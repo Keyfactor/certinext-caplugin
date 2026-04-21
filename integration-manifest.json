@@ -16,35 +16,59 @@
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
-                    "description": "REQUIRED: Base URL of the CERTInext REST API, e.g. https://us.certinext.io"
+                    "description": "REQUIRED: CERTInext API base URL. Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ \u2014 Production (US): https://us-api.certinext.io/ \u2014 Production (Global/India): https://api.certinext.io/"
+                },
+                {
+                    "name": "AccountNumber",
+                    "description": "REQUIRED: Your CERTInext account number (numeric string). Available in the CERTInext portal."
                 },
                 {
                     "name": "AuthMode",
-                    "description": "REQUIRED: Authentication mode — one of 'ApiKey', 'Basic', or 'OAuth2'. Default: 'ApiKey'."
+                    "description": "REQUIRED: Authentication mode. 'AccessKey' (default) \u2014 uses authKey = SHA256(accessKey + ts + txn) in every request body. 'OAuth' \u2014 uses an OAuth2 bearer token (requires OAuthTokenUrl, OAuthClientId, OAuthClientSecret)."
                 },
                 {
                     "name": "ApiKey",
-                    "description": "API key for authenticating with CERTInext. Required when AuthMode is 'ApiKey'."
+                    "description": "REQUIRED when AuthMode is 'AccessKey': the REST API Access Key generated in the CERTInext portal under Integrations \u2192 APIs. This value is used to compute authKey = SHA256(accessKey + ts + txn); it is never transmitted directly."
                 },
                 {
-                    "name": "Username",
-                    "description": "Username for Basic authentication. Required when AuthMode is 'Basic'."
+                    "name": "OAuthTokenUrl",
+                    "description": "OAuth token endpoint URL. Required when AuthMode is 'OAuth'."
                 },
                 {
-                    "name": "Password",
-                    "description": "Password for Basic authentication. Required when AuthMode is 'Basic'."
+                    "name": "OAuthClientId",
+                    "description": "OAuth client ID. Required when AuthMode is 'OAuth'."
                 },
                 {
-                    "name": "OAuth2TokenUrl",
-                    "description": "OAuth2 token endpoint URL. Required when AuthMode is 'OAuth2'. Example: https://us.certinext.io/oauth/token"
+                    "name": "OAuthClientSecret",
+                    "description": "OAuth client secret. Required when AuthMode is 'OAuth'."
                 },
                 {
-                    "name": "OAuth2ClientId",
-                    "description": "OAuth2 client ID. Required when AuthMode is 'OAuth2'."
+                    "name": "RequestorName",
+                    "description": "REQUIRED: Default requestor name submitted with all certificate orders. This is the name of the person/service responsible for the certificates."
                 },
                 {
-                    "name": "OAuth2ClientSecret",
-                    "description": "OAuth2 client secret. Required when AuthMode is 'OAuth2'."
+                    "name": "RequestorEmail",
+                    "description": "REQUIRED: Default requestor email submitted with all certificate orders. Must be a valid email address registered in your CERTInext account."
+                },
+                {
+                    "name": "RequestorIsdCode",
+                    "description": "International dialing code for the requestor phone number (e.g. '1' for US). Default: '1'."
+                },
+                {
+                    "name": "RequestorMobileNumber",
+                    "description": "Requestor mobile number (digits only, no country code)."
+                },
+                {
+                    "name": "SignerPlace",
+                    "description": "City or location of the subscriber agreement signer. Required by CERTInext for all orders."
+                },
+                {
+                    "name": "SignerIp",
+                    "description": "IP address of the subscriber agreement signer. Required by CERTInext for all orders."
+                },
+                {
+                    "name": "DefaultProductCode",
+                    "description": "OPTIONAL: Default numeric product code used when not specified at template level. Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). Retrieve available codes from Integrations \u2192 APIs \u2192 GetProductDetails."
                 },
                 {
                     "name": "IgnoreExpired",
@@ -52,7 +76,7 @@
                 },
                 {
                     "name": "PageSize",
-                    "description": "Number of certificates to fetch per page during synchronization. Default: 100, max: 500."
+                    "description": "Number of orders to fetch per page during synchronization. Default: 100, max: 500."
                 },
                 {
                     "name": "Enabled",
@@ -61,24 +85,32 @@
             ],
             "enrollment_config": [
                 {
+                    "name": "ProductCode",
+                    "description": "REQUIRED: The numeric CERTInext product code for this certificate type (e.g. '844' for DV SSL 1-year). Provided by eMudhra for your account. Overrides the connector-level DefaultProductCode when set."
+                },
+                {
                     "name": "ProfileId",
-                    "description": "REQUIRED: The CERTInext certificate profile/product ID to use for enrollment. This maps to a profile configured in the CERTInext portal."
+                    "description": "DEPRECATED: Use ProductCode instead. Kept for backward compatibility \u2014 mapped to ProductCode if ProductCode is not set."
+                },
+                {
+                    "name": "ValidityYears",
+                    "description": "OPTIONAL: Subscription validity in years: 1, 2, or 3. Default: 1. Note: CERTInext validates per 390-day certificate within the subscription; the 'validity' field in the order is the subscription term, not certificate lifetime."
                 },
                 {
                     "name": "ValidityDays",
-                    "description": "OPTIONAL: Validity period in days for issued certificates. If omitted, the profile default is used."
+                    "description": "DEPRECATED: Use ValidityYears instead. If set, value is divided by 365 and rounded up to get the subscription year count."
                 },
                 {
                     "name": "AutoApprove",
-                    "description": "OPTIONAL: If true, the gateway will attempt automatic approval of certificates returned in a pending-approval state. Default: false."
+                    "description": "OPTIONAL: If true, the gateway will attempt automatic approval of certificates that are returned in a pending-approval state. Default: false."
                 },
                 {
                     "name": "RequesterName",
-                    "description": "OPTIONAL: Default requester name to include in the enrollment request."
+                    "description": "OPTIONAL: Default requester name to include in the enrollment request. Used when no requester name can be derived from the subject."
                 },
                 {
                     "name": "RequesterEmail",
-                    "description": "OPTIONAL: Default requester email address."
+                    "description": "OPTIONAL: Default requester email address. Used when no email can be derived from the subject."
                 },
                 {
                     "name": "RenewalWindowDays",
@@ -86,7 +118,7 @@
                 },
                 {
                     "name": "KeyType",
-                    "description": "OPTIONAL: Key algorithm hint (e.g. 'RSA2048', 'RSA4096', 'EC256', 'EC384'). If omitted, the profile default is used."
+                    "description": "OPTIONAL: Key algorithm to request (e.g. 'RSA2048', 'RSA4096', 'EC256', 'EC384'). If omitted, the profile default is used."
                 }
             ]
         }
