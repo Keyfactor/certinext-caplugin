@@ -8,43 +8,75 @@
     "update_catalog": true,
     "description": "AnyCA REST Gateway plugin for CERTInext (eMudhra) certificate lifecycle management platform",
     "gateway_framework": "24.2.0",
-    "release_dir": "CERTInext/bin/Release/net8.0",
+    "release_dir": "CERTInext/bin/Release",
     "release_project": "CERTInext/CERTInext.csproj",
     "about": {
         "carest": {
-            "product_ids": [],
+            "product_ids": [
+                "838",
+                "839",
+                "840",
+                "842",
+                "843",
+                "844",
+                "846"
+            ],
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
-                    "description": "REQUIRED: Base URL of the CERTInext REST API, e.g. https://us.certinext.io"
+                    "description": "REQUIRED: Base URL of the CERTInext REST API for your environment (e.g. https://api.certinext.io/emSignHub-API). Must include the /emSignHub-API/ path segment."
+                },
+                {
+                    "name": "AccountNumber",
+                    "description": "REQUIRED: Your CERTInext account number (numeric string). Found in the portal under Account Settings."
                 },
                 {
                     "name": "AuthMode",
-                    "description": "REQUIRED: Authentication mode — one of 'ApiKey', 'Basic', or 'OAuth2'. Default: 'ApiKey'."
+                    "description": "REQUIRED: Authentication mode — 'AccessKey' (default, HMAC-based signing) or 'OAuth' (bearer token via client credentials)."
                 },
                 {
                     "name": "ApiKey",
-                    "description": "API key for authenticating with CERTInext. Required when AuthMode is 'ApiKey'."
+                    "description": "The REST API Access Key generated in the CERTInext portal. Used to compute authKey = SHA256(accessKey + ts + txn). Required when AuthMode is 'AccessKey'."
                 },
                 {
-                    "name": "Username",
-                    "description": "Username for Basic authentication. Required when AuthMode is 'Basic'."
+                    "name": "OAuthTokenUrl",
+                    "description": "OAuth token endpoint URL. Required when AuthMode is 'OAuth'."
                 },
                 {
-                    "name": "Password",
-                    "description": "Password for Basic authentication. Required when AuthMode is 'Basic'."
+                    "name": "OAuthClientId",
+                    "description": "OAuth client ID. Required when AuthMode is 'OAuth'."
                 },
                 {
-                    "name": "OAuth2TokenUrl",
-                    "description": "OAuth2 token endpoint URL. Required when AuthMode is 'OAuth2'. Example: https://us.certinext.io/oauth/token"
+                    "name": "OAuthClientSecret",
+                    "description": "OAuth client secret. Required when AuthMode is 'OAuth'."
                 },
                 {
-                    "name": "OAuth2ClientId",
-                    "description": "OAuth2 client ID. Required when AuthMode is 'OAuth2'."
+                    "name": "RequestorName",
+                    "description": "REQUIRED: Name of the person or service submitting certificate orders. Sent in the requestorInformation block of every order."
                 },
                 {
-                    "name": "OAuth2ClientSecret",
-                    "description": "OAuth2 client secret. Required when AuthMode is 'OAuth2'."
+                    "name": "RequestorEmail",
+                    "description": "REQUIRED: Email address for the requestor. Must be a valid email associated with your CERTInext account."
+                },
+                {
+                    "name": "RequestorIsdCode",
+                    "description": "International dialing code for the requestor phone number (digits only, no + prefix). Default: 1 (United States)."
+                },
+                {
+                    "name": "RequestorMobileNumber",
+                    "description": "Requestor mobile number (digits only, no country code). Included in the requestorInformation block."
+                },
+                {
+                    "name": "SignerPlace",
+                    "description": "REQUIRED: City or location of the person accepting the subscriber agreement on behalf of your organization."
+                },
+                {
+                    "name": "SignerIp",
+                    "description": "REQUIRED: Public IP address of the host accepting the subscriber agreement."
+                },
+                {
+                    "name": "DefaultProductCode",
+                    "description": "Default numeric product code to use when no ProductCode is set on the certificate template. If omitted and the template also has no product code, enrollment will fail."
                 },
                 {
                     "name": "IgnoreExpired",
@@ -52,41 +84,57 @@
                 },
                 {
                     "name": "PageSize",
-                    "description": "Number of certificates to fetch per page during synchronization. Default: 100, max: 500."
+                    "description": "Number of orders to retrieve per page during synchronization. Default: 100, max: 500."
                 },
                 {
                     "name": "Enabled",
-                    "description": "Flag to Enable or Disable gateway functionality. Disabling is primarily used to allow creation of the CA connector prior to configuration information being available."
+                    "description": "Enables or disables the CA connector. Set to false to save the connector record before credentials are available without triggering a live connectivity test. Default: true."
                 }
             ],
             "enrollment_config": [
                 {
-                    "name": "ProfileId",
-                    "description": "REQUIRED: The CERTInext certificate profile/product ID to use for enrollment. This maps to a profile configured in the CERTInext portal."
+                    "name": "ProductCode",
+                    "description": "REQUIRED: The numeric CERTInext product code for the type of certificate to issue (e.g. 838 for DV SSL). Overrides the connector-level DefaultProductCode when set."
                 },
                 {
-                    "name": "ValidityDays",
-                    "description": "OPTIONAL: Validity period in days for issued certificates. If omitted, the profile default is used."
+                    "name": "ValidityYears",
+                    "description": "Subscription validity period in years: 1, 2, or 3. Default: 1."
                 },
                 {
                     "name": "AutoApprove",
-                    "description": "OPTIONAL: If true, the gateway will attempt automatic approval of certificates returned in a pending-approval state. Default: false."
+                    "description": "If true, the gateway will attempt automatic approval of certificates returned in a pending-approval state. Default: false."
                 },
                 {
                     "name": "RequesterName",
-                    "description": "OPTIONAL: Default requester name to include in the enrollment request."
+                    "description": "Per-template override for the requestor name. Overrides the connector-level RequestorName for orders using this template."
                 },
                 {
                     "name": "RequesterEmail",
-                    "description": "OPTIONAL: Default requester email address."
+                    "description": "Per-template override for the requestor email address. Overrides the connector-level RequestorEmail."
                 },
                 {
                     "name": "RenewalWindowDays",
-                    "description": "OPTIONAL: Number of days before expiration within which a renewal is attempted instead of a reissue. Default: 90."
+                    "description": "Number of days before expiration within which a renewal is attempted instead of a reissue. Default: 90."
                 },
                 {
                     "name": "KeyType",
-                    "description": "OPTIONAL: Key algorithm hint (e.g. 'RSA2048', 'RSA4096', 'EC256', 'EC384'). If omitted, the profile default is used."
+                    "description": "Key algorithm hint (e.g. RSA2048, RSA4096, EC256, EC384). If omitted, the product default is used."
+                },
+                {
+                    "name": "DomainName",
+                    "description": "Primary domain name for SSL/TLS orders. If omitted, the gateway derives the domain from the CSR CN field."
+                },
+                {
+                    "name": "SignerName",
+                    "description": "Per-template override for the subscriber agreement signer name. Defaults to the connector-level RequestorName."
+                },
+                {
+                    "name": "SignerPlace",
+                    "description": "Per-template override for the subscriber agreement signer location. Defaults to the connector-level SignerPlace."
+                },
+                {
+                    "name": "SignerIp",
+                    "description": "Per-template override for the subscriber agreement signer IP address. Defaults to the connector-level SignerIp."
                 }
             ]
         }
