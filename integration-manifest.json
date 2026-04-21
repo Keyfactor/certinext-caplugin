@@ -2,7 +2,7 @@
     "$schema": "https://keyfactor.github.io/v2/integration-manifest-schema.json",
     "integration_type": "anyca-plugin",
     "name": "CERTInext AnyCA REST Gateway Plugin",
-    "status": "prototype",
+    "status": "release-candidate",
     "support_level": "kf-community",
     "link_github": true,
     "update_catalog": true,
