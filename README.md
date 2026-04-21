@@ -140,7 +140,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
 
     | Parameter | Required / Optional | Type | Description | Example / Default |
     |---|---|---|---|---|
-    | `ProductCode` | Required | String | The numeric CERTInext product code for the type of certificate to issue (e.g. `838` for DV SSL). Overrides the connector-level `DefaultProductCode` when set. See the product code table below. | `838` |
+    | `ProductCode` | Optional | String | Override the numeric CERTInext product code for this template. When omitted, the default production code for the selected product is used automatically (e.g. selecting **DV SSL** defaults to `838`). Set this explicitly when targeting the sandbox environment or a non-standard product code. | `838` |
     | `ProfileId` | Deprecated | String | Legacy alias for `ProductCode`. Accepted for backward compatibility — if `ProductCode` is not set, `ProfileId` is used in its place. New templates should use `ProductCode`. | `838` |
     | `ValidityYears` | Optional | Number | Subscription validity period in years: `1`, `2`, or `3`. Default: `1`. CERTInext certificates are issued within a subscription term at up to 390 days per certificate, with free renewals within the term. | `1` |
     | `ValidityDays` | Deprecated | Number | Legacy validity field. If set, the value is divided by 365 and rounded up to derive a year count. New templates should use `ValidityYears`. | `365` |
@@ -159,7 +159,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
 
 4. In Keyfactor Command (v12.3+), for each imported Certificate Template, follow the [official documentation](https://software.keyfactor.com/Core-OnPrem/Current/Content/ReferenceGuide/Configuring%20Template%20Options.htm) to define enrollment fields for each of the following parameters:
 
-    * **ProductCode** - REQUIRED: The numeric CERTInext product code for this certificate type (e.g. '844' for DV SSL 1-year). Provided by eMudhra for your account. Overrides the connector-level DefaultProductCode when set. 
+    * **ProductCode** - OPTIONAL: Override the numeric CERTInext product code for this template. When omitted, the default production code for the selected product is used automatically (e.g. DV SSL → 838). Set this explicitly when targeting sandbox or a non-standard code. 
     * **ProfileId** - DEPRECATED: Use ProductCode instead. Kept for backward compatibility — mapped to ProductCode if ProductCode is not set. 
     * **ValidityYears** - OPTIONAL: Subscription validity in years: 1, 2, or 3. Default: 1. Note: CERTInext validates per 390-day certificate within the subscription; the 'validity' field in the order is the subscription term, not certificate lifetime. 
     * **ValidityDays** - DEPRECATED: Use ValidityYears instead. If set, value is divided by 365 and rounded up to get the subscription year count. 

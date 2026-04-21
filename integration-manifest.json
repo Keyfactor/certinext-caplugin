@@ -12,15 +12,7 @@
     "release_project": "CERTInext/CERTInext.csproj",
     "about": {
         "carest": {
-            "product_ids": [
-                "DV SSL",
-                "DV SSL Wildcard",
-                "DV SSL Multi-Domain (UCC)",
-                "OV SSL",
-                "OV SSL Wildcard",
-                "OV SSL Multi-Domain (UCC)",
-                "EV SSL"
-            ],
+            "product_ids": [],
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
@@ -94,7 +86,7 @@
             "enrollment_config": [
                 {
                     "name": "ProductCode",
-                    "description": "REQUIRED: The numeric CERTInext product code for this certificate type (e.g. '844' for DV SSL 1-year). Provided by eMudhra for your account. Overrides the connector-level DefaultProductCode when set."
+                    "description": "OPTIONAL: Override the numeric CERTInext product code for this template. When omitted, the default production code for the selected product is used automatically (e.g. DV SSL \u2192 838). Set this explicitly when targeting sandbox or a non-standard code."
                 },
                 {
                     "name": "ProfileId",
