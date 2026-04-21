@@ -144,7 +144,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var profiles = _client.GetProfilesAsync().GetAwaiter().GetResult();
                 var ids = profiles
                     .Where(p => p.Active)
-                    .Select(p => p.Id)
+                    .Select(p => p.Name ?? p.Id)
                     .ToList();
 
                 _logger.LogInformation("Retrieved {Count} active certificate profiles from CERTInext.", ids.Count);

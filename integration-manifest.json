@@ -12,7 +12,15 @@
     "release_project": "CERTInext/CERTInext.csproj",
     "about": {
         "carest": {
-            "product_ids": [],
+            "product_ids": [
+                "DV SSL",
+                "DV SSL Wildcard",
+                "DV SSL Multi-Domain (UCC)",
+                "OV SSL",
+                "OV SSL Wildcard",
+                "OV SSL Multi-Domain (UCC)",
+                "EV SSL"
+            ],
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",

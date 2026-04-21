@@ -29,12 +29,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         public string ProductId { get; }
 
         /// <summary>
-        /// The CERTInext product code configured on the template.
-        /// Falls back to ProfileId for backward compat, then to the ProductID from the gateway.
+        /// The CERTInext numeric product code configured on the template.
+        /// Falls back to the deprecated ProfileId parameter for backward compat.
+        /// Must be a numeric string (e.g. "838") — the gateway ProductID is a human-readable
+        /// name and cannot be passed to the API.
         /// </summary>
         public string ProductCode =>
             GetString(Constants.EnrollmentParam.ProductCode,
-                GetString(Constants.EnrollmentParam.ProfileId, ProductId));
+                GetString(Constants.EnrollmentParam.ProfileId, string.Empty));
 
         /// <summary>Alias for ProductCode — kept for backward compat.</summary>
         public string ProfileId => ProductCode;
