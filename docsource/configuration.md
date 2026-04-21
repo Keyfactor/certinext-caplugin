@@ -117,7 +117,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 
 > Note: Only the credential fields that correspond to the selected `AuthMode` are evaluated at runtime. Fields belonging to the other auth mode are ignored.
 
-## Certificate Template Creation
+## Certificate Template Creation Step
 
 A Keyfactor Command certificate template maps an enrollment request to a specific CERTInext product. Create one template per CERTInext product that you want to make available to requesters.
 
@@ -187,8 +187,4 @@ CERTInext uses numeric product codes to identify certificate types. The codes be
 To retrieve the full list of product codes available to your account, call the `GetProductDetails` endpoint against your target environment. The sandbox and production APIs each return their own set of codes.
 
 > Note: SSL/TLS products (codes 838–846) are supported on standard accounts. Private PKI (100, 104), S/MIME (894), and document-signing products (819–827) require special provisioning by eMudhra and are not available on standard SSL/TLS accounts — ordering them returns EMS-1162.
-
-## Certificate Template Creation Step
-
-TODO Certificate Template Creation Step is a required section
 
