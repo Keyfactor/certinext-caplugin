@@ -63,6 +63,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string KeyType = "KeyType";
         }
 
+        public static class Products
+        {
+            public const string DvSsl             = "DV SSL";
+            public const string DvSslWildcard     = "DV SSL Wildcard";
+            public const string DvSslUcc          = "DV SSL Multi-Domain (UCC)";
+            public const string OvSsl             = "OV SSL";
+            public const string OvSslWildcard     = "OV SSL Wildcard";
+            public const string OvSslUcc          = "OV SSL Multi-Domain (UCC)";
+            public const string EvSsl             = "EV SSL";
+
+            // Default production numeric codes. These are the standard codes for the
+            // CERTInext production environment. Sandbox codes differ — set ProductCode
+            // explicitly on the template to override when targeting sandbox.
+            public static readonly System.Collections.Generic.Dictionary<string, string> DefaultProductCodes =
+                new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    [DvSsl]         = "838",
+                    [DvSslWildcard] = "839",
+                    [DvSslUcc]      = "840",
+                    [OvSsl]         = "842",
+                    [OvSslWildcard] = "843",
+                    [OvSslUcc]      = "844",
+                    [EvSsl]         = "846",
+                };
+        }
+
         public static class CertificateStatusId
         {
             // CERTInext certificateStatusId integer values (from TrackOrder response)

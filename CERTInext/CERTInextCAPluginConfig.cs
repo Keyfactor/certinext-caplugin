@@ -172,9 +172,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 [Constants.EnrollmentParam.ProductCode] = new PropertyConfigInfo
                 {
-                    Comments = "REQUIRED: The numeric CERTInext product code for this certificate type " +
-                               "(e.g. '844' for DV SSL 1-year). Provided by eMudhra for your account. " +
-                               "Overrides the connector-level DefaultProductCode when set.",
+                    Comments = "OPTIONAL: Override the numeric CERTInext product code for this template. " +
+                               "When omitted, the default production code for the selected product is used automatically " +
+                               "(e.g. DV SSL → 838). Set this explicitly when targeting sandbox or a non-standard code.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
