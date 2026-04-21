@@ -12,15 +12,7 @@
     "release_project": "CERTInext/CERTInext.csproj",
     "about": {
         "carest": {
-            "product_ids": [
-                "838",
-                "839",
-                "840",
-                "842",
-                "843",
-                "844",
-                "846"
-            ],
+            "product_ids": [],
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
