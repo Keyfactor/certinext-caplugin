@@ -12,10 +12,9 @@ terraform {
     }
   }
 
-  # Remote state in Azure Blob Storage — run bootstrap first, then:
-  #   terraform init -backend-config=backend.hcl
-  # To use local state instead (no bootstrap required):
-  #   remove this backend block and run: terraform init
+  # Remote state in Azure Blob Storage (shared with other plugin repos).
+  # The backend storage account is managed by the bootstrap in keyfactor-acme-lab.
+  # Run: terraform init -backend-config=backend.hcl
   backend "azurerm" {}
 }
 
