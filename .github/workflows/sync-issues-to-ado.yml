@@ -1,0 +1,207 @@
+name: Sync Issues to Azure DevOps
+
+# One-way sync: GitHub Issue → ADO work item.
+#
+# Work item type:  bug label → Bug,  enhancement label → Epic,  unlabeled → Bug
+# ADO item ID:     stored in a hidden comment on the issue (<!-- ado:<id> -->) so
+#                  updates and closes can find it without external state.
+#
+# Config:          integration-manifest.json (.ado_config)
+# Secret required: ADO_PERSONAL_ACCESS_TOKEN (repo secret, not environment-scoped)
+#                  Scope: Work Items (Read & Write)
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened, deleted]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load ADO config from manifest
+        id: manifest
+        run: |
+          cfg=$(jq '.ado_config' integration-manifest.json)
+          echo "org=$(echo "$cfg"              | jq -r '.org')"                     >> "$GITHUB_OUTPUT"
+          echo "project=$(echo "$cfg"          | jq -r '.project')"                >> "$GITHUB_OUTPUT"
+          echo "area=$(echo "$cfg"             | jq -r '.area')"                   >> "$GITHUB_OUTPUT"
+          echo "tags=$(echo "$cfg"             | jq -r '.tags | join(";")')"       >> "$GITHUB_OUTPUT"
+          echo "priority=$(echo "$cfg"         | jq -r '.priority // 3')"          >> "$GITHUB_OUTPUT"
+          echo "iteration=$(echo "$cfg"        | jq -r '.iteration_path // ""')"   >> "$GITHUB_OUTPUT"
+          echo "state_closed=$(echo "$cfg"     | jq -r '.state_closed // "Done"')" >> "$GITHUB_OUTPUT"
+          echo "state_reopened=$(echo "$cfg"   | jq -r '.state_reopened // "New"')" >> "$GITHUB_OUTPUT"
+
+      - name: Determine work item type from issue labels
+        id: wit
+        env:
+          LABELS_JSON: ${{ toJson(github.event.issue.labels) }}
+        run: |
+          NAMES=$(echo "$LABELS_JSON" | jq -r '.[].name')
+          if echo "$NAMES" | grep -qx 'bug'; then
+            echo "type=Bug" >> "$GITHUB_OUTPUT"
+          elif echo "$NAMES" | grep -qx 'enhancement'; then
+            echo "type=Epic" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=Bug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Find ADO work item ID from issue comments
+        id: ado
+        if: github.event.action != 'opened'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ID=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            | jq -r 'map(select(.body | contains("<!-- ado:"))) | last | .body' \
+            | grep -oP '(?<=<!-- ado:)\d+(?= -->)' || true)
+          echo "id=${ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Acknowledge issue to reporter
+        if: github.event.action == 'opened'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MSG=$(jq -r '.issue_acknowledgment // "Thanks for opening this issue! Our team has been notified and will follow up here."' integration-manifest.json)
+          gh issue comment ${{ github.event.issue.number }} \
+            --repo "${{ github.repository }}" \
+            --body "$MSG"
+
+      - name: Create ADO work item
+        id: create
+        if: github.event.action == 'opened'
+        env:
+          ADO_PAT: ${{ secrets.ADO_PERSONAL_ACCESS_TOKEN }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+        run: |
+          ORG="${{ steps.manifest.outputs.org }}"
+          PROJECT="${{ steps.manifest.outputs.project }}"
+          AREA="${{ steps.manifest.outputs.area }}"
+          TAGS="${{ steps.manifest.outputs.tags }}"
+          PRIORITY="${{ steps.manifest.outputs.priority }}"
+          ITERATION="${{ steps.manifest.outputs.iteration }}"
+          TYPE="${{ steps.wit.outputs.type }}"
+
+          DESCRIPTION=$(jq -rn \
+            --arg url  "$ISSUE_URL" \
+            --arg body "$ISSUE_BODY" \
+            '"<p>GitHub Issue: <a href=\"\($url)\">\($url)</a></p><pre>\($body)</pre>"')
+
+          FOUND_IN="GitHub #${{ github.event.issue.number }}"
+
+          PAYLOAD=$(jq -n \
+            --arg  title     "$ISSUE_TITLE" \
+            --arg  desc      "$DESCRIPTION" \
+            --arg  area      "$AREA" \
+            --arg  tags      "$TAGS" \
+            --argjson prio   "$PRIORITY" \
+            --arg  iteration "$ITERATION" \
+            --arg  found_in  "$FOUND_IN" \
+            '[
+              {"op":"add","path":"/fields/System.Title","value":$title},
+              {"op":"add","path":"/fields/System.Description","value":$desc},
+              {"op":"add","path":"/fields/System.AreaPath","value":$area},
+              {"op":"add","path":"/fields/System.Tags","value":$tags},
+              {"op":"add","path":"/fields/Microsoft.VSTS.Common.Priority","value":$prio},
+              {"op":"add","path":"/fields/Microsoft.VSTS.Build.FoundIn","value":$found_in}
+            ]
+            + if $iteration != "" then
+                [{"op":"add","path":"/fields/System.IterationPath","value":$iteration}]
+              else [] end')
+
+          AUTH=$(printf ':%s' "$ADO_PAT" | base64 -w 0)
+
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X PATCH \
+            "https://dev.azure.com/${ORG}/${PROJECT}/_apis/wit/workitems/\$${TYPE}?api-version=7.1" \
+            -H "Authorization: Basic ${AUTH}" \
+            -H "Content-Type: application/json-patch+json" \
+            -d "$PAYLOAD")
+
+          HTTP_STATUS=$(echo "$RESPONSE" | grep -o "HTTP_STATUS:[0-9]*" | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
+          echo "ADO response status: $HTTP_STATUS"
+
+          if [[ "$HTTP_STATUS" -lt 200 || "$HTTP_STATUS" -ge 300 ]]; then
+            echo "::error::ADO API returned $HTTP_STATUS"
+            exit 1
+          fi
+
+          echo "id=$(echo "$BODY"  | jq -r '.id')"               >> "$GITHUB_OUTPUT"
+          echo "url=$(echo "$BODY" | jq -r '._links.html.href')" >> "$GITHUB_OUTPUT"
+
+      - name: Post ADO link comment on issue
+        if: github.event.action == 'opened' && steps.create.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ID="${{ steps.create.outputs.id }}"
+          URL="${{ steps.create.outputs.url }}"
+          gh issue comment ${{ github.event.issue.number }} \
+            --repo "${{ github.repository }}" \
+            --body "<!-- ado:${ID} -->
+          <details><summary>Internal: ADO work item</summary>
+
+          [#${ID}](${URL})
+          </details>"
+
+      - name: Update ADO work item
+        if: github.event.action != 'opened' && steps.ado.outputs.id != ''
+        env:
+          ADO_PAT: ${{ secrets.ADO_PERSONAL_ACCESS_TOKEN }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+        run: |
+          ORG="${{ steps.manifest.outputs.org }}"
+          PROJECT="${{ steps.manifest.outputs.project }}"
+          ID="${{ steps.ado.outputs.id }}"
+          ACTION="${{ github.event.action }}"
+
+          OPS='[]'
+
+          if [[ "$ACTION" == "edited" ]]; then
+            DESCRIPTION=$(jq -rn \
+              --arg url  "$ISSUE_URL" \
+              --arg body "$ISSUE_BODY" \
+              '"<p>GitHub Issue: <a href=\"\($url)\">\($url)</a></p><pre>\($body)</pre>"')
+            OPS=$(echo "$OPS" | jq \
+              --arg title "$ISSUE_TITLE" \
+              --arg desc  "$DESCRIPTION" \
+              '. + [
+                {"op":"replace","path":"/fields/System.Title","value":$title},
+                {"op":"replace","path":"/fields/System.Description","value":$desc}
+              ]')
+          fi
+
+          if [[ "$ACTION" == "closed" || "$ACTION" == "deleted" ]]; then
+            STATE="${{ steps.manifest.outputs.state_closed }}"
+            OPS=$(echo "$OPS" | jq --arg s "$STATE" \
+              '. + [{"op":"replace","path":"/fields/System.State","value":$s}]')
+          fi
+
+          if [[ "$ACTION" == "reopened" ]]; then
+            STATE="${{ steps.manifest.outputs.state_reopened }}"
+            OPS=$(echo "$OPS" | jq --arg s "$STATE" \
+              '. + [{"op":"replace","path":"/fields/System.State","value":$s}]')
+          fi
+
+          if [[ "$OPS" == '[]' ]]; then
+            echo "No ADO fields to update for action: $ACTION — skipping."
+            exit 0
+          fi
+
+          AUTH=$(printf ':%s' "$ADO_PAT" | base64 -w 0)
+
+          curl -sf -X PATCH \
+            "https://dev.azure.com/${ORG}/${PROJECT}/_apis/wit/workitems/${ID}?api-version=7.1" \
+            -H "Authorization: Basic ${AUTH}" \
+            -H "Content-Type: application/json-patch+json" \
+            -d "$OPS"

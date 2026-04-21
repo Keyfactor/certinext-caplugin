@@ -1,0 +1,94 @@
+{
+    "$schema": "https://keyfactor.github.io/v2/integration-manifest-schema.json",
+    "integration_type": "anyca-plugin",
+    "name": "CERTInext AnyCA REST Gateway Plugin",
+    "status": "prototype",
+    "support_level": "kf-community",
+    "link_github": true,
+    "update_catalog": true,
+    "description": "AnyCA REST Gateway plugin for CERTInext (eMudhra) certificate lifecycle management platform",
+    "gateway_framework": "24.2.0",
+    "release_dir": "CERTInext/bin/Release/net8.0",
+    "release_project": "CERTInext/CERTInext.csproj",
+    "about": {
+        "carest": {
+            "product_ids": [],
+            "ca_plugin_config": [
+                {
+                    "name": "ApiUrl",
+                    "description": "REQUIRED: Base URL of the CERTInext REST API, e.g. https://us.certinext.io"
+                },
+                {
+                    "name": "AuthMode",
+                    "description": "REQUIRED: Authentication mode — one of 'ApiKey', 'Basic', or 'OAuth2'. Default: 'ApiKey'."
+                },
+                {
+                    "name": "ApiKey",
+                    "description": "API key for authenticating with CERTInext. Required when AuthMode is 'ApiKey'."
+                },
+                {
+                    "name": "Username",
+                    "description": "Username for Basic authentication. Required when AuthMode is 'Basic'."
+                },
+                {
+                    "name": "Password",
+                    "description": "Password for Basic authentication. Required when AuthMode is 'Basic'."
+                },
+                {
+                    "name": "OAuth2TokenUrl",
+                    "description": "OAuth2 token endpoint URL. Required when AuthMode is 'OAuth2'. Example: https://us.certinext.io/oauth/token"
+                },
+                {
+                    "name": "OAuth2ClientId",
+                    "description": "OAuth2 client ID. Required when AuthMode is 'OAuth2'."
+                },
+                {
+                    "name": "OAuth2ClientSecret",
+                    "description": "OAuth2 client secret. Required when AuthMode is 'OAuth2'."
+                },
+                {
+                    "name": "IgnoreExpired",
+                    "description": "If true, expired certificates will be skipped during synchronization. Default: false."
+                },
+                {
+                    "name": "PageSize",
+                    "description": "Number of certificates to fetch per page during synchronization. Default: 100, max: 500."
+                },
+                {
+                    "name": "Enabled",
+                    "description": "Flag to Enable or Disable gateway functionality. Disabling is primarily used to allow creation of the CA connector prior to configuration information being available."
+                }
+            ],
+            "enrollment_config": [
+                {
+                    "name": "ProfileId",
+                    "description": "REQUIRED: The CERTInext certificate profile/product ID to use for enrollment. This maps to a profile configured in the CERTInext portal."
+                },
+                {
+                    "name": "ValidityDays",
+                    "description": "OPTIONAL: Validity period in days for issued certificates. If omitted, the profile default is used."
+                },
+                {
+                    "name": "AutoApprove",
+                    "description": "OPTIONAL: If true, the gateway will attempt automatic approval of certificates returned in a pending-approval state. Default: false."
+                },
+                {
+                    "name": "RequesterName",
+                    "description": "OPTIONAL: Default requester name to include in the enrollment request."
+                },
+                {
+                    "name": "RequesterEmail",
+                    "description": "OPTIONAL: Default requester email address."
+                },
+                {
+                    "name": "RenewalWindowDays",
+                    "description": "OPTIONAL: Number of days before expiration within which a renewal is attempted instead of a reissue. Default: 90."
+                },
+                {
+                    "name": "KeyType",
+                    "description": "OPTIONAL: Key algorithm hint (e.g. 'RSA2048', 'RSA4096', 'EC256', 'EC384'). If omitted, the profile default is used."
+                }
+            ]
+        }
+    }
+}

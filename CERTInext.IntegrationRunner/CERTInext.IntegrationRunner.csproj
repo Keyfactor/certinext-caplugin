@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>warnings</Nullable>
+    <LangVersion>12.0</LangVersion>
+    <AssemblyName>CERTInext.IntegrationRunner</AssemblyName>
+    <RootNamespace>Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationRunner</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CERTInext\CERTInext.csproj" />
+  </ItemGroup>
+</Project>

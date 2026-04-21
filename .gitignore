@@ -1,0 +1,36 @@
+# .NET build output
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+*.DotSettings.user
+
+# Test results and coverage
+TestResults/
+/tmp/certinext-coverage/
+/tmp/certinext-coverage-report/
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Terraform
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/terraform.tfvars
+terraform/.terraform.lock.hcl
+
+# Credentials — never commit
+.env*
+*.env
+~/.env_certinext
+
+# macOS
+.DS_Store

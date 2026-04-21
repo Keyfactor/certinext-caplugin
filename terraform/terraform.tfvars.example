@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored — never commit it.
+
+github_token = "ghp_YOUR_PERSONAL_ACCESS_TOKEN"
+
+# Optional — defaults to the Keyfactor Azure subscription
+# azure_subscription_id = "b3114ff1-bb92-45b6-9bd6-e4a1eed8c91e"

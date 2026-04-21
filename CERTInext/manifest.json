@@ -1,0 +1,10 @@
+{
+    "extensions": {
+        "Keyfactor.AnyGateway.Extensions.IAnyCAPlugin": {
+            "CERTInextCAPlugin": {
+                "assemblypath": "CERTInextCAPlugin.dll",
+                "TypeFullName": "Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin"
+            }
+        }
+    }
+}
