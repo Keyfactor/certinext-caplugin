@@ -117,7 +117,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 
 > Note: Only the credential fields that correspond to the selected `AuthMode` are evaluated at runtime. Fields belonging to the other auth mode are ignored.
 
-## Certificate Template Creation
+## Certificate Template Creation Step
 
 A Keyfactor Command certificate template maps an enrollment request to a specific CERTInext product. Create one template per CERTInext product that you want to make available to requesters.
 

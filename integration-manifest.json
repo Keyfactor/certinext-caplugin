@@ -8,11 +8,19 @@
     "update_catalog": true,
     "description": "AnyCA REST Gateway plugin for CERTInext (eMudhra) certificate lifecycle management platform",
     "gateway_framework": "24.2.0",
-    "release_dir": "CERTInext/bin/Release/net8.0",
+    "release_dir": "CERTInext/bin/Release",
     "release_project": "CERTInext/CERTInext.csproj",
     "about": {
         "carest": {
-            "product_ids": [],
+            "product_ids": [
+                "838",
+                "839",
+                "840",
+                "842",
+                "843",
+                "844",
+                "846"
+            ],
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
