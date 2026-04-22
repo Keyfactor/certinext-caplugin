@@ -59,7 +59,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SignerPlace = "SignerPlace";
             public const string SignerIp = "SignerIp";
             public const string DomainName = "DomainName";      // primary domain for SSL/TLS orders
-            public const string SANFormat = "SANFormat";
             public const string KeyType = "KeyType";
         }
 
