@@ -189,6 +189,54 @@ To retrieve the full list of product codes available to your account, call the `
 > Note: SSL/TLS products (codes 838–846) are supported on standard accounts. Private PKI (100, 104), S/MIME (894), and document-signing products (819–827) require special provisioning by eMudhra and are not available on standard SSL/TLS accounts — ordering them returns EMS-1162.
 
 
+## Mechanics
+
+### Authentication
+
+Every CERTInext API call is an HTTP POST with a JSON body. There is no Authorization header. Instead, the body carries a `meta` block with an `authKey` field computed as:
+
+```
+authKey = SHA256(accessKey + requestTs + requestTxnId)
+```
+
+Where `requestTs` is the ISO 8601 timestamp and `requestTxnId` is a unique transaction UUID generated per request. The raw access key is never transmitted — only the derived hash is sent. This computation happens automatically on every outbound call. When `AuthMode` is `OAuth`, the gateway obtains a bearer token via the configured client credentials flow and injects it into the `meta` block instead.
+
+### Enrollment Decision Logic
+
+When the gateway calls `Enroll`, the plugin selects between three paths based on the enrollment type and the age of the prior certificate:
+
+1. **New enrollment** — no prior certificate exists. A new `GenerateOrderSSL` request is submitted.
+2. **Renewal** — a prior certificate exists and its expiry is within the `RenewalWindowDays` threshold (default: 90 days). The plugin calls the CERTInext renew API, which reuses the existing subscription term.
+3. **Reissue** — a prior certificate exists but is outside the renewal window. A new order is placed with the updated CSR/subject, replacing the prior certificate under a new subscription.
+
+The `RenewalWindowDays` template parameter controls the renewal/reissue boundary per certificate template.
+
+### Order Lifecycle and Pending Approval
+
+CERTInext orders pass through several internal status stages before a certificate is issued. The plugin maps these to Keyfactor enrollment statuses as follows:
+
+- **Issued** (status 9, 20) → certificate returned immediately.
+- **Pending approval** (status 2, 8, 15, 24) → enrollment returns a pending status to Command. If `AutoApprove` is enabled on the template, the plugin attempts automatic approval before returning.
+- **Rejected / cancelled** (status 4, 5, 13, 14) → enrollment fails with an error.
+
+The gateway polls the `TrackOrder` endpoint during sync to pick up certificates that were approved after the initial enrollment call.
+
+### Synchronization
+
+Synchronization uses the `GetOrderReport` endpoint with paginated results (controlled by `PageSize`, default 100, max 500). Each page is fetched sequentially until all orders are retrieved. The plugin maps each order's status to a Keyfactor certificate status and returns the result set to the gateway framework, which reconciles it against the Command inventory.
+
+Expired certificates are included by default. Set `IgnoreExpired: true` on the connector to skip them during sync.
+
+### Product Code Resolution
+
+When an enrollment request arrives, the numeric CERTInext product code is resolved in this order:
+
+1. `ProductCode` template parameter (explicit override — use for sandbox or non-standard codes).
+2. `ProfileId` template parameter (deprecated alias, accepted for backward compatibility).
+3. Default production code looked up from the selected product name (e.g. **DV SSL** → `838`).
+
+If none of these yield a code, enrollment fails with a validation error.
+
 ## Architecture
 
 {% include 'architecture.md' %}
