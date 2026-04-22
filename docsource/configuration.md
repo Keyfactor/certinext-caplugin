@@ -188,3 +188,7 @@ To retrieve the full list of product codes available to your account, call the `
 
 > Note: SSL/TLS products (codes 838–846) are supported on standard accounts. Private PKI (100, 104), S/MIME (894), and document-signing products (819–827) require special provisioning by eMudhra and are not available on standard SSL/TLS accounts — ordering them returns EMS-1162.
 
+
+## Architecture
+
+{% include 'architecture.md' %}
