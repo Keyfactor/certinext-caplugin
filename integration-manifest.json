@@ -16,10 +16,13 @@
                 "DV SSL",
                 "DV SSL Wildcard",
                 "DV SSL Multi-Domain (UCC)",
+                "DV SSL Wildcard Multi-Domain (UCC)",
                 "OV SSL",
                 "OV SSL Wildcard",
                 "OV SSL Multi-Domain (UCC)",
-                "EV SSL"
+                "OV SSL Wildcard Multi-Domain (UCC)",
+                "EV SSL",
+                "EV SSL Multi-Domain (UCC)"
             ],
             "ca_plugin_config": [
                 {

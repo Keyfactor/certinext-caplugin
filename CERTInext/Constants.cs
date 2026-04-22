@@ -65,13 +65,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         public static class Products
         {
-            public const string DvSsl             = "DV SSL";
-            public const string DvSslWildcard     = "DV SSL Wildcard";
-            public const string DvSslUcc          = "DV SSL Multi-Domain (UCC)";
-            public const string OvSsl             = "OV SSL";
-            public const string OvSslWildcard     = "OV SSL Wildcard";
-            public const string OvSslUcc          = "OV SSL Multi-Domain (UCC)";
-            public const string EvSsl             = "EV SSL";
+            public const string DvSsl                = "DV SSL";
+            public const string DvSslWildcard        = "DV SSL Wildcard";
+            public const string DvSslUcc             = "DV SSL Multi-Domain (UCC)";
+            public const string DvSslWildcardUcc     = "DV SSL Wildcard Multi-Domain (UCC)";
+            public const string OvSsl                = "OV SSL";
+            public const string OvSslWildcard        = "OV SSL Wildcard";
+            public const string OvSslUcc             = "OV SSL Multi-Domain (UCC)";
+            public const string OvSslWildcardUcc     = "OV SSL Wildcard Multi-Domain (UCC)";
+            public const string EvSsl                = "EV SSL";
+            public const string EvSslUcc             = "EV SSL Multi-Domain (UCC)";
 
             // Default production numeric codes. These are the standard codes for the
             // CERTInext production environment. Sandbox codes differ — set ProductCode
@@ -79,13 +82,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public static readonly System.Collections.Generic.Dictionary<string, string> DefaultProductCodes =
                 new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
                 {
-                    [DvSsl]         = "838",
-                    [DvSslWildcard] = "839",
-                    [DvSslUcc]      = "840",
-                    [OvSsl]         = "842",
-                    [OvSslWildcard] = "843",
-                    [OvSslUcc]      = "844",
-                    [EvSsl]         = "846",
+                    [DvSsl]             = "838",
+                    [DvSslWildcard]     = "839",
+                    [DvSslUcc]          = "840",
+                    [DvSslWildcardUcc]  = "841",
+                    [OvSsl]             = "842",
+                    [OvSslWildcard]     = "843",
+                    [OvSslUcc]          = "844",
+                    [OvSslWildcardUcc]  = "845",
+                    [EvSsl]             = "846",
+                    [EvSslUcc]          = "847",
                 };
         }
 

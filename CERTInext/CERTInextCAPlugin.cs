@@ -142,10 +142,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Constants.Products.DvSsl,
                 Constants.Products.DvSslWildcard,
                 Constants.Products.DvSslUcc,
+                Constants.Products.DvSslWildcardUcc,
                 Constants.Products.OvSsl,
                 Constants.Products.OvSslWildcard,
                 Constants.Products.OvSslUcc,
+                Constants.Products.OvSslWildcardUcc,
                 Constants.Products.EvSsl,
+                Constants.Products.EvSslUcc,
             };
         }
 
