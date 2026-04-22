@@ -334,10 +334,10 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 Every API call is signed using HMAC-SHA256. The access key itself is never transmitted — only a derived hash is sent:
 
 ```
-signature = SHA256(accessKey + timestamp + transactionId)
+authKey = SHA256(accessKey + requestTs + requestTxnId)
 ```
 
-A unique transaction ID is generated for each request. The timestamp and transaction ID travel alongside the signature so the CERTInext server can reproduce and verify the hash. The plugin handles this automatically; no manual signing is required during normal operation.
+A unique transaction ID (`requestTxnId`) is generated for each request. The timestamp (`requestTs`) and transaction ID travel alongside the `authKey` so the CERTInext server can reproduce and verify the hash. The plugin handles this automatically; no manual signing is required during normal operation.
 
 An OAuth client-credentials mode is also available as an alternative. When OAuth is configured, the plugin exchanges a client ID and secret for a short-lived bearer token and automatically refreshes it before expiry.
 
