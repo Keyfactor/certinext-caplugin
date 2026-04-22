@@ -137,28 +137,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <inheritdoc/>
         public List<string> GetProductIds()
         {
-            _logger.MethodEntry(LogLevel.Trace);
-
-            try
+            return new List<string>
             {
-                var profiles = _client.GetProfilesAsync().GetAwaiter().GetResult();
-                var ids = profiles
-                    .Where(p => p.Active)
-                    .Select(p => p.Name ?? p.Id)
-                    .ToList();
-
-                _logger.LogInformation("Retrieved {Count} active certificate profiles from CERTInext.", ids.Count);
-                return ids;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Unable to retrieve certificate profiles from CERTInext.");
-                return new List<string>();
-            }
-            finally
-            {
-                _logger.MethodExit(LogLevel.Trace);
-            }
+                Constants.Products.DvSsl,
+                Constants.Products.DvSslWildcard,
+                Constants.Products.DvSslUcc,
+                Constants.Products.OvSsl,
+                Constants.Products.OvSslWildcard,
+                Constants.Products.OvSslUcc,
+                Constants.Products.EvSsl,
+            };
         }
 
         // ---------------------------------------------------------------------------
