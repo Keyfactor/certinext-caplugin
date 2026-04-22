@@ -256,10 +256,15 @@ CERTInext uses numeric product codes to identify certificate types. The codes be
 | DV (Domain Validated) | `838` | None. `domainName` is derived from the CSR CN if omitted on the template. |
 | DV Wildcard | `839` | CSR CN must use wildcard format (e.g. `*.example.com`). `domainName` in the order must also use the wildcard format (e.g. `*.example.com`). |
 | DV UCC (Multi-domain) | `840` | `certificateInformation.additionalDomains` — array of additional SAN values beyond the primary `domainName`. |
+| DV Wildcard UCC (Multi-domain Wildcard) | `841` | Combines wildcard and multi-domain requirements. CSR CN and `domainName` must use wildcard format; `certificateInformation.additionalDomains` required. |
 | OV (Organization Validated) | `842` | `organizationDetails.organizationNumber` (your CERTInext org ID); `certificateInformation.locality`, `postalCode`, and full organization address fields (`streetAddress`, `city`, `state`, `country`). |
 | OV Wildcard | `843` | Same as OV (842). CSR CN and `domainName` must use wildcard format. |
 | OV UCC (Multi-domain) | `844` | Same as OV (842) plus `certificateInformation.additionalDomains`. |
+| OV Wildcard UCC (Multi-domain Wildcard) | `845` | Combines OV, wildcard, and multi-domain requirements. Same as OV (842) plus wildcard CN/domainName and `certificateInformation.additionalDomains`. |
 | EV (Extended Validation) | `846` | All OV fields plus: `contractSignerInfo` object (`name`, `email`, `isdCode`, `mobileNumber`, `designation`, `employeeID`); `certificateApproverInfo` object (same fields); `certificateInformation.companyRegistrationNumber`; `streetAddress2` must be non-empty. |
+| EV UCC (Multi-domain EV) | `847` | Same as EV (846) plus `certificateInformation.additionalDomains`. |
+
+> Note: The CERTInext portal may display additional short-validity products (e.g. **DV SSL Certificate 1 Month**, **DV SSL Certificate Wildcard 1 Month**) that do not appear in the `GetProductDetails` API response and have no published product code. These products are not accessible via the API and are therefore **not supported by this plugin**. Contact eMudhra to determine whether API ordering is available for these products on your account.
 
 ### Private PKI
 
