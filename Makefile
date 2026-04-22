@@ -210,6 +210,7 @@ generate-order:
 	if [ -z "$$signerIp" ]; then signerIp=$$(curl -s https://api.ipify.org); fi; \
 	mobile="$${CERTINEXT_REQUESTOR_MOBILE:-0000000000}"; \
 	name="$${CERTINEXT_REQUESTOR_NAME:-Keyfactor Gateway Test}"; \
+	if [ -n "$(CODE)" ]; then CERTINEXT_PRODUCT_CODE="$(CODE)"; fi; \
 	echo "GenerateOrderSSL  domain=$(DOMAIN)  productCode=$$CERTINEXT_PRODUCT_CODE  validity=$(VALIDITY)  saveAndHold=$(SAVE_AND_HOLD)  signerIp=$$signerIp  ts=$$ts  txn=$$txn"; \
 	if [ -n "$(CSR_FILE)" ] && [ -f "$(CSR_FILE)" ]; then \
 	  result=$$(jq -n \
