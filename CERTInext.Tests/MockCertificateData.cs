@@ -208,12 +208,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 noOfPages: 1);
 
         // POST /GetProductDetails
+        // Returns the nested category envelope format returned by the real CERTInext API
+        // (verified 2026-04). Each category object contains a "products" array.
+        // CERTInextClient.GetProductDetailsAsync calls FlattenProducts() to collapse this
+        // into a flat List<ProductDetail>.
         public static string GetProductDetailsJson() =>
             $@"{{
   ""meta"":{SuccessMetaJson()},
   ""productDetails"":[
-    {{""productCode"":""{ProfileIdTls}"",""productName"":""TLS Server"",""productType"":""SSL/TLS"",""active"":true}},
-    {{""productCode"":""{ProfileIdClient}"",""productName"":""Client Authentication"",""productType"":""Client"",""active"":true}}
+    {{
+      ""categoryName"":""SSL/TLS Certificates"",
+      ""categoryID"":""3"",
+      ""currencyType"":""USD"",
+      ""products"":[
+        {{""productCode"":""{ProfileIdTls}"",""productName"":""TLS Server"",""productTypeID"":""13""}},
+        {{""productCode"":""{ProfileIdClient}"",""productName"":""Client Authentication"",""productTypeID"":""14""}}
+      ]
+    }}
   ]
 }}";
 
