@@ -25,7 +25,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
     ///     CARequestID stored in Keyfactor Command.
     ///   - Certificate data is retrieved via separate TrackOrder + GetCertificate calls.
     /// </summary>
-    public interface ICERTInextClient
+    public interface ICERTInextClient : IDisposable
     {
         /// <summary>
         /// Verifies that the CERTInext API is reachable and the credentials are valid

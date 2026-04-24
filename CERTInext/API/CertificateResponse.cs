@@ -372,6 +372,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
 
     // ---------------------------------------------------------------------------
     // GetProductDetails response  — POST {baseURL}GetProductDetails
+    //
+    // Actual wire format (verified 2026-04):
+    //   productDetails: [
+    //     { categoryName, categoryID, products: [ { productCode, productName, productTypeID,
+    //                                               subscriptionPrice?, price? }, ... ] },
+    //     ...
+    //   ]
+    //
+    // The response is a list of category envelopes, each containing a nested
+    // "products" array.  CERTInextClient.GetProductDetailsAsync flattens this
+    // structure into a List<ProductDetail> for callers.
     // ---------------------------------------------------------------------------
 
     public class GetProductDetailsResponse
@@ -379,22 +390,109 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("meta")]
         public ResponseMeta Meta { get; set; }
 
+        /// <summary>
+        /// Category envelopes as returned by the API.  Each category contains a
+        /// <c>products</c> array.  Call <see cref="FlattenProducts"/> to get a
+        /// flat list of all product codes across all categories.
+        /// </summary>
         [JsonPropertyName("productDetails")]
-        public List<ProductDetail> ProductDetails { get; set; }
+        public List<ProductCategory> Categories { get; set; }
+
+        /// <summary>
+        /// Returns a flat list of all <see cref="ProductDetail"/> records across
+        /// every category in the response.  Returns an empty list when
+        /// <see cref="Categories"/> is null or empty.
+        /// </summary>
+        public List<ProductDetail> FlattenProducts()
+        {
+            var result = new List<ProductDetail>();
+            if (Categories == null) return result;
+
+            foreach (var cat in Categories)
+            {
+                if (cat.Products == null) continue;
+                foreach (var p in cat.Products)
+                {
+                    result.Add(new ProductDetail
+                    {
+                        ProductCode = p.ProductCode,
+                        ProductName = p.ProductName,
+                        ProductType = cat.CategoryName,
+                        Active = true  // API does not return an active flag at this level
+                    });
+                }
+            }
+
+            return result;
+        }
     }
 
-    public class ProductDetail
+    /// <summary>
+    /// One category envelope inside the GetProductDetails response
+    /// (e.g. "SSL/TLS Certificates", "S/MIME Certificates").
+    /// </summary>
+    public class ProductCategory
     {
-        /// <summary>Numeric product code string (e.g. "844").</summary>
+        [JsonPropertyName("categoryName")]
+        public string CategoryName { get; set; }
+
+        [JsonPropertyName("categoryID")]
+        public string CategoryId { get; set; }
+
+        [JsonPropertyName("currencyType")]
+        public string CurrencyType { get; set; }
+
+        [JsonPropertyName("products")]
+        public List<ProductCategoryEntry> Products { get; set; }
+    }
+
+    /// <summary>
+    /// A single product entry inside a <see cref="ProductCategory"/>.
+    /// </summary>
+    public class ProductCategoryEntry
+    {
         [JsonPropertyName("productCode")]
         public string ProductCode { get; set; }
 
         [JsonPropertyName("productName")]
         public string ProductName { get; set; }
 
+        /// <summary>Numeric product type ID (e.g. "13" for DV SSL).</summary>
+        [JsonPropertyName("productTypeID")]
+        public string ProductTypeId { get; set; }
+
+        /// <summary>
+        /// Per-unit price for non-subscription products (e.g. document signing).
+        /// </summary>
+        [JsonPropertyName("price")]
+        public string Price { get; set; }
+    }
+
+    /// <summary>
+    /// Flattened product record returned by
+    /// <see cref="Client.CERTInextClient.GetProductDetailsAsync"/>.
+    /// Consumers use this type; the nested category structure from the wire format
+    /// is an internal implementation detail of the response model.
+    /// </summary>
+    public class ProductDetail
+    {
+        /// <summary>Numeric product code string (e.g. "842").</summary>
+        [JsonPropertyName("productCode")]
+        public string ProductCode { get; set; }
+
+        [JsonPropertyName("productName")]
+        public string ProductName { get; set; }
+
+        /// <summary>
+        /// Product type derived from the category name (e.g. "SSL/TLS Certificates").
+        /// </summary>
         [JsonPropertyName("productType")]
         public string ProductType { get; set; }
 
+        /// <summary>
+        /// Always <c>true</c> for products returned by the API — the API only
+        /// returns products that are available on the account.
+        /// </summary>
         [JsonPropertyName("active")]
         public bool Active { get; set; }
     }
