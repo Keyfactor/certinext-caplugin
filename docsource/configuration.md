@@ -108,7 +108,8 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `RequestorMobileNumber` | Optional | Requestor mobile number (digits only, no country code). Included in the `requestorInformation` block. | N/A | `5551234567` |
 | `SignerPlace` | Required | City or location of the person accepting the subscriber agreement on behalf of your organization. Required by CERTInext for all orders. | Use the physical city where the signer is located. | `Austin` |
 | `SignerIp` | Required | Public IP address of the host accepting the subscriber agreement. Required by CERTInext for all orders. | Use the outbound IP of the AnyCA Gateway host, or the IP of the workstation from which the agreement was accepted. | `203.0.113.10` |
-| `DefaultProductCode` | Optional | Default numeric product code to use when no product code is set on the certificate template. If omitted and the template also has no product code, enrollment will fail. | Portal → **Integrations → APIs** → call `GetProductDetails`, or refer to the product code table below. | `100` |
+| `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in the `productDetails.groupNumber` field of `GetProductDetails` requests. Some sandbox accounts return an empty product list from `GetProductDetails` unless this field is included. Available in the CERTInext portal under **Delegation → Groups**. | Portal → **Delegation → Groups**. | `2171775848` |
+| `DefaultProductCode` | Optional | Default numeric product code to use when no product code is set on the certificate template. If omitted and the template also has no product code, enrollment will fail. Product codes are provisioned per account by eMudhra — contact your eMudhra account representative to obtain the numeric codes available to your account. | Call `GetProductDetails` against your account/environment (see product code table below). | `842` |
 | `IgnoreExpired` | Optional | If `true`, expired certificates are skipped during synchronization and are not imported into Keyfactor Command. Default: `false`. | N/A | `false` |
 | `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500`. Reduce this value if synchronization requests time out. | N/A | `100` |
 | `Enabled` | Optional | Enables or disables the CA connector. Setting this to `false` allows the connector record to be created before all credentials are available, without triggering a live connectivity test. Default: `true`. | N/A | `true` |
@@ -125,7 +126,7 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductCode` | Optional | String | Override the numeric CERTInext product code for this template. When omitted, the default production code for the selected product is used automatically (e.g. selecting **DV SSL** defaults to `838`). Set this explicitly when targeting the sandbox environment or a non-standard product code. | `838` |
+| `ProductCode` | Optional | String | Override the numeric CERTInext product code for this template. Product codes are provisioned per account by eMudhra — obtain the correct code from `GetProductDetails` for your account. Set this explicitly when targeting the sandbox environment or when the connector `DefaultProductCode` should not apply to this template. | `842` (sandbox DV SSL, account-specific) |
 | `ProfileId` | Deprecated | String | Legacy alias for `ProductCode`. Accepted for backward compatibility — if `ProductCode` is not set, `ProfileId` is used in its place. New templates should use `ProductCode`. | `838` |
 | `ValidityYears` | Optional | Number | Subscription validity period in years: `1`, `2`, or `3`. Default: `1`. CERTInext certificates are issued within a subscription term at up to 390 days per certificate, with free renewals within the term. | `1` |
 | `ValidityDays` | Deprecated | Number | Legacy validity field. If set, the value is divided by 365 and rounded up to derive a year count. New templates should use `ValidityYears`. | `365` |
@@ -141,35 +142,44 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 
 ## Product Codes
 
-CERTInext uses numeric product codes to identify certificate types. The codes below are representative values returned from the `GetProductDetails` API; the exact codes available to your account may differ. Always confirm codes from a live `GetProductDetails` call against your target environment.
+CERTInext uses numeric product codes to identify certificate types. **Product codes are provisioned per account by eMudhra** — the codes available to your account are determined when your account is set up. The codes in the tables below are the values observed on specific sandbox and production accounts; your account may have different codes.
+
+To retrieve the exact codes available to your account, call the `GetProductDetails` endpoint:
+- If you have a `GroupNumber` configured, include it in the request `productDetails` block — some accounts require this to return a non-empty list.
+- Use the `make get-product-details-group` Makefile target to retrieve products from the sandbox with `groupNumber` included.
 
 > Note: Product codes differ between the sandbox and production environments. Always verify the correct code before switching environments.
 
+> Note: Product codes are per-account. If you receive "Invalid Product Code" (EMS-1162) when placing an order, your account does not have that product provisioned. Contact your eMudhra account representative to request provisioning of the product codes you need.
+
 ### SSL/TLS
 
-| Product | Product Code | Required fields beyond base (`domainName`, `csr`, `requestorInformation`, `subscriptionDetails`, `agreementDetails`) |
+The product codes in this table were observed on the US sandbox account (`accountNumber=9374221333`) in April 2026. Your account will likely have different codes. Always call `GetProductDetails` to confirm the codes provisioned for your account.
+
+| Product | Sandbox Code (account 9374221333, April 2026) | Required fields beyond base (`domainName`, `csr`, `requestorInformation`, `subscriptionDetails`, `agreementDetails`) |
 |---|---|---|
-| DV (Domain Validated) | `838` | None. `domainName` is derived from the CSR CN if omitted on the template. |
-| DV Wildcard | `839` | CSR CN must use wildcard format (e.g. `*.example.com`). `domainName` in the order must also use the wildcard format (e.g. `*.example.com`). |
-| DV UCC (Multi-domain) | `840` | `certificateInformation.additionalDomains` — array of additional SAN values beyond the primary `domainName`. |
-| DV Wildcard UCC (Multi-domain Wildcard) | `841` | Combines wildcard and multi-domain requirements. CSR CN and `domainName` must use wildcard format; `certificateInformation.additionalDomains` required. |
-| OV (Organization Validated) | `842` | `organizationDetails.organizationNumber` (your CERTInext org ID); `certificateInformation.locality`, `postalCode`, and full organization address fields (`streetAddress`, `city`, `state`, `country`). |
-| OV Wildcard | `843` | Same as OV (842). CSR CN and `domainName` must use wildcard format. |
-| OV UCC (Multi-domain) | `844` | Same as OV (842) plus `certificateInformation.additionalDomains`. |
-| OV Wildcard UCC (Multi-domain Wildcard) | `845` | Combines OV, wildcard, and multi-domain requirements. Same as OV (842) plus wildcard CN/domainName and `certificateInformation.additionalDomains`. |
-| EV (Extended Validation) | `846` | All OV fields plus: `contractSignerInfo` object (`name`, `email`, `isdCode`, `mobileNumber`, `designation`, `employeeID`); `certificateApproverInfo` object (same fields); `certificateInformation.companyRegistrationNumber`; `streetAddress2` must be non-empty. |
-| EV UCC (Multi-domain EV) | `847` | Same as EV (846) plus `certificateInformation.additionalDomains`. |
+| DV (Domain Validated) | `842` | None. `domainName` is derived from the CSR CN if omitted on the template. |
+| DV Wildcard | `843` | CSR CN must use wildcard format (e.g. `*.example.com`). `domainName` in the order must also use the wildcard format. |
+| DV UCC (Multi-domain) | `844` | `certificateInformation.additionalDomains` — array of additional SAN values beyond the primary `domainName`. |
+| DV Wildcard UCC (Multi-domain Wildcard) | `845` | Combines wildcard and multi-domain requirements. CSR CN and `domainName` must use wildcard format; `certificateInformation.additionalDomains` required. |
+| OV (Organization Validated) | `846` | `organizationDetails.organizationNumber` (your CERTInext org ID); `certificateInformation.locality`, `postalCode`, and full organization address fields (`streetAddress`, `city`, `state`, `country`). |
+| OV Wildcard | `847` | Same as OV (846). CSR CN and `domainName` must use wildcard format. |
+| OV UCC (Multi-domain) | `848` | Same as OV (846) plus `certificateInformation.additionalDomains`. |
+| OV Wildcard UCC (Multi-domain Wildcard) | `849` | Combines OV, wildcard, and multi-domain requirements. Same as OV (846) plus wildcard CN/domainName and `certificateInformation.additionalDomains`. |
+| EV (Extended Validation) | `850` | All OV fields plus: `contractSignerInfo` object (`name`, `email`, `isdCode`, `mobileNumber`, `designation`, `employeeID`); `certificateApproverInfo` object (same fields); `certificateInformation.companyRegistrationNumber`; `streetAddress2` must be non-empty. |
+| EV UCC (Multi-domain EV) | `851` | Same as EV (850) plus `certificateInformation.additionalDomains`. |
 
 > Note: The CERTInext portal may display additional short-validity products (e.g. **DV SSL Certificate 1 Month**, **DV SSL Certificate Wildcard 1 Month**) that do not appear in the `GetProductDetails` API response and have no published product code. These products are not accessible via the API and are therefore **not supported by this plugin**. Contact eMudhra to determine whether API ordering is available for these products on your account.
 
 ### Private PKI
 
-| Product | Product Code | Availability |
+| Product | Example Code | Availability |
 |---|---|---|
-| emSign Intranet SSL 1 year | `100` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
+| Sandbox emSign Intranet SSL 1 year | `149` (sandbox account 9374221333, April 2026) | Requires special provisioning by eMudhra. Not available on standard production accounts. |
+| emSign Intranet SSL 1 year (production) | `100` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
 | IGTF Host 1 year | `104` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
 
-> Note: Private PKI products (codes 100, 104) are not available for ordering on standard CERTInext accounts. Attempting to place an order will return an error (EMS-1162: product not provisioned). Contact eMudhra to have these products enabled on your account.
+> Note: Private PKI products are not available for ordering on standard CERTInext accounts. Attempting to place an order will return EMS-1162 (product not provisioned). The sandbox Private PKI code (`149` on account 9374221333) also returns EMS-1162 because the product is not provisioned even though it appears in the `GetProductDetails` list. Contact eMudhra to have these products enabled on your account.
 
 ### S/MIME and Document Signing
 
@@ -214,6 +224,10 @@ When the gateway calls `Enroll`, the plugin selects between three paths based on
 3. **Reissue** — a prior certificate exists but is outside the renewal window. A new order is placed with the updated CSR/subject, replacing the prior certificate under a new subscription.
 
 The `RenewalWindowDays` template parameter controls the renewal/reissue boundary per certificate template.
+
+### Required Order Fields
+
+The `GenerateOrderSSL` API requires an `additionalInformation.remarks` field in every order request body. The gateway populates this field automatically with the text `"Issued via Keyfactor Command AnyCA REST Gateway."`. If you encounter error `EMS-918: Additional Information cannot be empty`, verify that the gateway version is current and that the field is being sent.
 
 ### Order Lifecycle and Pending Approval
 

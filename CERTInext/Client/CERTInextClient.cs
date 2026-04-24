@@ -19,6 +19,7 @@ using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.Logging;
 using Microsoft.Extensions.Logging;
 using RestSharp;
+using RestSharp.Authenticators;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 {
@@ -34,7 +35,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
     /// <c>https://us-api.certinext.io/emSignHub-API/</c>) and endpoint names are
     /// appended directly (e.g. <c>ValidateCredentials</c>).
     /// </summary>
-    public class CERTInextClient : ICERTInextClient
+    public class CERTInextClient : ICERTInextClient, IDisposable
     {
         private static readonly ILogger Logger = LogHandler.GetClassLogger<CERTInextClient>();
 
@@ -54,13 +55,61 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             _config = config ?? throw new ArgumentNullException(nameof(config));
 
+            var isOAuth = config.AuthMode.Equals(Constants.Config.AuthModeOAuth, StringComparison.OrdinalIgnoreCase) ||
+                          config.AuthMode.Equals(Constants.Config.AuthModeOAuth2, StringComparison.OrdinalIgnoreCase);
+
             var options = new RestClientOptions(_config.ApiUrl.TrimEnd('/') + "/")
             {
                 ThrowOnAnyError = false,
                 Timeout = TimeSpan.FromSeconds(120),
+                // OAuth: inject Bearer token per-request via authenticator.
+                // AccessKey: no HTTP-level authenticator — auth is in the JSON body meta block.
+                Authenticator = isOAuth ? new CERTInextOAuthAuthenticator(GetOrRefreshTokenAsync) : null
             };
 
             _http = new RestClient(options);
+        }
+
+        // ---------------------------------------------------------------------------
+        // IDisposable
+        // ---------------------------------------------------------------------------
+
+        public void Dispose()
+        {
+            _http?.Dispose();
+            _tokenLock?.Dispose();
+        }
+
+        // ---------------------------------------------------------------------------
+        // Nested authenticator — injects Authorization: Bearer <token> per-request
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// RestSharp authenticator that fetches (or reuses a cached) OAuth2 bearer
+        /// token and injects it as an <c>Authorization: Bearer</c> header on every
+        /// outgoing request.  The token provider is the client's own
+        /// <see cref="GetOrRefreshTokenAsync"/> method, which handles caching and
+        /// refresh with a semaphore so concurrent requests don't trigger redundant
+        /// token fetches.
+        /// </summary>
+        private sealed class CERTInextOAuthAuthenticator : AuthenticatorBase
+        {
+            private readonly Func<CancellationToken, Task<string>> _tokenProvider;
+
+            public CERTInextOAuthAuthenticator(Func<CancellationToken, Task<string>> tokenProvider)
+                : base(string.Empty) // base stores the token; we override GetAuthenticationParameter instead
+            {
+                _tokenProvider = tokenProvider ?? throw new ArgumentNullException(nameof(tokenProvider));
+            }
+
+            protected override async ValueTask<Parameter> GetAuthenticationParameter(string accessToken)
+            {
+                // Fetch (or return the cached) token from the provider.
+                // CancellationToken.None is acceptable here because RestSharp does not
+                // pass a token through the authenticator interface.
+                string token = await _tokenProvider(CancellationToken.None);
+                return new HeaderParameter(KnownHeaders.Authorization, $"Bearer {token}");
+            }
         }
 
         // ---------------------------------------------------------------------------
@@ -82,7 +131,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -143,7 +192,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -189,7 +238,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -217,7 +266,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -276,7 +325,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -318,7 +367,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -400,7 +449,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var resp = await _http.ExecuteAsync(req, ct);
+                var resp = await ExecuteWithRetryAsync(req, ct);
                 sw.Stop();
 
                 Logger.LogInformation(
@@ -462,14 +511,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             var body = new GetProductDetailsRequest
             {
                 Meta = await BuildMetaAsync(ct),
-                ProductDetails = new ProductDetailsFilter()
+                // Pass groupNumber when configured — required by some accounts to return
+                // products from the nested categories structure (e.g. sandbox accounts).
+                ProductDetails = new ProductDetailsFilter
+                {
+                    GroupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber
+                }
             };
 
             var req = new RestRequest(Constants.Api.GetProductDetailsPath, Method.Post);
             req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -487,10 +541,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             var result = DeserializeOrThrow<GetProductDetailsResponse>(resp, "get product details");
 
+            // The API returns a nested structure: productDetails[].products[].productCode
+            // FlattenProducts() extracts all products from all category envelopes.
+            var products = result.FlattenProducts();
             Logger.LogInformation("Retrieved {Count} product codes from CERTInext.",
-                result.ProductDetails?.Count ?? 0);
+                products.Count);
             Logger.MethodExit(LogLevel.Trace);
-            return result.ProductDetails ?? new List<ProductDetail>();
+            return products;
         }
 
         // ---------------------------------------------------------------------------
@@ -790,10 +847,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <summary>
         /// Builds the meta authentication block for a CERTInext API request.
         /// For AccessKey auth: authKey = SHA256(accessKey + ts + txn) (hex, lowercase).
-        /// For OAuth auth: the bearer token is applied as an HTTP header instead
-        /// (not in the meta block), but meta is still required for ver/ts/txn/accountNumber.
+        /// For OAuth auth: the bearer token is injected as an HTTP header automatically by
+        /// <see cref="CERTInextOAuthAuthenticator"/> — authKey is left empty in the meta block
+        /// (the server accepts the bearer token in lieu of authKey).  The meta block is still
+        /// required for ver/ts/txn/accountNumber in both auth modes.
         /// </summary>
-        private async Task<RequestMeta> BuildMetaAsync(CancellationToken ct)
+        private Task<RequestMeta> BuildMetaAsync(CancellationToken ct)
         {
             string ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:sszzz");
             string txn = GenerateTxnId();
@@ -802,23 +861,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (_config.AuthMode.Equals(Constants.Config.AuthModeOAuth, StringComparison.OrdinalIgnoreCase) ||
                 _config.AuthMode.Equals(Constants.Config.AuthModeOAuth2, StringComparison.OrdinalIgnoreCase))
             {
-                // OAuth: authenticate via bearer token header; authKey is left empty in meta
-                // (the server accepts the bearer token in lieu of authKey)
+                // OAuth: bearer token is injected by CERTInextOAuthAuthenticator per-request.
+                // Leave authKey empty in the meta block — the API accepts the bearer token
+                // in the Authorization header instead.
                 authKey = string.Empty;
-                // Attach the bearer token to the RestClient for the next request
-                // This is done by pre-populating a thread-local; actual header injection
-                // happens in the calling method after BuildMetaAsync returns.
-                // For simplicity here, we fetch the token and rely on the HTTP pipeline.
-                string token = await GetOrRefreshTokenAsync(ct);
-                // Store for injection by calling code — the cleanest approach is to add it
-                // as a default header on the request itself after this method returns.
-                // We store it as a field so the caller can inject it.
-                _pendingBearerToken = token;
             }
             else
             {
                 // AccessKey: compute SHA256(accessKey + ts + txn)
-                _pendingBearerToken = null;
                 authKey = ComputeAuthKey(_config.ApiKey, ts, txn);
             }
 
@@ -828,32 +878,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 "ApiKeyPresent={Present}",
                 _config.AuthMode, _config.AccountNumber, !string.IsNullOrEmpty(_config.ApiKey));
 
-            return new RequestMeta
+            return Task.FromResult(new RequestMeta
             {
                 Ver = Constants.Api.MetaVersion,
                 Ts = ts,
                 Txn = txn,
                 AccountNumber = _config.AccountNumber,
                 AuthKey = authKey
-            };
-        }
-
-        // Thread-local pending bearer token set by BuildMetaAsync for OAuth flows.
-        // The RestRequest AddHeader call must happen in the calling method after BuildMetaAsync.
-        [ThreadStatic]
-        private static string _pendingBearerToken;
-
-        /// <summary>
-        /// Applies any pending OAuth bearer token to the outgoing RestRequest.
-        /// Call this immediately after BuildMetaAsync and before executing the request.
-        /// </summary>
-        private static void ApplyPendingAuth(RestRequest req)
-        {
-            if (!string.IsNullOrEmpty(_pendingBearerToken))
-            {
-                req.AddHeader("Authorization", $"Bearer {_pendingBearerToken}");
-                _pendingBearerToken = null;
-            }
+            });
         }
 
         /// <summary>
@@ -933,6 +965,43 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 _tokenLock.Release();
             }
+        }
+
+        // ---------------------------------------------------------------------------
+        // Retry helper
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Executes a <see cref="RestRequest"/> with up to <paramref name="maxAttempts"/>
+        /// attempts, retrying on HTTP 5xx and network-level failures (no status code).
+        /// 4xx responses are returned immediately — client errors will not be resolved
+        /// by retrying.
+        /// </summary>
+        private async Task<RestResponse> ExecuteWithRetryAsync(
+            RestRequest req,
+            CancellationToken ct,
+            int maxAttempts = 3)
+        {
+            RestResponse resp = null;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                resp = await _http.ExecuteAsync(req, ct);
+
+                // Success or 4xx client error — return immediately
+                bool isClientError = (int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500;
+                if (resp.IsSuccessful || isClientError)
+                    return resp;
+
+                if (attempt < maxAttempts)
+                {
+                    Logger.LogWarning(
+                        "CERTInext API returned {Status} on attempt {Attempt}/{Max} — retrying...",
+                        (int)resp.StatusCode, attempt, maxAttempts);
+                }
+            }
+
+            // Return the last response (caller handles the error)
+            return resp;
         }
 
         // ---------------------------------------------------------------------------

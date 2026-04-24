@@ -15,6 +15,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string ApiUrl = "ApiUrl";
             public const string ApiKey = "ApiKey";              // the raw Access Key (used to compute authKey)
             public const string AccountNumber = "AccountNumber"; // CERTInext account number
+            public const string GroupNumber = "GroupNumber";     // optional delegation group number
             public const string AuthMode = "AuthMode";
             public const string Enabled = "Enabled";
             public const string IgnoreExpired = "IgnoreExpired";
@@ -23,6 +24,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string RequestorEmail = "RequestorEmail";
             public const string RequestorIsdCode = "RequestorIsdCode";
             public const string RequestorMobileNumber = "RequestorMobileNumber";
+            public const string SignerPlace = "SignerPlace";
+            public const string SignerIp = "SignerIp";
 
             // Auth mode values
             public const string AuthModeAccessKey = "AccessKey"; // default; authKey = SHA256(accessKey+ts+txn)
