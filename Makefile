@@ -2,6 +2,13 @@ SLN         := certinext-caplugin.sln
 COVERAGE_DIR := /tmp/certinext-coverage
 REPORT_DIR   := /tmp/certinext-coverage-report
 
+# ---------------------------------------------------------------------------
+# V2 API credentials — set CERTINEXT_V2_API_URL in ~/.env_certinext.
+# For the sandbox environment this is the same host as V1 but without the
+# /emSignHub-API/ suffix, e.g.:
+#   CERTINEXT_V2_API_URL=https://sandbox-us.certinext.io
+# ---------------------------------------------------------------------------
+
 .PHONY: build test integration-test coverage coverage-report open-coverage clean \
         ping \
         get-product-details products \
@@ -24,7 +31,28 @@ REPORT_DIR   := /tmp/certinext-coverage-report
         show-postman-bodies \
         show-postman-variables \
         probe-private-pki-payloads \
-        api-help
+        api-help \
+        v2-ping \
+        v2-list-products \
+        v2-get-custom-fields \
+        v2-list-groups \
+        v2-list-organizations \
+        v2-list-domains \
+        v2-create-ssl-order \
+        v2-track-order \
+        v2-get-dcv \
+        v2-verify-dcv \
+        v2-submit-csr \
+        v2-accept-agreement \
+        v2-download-certificate \
+        v2-revoke-ssl \
+        v2-cancel-ssl-order \
+        v2-create-private-pki-order \
+        v2-track-private-pki \
+        v2-submit-csr-private-pki \
+        v2-download-certificate-private-pki \
+        v2-revoke-private-pki \
+        v2-orders-report
 
 build:
 	dotnet build $(SLN)
@@ -298,7 +326,7 @@ generate-order-149-fresh:
 
 PRIVATE_PKI_CODE   ?= 149
 PRIVATE_PKI_DOMAIN ?= test-private-pki.example.com
-PRIVATE_PKI_CSR    ?= /tmp/certinext-igtf-test.csr
+PRIVATE_PKI_CSR    ?= /tmp/certinext-test.csr
 
 generate-order-private-pki: generate-test-csr
 	@PRIVATE_PKI_CODE=$(PRIVATE_PKI_CODE) PRIVATE_PKI_DOMAIN=$(PRIVATE_PKI_DOMAIN) PRIVATE_PKI_CSR=$(PRIVATE_PKI_CSR) SAVE_AND_HOLD=$(SAVE_AND_HOLD) scripts/generate-order-private-pki.sh
@@ -381,6 +409,269 @@ probe-private-pki-payloads: generate-test-csr
 	  --domain "$(IGTF_DOMAIN)" \
 	  --product "$(PRIVATE_PKI_CODE)" \
 	  --save-and-hold "$(SAVE_AND_HOLD)"
+
+# ---------------------------------------------------------------------------
+# V2 API targets  (credentials + CERTINEXT_V2_API_URL from ~/.env_certinext)
+#
+# Auth: scripts/lib/certinext-v2-auth.sh exchanges SHA256(accessKey+ts+txn)
+# for a short-lived Bearer JWT at POST {v2BaseURL}/oauth/token.  All V2
+# scripts source that lib automatically — no manual token step needed.
+#
+# Scripts live in scripts/v2/.  Each script sources ~/.env_certinext and
+# scripts/lib/certinext-v2-auth.sh; jq is used for JSON construction and
+# pretty-printing.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# v2-ping — GET /api/certinext/v2/auth/me
+# Connectivity + auth check; returns the account context the token resolves to.
+# Mirrors ICERTInextClient.PingAsync via the V2 API.
+# ---------------------------------------------------------------------------
+
+v2-ping:
+	@echo "V2 ping — GET /api/certinext/v2/auth/me"
+	@scripts/v2/ping.sh
+
+# ---------------------------------------------------------------------------
+# v2-list-products — GET /api/certinext/v2/catalog/products
+# Lists every SSL / Document Signer / Private PKI product the account can order.
+# Each entry carries a stable productCode used as the X-Product-Code header.
+# ---------------------------------------------------------------------------
+
+v2-list-products:
+	@echo "V2 list products — GET /api/certinext/v2/catalog/products"
+	@scripts/v2/list-products.sh
+
+# ---------------------------------------------------------------------------
+# v2-get-custom-fields — GET /api/certinext/v2/catalog/products/{code}/custom-fields
+# Returns mandatory + optional custom fields for a product code.
+# Required: PRODUCT_CODE=<code>
+# ---------------------------------------------------------------------------
+
+V2_PRODUCT_CODE ?= 842
+
+v2-get-custom-fields:
+	@echo "V2 get custom fields — GET /api/certinext/v2/catalog/products/$(V2_PRODUCT_CODE)/custom-fields"
+	@PRODUCT_CODE=$(V2_PRODUCT_CODE) scripts/v2/get-custom-fields.sh
+
+# ---------------------------------------------------------------------------
+# v2-list-groups — GET /api/certinext/v2/groups
+# Lists billing groups accessible to this account.
+# Use a groupNumber in order bodies to charge a specific cost centre.
+# ---------------------------------------------------------------------------
+
+v2-list-groups:
+	@echo "V2 list groups — GET /api/certinext/v2/groups"
+	@scripts/v2/list-groups.sh
+
+# ---------------------------------------------------------------------------
+# v2-list-organizations — GET /api/certinext/v2/organizations
+# Lists pre-vetted organizations available for OV/EV SSL orders.
+# Reference an organizationNumber in order bodies to skip re-vetting.
+# ---------------------------------------------------------------------------
+
+v2-list-organizations:
+	@echo "V2 list organizations — GET /api/certinext/v2/organizations"
+	@scripts/v2/list-organizations.sh
+
+# ---------------------------------------------------------------------------
+# v2-list-domains — GET /api/certinext/v2/domains
+# Lists domains already pre-validated under this account.
+# DCV does not need to be repeated for domains in this list.
+# ---------------------------------------------------------------------------
+
+v2-list-domains:
+	@echo "V2 list domains — GET /api/certinext/v2/domains"
+	@scripts/v2/list-domains.sh
+
+# ---------------------------------------------------------------------------
+# v2-create-ssl-order — POST /api/certinext/v2/ssl-certificates
+# Places a new SSL/TLS certificate order.
+# Required: PRODUCT_CODE=<code>  DOMAIN=<domain>
+# Optional: VARIANT=dv (also: ov, ev)
+#
+# Prints orderId on success.  Use orderId with v2-track-order, v2-get-dcv,
+# v2-verify-dcv, v2-submit-csr, v2-accept-agreement, v2-download-certificate,
+# v2-revoke-ssl, and v2-cancel-ssl-order.
+# ---------------------------------------------------------------------------
+
+V2_DOMAIN  ?=
+V2_VARIANT ?= dv
+
+v2-create-ssl-order:
+	@echo "V2 create SSL order — POST /api/certinext/v2/ssl-certificates"
+	@PRODUCT_CODE=$(V2_PRODUCT_CODE) DOMAIN=$(V2_DOMAIN) VARIANT=$(V2_VARIANT) scripts/v2/create-ssl-order.sh
+
+# ---------------------------------------------------------------------------
+# v2-track-order — GET /api/certinext/v2/ssl-certificates/{orderId}
+# Fetches current state of an SSL order.
+# Required: ORDER_ID=<orderId>
+#
+# Status sequence: pending-dcv -> pending-csr -> pending-agreement -> issued
+# (or cancelled / revoked)
+# ---------------------------------------------------------------------------
+
+ORDER_ID ?=
+
+v2-track-order:
+	@echo "V2 track SSL order — GET /api/certinext/v2/ssl-certificates/$(ORDER_ID)"
+	@ORDER_ID=$(ORDER_ID) scripts/v2/track-order.sh
+
+# ---------------------------------------------------------------------------
+# v2-get-dcv — GET /api/certinext/v2/ssl-certificates/{orderId}/dcv?domain={domain}
+# Returns DCV challenge artifacts (http-url, dns-txt, email) for a domain.
+# Required: ORDER_ID=<orderId>  DOMAIN=<domain>
+# ---------------------------------------------------------------------------
+
+v2-get-dcv:
+	@echo "V2 get DCV challenges — GET /api/certinext/v2/ssl-certificates/$(ORDER_ID)/dcv"
+	@ORDER_ID=$(ORDER_ID) DOMAIN=$(V2_DOMAIN) scripts/v2/get-dcv.sh
+
+# ---------------------------------------------------------------------------
+# v2-verify-dcv — POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify
+# Asks the CA to re-check the DCV artifact you published.
+# Required: ORDER_ID=<orderId>  DOMAIN=<domain>
+# Optional: METHOD=http-url  (also: dns-txt, email)
+# ---------------------------------------------------------------------------
+
+V2_DCV_METHOD ?= http-url
+
+v2-verify-dcv:
+	@echo "V2 verify DCV — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/dcv/verify"
+	@ORDER_ID=$(ORDER_ID) DOMAIN=$(V2_DOMAIN) METHOD=$(V2_DCV_METHOD) scripts/v2/verify-dcv.sh
+
+# ---------------------------------------------------------------------------
+# v2-submit-csr — PUT /api/certinext/v2/ssl-certificates/{orderId}/csr
+# Attaches a PEM CSR to an SSL order.
+# Required: ORDER_ID=<orderId>  CSR_FILE=<path to PEM file>
+# ---------------------------------------------------------------------------
+
+V2_CSR_FILE ?=
+
+v2-submit-csr:
+	@echo "V2 submit CSR (SSL) — PUT /api/certinext/v2/ssl-certificates/$(ORDER_ID)/csr"
+	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr.sh
+
+# ---------------------------------------------------------------------------
+# v2-accept-agreement — POST /api/certinext/v2/ssl-certificates/{orderId}/agreement
+# Records Subscriber Agreement acceptance.  The CA proceeds to issue after this.
+# Required: ORDER_ID=<orderId>
+# ---------------------------------------------------------------------------
+
+v2-accept-agreement:
+	@echo "V2 accept agreement — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/agreement"
+	@ORDER_ID=$(ORDER_ID) scripts/v2/accept-agreement.sh
+
+# ---------------------------------------------------------------------------
+# v2-download-certificate — GET /api/certinext/v2/ssl-certificates/{orderId}/certificate
+# Downloads the issued SSL certificate (JSON with PEM, serial, subject, validity).
+# Required: ORDER_ID=<orderId>
+# ---------------------------------------------------------------------------
+
+v2-download-certificate:
+	@echo "V2 download certificate (SSL) — GET /api/certinext/v2/ssl-certificates/$(ORDER_ID)/certificate"
+	@ORDER_ID=$(ORDER_ID) scripts/v2/download-certificate.sh
+
+# ---------------------------------------------------------------------------
+# v2-revoke-ssl — POST /api/certinext/v2/ssl-certificates/{orderId}/revoke
+# Permanently revokes an issued SSL certificate.
+# Required: ORDER_ID=<orderId>
+# Optional: REASON=superseded
+#
+# RFC 5280 reason values: unspecified, keyCompromise, caCompromise,
+#   affiliationChanged, superseded, cessationOfOperation, privilegeWithdrawn
+# ---------------------------------------------------------------------------
+
+V2_REASON ?= superseded
+
+v2-revoke-ssl:
+	@echo "V2 revoke SSL — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/revoke"
+	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-ssl.sh
+
+# ---------------------------------------------------------------------------
+# v2-cancel-ssl-order — POST /api/certinext/v2/ssl-certificates/{orderId}/cancel
+# Withdraws an SSL order before issuance.  Use v2-revoke-ssl after issuance.
+# Required: ORDER_ID=<orderId>
+# ---------------------------------------------------------------------------
+
+v2-cancel-ssl-order:
+	@echo "V2 cancel SSL order — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/cancel"
+	@ORDER_ID=$(ORDER_ID) scripts/v2/cancel-ssl-order.sh
+
+# ---------------------------------------------------------------------------
+# v2-create-private-pki-order — POST /api/certinext/v2/private-pki-certificates
+# Creates a Private PKI certificate order against a customer-owned CA.
+# Required: PRODUCT_CODE=<code>  HOSTNAME=<host>  CA_PROFILE_ID=<id>  MASTER_PRODUCT_ID=<id>
+#
+# Prints orderId on success.  Use orderId with v2-track-private-pki,
+# v2-submit-csr-private-pki, v2-download-certificate-private-pki, and
+# v2-revoke-private-pki.
+# ---------------------------------------------------------------------------
+
+V2_HOSTNAME         ?=
+V2_CA_PROFILE_ID    ?=
+V2_MASTER_PRODUCT_ID ?=
+
+v2-create-private-pki-order:
+	@echo "V2 create Private PKI order — POST /api/certinext/v2/private-pki-certificates"
+	@PRODUCT_CODE=$(V2_PRODUCT_CODE) HOSTNAME=$(V2_HOSTNAME) CA_PROFILE_ID=$(V2_CA_PROFILE_ID) MASTER_PRODUCT_ID=$(V2_MASTER_PRODUCT_ID) scripts/v2/create-private-pki-order.sh
+
+# ---------------------------------------------------------------------------
+# v2-track-private-pki — GET /api/certinext/v2/private-pki-certificates/{orderId}
+# Fetches current state of a Private PKI order.
+# Required: ORDER_ID=<orderId>
+#
+# Status sequence: pending-csr -> issued (or cancelled / revoked)
+# ---------------------------------------------------------------------------
+
+v2-track-private-pki:
+	@echo "V2 track Private PKI order — GET /api/certinext/v2/private-pki-certificates/$(ORDER_ID)"
+	@ORDER_ID=$(ORDER_ID) scripts/v2/track-private-pki.sh
+
+# ---------------------------------------------------------------------------
+# v2-submit-csr-private-pki — PUT /api/certinext/v2/private-pki-certificates/{orderId}/csr
+# Attaches a PEM CSR to a Private PKI order.  The customer CA signs immediately.
+# Required: ORDER_ID=<orderId>  CSR_FILE=<path to PEM file>
+# ---------------------------------------------------------------------------
+
+v2-submit-csr-private-pki:
+	@echo "V2 submit CSR (Private PKI) — PUT /api/certinext/v2/private-pki-certificates/$(ORDER_ID)/csr"
+	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr-private-pki.sh
+
+# ---------------------------------------------------------------------------
+# v2-download-certificate-private-pki — GET /api/certinext/v2/private-pki-certificates/{orderId}/certificate
+# Downloads the issued Private PKI certificate.
+# Required: ORDER_ID=<orderId>
+# ---------------------------------------------------------------------------
+
+v2-download-certificate-private-pki:
+	@echo "V2 download certificate (Private PKI) — GET /api/certinext/v2/private-pki-certificates/$(ORDER_ID)/certificate"
+	@ORDER_ID=$(ORDER_ID) scripts/v2/download-certificate-private-pki.sh
+
+# ---------------------------------------------------------------------------
+# v2-revoke-private-pki — POST /api/certinext/v2/private-pki-certificates/{orderId}/revoke
+# Permanently revokes an issued Private PKI certificate.
+# Required: ORDER_ID=<orderId>
+# Optional: REASON=superseded
+#
+# RFC 5280 reason values: unspecified, keyCompromise, affiliationChanged,
+#   superseded, cessationOfOperation, privilegeWithdrawn
+# ---------------------------------------------------------------------------
+
+v2-revoke-private-pki:
+	@echo "V2 revoke Private PKI — POST /api/certinext/v2/private-pki-certificates/$(ORDER_ID)/revoke"
+	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-private-pki.sh
+
+# ---------------------------------------------------------------------------
+# v2-orders-report — GET /api/certinext/v2/reports/orders?page=0&size=50
+# Paginated order history across all product types.
+# NOTE: currently returns 501 Not Implemented.
+# Use v1 make get-order-report (POST /emSignHub-API/GetOrderReport) meanwhile.
+# ---------------------------------------------------------------------------
+
+v2-orders-report:
+	@echo "V2 orders report — GET /api/certinext/v2/reports/orders (NOTE: currently 501)"
+	@scripts/v2/orders-report.sh
 
 # ---------------------------------------------------------------------------
 # Help
