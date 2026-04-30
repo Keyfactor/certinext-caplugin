@@ -15,6 +15,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string ApiUrl = "ApiUrl";
             public const string ApiKey = "ApiKey";              // the raw Access Key (used to compute authKey)
             public const string AccountNumber = "AccountNumber"; // CERTInext account number
+            public const string GroupNumber = "GroupNumber";     // optional delegation group number
             public const string AuthMode = "AuthMode";
             public const string Enabled = "Enabled";
             public const string IgnoreExpired = "IgnoreExpired";
@@ -23,6 +24,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string RequestorEmail = "RequestorEmail";
             public const string RequestorIsdCode = "RequestorIsdCode";
             public const string RequestorMobileNumber = "RequestorMobileNumber";
+            public const string SignerPlace = "SignerPlace";
+            public const string SignerIp = "SignerIp";
 
             // Auth mode values
             public const string AuthModeAccessKey = "AccessKey"; // default; authKey = SHA256(accessKey+ts+txn)
@@ -59,8 +62,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SignerPlace = "SignerPlace";
             public const string SignerIp = "SignerIp";
             public const string DomainName = "DomainName";      // primary domain for SSL/TLS orders
-            public const string SANFormat = "SANFormat";
             public const string KeyType = "KeyType";
+        }
+
+        public static class Products
+        {
+            public const string DvSsl                = "DV SSL";
+            public const string DvSslWildcard        = "DV SSL Wildcard";
+            public const string DvSslUcc             = "DV SSL Multi-Domain (UCC)";
+            public const string DvSslWildcardUcc     = "DV SSL Wildcard Multi-Domain (UCC)";
+            public const string OvSsl                = "OV SSL";
+            public const string OvSslWildcard        = "OV SSL Wildcard";
+            public const string OvSslUcc             = "OV SSL Multi-Domain (UCC)";
+            public const string OvSslWildcardUcc     = "OV SSL Wildcard Multi-Domain (UCC)";
+            public const string EvSsl                = "EV SSL";
+            public const string EvSslUcc             = "EV SSL Multi-Domain (UCC)";
+
+            // Default production numeric codes. These are the standard codes for the
+            // CERTInext production environment. Sandbox codes differ — set ProductCode
+            // explicitly on the template to override when targeting sandbox.
+            public static readonly System.Collections.Generic.Dictionary<string, string> DefaultProductCodes =
+                new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    [DvSsl]             = "838",
+                    [DvSslWildcard]     = "839",
+                    [DvSslUcc]          = "840",
+                    [DvSslWildcardUcc]  = "841",
+                    [OvSsl]             = "842",
+                    [OvSslWildcard]     = "843",
+                    [OvSslUcc]          = "844",
+                    [OvSslWildcardUcc]  = "845",
+                    [EvSsl]             = "846",
+                    [EvSslUcc]          = "847",
+                };
         }
 
         public static class CertificateStatusId

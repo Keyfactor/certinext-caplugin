@@ -87,6 +87,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     AuthMode           = "AccessKey",
                     ApiKey             = AccessKey,
                     AccountNumber      = AccountNumber,
+                    GroupNumber        = GroupNumber,
                     RequestorName      = string.IsNullOrWhiteSpace(RequestorName)
                                              ? "Keyfactor Integration Test"
                                              : RequestorName,

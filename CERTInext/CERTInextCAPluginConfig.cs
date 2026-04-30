@@ -43,6 +43,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
+                [Constants.Config.GroupNumber] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: CERTInext group (delegation) number. " +
+                               "When set, it is included in GetProductDetails requests so the full " +
+                               "product list is returned. Some sandbox accounts require this to avoid " +
+                               "receiving an empty product list. Available in the CERTInext portal under " +
+                               "Delegation → Groups.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
                 [Constants.Config.AuthMode] = new PropertyConfigInfo
                 {
                     Comments = "REQUIRED: Authentication mode. " +
@@ -113,14 +124,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
-                ["SignerPlace"] = new PropertyConfigInfo
+                [Constants.Config.SignerPlace] = new PropertyConfigInfo
                 {
                     Comments = "City or location of the subscriber agreement signer. Required by CERTInext for all orders.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
-                ["SignerIp"] = new PropertyConfigInfo
+                [Constants.Config.SignerIp] = new PropertyConfigInfo
                 {
                     Comments = "IP address of the subscriber agreement signer. Required by CERTInext for all orders.",
                     Hidden = false,
@@ -172,9 +183,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 [Constants.EnrollmentParam.ProductCode] = new PropertyConfigInfo
                 {
-                    Comments = "REQUIRED: The numeric CERTInext product code for this certificate type " +
-                               "(e.g. '844' for DV SSL 1-year). Provided by eMudhra for your account. " +
-                               "Overrides the connector-level DefaultProductCode when set.",
+                    Comments = "OPTIONAL: Override the numeric CERTInext product code for this template. " +
+                               "When omitted, the default production code for the selected product is used automatically " +
+                               "(e.g. DV SSL → 838). Set this explicitly when targeting sandbox or a non-standard code.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -230,8 +241,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.RenewalWindowDays] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Number of days before expiration within which a renewal is attempted " +
-                               "instead of a reissue. Default: 90.",
+                    Comments = "OPTIONAL: Number of days before certificate expiration within which a renewal is " +
+                               "triggered. Certificates expiring further than this window are reissued instead. " +
+                               "Certificates that have already expired also fall back to reissue. Default: 90.",
                     Hidden = false,
                     DefaultValue = 90,
                     Type = "Number"
@@ -240,6 +252,38 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "OPTIONAL: Key algorithm to request (e.g. 'RSA2048', 'RSA4096', 'EC256', 'EC384'). " +
                                "If omitted, the profile default is used.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.DomainName] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Primary domain for SSL/TLS orders. " +
+                               "Derived from the CSR CN if omitted.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.SignerName] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Per-template subscriber agreement signer name. " +
+                               "Falls back to the connector-level RequestorName if omitted.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.SignerPlace] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Per-template signer city/location. " +
+                               "Falls back to the connector-level SignerPlace if omitted.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.SignerIp] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Per-template signer IP address. " +
+                               "Falls back to the connector-level SignerIp if omitted.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -270,6 +314,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         [JsonPropertyName("AccountNumber")]
         public string AccountNumber { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Optional CERTInext group (delegation) number.  When set, it is passed in
+        /// the <c>productDetails.groupNumber</c> field of <c>GetProductDetails</c>
+        /// requests so that the account's full product list is returned.  Some sandbox
+        /// accounts return an empty product list if this field is omitted.
+        /// </summary>
+        [JsonPropertyName("GroupNumber")]
+        public string GroupNumber { get; set; } = string.Empty;
 
         // -----------------------------------------------------------------------
         // Authentication

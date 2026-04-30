@@ -27,13 +27,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
     /// Implements <see cref="IAnyCAPlugin"/> to route Keyfactor Command certificate
     /// lifecycle operations through the CERTInext REST API.
     /// </summary>
-    public class CERTInextCAPlugin : IAnyCAPlugin
+    public class CERTInextCAPlugin : IAnyCAPlugin, IDisposable
     {
         private readonly ILogger _logger = LogHandler.GetClassLogger<CERTInextCAPlugin>();
 
         private CERTInextConfig _config;
         private ICERTInextClient _client;
         private ICertificateDataReader _certificateDataReader;
+
+        // True when the client was passed in via a test-injection constructor and therefore
+        // should not be disposed by this class (the test owns the mock's lifetime).
+        private bool _clientWasInjected;
 
         // ---------------------------------------------------------------------------
         // Constructors
@@ -51,6 +55,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public CERTInextCAPlugin(ICERTInextClient client)
         {
             _client = client;
+            _clientWasInjected = true;
             _config = new CERTInextConfig();
         }
 
@@ -62,6 +67,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public CERTInextCAPlugin(ICERTInextClient client, ICertificateDataReader certDataReader)
         {
             _client = client;
+            _clientWasInjected = true;
             _certificateDataReader = certDataReader;
             _config = new CERTInextConfig();
         }
@@ -74,7 +80,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public CERTInextCAPlugin(ICERTInextClient client, CERTInextConfig config)
         {
             _client = client;
+            _clientWasInjected = true;
             _config = config ?? new CERTInextConfig();
+        }
+
+        // ---------------------------------------------------------------------------
+        // IDisposable
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Disposes the underlying client if it was created by <see cref="Initialize"/>
+        /// (not injected via a test constructor). Injected mocks are owned by the caller.
+        /// </summary>
+        public void Dispose()
+        {
+            if (!_clientWasInjected)
+                (_client as IDisposable)?.Dispose();
         }
 
         // ---------------------------------------------------------------------------
@@ -137,28 +158,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <inheritdoc/>
         public List<string> GetProductIds()
         {
-            _logger.MethodEntry(LogLevel.Trace);
-
-            try
+            // The product list is a static constant rather than a live API call because:
+            // 1. IAnyCAPlugin.GetProductIds() is synchronous — calling GetAwaiter().GetResult()
+            //    on GetProductDetailsAsync would risk deadlock in certain synchronization contexts.
+            // 2. The Keyfactor integration-manifest doc tool requires a known list at reflection
+            //    time (a live API call at that point returned empty results).
+            // 3. CERTInext product names are stable; operators select the correct product and
+            //    then provide the numeric ProductCode template parameter to map it to the actual
+            //    CERTInext API code for their account (sandbox vs. production).
+            return new List<string>
             {
-                var profiles = _client.GetProfilesAsync().GetAwaiter().GetResult();
-                var ids = profiles
-                    .Where(p => p.Active)
-                    .Select(p => p.Id)
-                    .ToList();
-
-                _logger.LogInformation("Retrieved {Count} active certificate profiles from CERTInext.", ids.Count);
-                return ids;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Unable to retrieve certificate profiles from CERTInext.");
-                return new List<string>();
-            }
-            finally
-            {
-                _logger.MethodExit(LogLevel.Trace);
-            }
+                Constants.Products.DvSsl,
+                Constants.Products.DvSslWildcard,
+                Constants.Products.DvSslUcc,
+                Constants.Products.DvSslWildcardUcc,
+                Constants.Products.OvSsl,
+                Constants.Products.OvSslWildcard,
+                Constants.Products.OvSslUcc,
+                Constants.Products.OvSslWildcardUcc,
+                Constants.Products.EvSsl,
+                Constants.Products.EvSslUcc,
+            };
         }
 
         // ---------------------------------------------------------------------------
@@ -169,6 +189,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public async Task Ping()
         {
             _logger.MethodEntry(LogLevel.Trace);
+
+            if (!_config.Enabled)
+            {
+                _logger.LogWarning("CERTInext connector is disabled — skipping connectivity test.");
+                _logger.MethodExit(LogLevel.Trace);
+                return;
+            }
 
             try
             {
@@ -572,60 +599,76 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int skipped = 0;
             int errors = 0;
 
-            await foreach (var cert in _client.ListCertificatesAsync(
-                issuedAfter, _config.PageSize, cancelToken))
+            try
             {
-                cancelToken.ThrowIfCancellationRequested();
-
-                try
+                await foreach (var cert in _client.ListCertificatesAsync(
+                    issuedAfter, _config.PageSize, cancelToken))
                 {
-                    // Skip expired certificates when IgnoreExpired is configured
-                    if (_config.IgnoreExpired
-                        && cert.ExpiresAt.HasValue
-                        && cert.ExpiresAt.Value < DateTime.UtcNow)
+                    cancelToken.ThrowIfCancellationRequested();
+
+                    try
                     {
-                        _logger.LogTrace(
-                            "Skipping expired certificate '{Id}' (expires {ExpiresAt:u}).",
-                            cert.Id, cert.ExpiresAt.Value);
-                        skipped++;
-                        continue;
-                    }
+                        // Skip expired certificates when IgnoreExpired is configured
+                        if (_config.IgnoreExpired
+                            && cert.ExpiresAt.HasValue
+                            && cert.ExpiresAt.Value < DateTime.UtcNow)
+                        {
+                            _logger.LogTrace(
+                                "Skipping expired certificate '{Id}' (expires {ExpiresAt:u}).",
+                                cert.Id, cert.ExpiresAt.Value);
+                            skipped++;
+                            continue;
+                        }
 
-                    // Skip failed/rejected/cancelled certificates — they have no cert body
-                    int status = StatusMapper.ToRequestDisposition(cert.Status);
-                    if (status == (int)EndEntityStatus.FAILED)
+                        // Skip failed/rejected/cancelled certificates — they have no cert body
+                        int status = StatusMapper.ToRequestDisposition(cert.Status);
+                        if (status == (int)EndEntityStatus.FAILED)
+                        {
+                            _logger.LogTrace(
+                                "Skipping certificate '{Id}' with terminal failure status '{Status}'.",
+                                cert.Id, cert.Status);
+                            skipped++;
+                            continue;
+                        }
+
+                        var record = MapToAnyCAPluginCertificate(cert);
+                        blockingBuffer.Add(record, cancelToken);
+                        synced++;
+                    }
+                    catch (OperationCanceledException)
                     {
-                        _logger.LogTrace(
-                            "Skipping certificate '{Id}' with terminal failure status '{Status}'.",
-                            cert.Id, cert.Status);
-                        skipped++;
-                        continue;
+                        // SOC1 completeness: log the cancellation event so the sync termination
+                        // reason is captured in the audit trail.
+                        _logger.LogWarning(
+                            "CERTInext synchronization cancelled by caller. " +
+                            "FullSync={FullSync}, Synced={Synced}, Skipped={Skipped}, Errors={Errors}",
+                            fullSync, synced, skipped, errors);
+                        throw;
                     }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error processing certificate '{Id}' during synchronization.", cert.Id);
+                        errors++;
+                    }
+                }
 
-                    var record = MapToAnyCAPluginCertificate(cert);
-                    blockingBuffer.Add(record, cancelToken);
-                    synced++;
-                }
-                catch (OperationCanceledException)
-                {
-                    // SOC1 completeness: log the cancellation event so the sync termination
-                    // reason is captured in the audit trail.
-                    _logger.LogWarning(
-                        "CERTInext synchronization cancelled by caller. " +
-                        "FullSync={FullSync}, Synced={Synced}, Skipped={Skipped}, Errors={Errors}",
-                        fullSync, synced, skipped, errors);
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error processing certificate '{Id}' during synchronization.", cert.Id);
-                    errors++;
-                }
+                _logger.LogInformation(
+                    "CERTInext synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}",
+                    synced, skipped, errors);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("CERTInext synchronization was cancelled.");
+                throw;
+            }
+            finally
+            {
+                // Signal to the gateway framework that no more items will be added to the buffer.
+                // This must be called on both normal exit and cancellation so the consumer
+                // (gateway) does not block indefinitely waiting for more records.
+                blockingBuffer.CompleteAdding();
             }
 
-            _logger.LogInformation(
-                "CERTInext synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}",
-                synced, skipped, errors);
             _logger.MethodExit(LogLevel.Trace);
         }
 
@@ -709,15 +752,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
 
-            // Determine whether this is within the renewal window
+            // Determine whether this is within the renewal window.
+            //
+            // Semantics (Option A — "window before expiry"):
+            //   useRenewalApi = true  when the cert expires within the next RenewalWindowDays.
+            //   useRenewalApi = false when the cert expires further away than that (too early → reissue).
+            //   useRenewalApi = false when the cert is already expired (graceful degradation → new order).
+            //
+            // This matches operator expectation: "renew when within N days of expiry".
+            // Certs expiring far in the future should be reissued, not renewed via the CA's
+            // renew endpoint (which may assume near-expiry context on its side).
             bool useRenewalApi = false;
             try
             {
                 DateTime? expiry = _certificateDataReader.GetExpirationDateByRequestId(priorCaRequestId);
                 if (expiry.HasValue)
                 {
-                    DateTime renewalCutoff = DateTime.UtcNow.AddDays(-ep.RenewalWindowDays);
-                    useRenewalApi = expiry.Value > renewalCutoff;
+                    DateTime now = DateTime.UtcNow;
+                    DateTime renewalWindowEnd = now.AddDays(ep.RenewalWindowDays);
+                    // Renew only if the cert is not yet expired AND expires within the window.
+                    useRenewalApi = expiry.Value > now && expiry.Value <= renewalWindowEnd;
+
                     // SOX CC6.2 / SOC2 CC7.2: the renewal window evaluation is a security-relevant
                     // policy decision (determines whether an existing CA record is reused).  Logged
                     // at Information so it survives production log filters and is not suppressible
@@ -725,8 +780,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     _logger.LogInformation(
                         "Renewal window evaluation complete. " +
                         "PriorCARequestID={PriorId}, CertExpiry={Expiry:O}, " +
-                        "RenewalCutoff={Cutoff:O}, RenewalWindowDays={Window}, UseRenewalApi={Use}",
-                        priorCaRequestId, expiry.Value, renewalCutoff, ep.RenewalWindowDays, useRenewalApi);
+                        "RenewalWindowEnd={WindowEnd:O}, RenewalWindowDays={Window}, UseRenewalApi={Use}",
+                        priorCaRequestId, expiry.Value, renewalWindowEnd, ep.RenewalWindowDays, useRenewalApi);
                 }
             }
             catch (Exception ex)
