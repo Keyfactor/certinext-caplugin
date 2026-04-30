@@ -95,7 +95,7 @@
                 },
                 {
                     "name": "Enabled",
-                    "description": "Flag to Enable or Disable gateway functionality. Disabling is primarily used to allow creation of the CA connector prior to configuration information being available."
+                    "description": "Enables or disables the CA connector. Set to false to save the connector record before credentials are available without triggering a live connectivity test. Default: true."
                 }
             ],
             "enrollment_config": [
