@@ -725,10 +725,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 // SOX CC7.3: bound the entire DCV flow with a hard timeout so a stuck
                 // DNS provider or extreme propagation delay cannot hold a gateway worker
-                // thread indefinitely.  The timeout is generous (10 minutes) to accommodate
-                // slow DNS zones; it is separate from the per-request HTTP timeout.
-                // Log the limit so an auditor can confirm the configured ceiling.
-                const int dcvTimeoutMinutes = 10;
+                // thread indefinitely.  Configurable via DcvTimeoutMinutes (config or
+                // CERTINEXT_DCV_TIMEOUT_MINUTES env var); defaults to 10 minutes.
+                // Log the resolved limit so an auditor can confirm the configured ceiling.
+                int dcvTimeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
                 _logger.LogInformation(
                     "Starting DCV for order {OrderNumber}. DcvTimeoutMinutes={Timeout}",
                     orderNumber, dcvTimeoutMinutes);

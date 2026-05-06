@@ -196,6 +196,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = 30,
                     Type = "Number"
+                },
+                [Constants.Config.DcvTimeoutMinutes] = new PropertyConfigInfo
+                {
+                    Comments = $"OPTIONAL: Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) " +
+                               $"before timing out the enrollment. Can also be set via the {Constants.Config.DcvTimeoutMinutesEnvVar} " +
+                               $"environment variable; the env var takes precedence when both are set. Default: 10.",
+                    Hidden = false,
+                    DefaultValue = 10,
+                    Type = "Number"
                 }
             };
         }
@@ -470,5 +479,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         [JsonPropertyName("DcvPropagationDelaySeconds")]
         public int DcvPropagationDelaySeconds { get; set; } = 30;
+
+        /// <summary>
+        /// Maximum minutes for the entire DCV flow before the enrollment is cancelled.
+        /// Overridden by the <c>CERTINEXT_DCV_TIMEOUT_MINUTES</c> environment variable when set.
+        /// Default: 10.
+        /// </summary>
+        [JsonPropertyName("DcvTimeoutMinutes")]
+        public int DcvTimeoutMinutes { get; set; } = 10;
+
+        /// <summary>
+        /// Returns the effective DCV timeout, preferring the environment variable over the
+        /// config field so operators can adjust the ceiling without a connector reconfiguration.
+        /// </summary>
+        public int GetEffectiveDcvTimeoutMinutes()
+        {
+            var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvTimeoutMinutesEnvVar);
+            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal > 0)
+                return envVal;
+            return DcvTimeoutMinutes > 0 ? DcvTimeoutMinutes : 10;
+        }
     }
 }

@@ -31,6 +31,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string DcvEnabled = "DcvEnabled";
             public const string DcvTxtRecordTemplate = "DcvTxtRecordTemplate";
             public const string DcvPropagationDelaySeconds = "DcvPropagationDelaySeconds";
+            public const string DcvTimeoutMinutes = "DcvTimeoutMinutes";
+
+            // Environment variable that overrides DcvTimeoutMinutes when set.
+            public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";
 
             // Auth mode values
             public const string AuthModeAccessKey = "AccessKey"; // default; authKey = SHA256(accessKey+ts+txn)
