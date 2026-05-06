@@ -19,6 +19,7 @@ using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.Logging;
 using Keyfactor.PKI.Enums.EJBCA;
 using Microsoft.Extensions.Logging;
+using IDomainValidatorFactory = Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext
 {
@@ -34,6 +35,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         private CERTInextConfig _config;
         private ICERTInextClient _client;
         private ICertificateDataReader _certificateDataReader;
+        private readonly IDomainValidatorFactory _domainValidatorFactory;
 
         // True when the client was passed in via a test-injection constructor and therefore
         // should not be disposed by this class (the test owns the mock's lifetime).
@@ -43,7 +45,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // Constructors
         // ---------------------------------------------------------------------------
 
-        /// <summary>Production constructor — called by the gateway framework via reflection.</summary>
+        /// <summary>
+        /// Production constructor — called by the gateway framework via constructor DI.
+        /// The gateway injects <see cref="IDomainValidatorFactory"/> when DNS provider
+        /// plugins are installed; DCV is only attempted when <c>DcvEnabled=true</c>
+        /// in the connector configuration.
+        /// </summary>
+        public CERTInextCAPlugin(IDomainValidatorFactory domainValidatorFactory)
+        {
+            _domainValidatorFactory = domainValidatorFactory;
+        }
+
+        /// <summary>
+        /// Parameterless constructor — retained for backwards compatibility with
+        /// gateway versions that do not inject <see cref="IDomainValidatorFactory"/>.
+        /// DCV will not be available when this constructor is used.
+        /// </summary>
         public CERTInextCAPlugin() { }
 
         /// <summary>
@@ -701,6 +718,46 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var enrollResp = await _client.EnrollCertificateAsync(enrollReq);
 
+            // DCV: run domain validation if enabled, the factory was injected, and the
+            // order was accepted (not immediately failed).
+            string orderNumber = enrollResp.Id;
+            if (_domainValidatorFactory != null && _config.DcvEnabled && !string.IsNullOrEmpty(orderNumber))
+            {
+                // SOX CC7.3: bound the entire DCV flow with a hard timeout so a stuck
+                // DNS provider or extreme propagation delay cannot hold a gateway worker
+                // thread indefinitely.  The timeout is generous (10 minutes) to accommodate
+                // slow DNS zones; it is separate from the per-request HTTP timeout.
+                // Log the limit so an auditor can confirm the configured ceiling.
+                const int dcvTimeoutMinutes = 10;
+                _logger.LogInformation(
+                    "Starting DCV for order {OrderNumber}. DcvTimeoutMinutes={Timeout}",
+                    orderNumber, dcvTimeoutMinutes);
+                using var dcvCts = new CancellationTokenSource(TimeSpan.FromMinutes(dcvTimeoutMinutes));
+                bool dcvRan = await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
+                if (dcvRan)
+                {
+                    // Re-fetch the order to reflect the post-DCV certificate state
+                    try
+                    {
+                        var postDcv = await _client.GetCertificateAsync(orderNumber);
+                        return BuildEnrollmentResult(new EnrollCertificateResponse
+                        {
+                            Id = postDcv.Id,
+                            Status = postDcv.Status,
+                            Certificate = postDcv.Certificate,
+                            SerialNumber = postDcv.SerialNumber,
+                            Message = $"Post-DCV status: {postDcv.Status}."
+                        }, ep.AutoApprove);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Failed to re-fetch certificate status after DCV for order {OrderNumber}. " +
+                            "Returning original pending result.", orderNumber);
+                    }
+                }
+            }
+
             return BuildEnrollmentResult(enrollResp, ep.AutoApprove);
         }
 
@@ -828,6 +885,178 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     priorCaRequestId, ep.RenewalWindowDays, subject);
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
+        }
+
+        // ---------------------------------------------------------------------------
+        // DCV helpers
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Passes connector configuration to DNS provider plugins for per-domain configuration lookup.
+        /// </summary>
+        private sealed class DomainValidatorConfigProvider : Keyfactor.AnyGateway.Extensions.IDomainValidatorConfigProvider
+        {
+            public Dictionary<string, object> DomainValidationConfiguration { get; }
+
+            public DomainValidatorConfigProvider(Dictionary<string, object> config)
+                => DomainValidationConfiguration = config ?? new Dictionary<string, object>();
+        }
+
+        /// <summary>
+        /// Runs DNS DCV for any domains on <paramref name="orderNumber"/> that are still pending
+        /// validation.  Returns <c>true</c> when DCV steps were executed, <c>false</c> when
+        /// skipped (order already issued, no pending domains, or factory not available).
+        ///
+        /// Rule: if the order is already issued we never attempt DCV — it would be a no-op
+        /// at best and could confuse the CA at worst.
+        /// </summary>
+        private async Task<bool> PerformDcvIfNeededAsync(string orderNumber, CancellationToken ct)
+        {
+            var track = await _client.TrackOrderAsync(orderNumber, ct);
+
+            // Skip DCV entirely if the certificate is already issued
+            if (track.OrderDetails != null)
+            {
+                if (int.TryParse(track.OrderDetails.CertificateStatusId, out int certStatusId))
+                {
+                    int disposition = StatusMapper.CertificateStatusIdToRequestDisposition(certStatusId);
+                    if (disposition == (int)EndEntityStatus.GENERATED || disposition == (int)EndEntityStatus.REVOKED)
+                    {
+                        _logger.LogDebug(
+                            "DCV skipped — order {OrderNumber} is already in terminal state (certificateStatusId={Status}).",
+                            orderNumber, certStatusId);
+                        return false;
+                    }
+                }
+            }
+
+            var domainVerification = track.OrderDetails?.DomainVerification;
+            if (domainVerification == null)
+                return false;
+
+            // If the overall DCV status is already validated, nothing to do
+            if (string.Equals(domainVerification.Status, Constants.Dcv.StatusValidated, StringComparison.Ordinal))
+                return false;
+
+            var pendingDomains = domainVerification.GetDomainEntries()
+                .Where(kvp => string.Equals(kvp.Value?.DcvStatus, Constants.Dcv.StatusPending, StringComparison.Ordinal)
+                           && string.Equals(kvp.Value?.DcvMethod, Constants.Dcv.MethodDnsTxt, StringComparison.Ordinal))
+                .ToList();
+
+            // SOX CC6.1: validate domain names before passing them to the DNS provider plugin
+            // or the CERTInext API.  A malformed domain (empty, whitespace, or containing
+            // characters outside the FQDN alphabet) could cause log injection or unexpected
+            // DNS plugin behaviour.  Invalid entries are rejected loudly rather than silently
+            // skipped so the condition is visible in the audit trail.
+            foreach (var (domain, _) in pendingDomains)
+            {
+                if (string.IsNullOrWhiteSpace(domain))
+                    throw new InvalidOperationException(
+                        $"TrackOrder returned a blank domain key in domainVerification for order '{orderNumber}'. " +
+                        "Cannot proceed with DCV.");
+
+                // Allow standard FQDN characters plus wildcard prefix (*.example.com)
+                if (!System.Text.RegularExpressions.Regex.IsMatch(domain, @"^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$"))
+                {
+                    _logger.LogError(
+                        "DCV domain name failed validation and will not be processed. OrderNumber={OrderNumber}, Domain={Domain}",
+                        orderNumber, domain);
+                    throw new InvalidOperationException(
+                        $"TrackOrder returned an invalid domain name '{domain}' in domainVerification for order '{orderNumber}'. " +
+                        "Domain names must conform to FQDN syntax.");
+                }
+            }
+
+            if (pendingDomains.Count == 0)
+                return false;
+
+            _logger.LogInformation(
+                "DCV required for order {OrderNumber}. Pending DNS TXT domains: [{Domains}]",
+                orderNumber, string.Join(", ", pendingDomains.Select(x => x.Key)));
+
+            var stagedValidations = new List<(string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator)>();
+
+            // Stage DNS TXT records for all pending domains
+            foreach (var (domain, _) in pendingDomains)
+            {
+                GetDcvResponse dcvResp;
+                try
+                {
+                    dcvResp = await _client.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "GetDcv failed for order {OrderNumber} domain {Domain}", orderNumber, domain);
+                    throw;
+                }
+
+                string token = dcvResp.DcvDetails?.Token;
+                if (string.IsNullOrWhiteSpace(token))
+                    throw new InvalidOperationException(
+                        $"GetDcv returned no token for order '{orderNumber}' domain '{domain}'.");
+
+                string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
+                    ? Constants.Dcv.DefaultTxtRecordTemplate
+                    : _config.DcvTxtRecordTemplate;
+                string hostname = string.Format(template, domain);
+
+                var validator = _domainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
+                if (validator == null)
+                    throw new InvalidOperationException(
+                        $"No DNS provider plugin is configured for domain '{domain}'. " +
+                        "Ensure the appropriate DNS provider plugin is deployed and configured on the gateway.");
+
+                _logger.LogInformation(
+                    "Staging DNS TXT record for DCV. OrderNumber={OrderNumber}, Domain={Domain}, Hostname={Hostname}",
+                    orderNumber, domain, hostname);
+
+                var stageResult = await validator.StageValidation(hostname, token, ct);
+                if (!stageResult.Success)
+                    throw new InvalidOperationException(
+                        $"Failed to stage DNS validation for '{domain}': {stageResult.ErrorMessage}");
+
+                stagedValidations.Add((domain, hostname, validator));
+            }
+
+            if (stagedValidations.Count == 0)
+                return false;
+
+            try
+            {
+                // Allow DNS propagation before asking CERTInext to verify
+                int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
+                _logger.LogInformation(
+                    "Waiting {Delay}s for DNS propagation before verifying DCV. OrderNumber={OrderNumber}",
+                    delaySeconds, orderNumber);
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+
+                foreach (var (domain, hostname, _) in stagedValidations)
+                {
+                    _logger.LogInformation(
+                        "Triggering CERTInext DCV verification. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                    await _client.VerifyDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
+                }
+            }
+            finally
+            {
+                // Always clean up staged DNS records — even on failure
+                foreach (var (domain, hostname, validator) in stagedValidations)
+                {
+                    try
+                    {
+                        await validator.CleanupValidation(hostname, ct);
+                        _logger.LogInformation(
+                            "DNS TXT record cleaned up. Domain={Domain}, Hostname={Hostname}", domain, hostname);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Failed to clean up DNS TXT record. Domain={Domain}, Hostname={Hostname}", domain, hostname);
+                    }
+                }
+            }
+
+            return true;
         }
 
         /// <summary>

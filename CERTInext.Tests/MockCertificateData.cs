@@ -335,6 +335,42 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             $@"{{""access_token"":""fake-bearer-token-abc123"",""token_type"":""Bearer"",""expires_in"":{expiresIn}}}";
 
         // -----------------------------------------------------------------------
+        // DCV (domain control validation)
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// POST /GetDcv — success response containing the TXT record token for DNS DCV.
+        /// </summary>
+        public static string GetDcvSuccessJson(string token = "abc123token") =>
+            $@"{{
+  ""meta"":{SuccessMetaJson()},
+  ""dcvDetails"":{{
+    ""token"":""{token}"",
+    ""fileName"":null,
+    ""fileContent"":null,
+    ""dcvEmails"":null
+  }}
+}}";
+
+        /// <summary>
+        /// POST /GetDcv — failure response (bad order or unsupported dcvMethod).
+        /// </summary>
+        public static string GetDcvFailureJson(string code = "EMS-DCV-001", string msg = "DCV not available for this order") =>
+            $@"{{""meta"":{FailureMetaJson(code, msg)}}}";
+
+        /// <summary>
+        /// POST /VerifyDcv — success response (meta only, no additional payload).
+        /// </summary>
+        public static string VerifyDcvSuccessJson() =>
+            $@"{{""meta"":{SuccessMetaJson()}}}";
+
+        /// <summary>
+        /// POST /VerifyDcv — failure response (TXT record not found).
+        /// </summary>
+        public static string VerifyDcvFailureJson(string code = "EMS-DCV-002", string msg = "DNS record not found") =>
+            $@"{{""meta"":{FailureMetaJson(code, msg)}}}";
+
+        // -----------------------------------------------------------------------
         // Error responses
         // -----------------------------------------------------------------------
 
