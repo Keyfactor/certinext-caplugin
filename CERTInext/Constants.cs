@@ -27,6 +27,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SignerPlace = "SignerPlace";
             public const string SignerIp = "SignerIp";
 
+            // DCV — domain control validation via DNS provider plugins
+            public const string DcvEnabled = "DcvEnabled";
+            public const string DcvTxtRecordTemplate = "DcvTxtRecordTemplate";
+            public const string DcvPropagationDelaySeconds = "DcvPropagationDelaySeconds";
+
             // Auth mode values
             public const string AuthModeAccessKey = "AccessKey"; // default; authKey = SHA256(accessKey+ts+txn)
             public const string AuthModeOAuth = "OAuth";         // bearer token via OAuth
@@ -218,6 +223,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // Default fallback when the CRL reason code has no CERTInext equivalent
             public const int Default = KeyCompromise;
+        }
+
+        public static class Dcv
+        {
+            // CERTInext dcvMethod values (dcvDetails.dcvMethod in GetDcv / VerifyDcv)
+            public const string MethodDnsTxt   = "1";  // DNS TXT record
+            public const string MethodHttpFile = "2";  // HTTP file validation
+            public const string MethodEmail    = "3";  // Email validation
+
+            // CERTInext dcvStatus values (per-domain entries in TrackOrder domainVerification)
+            public const string StatusPending   = "0";
+            public const string StatusValidated = "1";
+            public const string StatusRejected  = "2";
+
+            // Default TXT record hostname template; {0} is replaced with the bare domain name.
+            // Override via the DcvTxtRecordTemplate connector config field.
+            public const string DefaultTxtRecordTemplate = "_emsign-validation.{0}";
         }
 
         // Legacy string revocation reasons — retained so StatusMapper still compiles.
