@@ -101,6 +101,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _config = config ?? new CERTInextConfig();
         }
 
+        /// <summary>
+        /// Test-injection constructor — pass a mock client, a domain validator factory,
+        /// and an optional config for unit-testing the DCV orchestration path.
+        /// </summary>
+        public CERTInextCAPlugin(ICERTInextClient client, IDomainValidatorFactory domainValidatorFactory, CERTInextConfig config = null)
+        {
+            _client = client;
+            _clientWasInjected = true;
+            _domainValidatorFactory = domainValidatorFactory;
+            _config = config ?? new CERTInextConfig();
+        }
+
         // ---------------------------------------------------------------------------
         // IDisposable
         // ---------------------------------------------------------------------------

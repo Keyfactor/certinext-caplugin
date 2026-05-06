@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
@@ -337,6 +338,63 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // -----------------------------------------------------------------------
         // DCV (domain control validation)
         // -----------------------------------------------------------------------
+
+        public const string DcvOrderId = "ORD-DCV-001";
+        public const string DcvDomain  = "example.com";
+        public const string DcvToken   = "abc123dcvtoken";
+
+        /// <summary>
+        /// Returns a <see cref="TrackOrderResponse"/> with one pending DNS-TXT domain entry,
+        /// ready for Moq setups that exercise the DCV orchestration path.
+        /// </summary>
+        public static TrackOrderResponse DcvPendingTrackResponse(
+            string orderNumber = DcvOrderId,
+            string domain      = DcvDomain)
+        {
+            var detail = JsonSerializer.SerializeToElement(new DomainVerificationDetail
+            {
+                DcvMethod = Constants.Dcv.MethodDnsTxt,
+                DcvStatus = Constants.Dcv.StatusPending,
+                Status    = "1"
+            });
+
+            return new TrackOrderResponse
+            {
+                OrderDetails = new TrackOrderResponseDetails
+                {
+                    OrderStatusId      = "1",
+                    CertificateStatusId = "1",
+                    DomainVerification = new TrackOrderDomainVerification
+                    {
+                        Status           = Constants.Dcv.StatusPending,
+                        RawDomainEntries = new Dictionary<string, JsonElement> { [domain] = detail }
+                    }
+                }
+            };
+        }
+
+        /// <summary>
+        /// Returns a <see cref="TrackOrderResponse"/> whose order is already in a terminal
+        /// issued state — DCV should be skipped entirely when this is returned.
+        /// </summary>
+        public static TrackOrderResponse AlreadyIssuedTrackResponse(string orderNumber = CertId1) =>
+            new TrackOrderResponse
+            {
+                OrderDetails = new TrackOrderResponseDetails
+                {
+                    OrderStatusId       = "4",
+                    CertificateStatusId = "9",  // CertificateGenerated — maps to GENERATED
+                }
+            };
+
+        /// <summary>
+        /// Returns a <see cref="GetDcvResponse"/> containing the TXT token for Moq setups.
+        /// </summary>
+        public static GetDcvResponse DcvTokenResponse(string token = DcvToken) =>
+            new GetDcvResponse
+            {
+                DcvDetails = new DcvResponseDetails { Token = token }
+            };
 
         /// <summary>
         /// POST /GetDcv — success response containing the TXT record token for DNS DCV.
