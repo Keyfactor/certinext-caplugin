@@ -6,6 +6,7 @@
 // and limitations under the License.
 
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
@@ -151,8 +152,98 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("revocationDetails")]
         public TrackOrderRevocationDetails RevocationDetails { get; set; }
 
+        /// <summary>
+        /// Per-domain DCV state plus a top-level <c>status</c> field. The wire
+        /// shape mixes typed and dynamic keys: <c>{ "&lt;Domain Name&gt;": { ... },
+        /// "status": "..." }</c>, so domain entries are surfaced via
+        /// <see cref="TrackOrderDomainVerification.DomainEntries"/>.
+        /// </summary>
+        [JsonPropertyName("domainVerification")]
+        public TrackOrderDomainVerification DomainVerification { get; set; }
+
         [JsonPropertyName("csr")]
         public string Csr { get; set; }
+    }
+
+    /// <summary>
+    /// <c>domainVerification</c> block from TrackOrder. Wire shape is heterogeneous:
+    /// a known <c>status</c> field at the top level alongside one entry per domain
+    /// keyed by domain name. The per-domain entries are captured via
+    /// <see cref="JsonExtensionDataAttribute"/> and exposed through
+    /// <see cref="GetDomainEntries"/>.
+    /// </summary>
+    public class TrackOrderDomainVerification
+    {
+        /// <summary>Block-level status. Documented values mirror <see cref="DomainVerificationDetail.Status"/>.</summary>
+        [JsonPropertyName("status")]
+        public string Status { get; set; }
+
+        /// <summary>
+        /// Raw per-domain entries as parsed from the response. Keys are the domain
+        /// names exactly as returned by CERTInext. Use <see cref="GetDomainEntries"/>
+        /// for typed access.
+        /// </summary>
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement> RawDomainEntries { get; set; }
+
+        /// <summary>
+        /// Returns a typed dictionary of domain → <see cref="DomainVerificationDetail"/>,
+        /// skipping entries that fail to deserialize (e.g. unexpected scalar values).
+        /// Returns an empty dictionary if no per-domain entries were present.
+        /// </summary>
+        public Dictionary<string, DomainVerificationDetail> GetDomainEntries()
+        {
+            var result = new Dictionary<string, DomainVerificationDetail>();
+            if (RawDomainEntries == null) return result;
+
+            foreach (var kv in RawDomainEntries)
+            {
+                if (kv.Value.ValueKind != JsonValueKind.Object) continue;
+                try
+                {
+                    var detail = kv.Value.Deserialize<DomainVerificationDetail>();
+                    if (detail != null) result[kv.Key] = detail;
+                }
+                catch (JsonException)
+                {
+                    // ignore: entry shape unexpected, skip rather than failing the whole TrackOrder
+                }
+            }
+
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Per-domain DCV detail inside <see cref="TrackOrderDomainVerification"/>.
+    /// </summary>
+    public class DomainVerificationDetail
+    {
+        /// <summary>DCV method used / requested for this domain (typically the human label).</summary>
+        [JsonPropertyName("dcvMethod")]
+        public string DcvMethod { get; set; }
+
+        /// <summary>
+        /// DCV completion status: "0"=Pending, "1"=Validated, "2"=Rejected.
+        /// See <see cref="Constants.Dcv"/>.
+        /// </summary>
+        [JsonPropertyName("dcvStatus")]
+        public string DcvStatus { get; set; }
+
+        /// <summary>Domain status: "1"=Active, "2"=Inactive, "3"=Expired.</summary>
+        [JsonPropertyName("status")]
+        public string Status { get; set; }
+
+        /// <summary>Timestamp at which the domain was successfully verified (when applicable).</summary>
+        [JsonPropertyName("verifiedDate")]
+        public string VerifiedDate { get; set; }
+
+        /// <summary>
+        /// CAA check status: "1"=emSign authorized or no CAA present,
+        /// "2"=Authorization required, "3"=Authorization pending.
+        /// </summary>
+        [JsonPropertyName("caaStatus")]
+        public string CaaStatus { get; set; }
     }
 
     public class TrackOrderRequestorInfo
@@ -187,6 +278,84 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
 
         [JsonPropertyName("revokeRequestStatus")]
         public string RevokeRequestStatus { get; set; }
+    }
+
+    // ---------------------------------------------------------------------------
+    // GetDcv response  — POST {baseURL}GetDcv
+    //
+    // Per the V1 spec the dcvDetails block contains different fields depending
+    // on the dcvMethod that was requested:
+    //   dcvMethod=1 (DNS TXT) → token populated
+    //   dcvMethod=2 (HTTP)    → fileName + fileContent populated
+    //   dcvMethod=3 (email)   → dcvEmails populated
+    //
+    // The TXT record HOSTNAME for dcvMethod=1 is NOT returned by this endpoint.
+    // The CERTInext V1 documentation does not specify the convention. The plugin
+    // uses Constants.Dcv.DefaultTxtRecordTemplate ("_emsign-validation.{0}") by
+    // default, overridable via the DcvTxtRecordTemplate connector config field.
+    // ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// Response from POST {baseURL}GetDcv.
+    /// </summary>
+    public class GetDcvResponse
+    {
+        [JsonPropertyName("meta")]
+        public ResponseMeta Meta { get; set; }
+
+        [JsonPropertyName("dcvDetails")]
+        public DcvResponseDetails DcvDetails { get; set; }
+    }
+
+    /// <summary>
+    /// DCV instructions returned by GetDcv. Field population depends on the
+    /// requested dcvMethod (see class-level remarks on <see cref="GetDcvResponse"/>).
+    /// </summary>
+    public class DcvResponseDetails
+    {
+        /// <summary>
+        /// Token / target address value to publish for DNS TXT-based DCV
+        /// (dcvMethod = 1). Empty for other methods.
+        /// </summary>
+        [JsonPropertyName("token")]
+        public string Token { get; set; }
+
+        /// <summary>
+        /// File name to host under <c>/.well-known/pki-validation/</c> for HTTP
+        /// DCV (dcvMethod = 2). Empty for other methods.
+        /// </summary>
+        [JsonPropertyName("fileName")]
+        public string FileName { get; set; }
+
+        /// <summary>
+        /// File body to serve at the well-known path for HTTP DCV (dcvMethod = 2).
+        /// Empty for other methods.
+        /// </summary>
+        [JsonPropertyName("fileContent")]
+        public string FileContent { get; set; }
+
+        /// <summary>
+        /// CA/B Forum approved approver email candidates for email DCV
+        /// (dcvMethod = 3). Empty for other methods.
+        /// </summary>
+        [JsonPropertyName("dcvEmails")]
+        public List<string> DcvEmails { get; set; }
+    }
+
+    // ---------------------------------------------------------------------------
+    // VerifyDcv response  — POST {baseURL}VerifyDcv
+    // Body contains only the meta block (success/failure status).
+    // ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// Response from POST {baseURL}VerifyDcv. Body is meta-only; the actual
+    /// per-domain verification status is observed via subsequent TrackOrder
+    /// calls (see <see cref="TrackOrderDomainVerification"/>).
+    /// </summary>
+    public class VerifyDcvResponse
+    {
+        [JsonPropertyName("meta")]
+        public ResponseMeta Meta { get; set; }
     }
 
     // ---------------------------------------------------------------------------
