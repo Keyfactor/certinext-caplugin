@@ -169,6 +169,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = true,
                     Type = "Boolean"
+                },
+                [Constants.Config.DcvEnabled] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) " +
+                               "during enrollment for orders that require it, using the configured DNS provider plugin. " +
+                               "Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. " +
+                               "Default: false.",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
+                },
+                [Constants.Config.DcvTxtRecordTemplate] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Format string for the DNS TXT record hostname used during DCV. " +
+                               "{0} is replaced with the domain name being validated. " +
+                               $"Default: {Constants.Dcv.DefaultTxtRecordTemplate}",
+                    Hidden = false,
+                    DefaultValue = Constants.Dcv.DefaultTxtRecordTemplate,
+                    Type = "String"
+                },
+                [Constants.Config.DcvPropagationDelaySeconds] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext " +
+                               "to verify it. Increase for zones with slow propagation. Default: 30.",
+                    Hidden = false,
+                    DefaultValue = 30,
+                    Type = "Number"
                 }
             };
         }
@@ -417,5 +444,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         [JsonPropertyName("Enabled")]
         public bool Enabled { get; set; } = true;
+
+        // -----------------------------------------------------------------------
+        // DCV — domain control validation via DNS provider plugins
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// When true, the plugin will run DNS DCV for orders that require it during enrollment.
+        /// Requires <c>IDomainValidatorFactory</c> to be injected by the gateway (available from
+        /// <c>IAnyCAPlugin 3.3.0-prerelease</c>). Default: false.
+        /// </summary>
+        [JsonPropertyName("DcvEnabled")]
+        public bool DcvEnabled { get; set; } = false;
+
+        /// <summary>
+        /// Format string for the TXT record hostname.  <c>{0}</c> is replaced with the domain.
+        /// Default: <c>_emsign-validation.{0}</c>.
+        /// </summary>
+        [JsonPropertyName("DcvTxtRecordTemplate")]
+        public string DcvTxtRecordTemplate { get; set; } = Constants.Dcv.DefaultTxtRecordTemplate;
+
+        /// <summary>
+        /// Seconds to wait after publishing the DNS TXT record before calling VerifyDcv.
+        /// Default: 30.
+        /// </summary>
+        [JsonPropertyName("DcvPropagationDelaySeconds")]
+        public int DcvPropagationDelaySeconds { get; set; } = 30;
     }
 }
