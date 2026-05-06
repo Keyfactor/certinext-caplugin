@@ -841,6 +841,145 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         // ---------------------------------------------------------------------------
+        // ICERTInextClient — DCV methods
+        // ---------------------------------------------------------------------------
+
+        /// <inheritdoc/>
+        public async Task<GetDcvResponse> GetDcvAsync(
+            string orderNumber,
+            string domainName,
+            string dcvMethod,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+
+            var body = new GetDcvRequest
+            {
+                Meta = await BuildMetaAsync(ct),
+                DcvDetails = new DcvRequestDetails
+                {
+                    RequestorEmail = _config.RequestorEmail,
+                    OrderNumber = orderNumber,
+                    DomainName = domainName,
+                    DcvMethod = dcvMethod
+                }
+            };
+
+            var req = new RestRequest(Constants.Api.GetDcvPath, Method.Post);
+            req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await ExecuteWithRetryAsync(req, ct);
+            sw.Stop();
+
+            Logger.LogInformation(
+                "CERTInext API call: Method=POST, Path={Path}, OrderNumber={OrderNumber}, Domain={Domain}, HttpStatus={Status}, LatencyMs={Latency}",
+                Constants.Api.GetDcvPath, orderNumber, domainName, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+
+            if (resp.StatusCode == HttpStatusCode.Unauthorized || resp.StatusCode == HttpStatusCode.Forbidden)
+            {
+                Logger.LogError(
+                    "GetDcv API authentication failure. OrderNumber={OrderNumber}, Domain={Domain}, HttpStatus={Status}",
+                    orderNumber, domainName, (int)resp.StatusCode);
+                throw new Exception(
+                    $"Authentication failure calling GetDcv for order '{orderNumber}' domain '{domainName}'. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+            }
+
+            var result = DeserializeOrThrow<GetDcvResponse>(resp, $"get DCV token {orderNumber}/{domainName}");
+
+            if (result.Meta != null && !result.Meta.IsSuccess)
+            {
+                Logger.LogError(
+                    "GetDcv returned failure. OrderNumber={OrderNumber}, Domain={Domain}, ErrorCode={ErrorCode}, ErrorMessage={ErrorMessage}",
+                    orderNumber, domainName, result.Meta.ErrorCode, result.Meta.ErrorMessage);
+                throw new Exception(
+                    $"CERTInext GetDcv failed for order '{orderNumber}' domain '{domainName}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
+            }
+
+            // SOX CC7.3: log token presence (never value) so each DCV step is independently
+            // auditable — an auditor must be able to confirm the token was obtained before
+            // StageValidation was called.
+            Logger.LogInformation(
+                "GetDcv response received. OrderNumber={OrderNumber}, Domain={Domain}, TokenPresent={TokenPresent}",
+                orderNumber, domainName, !string.IsNullOrWhiteSpace(result.DcvDetails?.Token));
+
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task VerifyDcvAsync(
+            string orderNumber,
+            string domainName,
+            string dcvMethod,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+
+            var body = new VerifyDcvRequest
+            {
+                Meta = await BuildMetaAsync(ct),
+                DcvDetails = new DcvRequestDetails
+                {
+                    RequestorEmail = _config.RequestorEmail,
+                    OrderNumber = orderNumber,
+                    DomainName = domainName,
+                    DcvMethod = dcvMethod
+                }
+            };
+
+            var req = new RestRequest(Constants.Api.VerifyDcvPath, Method.Post);
+            req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await ExecuteWithRetryAsync(req, ct);
+            sw.Stop();
+
+            Logger.LogInformation(
+                "CERTInext API call: Method=POST, Path={Path}, OrderNumber={OrderNumber}, Domain={Domain}, HttpStatus={Status}, LatencyMs={Latency}",
+                Constants.Api.VerifyDcvPath, orderNumber, domainName, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+
+            if (resp.StatusCode == HttpStatusCode.Unauthorized || resp.StatusCode == HttpStatusCode.Forbidden)
+            {
+                Logger.LogError(
+                    "VerifyDcv API authentication failure. OrderNumber={OrderNumber}, Domain={Domain}, HttpStatus={Status}",
+                    orderNumber, domainName, (int)resp.StatusCode);
+                throw new Exception(
+                    $"Authentication failure calling VerifyDcv for order '{orderNumber}' domain '{domainName}'. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+            }
+
+            if (!resp.IsSuccessful)
+                throw new Exception(
+                    $"CERTInext VerifyDcv failed for order '{orderNumber}' domain '{domainName}'. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+
+            // Attempt to read meta.status from the response body
+            if (!string.IsNullOrWhiteSpace(resp.Content))
+            {
+                try
+                {
+                    var verifyResp = JsonSerializer.Deserialize<VerifyDcvResponse>(resp.Content, GetJsonOptions());
+                    if (verifyResp?.Meta != null && !verifyResp.Meta.IsSuccess)
+                    {
+                        // SOX CC7.3: log the failure outcome explicitly so an auditor can
+                        // distinguish a thrown meta-failure from a silent swallow.
+                        Logger.LogError(
+                            "VerifyDcv returned failure. OrderNumber={OrderNumber}, Domain={Domain}, ErrorCode={ErrorCode}, ErrorMessage={ErrorMessage}",
+                            orderNumber, domainName, verifyResp.Meta.ErrorCode, verifyResp.Meta.ErrorMessage);
+                        throw new Exception(
+                            $"CERTInext VerifyDcv returned failure for order '{orderNumber}' domain '{domainName}': {verifyResp.Meta.ErrorMessage ?? verifyResp.Meta.ErrorCode}.");
+                    }
+                }
+                catch (JsonException) { /* non-JSON 200 body is acceptable */ }
+            }
+
+            // SOX CC7.3 / SOC2 CC7.3: log success only after the meta check so the log entry
+            // unambiguously reflects that CERTInext acknowledged the verification request.
+            Logger.LogInformation(
+                "DCV verification succeeded. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domainName);
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        // ---------------------------------------------------------------------------
         // Auth helpers
         // ---------------------------------------------------------------------------
 
@@ -872,8 +1011,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 authKey = ComputeAuthKey(_config.ApiKey, ts, txn);
             }
 
-            // SOX CC6.1: log credential use (presence only, never the value) at Information.
-            Logger.LogInformation(
+            // SOC2 CC7.2: log credential use at Debug only — this is called on every outbound
+            // request, so Information would flood the log and degrade anomaly detection signal.
+            // Per-operation audit entries (LogInformation) are emitted at the call sites above.
+            Logger.LogDebug(
                 "Outbound API request authenticated. AuthMode={AuthMode}, AccountNumber={AccountNumber}, " +
                 "ApiKeyPresent={Present}",
                 _config.AuthMode, _config.AccountNumber, !string.IsNullOrEmpty(_config.ApiKey));
