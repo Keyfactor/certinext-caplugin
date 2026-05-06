@@ -205,6 +205,7 @@ track-order get-order:
 get-certificate get-cert:
 	@ORDER_NUMBER=$(ORDER_NUMBER) scripts/get-certificate.sh
 
+
 # ---------------------------------------------------------------------------
 # GetDcv — POST {baseURL}GetDcv
 # Fetches the DCV token for a domain on an existing order
@@ -353,7 +354,7 @@ generate-order-149-fresh:
 
 PRIVATE_PKI_CODE   ?= 149
 PRIVATE_PKI_DOMAIN ?= test-private-pki.example.com
-PRIVATE_PKI_CSR    ?= /tmp/certinext-test.csr
+PRIVATE_PKI_CSR    ?= /tmp/certinext-igtf-test.csr
 
 generate-order-private-pki: generate-test-csr
 	@PRIVATE_PKI_CODE=$(PRIVATE_PKI_CODE) PRIVATE_PKI_DOMAIN=$(PRIVATE_PKI_DOMAIN) PRIVATE_PKI_CSR=$(PRIVATE_PKI_CSR) SAVE_AND_HOLD=$(SAVE_AND_HOLD) scripts/generate-order-private-pki.sh
