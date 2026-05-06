@@ -96,6 +96,22 @@
                 {
                     "name": "Enabled",
                     "description": "Flag to Enable or Disable gateway functionality. Disabling is primarily used to allow creation of the CA connector prior to configuration information being available."
+                },
+                {
+                    "name": "DcvEnabled",
+                    "description": "OPTIONAL: When true, the gateway performs DNS-based Domain Control Validation (DCV) during enrollment for orders that require it. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) deployed on the gateway. Default: false."
+                },
+                {
+                    "name": "DcvTxtRecordTemplate",
+                    "description": "OPTIONAL: Format string for the DNS TXT record hostname published during DCV. {0} is replaced with the domain being validated. Default: _emsign-validation.{0}."
+                },
+                {
+                    "name": "DcvPropagationDelaySeconds",
+                    "description": "OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: 30."
+                },
+                {
+                    "name": "DcvTimeoutMinutes",
+                    "description": "OPTIONAL: Maximum minutes to wait for the entire DCV flow before cancelling the enrollment. Can also be set via the CERTINEXT_DCV_TIMEOUT_MINUTES environment variable; the environment variable takes precedence when both are set. Default: 10."
                 }
             ],
             "enrollment_config": [
