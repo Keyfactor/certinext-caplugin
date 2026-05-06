@@ -18,6 +18,8 @@ REPORT_DIR   := /tmp/certinext-coverage-report
         get-order-report orders \
         track-order get-order \
         get-certificate get-cert \
+        get-dcv \
+        verify-dcv \
         generate-order \
         revoke-order \
         submit-csr \
@@ -202,6 +204,31 @@ track-order get-order:
 
 get-certificate get-cert:
 	@ORDER_NUMBER=$(ORDER_NUMBER) scripts/get-certificate.sh
+
+# ---------------------------------------------------------------------------
+# GetDcv — POST {baseURL}GetDcv
+# Fetches the DCV token for a domain on an existing order
+# Mirrors ICERTInextClient.GetDcvAsync
+# Required: ORDER_NUMBER=<order number>  DOMAIN_NAME=<domain>
+# Optional: DCV_METHOD=1  (1=DNS TXT, 2=HTTP file, 3=Email; default 1)
+# ---------------------------------------------------------------------------
+
+DCV_METHOD ?= 1
+
+get-dcv:
+	@ORDER_NUMBER=$(ORDER_NUMBER) DOMAIN_NAME=$(DOMAIN_NAME) DCV_METHOD=$(DCV_METHOD) scripts/get-dcv.sh
+
+# ---------------------------------------------------------------------------
+# VerifyDcv — POST {baseURL}VerifyDcv
+# Instructs CERTInext to check the published DCV token for a domain
+# Mirrors ICERTInextClient.VerifyDcvAsync
+# Call after publishing the TXT record and allowing time for DNS propagation.
+# Required: ORDER_NUMBER=<order number>  DOMAIN_NAME=<domain>
+# Optional: DCV_METHOD=1  (default 1 = DNS TXT)
+# ---------------------------------------------------------------------------
+
+verify-dcv:
+	@ORDER_NUMBER=$(ORDER_NUMBER) DOMAIN_NAME=$(DOMAIN_NAME) DCV_METHOD=$(DCV_METHOD) scripts/verify-dcv.sh
 
 # ---------------------------------------------------------------------------
 # GenerateOrderSSL — POST {baseURL}GenerateOrderSSL
