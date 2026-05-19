@@ -1205,31 +1205,78 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private GenerateOrderSslRequest BuildOrderRequestFromLegacyEnrollRequest(EnrollCertificateRequest request)
         {
+            // Map ValidityDays → CERTInext's year-based validity. Default 1.
+            string validityYears = request.ValidityDays.HasValue
+                ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
+                : (string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears)
+                    ? "1"
+                    : _config.SubscriptionValidityYears);
+
+            string requestorName  = request.RequesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
+            string requestorEmail = request.RequesterEmail ?? _config.RequestorEmail ?? string.Empty;
+            string requestorIsd   = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
+            string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
+
             return new GenerateOrderSslRequest
             {
                 // Meta will be set by PlaceOrderAsync
                 OrderDetails = new SslOrderDetails
                 {
                     ProductCode = request.ProfileId ?? _config.DefaultProductCode ?? string.Empty,
+                    AccountingModel = string.IsNullOrWhiteSpace(_config.AccountingModel) ? "2" : _config.AccountingModel,
                     SaveAndHold = "0",
+                    EmailNotifications = string.IsNullOrWhiteSpace(_config.EmailNotifications) ? "0" : _config.EmailNotifications,
+
+                    // delegationInformation — routes the order to the configured account group.
+                    // Omitted entirely when GroupNumber is blank (the model JsonIgnore-WhenNull
+                    // handles property absence further down).
+                    DelegationInformation = !string.IsNullOrWhiteSpace(_config.GroupNumber)
+                        ? new DelegationInformation { GroupNumber = _config.GroupNumber }
+                        : null,
+
+                    // organizationDetails — declares pre-vetted org when configured. This is the
+                    // single biggest factor in how quickly CERTInext releases an order from
+                    // Pending System RA. When OrganizationNumber is blank we omit the whole
+                    // block (the model is JsonIgnore-WhenNull) so the order falls back to the
+                    // unvetted path — same behavior as the prior plugin builds.
+                    OrganizationDetails = !string.IsNullOrWhiteSpace(_config.OrganizationNumber)
+                        ? new OrganizationDetails
+                        {
+                            PreVetting = "1",
+                            OrganizationNumber = _config.OrganizationNumber
+                        }
+                        : null,
+
                     RequestorInformation = new RequestorInformation
                     {
-                        RequestorName = request.RequesterName ?? _config.RequestorName ?? "Keyfactor Gateway",
-                        RequestorEmail = request.RequesterEmail ?? _config.RequestorEmail ?? string.Empty,
-                        RequestorIsdCode = _config.RequestorIsdCode ?? "1",
-                        RequestorMobileNumber = _config.RequestorMobileNumber ?? string.Empty
+                        RequestorName = requestorName,
+                        RequestorEmail = requestorEmail,
+                        RequestorIsdCode = requestorIsd,
+                        RequestorMobileNumber = requestorMobile
                     },
                     SubscriptionDetails = new SubscriptionDetails
                     {
-                        Validity = request.ValidityDays.HasValue
-                            ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
-                            : "1"
+                        Validity = validityYears,
+                        AutoRenew = string.IsNullOrWhiteSpace(_config.SubscriptionAutoRenew) ? "0" : _config.SubscriptionAutoRenew,
+                        RenewCriteria = string.IsNullOrWhiteSpace(_config.SubscriptionRenewCriteriaDays) ? "30" : _config.SubscriptionRenewCriteriaDays
                     },
                     CertificateInformation = new CertificateInformation
                     {
                         DomainName = ExtractCnFromSubject(request.Subject) ?? "unknown",
-                        AdditionalDomains = BuildAdditionalDomains(request.Sans)
+                        AdditionalDomains = BuildAdditionalDomains(request.Sans),
+                        AutoSecureWww = string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0" : _config.AutoSecureWww
                     },
+
+                    // technicalPointOfContact — each field falls back to the requestor default
+                    // when its TechnicalContact* counterpart is blank.
+                    TechnicalPointOfContact = new TechnicalPointOfContact
+                    {
+                        TpcName = string.IsNullOrWhiteSpace(_config.TechnicalContactName) ? requestorName : _config.TechnicalContactName,
+                        TpcEmail = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail) ? requestorEmail : _config.TechnicalContactEmail,
+                        TpcIsdCode = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode) ? requestorIsd : _config.TechnicalContactIsdCode,
+                        TpcMobileNumber = string.IsNullOrWhiteSpace(_config.TechnicalContactMobileNumber) ? requestorMobile : _config.TechnicalContactMobileNumber
+                    },
+
                     Csr = request.Csr,
                     AgreementDetails = BuildDefaultAgreementDetails(),
                     AdditionalInformation = new AdditionalInformation

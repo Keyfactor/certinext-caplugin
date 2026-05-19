@@ -142,6 +142,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public OrganizationDetails OrganizationDetails { get; set; }
 
+        [JsonPropertyName("delegationInformation")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public DelegationInformation DelegationInformation { get; set; }
+
+        [JsonPropertyName("technicalPointOfContact")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public TechnicalPointOfContact TechnicalPointOfContact { get; set; }
+
         [JsonPropertyName("additionalInformation")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public AdditionalInformation AdditionalInformation { get; set; }
@@ -222,6 +230,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("organizationNumber")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string OrganizationNumber { get; set; }
+    }
+
+    /// <summary>
+    /// Routes the order to a specific account group within CERTInext.  Required by many
+    /// accounts even though the V1 docs list it as optional — without it, orders may be
+    /// placed against the default group and queued for additional review.
+    /// </summary>
+    public class DelegationInformation
+    {
+        [JsonPropertyName("groupNumber")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string GroupNumber { get; set; }
+    }
+
+    /// <summary>
+    /// Technical point of contact metadata sent with SSL orders.  CERTInext uses these
+    /// fields as the secondary contact for issuance-related notifications.  When omitted,
+    /// some product configurations queue the order in <c>Pending System RA</c> waiting
+    /// for the field to be populated manually.
+    /// </summary>
+    public class TechnicalPointOfContact
+    {
+        [JsonPropertyName("tpcName")]
+        public string TpcName { get; set; }
+
+        [JsonPropertyName("tpcEmail")]
+        public string TpcEmail { get; set; }
+
+        [JsonPropertyName("tpcIsdCode")]
+        public string TpcIsdCode { get; set; } = "1";
+
+        [JsonPropertyName("tpcMobileNumber")]
+        public string TpcMobileNumber { get; set; }
     }
 
     public class AdditionalInformation

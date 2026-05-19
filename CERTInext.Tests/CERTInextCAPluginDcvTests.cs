@@ -31,14 +31,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         private static CERTInextConfig DcvConfig(
-            bool enabled                 = true,
-            int propagationDelaySeconds  = 1,
-            int timeoutMinutes           = 1) =>
+            bool enabled                       = true,
+            int propagationDelaySeconds        = 1,
+            int timeoutMinutes                 = 1,
+            int dcvWaitForChallengeSeconds     = 0,
+            int dcvWaitForIssuanceSeconds      = 0) =>
             new CERTInextConfig
             {
                 DcvEnabled                 = enabled,
                 DcvPropagationDelaySeconds = propagationDelaySeconds,
-                DcvTimeoutMinutes          = timeoutMinutes
+                DcvTimeoutMinutes          = timeoutMinutes,
+                // Default to 0 so existing tests preserve the pre-polling single-check
+                // behaviour and run fast.  Tests that exercise the new wait paths can opt
+                // in with a positive value (see WaitsForChallenge_ToAppear / WaitsForIssuance).
+                DcvWaitForChallengeSeconds = dcvWaitForChallengeSeconds,
+                DcvWaitForIssuanceSeconds  = dcvWaitForIssuanceSeconds
             };
 
         private static Mock<ICERTInextClient> NewMock() =>
@@ -73,8 +80,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new EnrollCertificateResponse { Id = orderNumber, Status = "pending_dcv" });
 
-            mock.Setup(c => c.TrackOrderAsync(orderNumber, It.IsAny<CancellationToken>()))
-                .ReturnsAsync(MockCertificateData.DcvPendingTrackResponse(orderNumber, domain));
+            // First call: pending (initial check in PerformDcvIfNeededAsync)
+            // Subsequent calls: verified (polling in WaitForDcvVerificationAsync)
+            mock.SetupSequence(c => c.TrackOrderAsync(orderNumber, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvPendingTrackResponse(orderNumber, domain))
+                .ReturnsAsync(MockCertificateData.DcvVerifiedTrackResponse(orderNumber, domain));
 
             mock.Setup(c => c.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.DcvTokenResponse(token));
@@ -347,6 +357,207 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().ThrowAsync<InvalidOperationException>()
                 .WithMessage("*GetDcv returned no token*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // EMS-956 tolerance — see analysis/certinext-support-ticket-2026-05-12.md
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Dcv_Defers_When_GetDcv_ReturnsEms956()
+        {
+            // Simulates the post-pre-vetted-org behaviour: TrackOrder shows a pending DCV
+            // slot, but CERTInext's GetDcv endpoint still rejects calls with EMS-956 for a
+            // window after enrollment. Plugin must NOT throw — it must return the pending
+            // result so the gateway records the order and the sync-retry can pick it up.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending_dcv" });
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvPendingTrackResponse());
+
+            mock.Setup(c => c.GetDcvAsync(MockCertificateData.DcvOrderId, MockCertificateData.DcvDomain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception(
+                    "CERTInext GetDcv failed for order '" + MockCertificateData.DcvOrderId + "': EMS-956 Invalid Request for this API."));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            // Should NOT throw — must return pending enrollment result so the gateway
+            // records the order and lets sync-retry recover later.
+            var result = await Enroll(plugin);
+            result.Should().NotBeNull();
+
+            // The DNS provider must not have been touched — staging a TXT record without a
+            // valid token would be wasted work and could collide with the future retry.
+            validator.StagedRecords.Should().BeEmpty();
+            validator.CleanedUpKeys.Should().BeEmpty();
+
+            // VerifyDcv must never be called either.
+            mock.Verify(c => c.VerifyDcvAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+
+        [Fact]
+        public async Task Dcv_Defers_When_GetDcv_ReturnsInvalidRequestMessage_WithoutEms956Code()
+        {
+            // Tolerance must also match the human-readable phrase, not only the error code,
+            // because the CERTInext client wraps non-200 responses in a generic Exception
+            // whose Message is the upstream errorMessage field (sometimes without the code).
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending_dcv" });
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvPendingTrackResponse());
+
+            mock.Setup(c => c.GetDcvAsync(MockCertificateData.DcvOrderId, MockCertificateData.DcvDomain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("Invalid Request for this API"));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var result = await Enroll(plugin);
+            result.Should().NotBeNull();
+            validator.StagedRecords.Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task Dcv_Rethrows_When_GetDcv_FailsWithUnrelatedError()
+        {
+            // Tolerance is narrow: a genuine server error (5xx, transport, auth) must still
+            // bubble up so the gateway treats the enrollment as failed and the operator can
+            // diagnose. This guards against accidentally swallowing every GetDcv exception.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending_dcv" });
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvPendingTrackResponse());
+
+            mock.Setup(c => c.GetDcvAsync(MockCertificateData.DcvOrderId, MockCertificateData.DcvDomain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("HTTP 500: Internal Server Error"));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            Func<Task> act = () => Enroll(plugin);
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*HTTP 500*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // DcvWaitForChallengeSeconds — wait for domainVerification to appear
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Dcv_WaitsForChallenge_WhenDomainVerificationAppearsLate()
+        {
+            // First TrackOrder returns null domainVerification (CERTInext hasn't materialised
+            // the slot yet), second returns a populated pending slot.  With a positive
+            // DcvWaitForChallengeSeconds the plugin must poll and proceed with DCV, NOT skip.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending_dcv" });
+
+            // Sequence: 1st TrackOrder = no DCV slot, 2nd = pending, then verified for the wait poll.
+            mock.SetupSequence(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId       = "1",
+                        CertificateStatusId = "1",
+                        DomainVerification  = null
+                    }
+                })
+                .ReturnsAsync(MockCertificateData.DcvPendingTrackResponse())
+                .ReturnsAsync(MockCertificateData.DcvVerifiedTrackResponse());
+
+            mock.Setup(c => c.GetDcvAsync(MockCertificateData.DcvOrderId, MockCertificateData.DcvDomain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse());
+            mock.Setup(c => c.VerifyDcvAsync(MockCertificateData.DcvOrderId, MockCertificateData.DcvDomain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.DcvOrderId));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(
+                mock.Object,
+                new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForChallengeSeconds: 10, dcvWaitForIssuanceSeconds: 0));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            validator.StagedRecords.Should().NotBeEmpty("DCV must have run after polling found the slot");
+        }
+
+        [Fact]
+        public async Task Dcv_GivesUpWaitingForChallenge_AfterBudgetExpires()
+        {
+            // domainVerification stays null forever.  With a short positive budget the plugin
+            // must poll for the budget and then return false (deferred to sync), NOT throw.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending" });
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId       = "1",
+                        CertificateStatusId = "1",
+                        DomainVerification  = null
+                    }
+                });
+
+            var validator = new FakeDomainValidator();
+            // 5-second budget keeps the test fast but tolerates loaded CI hosts where a
+            // 2-second budget could overshoot to a single poll.
+            var plugin = BuildPlugin(
+                mock.Object,
+                new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForChallengeSeconds: 5));
+
+            var result = await Enroll(plugin);
+
+            result.Should().NotBeNull();
+            validator.StagedRecords.Should().BeEmpty("no DCV slot was ever exposed");
+            mock.Verify(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
+                Times.AtLeast(2), "plugin should have polled at least twice within the 5-second budget");
+        }
+
+        // ---------------------------------------------------------------------------
+        // DcvWaitForIssuanceSeconds — wait for cert PEM after DCV verifies
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Dcv_WaitsForIssuance_AfterDcvVerifies()
+        {
+            // First post-DCV GetCertificate returns pending; second returns issued. Plugin
+            // must poll and return the issued result to Enroll(), not the first pending one.
+            var (mock, validator) = HappyPathMocks();
+
+            // Override default GetCertificate setup: first pending, then issued.
+            mock.SetupSequence(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingCertRecord(MockCertificateData.DcvOrderId))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.DcvOrderId));
+
+            var plugin = BuildPlugin(
+                mock.Object,
+                new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "post-DCV polling must return the issued status, not the first pending fetch");
+            mock.Verify(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
+                Times.AtLeast(2), "plugin should have polled at least twice for issuance");
         }
     }
 }

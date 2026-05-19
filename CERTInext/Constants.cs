@@ -16,6 +16,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string ApiKey = "ApiKey";              // the raw Access Key (used to compute authKey)
             public const string AccountNumber = "AccountNumber"; // CERTInext account number
             public const string GroupNumber = "GroupNumber";     // optional delegation group number
+            public const string OrganizationNumber = "OrganizationNumber"; // pre-vetted organization (declares preVetting=1)
             public const string AuthMode = "AuthMode";
             public const string Enabled = "Enabled";
             public const string IgnoreExpired = "IgnoreExpired";
@@ -27,14 +28,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SignerPlace = "SignerPlace";
             public const string SignerIp = "SignerIp";
 
+            // Technical point-of-contact defaults (TpcName/Email default to Requestor* when blank)
+            public const string TechnicalContactName = "TechnicalContactName";
+            public const string TechnicalContactEmail = "TechnicalContactEmail";
+            public const string TechnicalContactIsdCode = "TechnicalContactIsdCode";
+            public const string TechnicalContactMobileNumber = "TechnicalContactMobileNumber";
+
+            // SSL order body defaults — every value matches a CERTInext-documented field and
+            // is overridable by the connector admin via the gateway's connector-config UI.
+            public const string AccountingModel = "AccountingModel";
+            public const string EmailNotifications = "EmailNotifications";
+            public const string SubscriptionValidityYears = "SubscriptionValidityYears";
+            public const string SubscriptionAutoRenew = "SubscriptionAutoRenew";
+            public const string SubscriptionRenewCriteriaDays = "SubscriptionRenewCriteriaDays";
+            public const string AutoSecureWww = "AutoSecureWww";
+
             // DCV — domain control validation via DNS provider plugins
             public const string DcvEnabled = "DcvEnabled";
             public const string DcvTxtRecordTemplate = "DcvTxtRecordTemplate";
             public const string DcvPropagationDelaySeconds = "DcvPropagationDelaySeconds";
             public const string DcvTimeoutMinutes = "DcvTimeoutMinutes";
 
+            // How long to wait inside Enroll() for CERTInext to expose the DCV challenge
+            // (domainVerification metadata in TrackOrder).  Under concurrent load CERTInext
+            // sometimes takes a few seconds after GenerateOrderSSL before the slot appears.
+            // Without this wait, the plugin's single TrackOrder check sees null and skips
+            // DCV; the order then has to wait for the next gateway sync cycle to be picked up.
+            public const string DcvWaitForChallengeSeconds = "DcvWaitForChallengeSeconds";
+
+            // How long to wait inside Enroll() for CERTInext to finish generating the cert
+            // after DCV verification succeeds.  CERTInext's issuance is async — DCV may be
+            // verified but the cert PEM isn't yet available for download.  Without this
+            // wait, Enroll() returns pending and the cert is picked up on the next sync.
+            public const string DcvWaitForIssuanceSeconds = "DcvWaitForIssuanceSeconds";
+
             // Environment variable that overrides DcvTimeoutMinutes when set.
             public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";
+            public const string DcvWaitForChallengeSecondsEnvVar = "CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS";
+            public const string DcvWaitForIssuanceSecondsEnvVar = "CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS";
 
             // Auth mode values
             public const string AuthModeAccessKey = "AccessKey"; // default; authKey = SHA256(accessKey+ts+txn)
@@ -232,9 +263,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public static class Dcv
         {
             // CERTInext dcvMethod values (dcvDetails.dcvMethod in GetDcv / VerifyDcv)
-            public const string MethodDnsTxt   = "1";  // DNS TXT record
-            public const string MethodHttpFile = "2";  // HTTP file validation
-            public const string MethodEmail    = "3";  // Email validation
+            public const string MethodDnsTxt      = "1";              // DNS TXT record (numeric, used in API requests)
+            public const string MethodDnsTxtLabel = "DNS TXT Record"; // DNS TXT record (string label returned by TrackOrder)
+            public const string MethodHttpFile    = "2";              // HTTP file validation
+            public const string MethodEmail       = "3";              // Email validation
 
             // CERTInext dcvStatus values (per-domain entries in TrackOrder domainVerification)
             public const string StatusPending   = "0";

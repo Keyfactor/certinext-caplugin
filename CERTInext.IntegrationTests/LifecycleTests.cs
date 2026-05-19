@@ -6,14 +6,18 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
+using Org.BouncyCastle.Asn1.X509;
+using Org.BouncyCastle.Crypto;
+using Org.BouncyCastle.Crypto.Generators;
+using Org.BouncyCastle.Pkcs;
+using Org.BouncyCastle.Security;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Keyfactor.AnyGateway.Extensions;
 using Keyfactor.PKI.Enums.EJBCA;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 {
@@ -34,10 +38,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     public class LifecycleTests : IClassFixture<IntegrationTestFixture>
     {
         private readonly IntegrationTestFixture _fixture;
+        private readonly ITestOutputHelper _output;
 
-        public LifecycleTests(IntegrationTestFixture fixture)
+        public LifecycleTests(IntegrationTestFixture fixture, ITestOutputHelper output)
         {
             _fixture = fixture;
+            _output = output;
         }
 
         // ---------------------------------------------------------------------------
@@ -60,22 +66,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// </summary>
         private static string GenerateCsrPem(string commonName)
         {
-            using var rsa = RSA.Create(2048);
+            var keyGen = new RsaKeyPairGenerator();
+            keyGen.Init(new KeyGenerationParameters(new SecureRandom(), 2048));
+            var keyPair = keyGen.GenerateKeyPair();
 
-            var certReq = new CertificateRequest(
-                $"CN={commonName}",
-                rsa,
-                HashAlgorithmName.SHA256,
-                RSASignaturePadding.Pkcs1);
-
-            var sanBuilder = new SubjectAlternativeNameBuilder();
-            sanBuilder.AddDnsName(commonName);
-            certReq.CertificateExtensions.Add(sanBuilder.Build());
-
-            byte[] csrDer = certReq.CreateSigningRequest();
+            var subject = new X509Name($"CN={commonName}");
+            var csr = new Pkcs10CertificationRequest("SHA256withRSA", subject, keyPair.Public, null, keyPair.Private);
 
             return "-----BEGIN CERTIFICATE REQUEST-----\n"
-                + Convert.ToBase64String(csrDer, Base64FormattingOptions.InsertLineBreaks)
+                + Convert.ToBase64String(csr.GetEncoded(), Base64FormattingOptions.InsertLineBreaks)
                 + "\n-----END CERTIFICATE REQUEST-----";
         }
 
@@ -237,5 +236,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 (int)EndEntityStatus.REVOKED,
                 "Revoke must return the REVOKED status code on success");
         }
+
     }
 }

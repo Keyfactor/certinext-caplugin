@@ -41,6 +41,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // should not be disposed by this class (the test owns the mock's lifetime).
         private bool _clientWasInjected;
 
+        // Guards against concurrent DCV attempts on the same order — two overlapping sync
+        // cycles, or a sync overlapping with a GetSingleRecord refresh, must not both try
+        // to stage TXT records for the same order. The value byte is unused; this is a set.
+        private readonly ConcurrentDictionary<string, byte> _dcvInFlight = new();
+
         // ---------------------------------------------------------------------------
         // Constructors
         // ---------------------------------------------------------------------------
@@ -507,6 +512,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             try
             {
                 var cert = await _client.GetCertificateAsync(caRequestID);
+
+                // Mirror the deferred-DCV behavior of Synchronize: if the order is still in
+                // a pending state, try to advance it through DCV before returning. This lets
+                // a manual single-record refresh unstick an order whose DCV challenge was
+                // only exposed after enrollment returned.
+                int status = StatusMapper.ToRequestDisposition(cert.Status);
+                if (status == (int)EndEntityStatus.EXTERNALVALIDATION)
+                {
+                    bool dcvRan = await TryRunDcvDuringSyncAsync(caRequestID, CancellationToken.None);
+                    if (dcvRan)
+                    {
+                        try
+                        {
+                            cert = await _client.GetCertificateAsync(caRequestID);
+                        }
+                        catch (Exception refetchEx)
+                        {
+                            _logger.LogWarning(refetchEx,
+                                "Single-record DCV completed but post-DCV refetch failed. CARequestID={Id}",
+                                caRequestID);
+                        }
+                    }
+                }
+
                 var record = MapToAnyCAPluginCertificate(cert);
 
                 // SOC2 CC7.3: certificate retrieval is a security-relevant read operation;
@@ -635,32 +664,62 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     cancelToken.ThrowIfCancellationRequested();
 
+                    // Local copy so we can replace it with a post-DCV refetch below
+                    var current = cert;
+
                     try
                     {
                         // Skip expired certificates when IgnoreExpired is configured
                         if (_config.IgnoreExpired
-                            && cert.ExpiresAt.HasValue
-                            && cert.ExpiresAt.Value < DateTime.UtcNow)
+                            && current.ExpiresAt.HasValue
+                            && current.ExpiresAt.Value < DateTime.UtcNow)
                         {
                             _logger.LogTrace(
                                 "Skipping expired certificate '{Id}' (expires {ExpiresAt:u}).",
-                                cert.Id, cert.ExpiresAt.Value);
+                                current.Id, current.ExpiresAt.Value);
                             skipped++;
                             continue;
                         }
 
+                        int status = StatusMapper.ToRequestDisposition(current.Status);
+
+                        // Deferred DCV: if the order is still pending validation (anything not
+                        // GENERATED/REVOKED/FAILED — i.e. EXTERNALVALIDATION), try to advance it
+                        // through DCV now. CERTInext frequently parks fresh orders at
+                        // "Pending for Approver" with domainVerification=null at enroll time and
+                        // only exposes the DCV challenge minutes later; sync is the only place
+                        // we can pick that back up. PerformDcvIfNeededAsync internally short-
+                        // circuits when there's nothing pending, so this is cheap when DCV is
+                        // already done or not yet exposed.
+                        if (status == (int)EndEntityStatus.EXTERNALVALIDATION)
+                        {
+                            bool dcvRan = await TryRunDcvDuringSyncAsync(current.Id, cancelToken);
+                            if (dcvRan)
+                            {
+                                try
+                                {
+                                    current = await _client.GetCertificateAsync(current.Id, cancelToken);
+                                    status = StatusMapper.ToRequestDisposition(current.Status);
+                                }
+                                catch (Exception refetchEx)
+                                {
+                                    _logger.LogWarning(refetchEx,
+                                        "Sync DCV completed but post-DCV refetch failed. Id={Id}", current.Id);
+                                }
+                            }
+                        }
+
                         // Skip failed/rejected/cancelled certificates — they have no cert body
-                        int status = StatusMapper.ToRequestDisposition(cert.Status);
                         if (status == (int)EndEntityStatus.FAILED)
                         {
                             _logger.LogTrace(
                                 "Skipping certificate '{Id}' with terminal failure status '{Status}'.",
-                                cert.Id, cert.Status);
+                                current.Id, current.Status);
                             skipped++;
                             continue;
                         }
 
-                        var record = MapToAnyCAPluginCertificate(cert);
+                        var record = MapToAnyCAPluginCertificate(current);
                         blockingBuffer.Add(record, cancelToken);
                         synced++;
                     }
@@ -745,27 +804,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "Starting DCV for order {OrderNumber}. DcvTimeoutMinutes={Timeout}",
                     orderNumber, dcvTimeoutMinutes);
                 using var dcvCts = new CancellationTokenSource(TimeSpan.FromMinutes(dcvTimeoutMinutes));
-                bool dcvRan = await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
-                if (dcvRan)
+
+                // Reserve the in-flight slot before running DCV so that any concurrent
+                // Synchronize / GetSingleRecord cycle won't try to stage TXT records for the
+                // same order from the sync-driven retry path.  If something else already has
+                // the slot (the only realistic case: a duplicate Enroll for the same order
+                // ID), skip our own attempt and fall through to the pending result — the
+                // other caller will produce the same outcome and we shouldn't double-stage.
+                bool reserved = _dcvInFlight.TryAdd(orderNumber, 0);
+                if (!reserved)
                 {
-                    // Re-fetch the order to reflect the post-DCV certificate state
+                    _logger.LogInformation(
+                        "DCV is already in flight for order {OrderNumber}; Enroll will skip its own DCV attempt " +
+                        "and return the pending enroll response. The other caller will drive issuance.",
+                        orderNumber);
+                }
+                else
+                {
                     try
                     {
-                        var postDcv = await _client.GetCertificateAsync(orderNumber);
-                        return BuildEnrollmentResult(new EnrollCertificateResponse
+                        bool dcvRan = await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
+                        if (dcvRan)
                         {
-                            Id = postDcv.Id,
-                            Status = postDcv.Status,
-                            Certificate = postDcv.Certificate,
-                            SerialNumber = postDcv.SerialNumber,
-                            Message = $"Post-DCV status: {postDcv.Status}."
-                        }, ep.AutoApprove);
+                            // Poll GetCertificate until CERTInext finishes generating the cert OR the
+                            // issuance budget expires.  CERTInext issuance is async — DCV may verify
+                            // but the cert PEM isn't immediately available.  Without this poll, Enroll
+                            // returns a pending result and the cert is picked up on the next sync cycle,
+                            // which is undesirable when the whole thing completes in under a minute.
+                            var postDcv = await WaitForIssuanceAfterDcvAsync(orderNumber, dcvCts.Token);
+                            if (postDcv != null)
+                            {
+                                return BuildEnrollmentResult(new EnrollCertificateResponse
+                                {
+                                    Id = postDcv.Id,
+                                    Status = postDcv.Status,
+                                    Certificate = postDcv.Certificate,
+                                    SerialNumber = postDcv.SerialNumber,
+                                    Message = $"Post-DCV status: {postDcv.Status}."
+                                }, ep.AutoApprove);
+                            }
+                        }
                     }
-                    catch (Exception ex)
+                    finally
                     {
-                        _logger.LogWarning(ex,
-                            "Failed to re-fetch certificate status after DCV for order {OrderNumber}. " +
-                            "Returning original pending result.", orderNumber);
+                        _dcvInFlight.TryRemove(orderNumber, out _);
                     }
                 }
             }
@@ -904,6 +986,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // ---------------------------------------------------------------------------
 
         /// <summary>
+        /// True when a <c>GetDcv</c> failure is the CERTInext-side "DCV slot is exposed in
+        /// TrackOrder but the endpoint won't accept calls yet" condition.  Observed as the
+        /// API error <c>EMS-956 "Invalid Request for this API"</c> for several hours after
+        /// enrollment — see <c>analysis/certinext-support-ticket-2026-05-12.md</c>.
+        ///
+        /// Detection is intentionally narrow:
+        ///  * If the message contains the literal code <c>EMS-956</c>, treat it as the
+        ///    known not-ready condition.
+        ///  * Otherwise, only fall back to the human-readable phrase match when *no other*
+        ///    <c>EMS-NNN</c> code is present.  Without that guard, an upstream proxy or WAF
+        ///    returning a 4xx whose body happens to contain "Invalid Request for this API …"
+        ///    plus a different CERTInext code (e.g. EMS-401) would be silently deferred,
+        ///    masking a real authentication or input-validation failure.
+        /// </summary>
+        private static bool IsDcvNotYetReady(Exception ex)
+        {
+            if (ex == null) return false;
+            string msg = ex.Message ?? string.Empty;
+            if (msg.IndexOf("EMS-956", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            bool hasPhrase = msg.IndexOf("Invalid Request for this API", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool hasOtherEmsCode = System.Text.RegularExpressions.Regex.IsMatch(msg, @"\bEMS-\d+\b");
+            return hasPhrase && !hasOtherEmsCode;
+        }
+
+        /// <summary>
         /// Passes connector configuration to DNS provider plugins for per-domain configuration lookup.
         /// </summary>
         private sealed class DomainValidatorConfigProvider : Keyfactor.AnyGateway.Extensions.IDomainValidatorConfigProvider
@@ -912,6 +1020,62 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             public DomainValidatorConfigProvider(Dictionary<string, object> config)
                 => DomainValidationConfiguration = config ?? new Dictionary<string, object>();
+        }
+
+        /// <summary>
+        /// Best-effort DCV retry for an order that may still be pending validation.
+        ///
+        /// Called from Synchronize and GetSingleRecord so that orders which CERTInext placed
+        /// into "Pending for Approver"/"Pending System RA" between enrollment and the next
+        /// gateway cycle (when domainVerification was still null at enroll time) can be
+        /// driven forward through DCV. Wraps <see cref="PerformDcvIfNeededAsync"/> with:
+        ///   * a per-order in-flight guard so overlapping sync cycles or a sync+single
+        ///     refresh do not double-stage TXT records,
+        ///   * a bounded DCV timeout linked to the caller's cancellation token,
+        ///   * swallowing of non-cancellation exceptions so a single bad order does not
+        ///     halt a 12-hour sync — the order will be retried on the next cycle.
+        /// Returns <c>true</c> when DCV actually executed, <c>false</c> when skipped.
+        /// </summary>
+        private async Task<bool> TryRunDcvDuringSyncAsync(string orderNumber, CancellationToken ct)
+        {
+            if (_domainValidatorFactory == null || !_config.DcvEnabled || string.IsNullOrEmpty(orderNumber))
+                return false;
+
+            if (!_dcvInFlight.TryAdd(orderNumber, 0))
+            {
+                _logger.LogDebug(
+                    "DCV already in flight for order {OrderNumber}; skipping concurrent attempt.",
+                    orderNumber);
+                return false;
+            }
+
+            try
+            {
+                int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+                using var dcvCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                dcvCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
+
+                _logger.LogInformation(
+                    "Attempting deferred DCV during sync/refresh. OrderNumber={OrderNumber}, DcvTimeoutMinutes={Timeout}",
+                    orderNumber, timeoutMinutes);
+
+                return await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Deferred DCV attempt failed for order {OrderNumber}. Order will be retried on the next sync cycle.",
+                    orderNumber);
+                return false;
+            }
+            finally
+            {
+                _dcvInFlight.TryRemove(orderNumber, out _);
+            }
         }
 
         /// <summary>
@@ -924,12 +1088,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private async Task<bool> PerformDcvIfNeededAsync(string orderNumber, CancellationToken ct)
         {
-            var track = await _client.TrackOrderAsync(orderNumber, ct);
+            // Poll TrackOrder until CERTInext exposes the DCV challenge (domainVerification
+            // populated) OR the cert reaches a terminal state OR the wait budget expires.
+            // Under concurrent enrollment load CERTInext sometimes takes a few seconds to
+            // materialize the slot after GenerateOrderSSL returns — without this wait a
+            // race-condition order skips DCV entirely and waits for the next sync cycle.
+            int waitBudgetSeconds = _config.GetEffectiveDcvWaitForChallengeSeconds();
+            // Challenge-wait poll interval is clamped to [1s, 5s] so it's responsive even
+            // when an admin has set DcvPropagationDelaySeconds high for slow zones (that
+            // setting governs how long we wait *after* publishing a TXT record, which is a
+            // different, slower concern than how often we re-check TrackOrder here).
+            int challengePollSeconds = Math.Max(1, Math.Min(5, _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 5));
+            var waitDeadline = DateTime.UtcNow.AddSeconds(Math.Max(0, waitBudgetSeconds));
 
-            // Skip DCV entirely if the certificate is already issued
-            if (track.OrderDetails != null)
+            TrackOrderResponse track = null;
+            API.TrackOrderDomainVerification domainVerification = null;
+            int pollAttempts = 0;
+
+            while (true)
             {
-                if (int.TryParse(track.OrderDetails.CertificateStatusId, out int certStatusId))
+                pollAttempts++;
+                ct.ThrowIfCancellationRequested();
+                track = await _client.TrackOrderAsync(orderNumber, ct);
+
+                // Skip DCV entirely if the certificate is already issued or revoked
+                if (track.OrderDetails != null
+                    && int.TryParse(track.OrderDetails.CertificateStatusId, out int certStatusId))
                 {
                     int disposition = StatusMapper.CertificateStatusIdToRequestDisposition(certStatusId);
                     if (disposition == (int)EndEntityStatus.GENERATED || disposition == (int)EndEntityStatus.REVOKED)
@@ -940,19 +1124,48 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         return false;
                     }
                 }
-            }
 
-            var domainVerification = track.OrderDetails?.DomainVerification;
-            if (domainVerification == null)
-                return false;
+                domainVerification = track.OrderDetails?.DomainVerification;
+                if (domainVerification != null)
+                    break;
+
+                // domainVerification still null — sleep and retry if we have budget left.
+                if (waitBudgetSeconds <= 0 || DateTime.UtcNow >= waitDeadline)
+                {
+                    _logger.LogInformation(
+                        "DCV challenge not exposed by CERTInext within {Budget}s for order {OrderNumber} " +
+                        "(attempted {Attempts} TrackOrder polls). Deferring to next sync cycle.",
+                        waitBudgetSeconds, orderNumber, pollAttempts);
+                    return false;
+                }
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(challengePollSeconds), ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    return false;
+                }
+            }
 
             // If the overall DCV status is already validated, nothing to do
             if (string.Equals(domainVerification.Status, Constants.Dcv.StatusValidated, StringComparison.Ordinal))
                 return false;
 
+            // Include domains that are pending DCV and either have no method set yet,
+            // or are already assigned to DNS TXT (numeric "1" from API or label from TrackOrder).
+            // Domains assigned to HTTP or email DCV are excluded — we must not override them.
             var pendingDomains = domainVerification.GetDomainEntries()
-                .Where(kvp => string.Equals(kvp.Value?.DcvStatus, Constants.Dcv.StatusPending, StringComparison.Ordinal)
-                           && string.Equals(kvp.Value?.DcvMethod, Constants.Dcv.MethodDnsTxt, StringComparison.Ordinal))
+                .Where(kvp =>
+                {
+                    if (!string.Equals(kvp.Value?.DcvStatus, Constants.Dcv.StatusPending, StringComparison.Ordinal))
+                        return false;
+                    string method = kvp.Value?.DcvMethod ?? string.Empty;
+                    return string.IsNullOrEmpty(method)
+                        || string.Equals(method, Constants.Dcv.MethodDnsTxt, StringComparison.Ordinal)
+                        || string.Equals(method, Constants.Dcv.MethodDnsTxtLabel, StringComparison.OrdinalIgnoreCase);
+                })
                 .ToList();
 
             // SOX CC6.1: validate domain names before passing them to the DNS provider plugin
@@ -995,6 +1208,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 try
                 {
                     dcvResp = await _client.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
+                }
+                catch (Exception ex) when (IsDcvNotYetReady(ex))
+                {
+                    // CERTInext occasionally exposes the DCV slot in TrackOrder (so
+                    // domainVerification is populated and dcvStatus="0") before the GetDcv
+                    // endpoint will accept calls for that order — observed as EMS-956
+                    // "Invalid Request for this API" for several hours after enrollment.
+                    // Treat this as "DCV not ready yet": skip the DCV ceremony for now and
+                    // let the sync-driven retry pick it up on a later cycle. We must NOT
+                    // throw, because that would fail the entire Enroll call and prevent the
+                    // gateway from recording the pending order at all.
+                    _logger.LogInformation(
+                        "GetDcv not yet accepting calls for order {OrderNumber} domain {Domain} ({Error}). " +
+                        "Deferring DCV to the next sync cycle.",
+                        orderNumber, domain, ex.Message);
+                    return false;
                 }
                 catch (Exception ex)
                 {
@@ -1048,6 +1277,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "Triggering CERTInext DCV verification. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
                     await _client.VerifyDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
                 }
+
+                // Poll TrackOrder until CERTInext confirms all staged domains are verified
+                // before removing TXT records — VerifyDcv triggers an async DNS lookup on
+                // their side, so cleanup must wait for dcvStatus=1 on every domain.
+                await WaitForDcvVerificationAsync(orderNumber, stagedValidations.Select(s => s.domain).ToList(), ct);
             }
             finally
             {
@@ -1069,6 +1303,140 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Polls <c>GetCertificateAsync</c> until either (a) the certificate reaches a terminal
+        /// state (issued or rejected) or (b) the configured <c>DcvWaitForIssuanceSeconds</c>
+        /// budget expires.  Returns the final response on success, or <c>null</c> if all polls
+        /// failed (so callers fall back to the pending result they already have).
+        ///
+        /// CERTInext's issuance pipeline is asynchronous on their side: after the plugin's
+        /// VerifyDcv triggers and the per-domain DCV is confirmed, the cert generation step
+        /// finishes a few seconds later.  Without this poll the plugin would catch the cert
+        /// in pending state and return it that way, forcing the gateway to wait for the next
+        /// sync cycle.
+        /// </summary>
+        private async Task<LegacyGetCertificateResponse> WaitForIssuanceAfterDcvAsync(
+            string orderNumber, CancellationToken ct)
+        {
+            int waitBudgetSeconds = _config.GetEffectiveDcvWaitForIssuanceSeconds();
+
+            // Fixed 3-second poll interval. CERTInext's post-DCV issuance step typically
+            // completes within 5–15s; polling more aggressively would just add API load,
+            // and polling more slowly would push the typical-case latency closer to the
+            // budget ceiling. Decoupled from DcvPropagationDelaySeconds (which is for DNS
+            // propagation, a different concern) so admins tuning DNS settings don't
+            // accidentally make post-DCV polling chunky.
+            int pollIntervalSeconds = 3;
+            DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Max(0, waitBudgetSeconds));
+            LegacyGetCertificateResponse last = null;
+
+            int attempt = 0;
+            while (true)
+            {
+                attempt++;
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    last = await _client.GetCertificateAsync(orderNumber, ct);
+                }
+                catch (Exception ex)
+                {
+                    // Distinguish first-call failure (no result to return, sync must pick up)
+                    // from later-poll failure (we have a prior pending result that the caller
+                    // can use as a fallback). Without this distinction a repeated first-call
+                    // failure would look identical to a working-but-always-pending enroll.
+                    _logger.LogWarning(ex,
+                        "Post-DCV GetCertificate failed for order {OrderNumber} (attempt {Attempt}). " +
+                        "Returning {Outcome}; sync will pick up the cert later.",
+                        orderNumber, attempt, last == null ? "pending fallback (no prior result)" : "prior pending result");
+                    return last;
+                }
+
+                int disposition = StatusMapper.ToRequestDisposition(last.Status);
+                if (disposition == (int)EndEntityStatus.GENERATED
+                    || disposition == (int)EndEntityStatus.REVOKED
+                    || disposition == (int)EndEntityStatus.FAILED)
+                {
+                    return last;
+                }
+
+                if (waitBudgetSeconds <= 0 || DateTime.UtcNow >= deadline)
+                {
+                    _logger.LogInformation(
+                        "Post-DCV issuance not complete within {Budget}s for order {OrderNumber}. " +
+                        "Returning pending result; sync will pick up the cert later.",
+                        waitBudgetSeconds, orderNumber);
+                    return last;
+                }
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(pollIntervalSeconds), ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    return last;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Polls <see cref="ICERTInextClient.TrackOrderAsync"/> until every domain in
+        /// <paramref name="domains"/> reaches <c>dcvStatus=1</c> (verified) or a terminal
+        /// failure state (rejected/cancelled), or <paramref name="ct"/> is cancelled.
+        /// Called after <c>VerifyDcvAsync</c> to ensure CERTInext has completed its async
+        /// DNS lookup before TXT records are cleaned up.
+        /// </summary>
+        private async Task WaitForDcvVerificationAsync(string orderNumber, IReadOnlyList<string> domains, CancellationToken ct)
+        {
+            if (domains.Count == 0) return;
+
+            var pending = new HashSet<string>(domains, StringComparer.OrdinalIgnoreCase);
+            int pollSeconds = Math.Max(1, _config.DcvPropagationDelaySeconds);
+
+            while (pending.Count > 0 && !ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
+
+                TrackOrderResponse poll;
+                try { poll = await _client.TrackOrderAsync(orderNumber, ct); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "TrackOrder polling failed during DCV wait. OrderNumber={OrderNumber}", orderNumber);
+                    return;
+                }
+
+                var entries = poll.OrderDetails?.DomainVerification?.GetDomainEntries()
+                              ?? new Dictionary<string, API.DomainVerificationDetail>();
+
+                // Check for order-level terminal failure (cancelled/rejected)
+                if (poll.OrderDetails?.OrderStatusId is "4" or "5")
+                {
+                    _logger.LogWarning(
+                        "Order {OrderNumber} reached terminal failure state (OrderStatusId={Status}) during DCV wait. TXT records will be cleaned up.",
+                        orderNumber, poll.OrderDetails.OrderStatusId);
+                    return;
+                }
+
+                foreach (var domain in domains)
+                {
+                    if (!pending.Contains(domain)) continue;
+                    if (!entries.TryGetValue(domain, out var detail)) continue;
+
+                    if (string.Equals(detail.DcvStatus, Constants.Dcv.StatusValidated, StringComparison.Ordinal))
+                    {
+                        _logger.LogInformation("DCV verified by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        pending.Remove(domain);
+                    }
+                    else if (string.Equals(detail.DcvStatus, Constants.Dcv.StatusRejected, StringComparison.Ordinal))
+                    {
+                        _logger.LogWarning("DCV rejected by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        pending.Remove(domain);
+                    }
+                }
+            }
         }
 
         /// <summary>

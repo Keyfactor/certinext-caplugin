@@ -83,6 +83,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             var env = LoadEnvFile(envPath);
 
+            // Promote env-file values into the process environment so that any code
+            // calling System.Environment.GetEnvironmentVariable() picks them up.
+            foreach (var kv in env)
+                if (System.Environment.GetEnvironmentVariable(kv.Key) == null)
+                    System.Environment.SetEnvironmentVariable(kv.Key, kv.Value);
+
             ApiUrl        = GetEnvValue(env, "CERTINEXT_API_URL");
             AccessKey     = GetEnvValue(env, "CERTINEXT_ACCESS_KEY");
             AccountNumber = GetEnvValue(env, "CERTINEXT_ACCOUNT_NUMBER");
@@ -109,6 +115,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     ApiKey             = AccessKey,
                     AccountNumber      = AccountNumber,
                     GroupNumber        = GroupNumber,
+                    OrganizationNumber = OrgNumber,
                     RequestorName      = string.IsNullOrWhiteSpace(RequestorName)
                                              ? "Keyfactor Integration Test"
                                              : RequestorName,

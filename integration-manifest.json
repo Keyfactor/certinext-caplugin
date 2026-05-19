@@ -35,7 +35,27 @@
                 },
                 {
                     "name": "GroupNumber",
-                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests so the full product list is returned. Some sandbox accounts require this to avoid receiving an empty product list. Available in the CERTInext portal under Delegation \u2192 Groups."
+                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation \u2192 Groups."
+                },
+                {
+                    "name": "OrganizationNumber",
+                    "description": "STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric CERTInext organization number for a pre-vetted organization (e.g. your company's pre-vetted entry). When set, every SSL order is submitted with `organizationDetails.preVetting=\"1\"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. Without this value, orders are placed without any organizationDetails block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours). Available in the CERTInext portal under Organizations \u2192 Pre-vetted Organizations."
+                },
+                {
+                    "name": "TechnicalContactName",
+                    "description": "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field."
+                },
+                {
+                    "name": "TechnicalContactEmail",
+                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every SSL order. Defaults to RequestorEmail when blank."
+                },
+                {
+                    "name": "TechnicalContactIsdCode",
+                    "description": "OPTIONAL: International dialing code for the TPoC phone number. Defaults to RequestorIsdCode when blank."
+                },
+                {
+                    "name": "TechnicalContactMobileNumber",
+                    "description": "OPTIONAL: Mobile number for the TPoC (digits only). Defaults to RequestorMobileNumber when blank."
                 },
                 {
                     "name": "AuthMode",
@@ -84,6 +104,30 @@
                 {
                     "name": "DefaultProductCode",
                     "description": "OPTIONAL: Default numeric product code used when not specified at template level. Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). Retrieve available codes from Integrations \u2192 APIs \u2192 GetProductDetails."
+                },
+                {
+                    "name": "AccountingModel",
+                    "description": "OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel`. \"2\" = credit-based (most accounts, default). \"1\" = cash model."
+                },
+                {
+                    "name": "EmailNotifications",
+                    "description": "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. \"1\" = enabled, \"0\" = silent (recommended for gateway-driven orders so end users aren't surprised by CA emails). Default: \"0\"."
+                },
+                {
+                    "name": "SubscriptionValidityYears",
+                    "description": "OPTIONAL: Default validity in years for SSL orders. \"1\", \"2\", or \"3\". Override per template via the ValidityYears product parameter. Default: \"1\"."
+                },
+                {
+                    "name": "SubscriptionAutoRenew",
+                    "description": "OPTIONAL: Whether CERTInext should auto-renew certificates issued through this connector. \"0\" = disabled (recommended \u2014 renewal is driven by Keyfactor Command), \"1\" = enabled. Default: \"0\"."
+                },
+                {
+                    "name": "SubscriptionRenewCriteriaDays",
+                    "description": "OPTIONAL: Days before expiry at which CERTInext auto-renews (only honored when SubscriptionAutoRenew = \"1\"). Typical values: \"30\" or \"60\". Default: \"30\"."
+                },
+                {
+                    "name": "AutoSecureWww",
+                    "description": "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\"."
                 },
                 {
                     "name": "IgnoreExpired",

@@ -313,6 +313,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Csr = FakeCsrPem
             };
 
+        /// <summary>
+        /// A LegacyGetCertificateResponse representing an order that is past DCV verification
+        /// but still has CERTInext-side issuance in progress.  Status maps to
+        /// <see cref="EndEntityStatus.EXTERNALVALIDATION"/> so post-DCV polling logic continues.
+        /// </summary>
+        public static LegacyGetCertificateResponse PendingCertRecord(string id = null) =>
+            new LegacyGetCertificateResponse
+            {
+                Id = id ?? CertId1,
+                Status = "pending_approval",   // → EXTERNALVALIDATION via StatusMapper
+                Certificate = null,
+                SerialNumber = null
+            };
+
         public static LegacyGetCertificateResponse RevokedCertRecord(string id = null) =>
             new LegacyGetCertificateResponse
             {
@@ -367,6 +381,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     DomainVerification = new TrackOrderDomainVerification
                     {
                         Status           = Constants.Dcv.StatusPending,
+                        RawDomainEntries = new Dictionary<string, JsonElement> { [domain] = detail }
+                    }
+                }
+            };
+        }
+
+        public static TrackOrderResponse DcvVerifiedTrackResponse(
+            string orderNumber = DcvOrderId,
+            string domain      = DcvDomain)
+        {
+            var detail = JsonSerializer.SerializeToElement(new DomainVerificationDetail
+            {
+                DcvMethod = Constants.Dcv.MethodDnsTxt,
+                DcvStatus = Constants.Dcv.StatusValidated,
+                Status    = "1"
+            });
+
+            return new TrackOrderResponse
+            {
+                OrderDetails = new TrackOrderResponseDetails
+                {
+                    OrderStatusId       = "2",
+                    CertificateStatusId = "24",
+                    DomainVerification  = new TrackOrderDomainVerification
+                    {
+                        Status           = Constants.Dcv.StatusValidated,
                         RawDomainEntries = new Dictionary<string, JsonElement> { [domain] = detail }
                     }
                 }

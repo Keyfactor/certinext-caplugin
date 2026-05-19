@@ -46,10 +46,61 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.Config.GroupNumber] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: CERTInext group (delegation) number. " +
-                               "When set, it is included in GetProductDetails requests so the full " +
-                               "product list is returned. Some sandbox accounts require this to avoid " +
-                               "receiving an empty product list. Available in the CERTInext portal under " +
-                               "Delegation → Groups.",
+                               "When set, it is included in GetProductDetails requests AND in the " +
+                               "`delegationInformation.groupNumber` field of every SSL order so the order " +
+                               "is routed to the correct account group. Some accounts will queue orders for " +
+                               "additional review when this field is omitted. " +
+                               "Available in the CERTInext portal under Delegation → Groups.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.Config.OrganizationNumber] = new PropertyConfigInfo
+                {
+                    Comments = "STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric " +
+                               "CERTInext organization number for a pre-vetted organization (e.g. " +
+                               "your company's pre-vetted entry). When set, every SSL order is submitted " +
+                               "with `organizationDetails.preVetting=\"1\"` and the configured " +
+                               "`organizationNumber`, telling CERTInext to skip the manual " +
+                               "organization-vetting queue. Without this value, orders are placed without " +
+                               "any organizationDetails block and CERTInext may park them in " +
+                               "`Pending System RA` for extended manual review (observed: tens of hours). " +
+                               "Available in the CERTInext portal under Organizations → " +
+                               "Pre-vetted Organizations.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.Config.TechnicalContactName] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every " +
+                               "SSL order. Defaults to the configured RequestorName when blank. " +
+                               "Some product configurations require a TPoC to be present; omitting it can " +
+                               "cause CERTInext to park orders awaiting manual completion of the field.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.Config.TechnicalContactEmail] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every " +
+                               "SSL order. Defaults to the configured RequestorEmail when blank.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.Config.TechnicalContactIsdCode] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: International dialing code for the TPoC phone number. " +
+                               "Defaults to the configured RequestorIsdCode when blank.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.Config.TechnicalContactMobileNumber] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Mobile number for the TPoC (digits only). " +
+                               "Defaults to the configured RequestorMobileNumber when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -147,6 +198,57 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
+                [Constants.Config.AccountingModel] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel`. " +
+                               "\"2\" = credit-based (most accounts, default). \"1\" = cash model.",
+                    Hidden = false,
+                    DefaultValue = "2",
+                    Type = "String"
+                },
+                [Constants.Config.EmailNotifications] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. " +
+                               "\"1\" = enabled, \"0\" = silent (recommended for gateway-driven orders so end users " +
+                               "aren't surprised by CA emails). Default: \"0\".",
+                    Hidden = false,
+                    DefaultValue = "0",
+                    Type = "String"
+                },
+                [Constants.Config.SubscriptionValidityYears] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Default validity in years for SSL orders. \"1\", \"2\", or \"3\". " +
+                               "Override per template via the ValidityYears product parameter. Default: \"1\".",
+                    Hidden = false,
+                    DefaultValue = "1",
+                    Type = "String"
+                },
+                [Constants.Config.SubscriptionAutoRenew] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Whether CERTInext should auto-renew certificates issued through " +
+                               "this connector. \"0\" = disabled (recommended — renewal is driven by Keyfactor " +
+                               "Command), \"1\" = enabled. Default: \"0\".",
+                    Hidden = false,
+                    DefaultValue = "0",
+                    Type = "String"
+                },
+                [Constants.Config.SubscriptionRenewCriteriaDays] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Days before expiry at which CERTInext auto-renews (only honored when " +
+                               "SubscriptionAutoRenew = \"1\"). Typical values: \"30\" or \"60\". Default: \"30\".",
+                    Hidden = false,
+                    DefaultValue = "30",
+                    Type = "String"
+                },
+                [Constants.Config.AutoSecureWww] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the " +
+                               "primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied " +
+                               "with the CSR. Default: \"0\".",
+                    Hidden = false,
+                    DefaultValue = "0",
+                    Type = "String"
+                },
                 [Constants.Config.IgnoreExpired] = new PropertyConfigInfo
                 {
                     Comments = "If true, expired certificates will be skipped during synchronization. Default: false.",
@@ -204,6 +306,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                $"environment variable; the env var takes precedence when both are set. Default: 10.",
                     Hidden = false,
                     DefaultValue = 10,
+                    Type = "Number"
+                },
+                [Constants.Config.DcvWaitForChallengeSeconds] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() for CERTInext to " +
+                               "expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under " +
+                               "concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL " +
+                               "before the slot appears. Without this wait, the plugin's initial TrackOrder check " +
+                               "sees null and skips DCV — the order then has to wait for the next gateway sync " +
+                               "cycle to be picked up. Setting to 0 disables the wait (single-check behaviour). " +
+                               $"Can also be set via the {Constants.Config.DcvWaitForChallengeSecondsEnvVar} " +
+                               "environment variable; the env var takes precedence when both are set. Default: 60.",
+                    Hidden = false,
+                    DefaultValue = 60,
+                    Type = "Number"
+                },
+                [Constants.Config.DcvWaitForIssuanceSeconds] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV " +
+                               "verifies for CERTInext to finish generating the certificate. CERTInext issuance " +
+                               "is async — DCV may be verified but the cert PEM isn't yet available for download. " +
+                               "Without this wait, Enroll() returns a pending result and the issued cert is " +
+                               "picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch " +
+                               "behaviour). " +
+                               $"Can also be set via the {Constants.Config.DcvWaitForIssuanceSecondsEnvVar} " +
+                               "environment variable; the env var takes precedence when both are set. Default: 60.",
+                    Hidden = false,
+                    DefaultValue = 60,
                     Type = "Number"
                 }
             };
@@ -354,11 +484,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Optional CERTInext group (delegation) number.  When set, it is passed in
         /// the <c>productDetails.groupNumber</c> field of <c>GetProductDetails</c>
-        /// requests so that the account's full product list is returned.  Some sandbox
-        /// accounts return an empty product list if this field is omitted.
+        /// requests AND in the <c>delegationInformation.groupNumber</c> field of every
+        /// SSL order body so the order is routed to the correct account group.  Some
+        /// accounts queue orders for extra review when this field is omitted.
         /// </summary>
         [JsonPropertyName("GroupNumber")]
         public string GroupNumber { get; set; } = string.Empty;
+
+        /// <summary>
+        /// CERTInext organization number for a pre-vetted organization (e.g. the customer's
+        /// company).  When set, every SSL order is submitted with
+        /// <c>organizationDetails.preVetting="1"</c> and the configured
+        /// <c>organizationNumber</c>, telling CERTInext to skip the manual organization
+        /// vetting queue.  Strongly recommended for OV/EV products; significantly speeds
+        /// up DV issuance because CERTInext otherwise parks orders in <c>Pending System RA</c>
+        /// for extended manual review (observed tens of hours on the sandbox).
+        /// Empty by default — the plugin omits the <c>organizationDetails</c> block when
+        /// this is unset, preserving prior behavior.
+        /// </summary>
+        [JsonPropertyName("OrganizationNumber")]
+        public string OrganizationNumber { get; set; } = string.Empty;
 
         // -----------------------------------------------------------------------
         // Authentication
@@ -442,6 +587,56 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public string DefaultProductCode { get; set; } = string.Empty;
 
         // -----------------------------------------------------------------------
+        // Technical point-of-contact — populated into technicalPointOfContact on SSL orders.
+        // When any field is blank, the corresponding Requestor* default is used.
+        // -----------------------------------------------------------------------
+
+        /// <summary>Technical contact name. Defaults to <see cref="RequestorName"/> when blank.</summary>
+        [JsonPropertyName("TechnicalContactName")]
+        public string TechnicalContactName { get; set; } = string.Empty;
+
+        /// <summary>Technical contact email. Defaults to <see cref="RequestorEmail"/> when blank.</summary>
+        [JsonPropertyName("TechnicalContactEmail")]
+        public string TechnicalContactEmail { get; set; } = string.Empty;
+
+        /// <summary>Technical contact ISD code. Defaults to <see cref="RequestorIsdCode"/> when blank.</summary>
+        [JsonPropertyName("TechnicalContactIsdCode")]
+        public string TechnicalContactIsdCode { get; set; } = string.Empty;
+
+        /// <summary>Technical contact mobile number. Defaults to <see cref="RequestorMobileNumber"/> when blank.</summary>
+        [JsonPropertyName("TechnicalContactMobileNumber")]
+        public string TechnicalContactMobileNumber { get; set; } = string.Empty;
+
+        // -----------------------------------------------------------------------
+        // SSL order body defaults — every value matches a CERTInext-documented field
+        // and is overridable per-connector via the gateway admin UI.
+        // -----------------------------------------------------------------------
+
+        /// <summary>CERTInext billing model ("2" credit, "1" cash). Default "2".</summary>
+        [JsonPropertyName("AccountingModel")]
+        public string AccountingModel { get; set; } = "2";
+
+        /// <summary>"1" = enable lifecycle emails to requestor, "0" = silent (default).</summary>
+        [JsonPropertyName("EmailNotifications")]
+        public string EmailNotifications { get; set; } = "0";
+
+        /// <summary>Default validity in years sent in subscriptionDetails. "1", "2", or "3". Default "1".</summary>
+        [JsonPropertyName("SubscriptionValidityYears")]
+        public string SubscriptionValidityYears { get; set; } = "1";
+
+        /// <summary>"0" = disable CERTInext-side auto-renew (recommended — renewal is driven by Command). "1" = enable.</summary>
+        [JsonPropertyName("SubscriptionAutoRenew")]
+        public string SubscriptionAutoRenew { get; set; } = "0";
+
+        /// <summary>Days before expiry at which CERTInext auto-renews (only honored when SubscriptionAutoRenew="1").</summary>
+        [JsonPropertyName("SubscriptionRenewCriteriaDays")]
+        public string SubscriptionRenewCriteriaDays { get; set; } = "30";
+
+        /// <summary>"1" = let CERTInext auto-add the www. variant, "0" = use only the supplied CN/SANs (default).</summary>
+        [JsonPropertyName("AutoSecureWww")]
+        public string AutoSecureWww { get; set; } = "0";
+
+        // -----------------------------------------------------------------------
         // Sync / behaviour
         // -----------------------------------------------------------------------
 
@@ -489,6 +684,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public int DcvTimeoutMinutes { get; set; } = 10;
 
         /// <summary>
+        /// Seconds the plugin will poll inside <c>Enroll()</c> waiting for CERTInext to populate
+        /// <c>domainVerification</c> in <c>TrackOrder</c>.  Under concurrent load the slot can
+        /// take a few seconds to appear after <c>GenerateOrderSSL</c> returns; without this
+        /// wait the plugin's initial single-shot check sees <c>null</c> and skips DCV.
+        /// Set to <c>0</c> to disable the wait (preserving the single-check behaviour).
+        /// Overridden by <c>CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS</c> when set.  Default: 60.
+        /// </summary>
+        [JsonPropertyName("DcvWaitForChallengeSeconds")]
+        public int DcvWaitForChallengeSeconds { get; set; } = 60;
+
+        /// <summary>
+        /// Seconds the plugin will poll <c>GetCertificate</c> inside <c>Enroll()</c> after DCV
+        /// verifies, waiting for CERTInext to finish generating the certificate.  CERTInext
+        /// issuance is async — DCV may be verified but the cert PEM isn't yet available.
+        /// Set to <c>0</c> to disable the wait (preserving the single-fetch behaviour, where
+        /// the cert is picked up on the next sync cycle).  Overridden by
+        /// <c>CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS</c> when set.  Default: 60.
+        /// </summary>
+        [JsonPropertyName("DcvWaitForIssuanceSeconds")]
+        public int DcvWaitForIssuanceSeconds { get; set; } = 60;
+
+        /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the
         /// config field so operators can adjust the ceiling without a connector reconfiguration.
         /// </summary>
@@ -498,6 +715,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal > 0)
                 return envVal;
             return DcvTimeoutMinutes > 0 ? DcvTimeoutMinutes : 10;
+        }
+
+        /// <summary>
+        /// Returns the effective wait for the DCV challenge to appear in TrackOrder, preferring
+        /// the env var so operators can tune without re-saving the connector. A value of 0
+        /// (either field or env var) disables the wait entirely.
+        /// </summary>
+        public int GetEffectiveDcvWaitForChallengeSeconds()
+        {
+            var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvWaitForChallengeSecondsEnvVar);
+            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal >= 0)
+                return envVal;
+            return DcvWaitForChallengeSeconds >= 0 ? DcvWaitForChallengeSeconds : 60;
+        }
+
+        /// <summary>
+        /// Returns the effective post-DCV wait for cert issuance, preferring the env var.
+        /// A value of 0 disables the wait.
+        /// </summary>
+        public int GetEffectiveDcvWaitForIssuanceSeconds()
+        {
+            var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvWaitForIssuanceSecondsEnvVar);
+            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal >= 0)
+                return envVal;
+            return DcvWaitForIssuanceSeconds >= 0 ? DcvWaitForIssuanceSeconds : 60;
         }
     }
 }
