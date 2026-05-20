@@ -116,7 +116,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Dcv_HappyPath_StagesVerifiesAndCleansUp()
         {
             var (mock, validator) = HappyPathMocks();
-            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+            // Issuance budget > 0 so the post-DCV GetCertificate poll runs and lifts the
+            // issued cert out of the mock back into the EnrollmentResult.
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
 
             var result = await Enroll(plugin);
 
@@ -144,7 +147,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Dcv_HappyPath_UsesCustomTxtTemplate()
         {
             var (mock, validator) = HappyPathMocks();
-            var config = DcvConfig();
+            // Issuance budget > 0 so the post-DCV GetCertificate poll runs.
+            var config = DcvConfig(dcvWaitForIssuanceSeconds: 10);
             config.DcvTxtRecordTemplate = "dcv-proof.{0}.acme-corp.com";
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator), config);
 
@@ -211,8 +215,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Dcv_Skipped_WhenAllDomainsAlreadyValidated()
+        public async Task Dcv_SkipsStaging_AndDoesNotIssuancePoll_WhenAllDomainsAlreadyValidated_AndIssuanceBudgetZero()
         {
+            // With DcvWaitForIssuanceSeconds=0 (the test fixture's DcvConfig default), an
+            // order with DCV already validated short-circuits: no TXT records staged AND
+            // no post-DCV GetCertificate poll. Lets sync pick up the cert on its own.
             var mock = NewMock();
             mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending" });
@@ -239,6 +246,54 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             validator.StagedRecords.Should().BeEmpty();
             mock.Verify(c => c.GetDcvAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            // Issuance budget = 0 means the post-DCV poll short-circuits and GetCertificate
+            // is never called from this Enroll() path.
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Dcv_RunsIssuanceWait_WhenDcvAlreadyValidated_AndIssuanceBudgetPositive()
+        {
+            // The cached-DCV gap fix: when CERTInext shows DCV already validated (no work
+            // for the plugin's DNS-TXT staging) AND the admin has set a positive issuance
+            // budget, the plugin should poll GetCertificate until the cert is generated
+            // and return the issued result directly from Enroll() — not leave it for sync.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending" });
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId       = "1",
+                        CertificateStatusId = "1",
+                        DomainVerification  = new TrackOrderDomainVerification
+                        {
+                            Status = Constants.Dcv.StatusValidated
+                        }
+                    }
+                });
+
+            // First post-DCV fetch is still pending; second returns issued.
+            mock.SetupSequence(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingCertRecord(MockCertificateData.DcvOrderId))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.DcvOrderId));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "the issuance poll must lift the issued cert into the EnrollmentResult, " +
+                "not let the order fall through to a pending-then-sync round-trip");
+            validator.StagedRecords.Should().BeEmpty("no TXT staging is needed when DCV is already validated");
+            mock.Verify(c => c.GetDcvAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
+                Times.AtLeast(2), "plugin should have polled at least twice to see the cert transition to issued");
         }
 
         [Fact]
@@ -484,10 +539,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.DcvOrderId));
 
             var validator = new FakeDomainValidator();
+            // Both budgets positive so the polling paths exercise end-to-end.
             var plugin = BuildPlugin(
                 mock.Object,
                 new FakeDomainValidatorFactory(validator),
-                DcvConfig(dcvWaitForChallengeSeconds: 10, dcvWaitForIssuanceSeconds: 0));
+                DcvConfig(dcvWaitForChallengeSeconds: 10, dcvWaitForIssuanceSeconds: 10));
 
             var result = await Enroll(plugin);
 

@@ -520,8 +520,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 int status = StatusMapper.ToRequestDisposition(cert.Status);
                 if (status == (int)EndEntityStatus.EXTERNALVALIDATION)
                 {
-                    bool dcvRan = await TryRunDcvDuringSyncAsync(caRequestID, CancellationToken.None);
-                    if (dcvRan)
+                    bool dcvDone = await TryRunDcvDuringSyncAsync(caRequestID, CancellationToken.None);
+                    if (dcvDone)
                     {
                         try
                         {
@@ -693,8 +693,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // already done or not yet exposed.
                         if (status == (int)EndEntityStatus.EXTERNALVALIDATION)
                         {
-                            bool dcvRan = await TryRunDcvDuringSyncAsync(current.Id, cancelToken);
-                            if (dcvRan)
+                            bool dcvDone = await TryRunDcvDuringSyncAsync(current.Id, cancelToken);
+                            if (dcvDone)
                             {
                                 try
                                 {
@@ -823,8 +823,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     try
                     {
-                        bool dcvRan = await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
-                        if (dcvRan)
+                        bool dcvDone = await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
+                        if (dcvDone)
                         {
                             // Poll GetCertificate until CERTInext finishes generating the cert OR the
                             // issuance budget expires.  CERTInext issuance is async — DCV may verify
@@ -1149,9 +1149,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
             }
 
-            // If the overall DCV status is already validated, nothing to do
-            if (string.Equals(domainVerification.Status, Constants.Dcv.StatusValidated, StringComparison.Ordinal))
-                return false;
+            // If DCV is already validated CERTInext-side, the plugin has no DCV work to
+            // do — but CERTInext's certificate generation may still be in flight (this
+            // happens when CERTInext has cached a prior DCV validation for the parent
+            // domain).  Return true so the caller can run the issuance poll and pick up
+            // the cert directly from Enroll() instead of leaving it for the next sync.
+            //
+            // Treat "DCV done" as EITHER the overall aggregate Status flipping to "1"
+            // OR every individual per-domain dcvStatus being "1" — observed in the wild
+            // that the per-domain field can flip before the parent aggregate.
+            var allDomainEntries = domainVerification.GetDomainEntries();
+            bool aggregateValidated = string.Equals(
+                domainVerification.Status, Constants.Dcv.StatusValidated, StringComparison.Ordinal);
+            bool everyDomainValidated = allDomainEntries.Count > 0
+                && allDomainEntries.All(kvp => string.Equals(
+                    kvp.Value?.DcvStatus, Constants.Dcv.StatusValidated, StringComparison.Ordinal));
+            if (aggregateValidated || everyDomainValidated)
+            {
+                _logger.LogInformation(
+                    "DCV is already validated for order {OrderNumber} " +
+                    "(aggregateStatus={Aggregate}, perDomainAllValidated={PerDomain}). " +
+                    "Skipping DNS-TXT staging; caller may run the issuance poll.",
+                    orderNumber, aggregateValidated, everyDomainValidated);
+                return true;
+            }
 
             // Include domains that are pending DCV and either have no method set yet,
             // or are already assigned to DNS TXT (numeric "1" from API or label from TrackOrder).
@@ -1331,6 +1352,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int pollIntervalSeconds = 3;
             DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Max(0, waitBudgetSeconds));
             LegacyGetCertificateResponse last = null;
+
+            // Admin opt-out: budget <= 0 means "don't wait, let sync pick the cert up".
+            // Short-circuit before any API call so the gateway doesn't pay a TrackOrder +
+            // optional DownloadCertificate round trip per Enroll when the admin has
+            // explicitly disabled the wait.
+            if (waitBudgetSeconds <= 0)
+            {
+                _logger.LogDebug(
+                    "Post-DCV issuance wait disabled (DcvWaitForIssuanceSeconds<=0). " +
+                    "Order {OrderNumber} will be picked up on the next sync cycle.",
+                    orderNumber);
+                return null;
+            }
 
             int attempt = 0;
             while (true)
