@@ -33,6 +33,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         public string RequestorEmail { get; }
         public string RequestorName { get; }
 
+        // ---------------------------------------------------------------------------
+        // Cloudflare DCV credentials (optional)
+        // ---------------------------------------------------------------------------
+
+        /// <summary>Cloudflare API token with DNS:Edit permission on <see cref="CloudflareZoneId"/>.</summary>
+        public string CloudflareApiToken { get; }
+
+        /// <summary>Cloudflare Zone ID for the domain used in DCV integration tests.</summary>
+        public string CloudflareZoneId { get; }
+
+        /// <summary>
+        /// True when Cloudflare credentials are present, enabling real DNS DCV tests.
+        /// When false, DCV integration tests fall back to a <see cref="StubDomainValidator"/>.
+        /// </summary>
+        public bool IsCloudflareConfigured { get; }
+
         /// <summary>
         /// True when at minimum ApiUrl and AccessKey are both non-empty,
         /// indicating that live credential configuration is present.
@@ -67,6 +83,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             var env = LoadEnvFile(envPath);
 
+            // Promote env-file values into the process environment so that any code
+            // calling System.Environment.GetEnvironmentVariable() picks them up.
+            foreach (var kv in env)
+                if (System.Environment.GetEnvironmentVariable(kv.Key) == null)
+                    System.Environment.SetEnvironmentVariable(kv.Key, kv.Value);
+
             ApiUrl        = GetEnvValue(env, "CERTINEXT_API_URL");
             AccessKey     = GetEnvValue(env, "CERTINEXT_ACCESS_KEY");
             AccountNumber = GetEnvValue(env, "CERTINEXT_ACCOUNT_NUMBER");
@@ -75,6 +97,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             ProductCode   = GetEnvValue(env, "CERTINEXT_PRODUCT_CODE");
             RequestorEmail = GetEnvValue(env, "CERTINEXT_REQUESTOR_EMAIL");
             RequestorName  = GetEnvValue(env, "CERTINEXT_REQUESTOR_NAME");
+
+            CloudflareApiToken    = GetEnvValue(env, "CERTINEXT_CF_API_TOKEN");
+            CloudflareZoneId      = GetEnvValue(env, "CERTINEXT_CF_ZONE_ID");
+            IsCloudflareConfigured = !string.IsNullOrWhiteSpace(CloudflareApiToken) &&
+                                     !string.IsNullOrWhiteSpace(CloudflareZoneId);
 
             IsConfigured = !string.IsNullOrWhiteSpace(ApiUrl) &&
                            !string.IsNullOrWhiteSpace(AccessKey);
@@ -87,6 +114,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     AuthMode           = "AccessKey",
                     ApiKey             = AccessKey,
                     AccountNumber      = AccountNumber,
+                    GroupNumber        = GroupNumber,
+                    OrganizationNumber = OrgNumber,
                     RequestorName      = string.IsNullOrWhiteSpace(RequestorName)
                                              ? "Keyfactor Integration Test"
                                              : RequestorName,

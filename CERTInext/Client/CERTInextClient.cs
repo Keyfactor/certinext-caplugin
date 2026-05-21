@@ -9,7 +9,6 @@ using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -19,6 +18,7 @@ using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.Logging;
 using Microsoft.Extensions.Logging;
 using RestSharp;
+using RestSharp.Authenticators;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 {
@@ -34,7 +34,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
     /// <c>https://us-api.certinext.io/emSignHub-API/</c>) and endpoint names are
     /// appended directly (e.g. <c>ValidateCredentials</c>).
     /// </summary>
-    public class CERTInextClient : ICERTInextClient
+    public class CERTInextClient : ICERTInextClient, IDisposable
     {
         private static readonly ILogger Logger = LogHandler.GetClassLogger<CERTInextClient>();
 
@@ -54,13 +54,61 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             _config = config ?? throw new ArgumentNullException(nameof(config));
 
+            var isOAuth = config.AuthMode.Equals(Constants.Config.AuthModeOAuth, StringComparison.OrdinalIgnoreCase) ||
+                          config.AuthMode.Equals(Constants.Config.AuthModeOAuth2, StringComparison.OrdinalIgnoreCase);
+
             var options = new RestClientOptions(_config.ApiUrl.TrimEnd('/') + "/")
             {
                 ThrowOnAnyError = false,
                 Timeout = TimeSpan.FromSeconds(120),
+                // OAuth: inject Bearer token per-request via authenticator.
+                // AccessKey: no HTTP-level authenticator — auth is in the JSON body meta block.
+                Authenticator = isOAuth ? new CERTInextOAuthAuthenticator(GetOrRefreshTokenAsync) : null
             };
 
             _http = new RestClient(options);
+        }
+
+        // ---------------------------------------------------------------------------
+        // IDisposable
+        // ---------------------------------------------------------------------------
+
+        public void Dispose()
+        {
+            _http?.Dispose();
+            _tokenLock?.Dispose();
+        }
+
+        // ---------------------------------------------------------------------------
+        // Nested authenticator — injects Authorization: Bearer <token> per-request
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// RestSharp authenticator that fetches (or reuses a cached) OAuth2 bearer
+        /// token and injects it as an <c>Authorization: Bearer</c> header on every
+        /// outgoing request.  The token provider is the client's own
+        /// <see cref="GetOrRefreshTokenAsync"/> method, which handles caching and
+        /// refresh with a semaphore so concurrent requests don't trigger redundant
+        /// token fetches.
+        /// </summary>
+        private sealed class CERTInextOAuthAuthenticator : AuthenticatorBase
+        {
+            private readonly Func<CancellationToken, Task<string>> _tokenProvider;
+
+            public CERTInextOAuthAuthenticator(Func<CancellationToken, Task<string>> tokenProvider)
+                : base(string.Empty) // base stores the token; we override GetAuthenticationParameter instead
+            {
+                _tokenProvider = tokenProvider ?? throw new ArgumentNullException(nameof(tokenProvider));
+            }
+
+            protected override async ValueTask<Parameter> GetAuthenticationParameter(string accessToken)
+            {
+                // Fetch (or return the cached) token from the provider.
+                // CancellationToken.None is acceptable here because RestSharp does not
+                // pass a token through the authenticator interface.
+                string token = await _tokenProvider(CancellationToken.None);
+                return new HeaderParameter(KnownHeaders.Authorization, $"Bearer {token}");
+            }
         }
 
         // ---------------------------------------------------------------------------
@@ -82,7 +130,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -143,7 +191,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -189,7 +237,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -217,7 +265,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -276,7 +324,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -318,7 +366,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -400,7 +448,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var resp = await _http.ExecuteAsync(req, ct);
+                var resp = await ExecuteWithRetryAsync(req, ct);
                 sw.Stop();
 
                 Logger.LogInformation(
@@ -462,14 +510,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             var body = new GetProductDetailsRequest
             {
                 Meta = await BuildMetaAsync(ct),
-                ProductDetails = new ProductDetailsFilter()
+                // Pass groupNumber when configured — required by some accounts to return
+                // products from the nested categories structure (e.g. sandbox accounts).
+                ProductDetails = new ProductDetailsFilter
+                {
+                    GroupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber
+                }
             };
 
             var req = new RestRequest(Constants.Api.GetProductDetailsPath, Method.Post);
             req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await _http.ExecuteAsync(req, ct);
+            var resp = await ExecuteWithRetryAsync(req, ct);
             sw.Stop();
 
             Logger.LogInformation(
@@ -487,10 +540,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             var result = DeserializeOrThrow<GetProductDetailsResponse>(resp, "get product details");
 
+            // The API returns a nested structure: productDetails[].products[].productCode
+            // FlattenProducts() extracts all products from all category envelopes.
+            var products = result.FlattenProducts();
             Logger.LogInformation("Retrieved {Count} product codes from CERTInext.",
-                result.ProductDetails?.Count ?? 0);
+                products.Count);
             Logger.MethodExit(LogLevel.Trace);
-            return result.ProductDetails ?? new List<ProductDetail>();
+            return products;
         }
 
         // ---------------------------------------------------------------------------
@@ -784,16 +840,157 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         // ---------------------------------------------------------------------------
+        // ICERTInextClient — DCV methods
+        // ---------------------------------------------------------------------------
+
+        /// <inheritdoc/>
+        public async Task<GetDcvResponse> GetDcvAsync(
+            string orderNumber,
+            string domainName,
+            string dcvMethod,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+
+            var body = new GetDcvRequest
+            {
+                Meta = await BuildMetaAsync(ct),
+                DcvDetails = new DcvRequestDetails
+                {
+                    RequestorEmail = _config.RequestorEmail,
+                    OrderNumber = orderNumber,
+                    DomainName = domainName,
+                    DcvMethod = dcvMethod
+                }
+            };
+
+            var req = new RestRequest(Constants.Api.GetDcvPath, Method.Post);
+            req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await ExecuteWithRetryAsync(req, ct);
+            sw.Stop();
+
+            Logger.LogInformation(
+                "CERTInext API call: Method=POST, Path={Path}, OrderNumber={OrderNumber}, Domain={Domain}, HttpStatus={Status}, LatencyMs={Latency}",
+                Constants.Api.GetDcvPath, orderNumber, domainName, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+
+            if (resp.StatusCode == HttpStatusCode.Unauthorized || resp.StatusCode == HttpStatusCode.Forbidden)
+            {
+                Logger.LogError(
+                    "GetDcv API authentication failure. OrderNumber={OrderNumber}, Domain={Domain}, HttpStatus={Status}",
+                    orderNumber, domainName, (int)resp.StatusCode);
+                throw new Exception(
+                    $"Authentication failure calling GetDcv for order '{orderNumber}' domain '{domainName}'. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+            }
+
+            var result = DeserializeOrThrow<GetDcvResponse>(resp, $"get DCV token {orderNumber}/{domainName}");
+
+            if (result.Meta != null && !result.Meta.IsSuccess)
+            {
+                Logger.LogError(
+                    "GetDcv returned failure. OrderNumber={OrderNumber}, Domain={Domain}, ErrorCode={ErrorCode}, ErrorMessage={ErrorMessage}",
+                    orderNumber, domainName, result.Meta.ErrorCode, result.Meta.ErrorMessage);
+                throw new Exception(
+                    $"CERTInext GetDcv failed for order '{orderNumber}' domain '{domainName}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
+            }
+
+            // SOX CC7.3: log token presence (never value) so each DCV step is independently
+            // auditable — an auditor must be able to confirm the token was obtained before
+            // StageValidation was called.
+            Logger.LogInformation(
+                "GetDcv response received. OrderNumber={OrderNumber}, Domain={Domain}, TokenPresent={TokenPresent}",
+                orderNumber, domainName, !string.IsNullOrWhiteSpace(result.DcvDetails?.Token));
+
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task VerifyDcvAsync(
+            string orderNumber,
+            string domainName,
+            string dcvMethod,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+
+            var body = new VerifyDcvRequest
+            {
+                Meta = await BuildMetaAsync(ct),
+                DcvDetails = new DcvRequestDetails
+                {
+                    RequestorEmail = _config.RequestorEmail,
+                    OrderNumber = orderNumber,
+                    DomainName = domainName,
+                    DcvMethod = dcvMethod
+                }
+            };
+
+            var req = new RestRequest(Constants.Api.VerifyDcvPath, Method.Post);
+            req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await ExecuteWithRetryAsync(req, ct);
+            sw.Stop();
+
+            Logger.LogInformation(
+                "CERTInext API call: Method=POST, Path={Path}, OrderNumber={OrderNumber}, Domain={Domain}, HttpStatus={Status}, LatencyMs={Latency}",
+                Constants.Api.VerifyDcvPath, orderNumber, domainName, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+
+            if (resp.StatusCode == HttpStatusCode.Unauthorized || resp.StatusCode == HttpStatusCode.Forbidden)
+            {
+                Logger.LogError(
+                    "VerifyDcv API authentication failure. OrderNumber={OrderNumber}, Domain={Domain}, HttpStatus={Status}",
+                    orderNumber, domainName, (int)resp.StatusCode);
+                throw new Exception(
+                    $"Authentication failure calling VerifyDcv for order '{orderNumber}' domain '{domainName}'. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+            }
+
+            if (!resp.IsSuccessful)
+                throw new Exception(
+                    $"CERTInext VerifyDcv failed for order '{orderNumber}' domain '{domainName}'. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+
+            // Attempt to read meta.status from the response body
+            if (!string.IsNullOrWhiteSpace(resp.Content))
+            {
+                try
+                {
+                    var verifyResp = JsonSerializer.Deserialize<VerifyDcvResponse>(resp.Content, GetJsonOptions());
+                    if (verifyResp?.Meta != null && !verifyResp.Meta.IsSuccess)
+                    {
+                        // SOX CC7.3: log the failure outcome explicitly so an auditor can
+                        // distinguish a thrown meta-failure from a silent swallow.
+                        Logger.LogError(
+                            "VerifyDcv returned failure. OrderNumber={OrderNumber}, Domain={Domain}, ErrorCode={ErrorCode}, ErrorMessage={ErrorMessage}",
+                            orderNumber, domainName, verifyResp.Meta.ErrorCode, verifyResp.Meta.ErrorMessage);
+                        throw new Exception(
+                            $"CERTInext VerifyDcv returned failure for order '{orderNumber}' domain '{domainName}': {verifyResp.Meta.ErrorMessage ?? verifyResp.Meta.ErrorCode}.");
+                    }
+                }
+                catch (JsonException) { /* non-JSON 200 body is acceptable */ }
+            }
+
+            // SOX CC7.3 / SOC2 CC7.3: log success only after the meta check so the log entry
+            // unambiguously reflects that CERTInext acknowledged the verification request.
+            Logger.LogInformation(
+                "DCV verification succeeded. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domainName);
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        // ---------------------------------------------------------------------------
         // Auth helpers
         // ---------------------------------------------------------------------------
 
         /// <summary>
         /// Builds the meta authentication block for a CERTInext API request.
         /// For AccessKey auth: authKey = SHA256(accessKey + ts + txn) (hex, lowercase).
-        /// For OAuth auth: the bearer token is applied as an HTTP header instead
-        /// (not in the meta block), but meta is still required for ver/ts/txn/accountNumber.
+        /// For OAuth auth: the bearer token is injected as an HTTP header automatically by
+        /// <see cref="CERTInextOAuthAuthenticator"/> — authKey is left empty in the meta block
+        /// (the server accepts the bearer token in lieu of authKey).  The meta block is still
+        /// required for ver/ts/txn/accountNumber in both auth modes.
         /// </summary>
-        private async Task<RequestMeta> BuildMetaAsync(CancellationToken ct)
+        private Task<RequestMeta> BuildMetaAsync(CancellationToken ct)
         {
             string ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:sszzz");
             string txn = GenerateTxnId();
@@ -802,77 +999,69 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (_config.AuthMode.Equals(Constants.Config.AuthModeOAuth, StringComparison.OrdinalIgnoreCase) ||
                 _config.AuthMode.Equals(Constants.Config.AuthModeOAuth2, StringComparison.OrdinalIgnoreCase))
             {
-                // OAuth: authenticate via bearer token header; authKey is left empty in meta
-                // (the server accepts the bearer token in lieu of authKey)
+                // OAuth: bearer token is injected by CERTInextOAuthAuthenticator per-request.
+                // Leave authKey empty in the meta block — the API accepts the bearer token
+                // in the Authorization header instead.
                 authKey = string.Empty;
-                // Attach the bearer token to the RestClient for the next request
-                // This is done by pre-populating a thread-local; actual header injection
-                // happens in the calling method after BuildMetaAsync returns.
-                // For simplicity here, we fetch the token and rely on the HTTP pipeline.
-                string token = await GetOrRefreshTokenAsync(ct);
-                // Store for injection by calling code — the cleanest approach is to add it
-                // as a default header on the request itself after this method returns.
-                // We store it as a field so the caller can inject it.
-                _pendingBearerToken = token;
             }
             else
             {
                 // AccessKey: compute SHA256(accessKey + ts + txn)
-                _pendingBearerToken = null;
                 authKey = ComputeAuthKey(_config.ApiKey, ts, txn);
             }
 
-            // SOX CC6.1: log credential use (presence only, never the value) at Information.
-            Logger.LogInformation(
+            // SOC2 CC7.2: log credential use at Debug only — this is called on every outbound
+            // request, so Information would flood the log and degrade anomaly detection signal.
+            // Per-operation audit entries (LogInformation) are emitted at the call sites above.
+            Logger.LogDebug(
                 "Outbound API request authenticated. AuthMode={AuthMode}, AccountNumber={AccountNumber}, " +
                 "ApiKeyPresent={Present}",
                 _config.AuthMode, _config.AccountNumber, !string.IsNullOrEmpty(_config.ApiKey));
 
-            return new RequestMeta
+            return Task.FromResult(new RequestMeta
             {
                 Ver = Constants.Api.MetaVersion,
                 Ts = ts,
                 Txn = txn,
                 AccountNumber = _config.AccountNumber,
                 AuthKey = authKey
-            };
-        }
-
-        // Thread-local pending bearer token set by BuildMetaAsync for OAuth flows.
-        // The RestRequest AddHeader call must happen in the calling method after BuildMetaAsync.
-        [ThreadStatic]
-        private static string _pendingBearerToken;
-
-        /// <summary>
-        /// Applies any pending OAuth bearer token to the outgoing RestRequest.
-        /// Call this immediately after BuildMetaAsync and before executing the request.
-        /// </summary>
-        private static void ApplyPendingAuth(RestRequest req)
-        {
-            if (!string.IsNullOrEmpty(_pendingBearerToken))
-            {
-                req.AddHeader("Authorization", $"Bearer {_pendingBearerToken}");
-                _pendingBearerToken = null;
-            }
+            });
         }
 
         /// <summary>
         /// Computes the CERTInext authKey: SHA256(accessKey + ts + txn) as lowercase hex.
+        ///
+        /// Implemented with BouncyCastle (per the project's crypto policy: all hashing and
+        /// key handling goes through BouncyCastle, never BCL System.Security.Cryptography).
         /// </summary>
         private static string ComputeAuthKey(string accessKey, string ts, string txn)
         {
             string input = accessKey + ts + txn;
-            byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+            byte[] inputBytes = Encoding.UTF8.GetBytes(input);
+            var digest = new Org.BouncyCastle.Crypto.Digests.Sha256Digest();
+            digest.BlockUpdate(inputBytes, 0, inputBytes.Length);
+            byte[] hash = new byte[digest.GetDigestSize()];
+            digest.DoFinal(hash, 0);
             return Convert.ToHexString(hash).ToLowerInvariant();
         }
 
         /// <summary>
-        /// Generates a unique transaction ID (alphanumeric, 16–18 digits).
+        /// Generates a unique transaction ID (decimal, up to 18 digits).
+        ///
+        /// `txn` is part of the SHA-256 input for the CERTInext authKey
+        /// (<c>SHA256(accessKey + ts + txn)</c>).  A predictable txn shrinks the search
+        /// space against a leaked accessKey, so we use a cryptographically-strong source
+        /// rather than <see cref="Random.Shared"/> — per the project's BouncyCastle-only
+        /// crypto policy, that source is <c>Org.BouncyCastle.Security.SecureRandom</c>.
         /// </summary>
+        private static readonly Org.BouncyCastle.Security.SecureRandom _txnRandom =
+            new Org.BouncyCastle.Security.SecureRandom();
+
         private static string GenerateTxnId()
         {
-            // Match the Postman pre-request script: Math.floor(Math.random() * 1e18 + 1)
-            long val = (long)(Random.Shared.NextDouble() * 1_000_000_000_000_000_000L) + 1L;
+            // Produce a positive long in [1, 1e18). NextLong() returns the full Int64
+            // range including negatives — mask off the sign bit and reduce.
+            long val = (_txnRandom.NextLong() & long.MaxValue) % 1_000_000_000_000_000_000L + 1L;
             return val.ToString();
         }
 
@@ -904,6 +1093,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 var tokenResp = await tokenClient.ExecuteAsync(tokenReq, ct);
                 if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
                 {
+                    // SOX CC6.1 (credential confidentiality): NEVER log tokenResp.Content,
+                    // tokenResp.ErrorMessage, or tokenResp.ErrorException — RestSharp's
+                    // failure paths can echo the original request including the
+                    // `client_secret` form value.  Only StatusCode + non-secret config
+                    // identifiers are safe to log here.
                     Logger.LogError(
                         "OAuth2 token acquisition failed. TokenUrl={TokenUrl}, ClientId={ClientId}, HttpStatus={Status}",
                         _config.OAuthTokenUrl, _config.OAuthClientId, (int)tokenResp.StatusCode);
@@ -933,6 +1127,43 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 _tokenLock.Release();
             }
+        }
+
+        // ---------------------------------------------------------------------------
+        // Retry helper
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Executes a <see cref="RestRequest"/> with up to <paramref name="maxAttempts"/>
+        /// attempts, retrying on HTTP 5xx and network-level failures (no status code).
+        /// 4xx responses are returned immediately — client errors will not be resolved
+        /// by retrying.
+        /// </summary>
+        private async Task<RestResponse> ExecuteWithRetryAsync(
+            RestRequest req,
+            CancellationToken ct,
+            int maxAttempts = 3)
+        {
+            RestResponse resp = null;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                resp = await _http.ExecuteAsync(req, ct);
+
+                // Success or 4xx client error — return immediately
+                bool isClientError = (int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500;
+                if (resp.IsSuccessful || isClientError)
+                    return resp;
+
+                if (attempt < maxAttempts)
+                {
+                    Logger.LogWarning(
+                        "CERTInext API returned {Status} on attempt {Attempt}/{Max} — retrying...",
+                        (int)resp.StatusCode, attempt, maxAttempts);
+                }
+            }
+
+            // Return the last response (caller handles the error)
+            return resp;
         }
 
         // ---------------------------------------------------------------------------
@@ -995,31 +1226,78 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private GenerateOrderSslRequest BuildOrderRequestFromLegacyEnrollRequest(EnrollCertificateRequest request)
         {
+            // Map ValidityDays → CERTInext's year-based validity. Default 1.
+            string validityYears = request.ValidityDays.HasValue
+                ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
+                : (string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears)
+                    ? "1"
+                    : _config.SubscriptionValidityYears);
+
+            string requestorName  = request.RequesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
+            string requestorEmail = request.RequesterEmail ?? _config.RequestorEmail ?? string.Empty;
+            string requestorIsd   = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
+            string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
+
             return new GenerateOrderSslRequest
             {
                 // Meta will be set by PlaceOrderAsync
                 OrderDetails = new SslOrderDetails
                 {
                     ProductCode = request.ProfileId ?? _config.DefaultProductCode ?? string.Empty,
+                    AccountingModel = string.IsNullOrWhiteSpace(_config.AccountingModel) ? "2" : _config.AccountingModel,
                     SaveAndHold = "0",
+                    EmailNotifications = string.IsNullOrWhiteSpace(_config.EmailNotifications) ? "0" : _config.EmailNotifications,
+
+                    // delegationInformation — routes the order to the configured account group.
+                    // Omitted entirely when GroupNumber is blank (the model JsonIgnore-WhenNull
+                    // handles property absence further down).
+                    DelegationInformation = !string.IsNullOrWhiteSpace(_config.GroupNumber)
+                        ? new DelegationInformation { GroupNumber = _config.GroupNumber }
+                        : null,
+
+                    // organizationDetails — declares pre-vetted org when configured. This is the
+                    // single biggest factor in how quickly CERTInext releases an order from
+                    // Pending System RA. When OrganizationNumber is blank we omit the whole
+                    // block (the model is JsonIgnore-WhenNull) so the order falls back to the
+                    // unvetted path — same behavior as the prior plugin builds.
+                    OrganizationDetails = !string.IsNullOrWhiteSpace(_config.OrganizationNumber)
+                        ? new OrganizationDetails
+                        {
+                            PreVetting = "1",
+                            OrganizationNumber = _config.OrganizationNumber
+                        }
+                        : null,
+
                     RequestorInformation = new RequestorInformation
                     {
-                        RequestorName = request.RequesterName ?? _config.RequestorName ?? "Keyfactor Gateway",
-                        RequestorEmail = request.RequesterEmail ?? _config.RequestorEmail ?? string.Empty,
-                        RequestorIsdCode = _config.RequestorIsdCode ?? "1",
-                        RequestorMobileNumber = _config.RequestorMobileNumber ?? string.Empty
+                        RequestorName = requestorName,
+                        RequestorEmail = requestorEmail,
+                        RequestorIsdCode = requestorIsd,
+                        RequestorMobileNumber = requestorMobile
                     },
                     SubscriptionDetails = new SubscriptionDetails
                     {
-                        Validity = request.ValidityDays.HasValue
-                            ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
-                            : "1"
+                        Validity = validityYears,
+                        AutoRenew = string.IsNullOrWhiteSpace(_config.SubscriptionAutoRenew) ? "0" : _config.SubscriptionAutoRenew,
+                        RenewCriteria = string.IsNullOrWhiteSpace(_config.SubscriptionRenewCriteriaDays) ? "30" : _config.SubscriptionRenewCriteriaDays
                     },
                     CertificateInformation = new CertificateInformation
                     {
                         DomainName = ExtractCnFromSubject(request.Subject) ?? "unknown",
-                        AdditionalDomains = BuildAdditionalDomains(request.Sans)
+                        AdditionalDomains = BuildAdditionalDomains(request.Sans),
+                        AutoSecureWww = string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0" : _config.AutoSecureWww
                     },
+
+                    // technicalPointOfContact — each field falls back to the requestor default
+                    // when its TechnicalContact* counterpart is blank.
+                    TechnicalPointOfContact = new TechnicalPointOfContact
+                    {
+                        TpcName = string.IsNullOrWhiteSpace(_config.TechnicalContactName) ? requestorName : _config.TechnicalContactName,
+                        TpcEmail = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail) ? requestorEmail : _config.TechnicalContactEmail,
+                        TpcIsdCode = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode) ? requestorIsd : _config.TechnicalContactIsdCode,
+                        TpcMobileNumber = string.IsNullOrWhiteSpace(_config.TechnicalContactMobileNumber) ? requestorMobile : _config.TechnicalContactMobileNumber
+                    },
+
                     Csr = request.Csr,
                     AgreementDetails = BuildDefaultAgreementDetails(),
                     AdditionalInformation = new AdditionalInformation
@@ -1032,12 +1310,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private AgreementDetails BuildDefaultAgreementDetails()
         {
+            // SOC1 accuracy-of-processing: the subscriber agreement is a legal artefact
+            // and the SignerIp it carries is part of the audit record CERTInext stores.
+            // Submitting 127.0.0.1 is a misrepresentation. We retain the fallback so we
+            // don't break existing deployments (and our enrollment never fails just
+            // because SignerIp is blank), but a missing value emits a Warning so an
+            // auditor sees the misrepresentation as an actionable signal in the gateway log.
+            string signerIp = _config.SignerIp;
+            if (string.IsNullOrWhiteSpace(signerIp))
+            {
+                Logger.LogWarning(
+                    "Connector config SignerIp is empty — falling back to 127.0.0.1 for the " +
+                    "subscriber agreement. Set the SignerIp config field to the gateway host's " +
+                    "actual public-routable IP so the audit record is accurate.");
+                signerIp = "127.0.0.1";
+            }
             return new AgreementDetails
             {
                 AcceptAgreement = "1",
                 SignerName = _config.RequestorName ?? "Keyfactor Gateway",
                 SignerPlace = _config.SignerPlace ?? "Gateway",
-                SignerIp = _config.SignerIp ?? "127.0.0.1"
+                SignerIp = signerIp
             };
         }
 
@@ -1102,10 +1395,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return result;
         }
 
+        // SOC2 CC7.2 DoS guard: cap the size of any response body we parse here. CERTInext
+        // error envelopes are always under a few KB; a multi-MB body is either a misrouted
+        // response or a hostile payload aimed at exhausting our JsonDocument buffer.
+        private const int MaxErrorBodyBytes = 64 * 1024;
+
         private static string ExtractErrorMessage(string content, string operation)
         {
             if (string.IsNullOrWhiteSpace(content))
                 return $"CERTInext returned no body for operation '{operation}'.";
+
+            if (content.Length > MaxErrorBodyBytes)
+            {
+                Logger.LogWarning(
+                    "CERTInext response body for '{Operation}' exceeded the parser size cap " +
+                    "({Length} bytes, cap {Cap}). Truncating before JSON parse to avoid memory exhaustion.",
+                    operation, content.Length, MaxErrorBodyBytes);
+                content = content.Substring(0, MaxErrorBodyBytes);
+            }
 
             try
             {

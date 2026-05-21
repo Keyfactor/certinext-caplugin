@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
@@ -208,12 +209,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 noOfPages: 1);
 
         // POST /GetProductDetails
+        // Returns the nested category envelope format returned by the real CERTInext API
+        // (verified 2026-04). Each category object contains a "products" array.
+        // CERTInextClient.GetProductDetailsAsync calls FlattenProducts() to collapse this
+        // into a flat List<ProductDetail>.
         public static string GetProductDetailsJson() =>
             $@"{{
   ""meta"":{SuccessMetaJson()},
   ""productDetails"":[
-    {{""productCode"":""{ProfileIdTls}"",""productName"":""TLS Server"",""productType"":""SSL/TLS"",""active"":true}},
-    {{""productCode"":""{ProfileIdClient}"",""productName"":""Client Authentication"",""productType"":""Client"",""active"":true}}
+    {{
+      ""categoryName"":""SSL/TLS Certificates"",
+      ""categoryID"":""3"",
+      ""currencyType"":""USD"",
+      ""products"":[
+        {{""productCode"":""{ProfileIdTls}"",""productName"":""TLS Server"",""productTypeID"":""13""}},
+        {{""productCode"":""{ProfileIdClient}"",""productName"":""Client Authentication"",""productTypeID"":""14""}}
+      ]
+    }}
   ]
 }}";
 
@@ -301,6 +313,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Csr = FakeCsrPem
             };
 
+        /// <summary>
+        /// A LegacyGetCertificateResponse representing an order that is past DCV verification
+        /// but still has CERTInext-side issuance in progress.  Status maps to
+        /// <see cref="EndEntityStatus.EXTERNALVALIDATION"/> so post-DCV polling logic continues.
+        /// </summary>
+        public static LegacyGetCertificateResponse PendingCertRecord(string id = null) =>
+            new LegacyGetCertificateResponse
+            {
+                Id = id ?? CertId1,
+                Status = "pending_approval",   // → EXTERNALVALIDATION via StatusMapper
+                Certificate = null,
+                SerialNumber = null
+            };
+
         public static LegacyGetCertificateResponse RevokedCertRecord(string id = null) =>
             new LegacyGetCertificateResponse
             {
@@ -322,6 +348,125 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         public static string OAuth2TokenJson(int expiresIn = 3600) =>
             $@"{{""access_token"":""fake-bearer-token-abc123"",""token_type"":""Bearer"",""expires_in"":{expiresIn}}}";
+
+        // -----------------------------------------------------------------------
+        // DCV (domain control validation)
+        // -----------------------------------------------------------------------
+
+        public const string DcvOrderId = "ORD-DCV-001";
+        public const string DcvDomain  = "example.com";
+        public const string DcvToken   = "abc123dcvtoken";
+
+        /// <summary>
+        /// Returns a <see cref="TrackOrderResponse"/> with one pending DNS-TXT domain entry,
+        /// ready for Moq setups that exercise the DCV orchestration path.
+        /// </summary>
+        public static TrackOrderResponse DcvPendingTrackResponse(
+            string orderNumber = DcvOrderId,
+            string domain      = DcvDomain)
+        {
+            var detail = JsonSerializer.SerializeToElement(new DomainVerificationDetail
+            {
+                DcvMethod = Constants.Dcv.MethodDnsTxt,
+                DcvStatus = Constants.Dcv.StatusPending,
+                Status    = "1"
+            });
+
+            return new TrackOrderResponse
+            {
+                OrderDetails = new TrackOrderResponseDetails
+                {
+                    OrderStatusId      = "1",
+                    CertificateStatusId = "1",
+                    DomainVerification = new TrackOrderDomainVerification
+                    {
+                        Status           = Constants.Dcv.StatusPending,
+                        RawDomainEntries = new Dictionary<string, JsonElement> { [domain] = detail }
+                    }
+                }
+            };
+        }
+
+        public static TrackOrderResponse DcvVerifiedTrackResponse(
+            string orderNumber = DcvOrderId,
+            string domain      = DcvDomain)
+        {
+            var detail = JsonSerializer.SerializeToElement(new DomainVerificationDetail
+            {
+                DcvMethod = Constants.Dcv.MethodDnsTxt,
+                DcvStatus = Constants.Dcv.StatusValidated,
+                Status    = "1"
+            });
+
+            return new TrackOrderResponse
+            {
+                OrderDetails = new TrackOrderResponseDetails
+                {
+                    OrderStatusId       = "2",
+                    CertificateStatusId = "24",
+                    DomainVerification  = new TrackOrderDomainVerification
+                    {
+                        Status           = Constants.Dcv.StatusValidated,
+                        RawDomainEntries = new Dictionary<string, JsonElement> { [domain] = detail }
+                    }
+                }
+            };
+        }
+
+        /// <summary>
+        /// Returns a <see cref="TrackOrderResponse"/> whose order is already in a terminal
+        /// issued state — DCV should be skipped entirely when this is returned.
+        /// </summary>
+        public static TrackOrderResponse AlreadyIssuedTrackResponse(string orderNumber = CertId1) =>
+            new TrackOrderResponse
+            {
+                OrderDetails = new TrackOrderResponseDetails
+                {
+                    OrderStatusId       = "4",
+                    CertificateStatusId = "9",  // CertificateGenerated — maps to GENERATED
+                }
+            };
+
+        /// <summary>
+        /// Returns a <see cref="GetDcvResponse"/> containing the TXT token for Moq setups.
+        /// </summary>
+        public static GetDcvResponse DcvTokenResponse(string token = DcvToken) =>
+            new GetDcvResponse
+            {
+                DcvDetails = new DcvResponseDetails { Token = token }
+            };
+
+        /// <summary>
+        /// POST /GetDcv — success response containing the TXT record token for DNS DCV.
+        /// </summary>
+        public static string GetDcvSuccessJson(string token = "abc123token") =>
+            $@"{{
+  ""meta"":{SuccessMetaJson()},
+  ""dcvDetails"":{{
+    ""token"":""{token}"",
+    ""fileName"":null,
+    ""fileContent"":null,
+    ""dcvEmails"":null
+  }}
+}}";
+
+        /// <summary>
+        /// POST /GetDcv — failure response (bad order or unsupported dcvMethod).
+        /// </summary>
+        public static string GetDcvFailureJson(string code = "EMS-DCV-001", string msg = "DCV not available for this order") =>
+            $@"{{""meta"":{FailureMetaJson(code, msg)}}}";
+
+        /// <summary>
+        /// POST /VerifyDcv — success response (meta only, no additional payload).
+        /// </summary>
+        public static string VerifyDcvSuccessJson() =>
+            $@"{{""meta"":{SuccessMetaJson()}}}";
+
+        /// <summary>
+        /// POST /VerifyDcv — failure response (TXT record not found).
+        /// </summary>
+        public static string VerifyDcvFailureJson(string code = "EMS-DCV-002", string msg = "DNS record not found") =>
+            $@"{{""meta"":{FailureMetaJson(code, msg)}}}";
 
         // -----------------------------------------------------------------------
         // Error responses
