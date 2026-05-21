@@ -371,28 +371,85 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public void SetDomainValidatorFactory_SecondCall_OverridesFirst()
+        public async Task SetDomainValidatorFactory_SecondCall_OverridesFirst()
         {
             // Property-style setter semantics: the most recent SetDomainValidatorFactory
             // call wins. Important for gateway hosts that may resolve a fresh factory
-            // per-initialize cycle.
-            var plugin = new CERTInextCAPlugin();
+            // per-initialize cycle.  Tested behaviorally — drive Enroll() and assert
+            // the SECOND factory's validator received the TXT staging call (no reflection
+            // on internal fields).
+            var (mock, _) = HappyPathMocks();
             var firstValidator = new FakeDomainValidator();
             var secondValidator = new FakeDomainValidator();
 
+            var plugin = new CERTInextCAPlugin(
+                mock.Object,
+                domainValidatorFactory: null,
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            // First setter call is ignored by the override; only the second factory's
+            // validator should ever see traffic.
             plugin.SetDomainValidatorFactory(new FakeDomainValidatorFactory(firstValidator));
             plugin.SetDomainValidatorFactory(new FakeDomainValidatorFactory(secondValidator));
 
-            // The plugin uses _domainValidatorFactory through internal methods; we reach
-            // the field via reflection to assert the second factory is the one stored.
-            var field = typeof(CERTInextCAPlugin)
-                .GetField("_domainValidatorFactory",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            field.Should().NotBeNull();
-            var stored = field!.GetValue(plugin) as FakeDomainValidatorFactory;
-            stored.Should().NotBeNull();
-            stored!.PrimaryValidator.Should().BeSameAs(secondValidator,
-                "the most recent SetDomainValidatorFactory call must replace the earlier one");
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            firstValidator.StagedRecords.Should().BeEmpty(
+                "the first factory must be replaced — its validator should never be called");
+            secondValidator.StagedRecords.Should().NotBeEmpty(
+                "the second SetDomainValidatorFactory call must replace the first; its validator drives DCV");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Cancelled/rejected orders short-circuit even with validated DCV state
+        // ---------------------------------------------------------------------------
+
+        [Theory]
+        [InlineData("4")] // OrderStatusId 4 = Order Cancelled
+        [InlineData("5")] // OrderStatusId 5 = Order Rejected
+        public async Task Dcv_Skipped_WhenOrderStatusIdIsTerminal_EvenIfDcvValidated(string terminalOrderStatusId)
+        {
+            // Regression guard for the cached-DCV path: a cancelled or rejected order
+            // can still have domainVerification.Status="1" carried over from a prior
+            // validated round. Without this guard the plugin would return true from
+            // PerformDcvIfNeededAsync and the caller would spend the full
+            // DcvWaitForIssuanceSeconds budget polling GetCertificate for a cert that
+            // is never going to issue. Per audit report B2 on PR #2.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending" });
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId       = terminalOrderStatusId,
+                        CertificateStatusId = "1",
+                        // Validated DCV state — without the OrderStatusId guard this would
+                        // erroneously trigger the issuance-wait path.
+                        DomainVerification  = new TrackOrderDomainVerification
+                        {
+                            Status = Constants.Dcv.StatusValidated
+                        }
+                    }
+                });
+
+            var validator = new FakeDomainValidator();
+            // Issuance-wait budget > 0 so a wrong-path entry would manifest as a
+            // GetCertificate call we DON'T expect.
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            await Enroll(plugin);
+
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never,
+                "Enroll must not enter WaitForIssuanceAfterDcvAsync when the order is " +
+                "cancelled/rejected, even if DCV happens to be in a 'validated' state");
+            validator.StagedRecords.Should().BeEmpty(
+                "DCV staging must not run for a cancelled/rejected order");
         }
 
         // ---------------------------------------------------------------------------
@@ -426,7 +483,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             // GetSingleRecord calls GetCertificateAsync first to materialize the record;
             // the sync-DCV-retry kicks in afterwards.  The pending response keeps the
-            // retry path engaged so we exercise the override.
+            // retry path engaged so we exercise the override.  The assertion below pins
+            // Times.Exactly(1) on TrackOrderAsync: with override=0, the polling loop
+            // takes one TrackOrder call, sees domainVerification null, and bails — no
+            // further polls inside the 60s budget the config nominally allows.
             mock.Setup(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.PendingCertRecord(MockCertificateData.DcvOrderId));
 

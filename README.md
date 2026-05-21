@@ -57,7 +57,7 @@ The CERTInext AnyCA Gateway REST plugin is compatible with the Keyfactor AnyCA G
 
 DNS DCV is an opt-in feature (controlled by `DcvEnabled` in the connector config). The plugin's DCV machinery uses `Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory`, which was introduced in `Keyfactor.AnyGateway.IAnyCAPlugin` v3.3 (paired with newer gateway images). On older gateway hosts whose bundled `IAnyCAPlugin` assembly is v3.2 or earlier, the plugin loads cleanly and operates normally for enrollment, sync, and revocation — but DCV is automatically disabled (the plugin returns each pending order with status `EXTERNALVALIDATION` so the gateway picks it up on the next sync, instead of running DNS-01 itself).
 
-To enable DCV on a v3.3+ gateway, the host must invoke `CERTInextCAPlugin.SetDomainValidatorFactory(factory)` after constructing the plugin and before calling `Initialize`. The setter accepts `object` (rather than the v3.3-only interface type) so the plugin's public surface stays loadable on older gateways — see GitHub [issue #7](../../issues/7) for the full reasoning.
+**No operator action is required.** On a v3.3+ AnyCA Gateway, the gateway host wires `IDomainValidatorFactory` into the plugin automatically — operators just install a DNS provider plugin (e.g. `azure-azuredns-dnsplugin`) and set `DcvEnabled=true` in the connector config. The plugin exposes a public `SetDomainValidatorFactory(object)` method that the gateway host uses as its integration point; the parameter type is `object` (rather than the v3.3-only interface) specifically so the plugin's public surface remains loadable on older gateways. See GitHub [issue #7](../../issues/7) for the full reasoning.
 
 ## Support
 The CERTInext AnyCA Gateway REST plugin is open source and there is **no SLA**. Keyfactor will address issues as resources become available. Keyfactor customers may request escalation by opening up a support ticket through their Keyfactor representative. 
@@ -347,7 +347,7 @@ The same numeric product codes have been observed for S/MIME and document-signin
 
 To retrieve the full list of product codes available to your account, call the `GetProductDetails` endpoint against your target environment. The sandbox and production APIs each return their own set of codes.
 
-> Note: SSL/TLS products are supported on standard accounts (Production codes `838`–`847`, Sandbox codes `842`–`851` in the snapshots we've seen). Private PKI (Production `100`, `104` / Sandbox `149`), S/MIME (`894`), and document-signing products (`819`–`827`) require special provisioning by eMudhra and are not available on standard SSL/TLS accounts — ordering them returns EMS-1162.
+> Note: SSL/TLS products are supported on standard accounts — see the SSL/TLS table above for the exact sandbox/production code pair for each product. Private PKI (Production `100`, `104` / Sandbox `149`), S/MIME (`894`), and document-signing products (`819`–`827`) require special provisioning by eMudhra and are not available on standard SSL/TLS accounts — ordering them returns EMS-1162.
 
 ## Architecture
 

@@ -1046,12 +1046,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <summary>
-        /// Generates a unique transaction ID (alphanumeric, 16–18 digits).
+        /// Generates a unique transaction ID (decimal, up to 18 digits).
+        ///
+        /// `txn` is part of the SHA-256 input for the CERTInext authKey
+        /// (<c>SHA256(accessKey + ts + txn)</c>).  A predictable txn shrinks the search
+        /// space against a leaked accessKey, so we use a cryptographically-strong source
+        /// rather than <see cref="Random.Shared"/> — per the project's BouncyCastle-only
+        /// crypto policy, that source is <c>Org.BouncyCastle.Security.SecureRandom</c>.
         /// </summary>
+        private static readonly Org.BouncyCastle.Security.SecureRandom _txnRandom =
+            new Org.BouncyCastle.Security.SecureRandom();
+
         private static string GenerateTxnId()
         {
-            // Match the Postman pre-request script: Math.floor(Math.random() * 1e18 + 1)
-            long val = (long)(Random.Shared.NextDouble() * 1_000_000_000_000_000_000L) + 1L;
+            // Produce a positive long in [1, 1e18). NextLong() returns the full Int64
+            // range including negatives — mask off the sign bit and reduce.
+            long val = (_txnRandom.NextLong() & long.MaxValue) % 1_000_000_000_000_000_000L + 1L;
             return val.ToString();
         }
 
@@ -1083,6 +1093,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 var tokenResp = await tokenClient.ExecuteAsync(tokenReq, ct);
                 if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
                 {
+                    // SOX CC6.1 (credential confidentiality): NEVER log tokenResp.Content,
+                    // tokenResp.ErrorMessage, or tokenResp.ErrorException — RestSharp's
+                    // failure paths can echo the original request including the
+                    // `client_secret` form value.  Only StatusCode + non-secret config
+                    // identifiers are safe to log here.
                     Logger.LogError(
                         "OAuth2 token acquisition failed. TokenUrl={TokenUrl}, ClientId={ClientId}, HttpStatus={Status}",
                         _config.OAuthTokenUrl, _config.OAuthClientId, (int)tokenResp.StatusCode);
@@ -1295,12 +1310,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private AgreementDetails BuildDefaultAgreementDetails()
         {
+            // SOC1 accuracy-of-processing: the subscriber agreement is a legal artefact
+            // and the SignerIp it carries is part of the audit record CERTInext stores.
+            // Submitting 127.0.0.1 is a misrepresentation. We retain the fallback so we
+            // don't break existing deployments (and our enrollment never fails just
+            // because SignerIp is blank), but a missing value emits a Warning so an
+            // auditor sees the misrepresentation as an actionable signal in the gateway log.
+            string signerIp = _config.SignerIp;
+            if (string.IsNullOrWhiteSpace(signerIp))
+            {
+                Logger.LogWarning(
+                    "Connector config SignerIp is empty — falling back to 127.0.0.1 for the " +
+                    "subscriber agreement. Set the SignerIp config field to the gateway host's " +
+                    "actual public-routable IP so the audit record is accurate.");
+                signerIp = "127.0.0.1";
+            }
             return new AgreementDetails
             {
                 AcceptAgreement = "1",
                 SignerName = _config.RequestorName ?? "Keyfactor Gateway",
                 SignerPlace = _config.SignerPlace ?? "Gateway",
-                SignerIp = _config.SignerIp ?? "127.0.0.1"
+                SignerIp = signerIp
             };
         }
 
@@ -1365,10 +1395,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return result;
         }
 
+        // SOC2 CC7.2 DoS guard: cap the size of any response body we parse here. CERTInext
+        // error envelopes are always under a few KB; a multi-MB body is either a misrouted
+        // response or a hostile payload aimed at exhausting our JsonDocument buffer.
+        private const int MaxErrorBodyBytes = 64 * 1024;
+
         private static string ExtractErrorMessage(string content, string operation)
         {
             if (string.IsNullOrWhiteSpace(content))
                 return $"CERTInext returned no body for operation '{operation}'.";
+
+            if (content.Length > MaxErrorBodyBytes)
+            {
+                Logger.LogWarning(
+                    "CERTInext response body for '{Operation}' exceeded the parser size cap " +
+                    "({Length} bytes, cap {Cap}). Truncating before JSON parse to avoid memory exhaustion.",
+                    operation, content.Length, MaxErrorBodyBytes);
+                content = content.Substring(0, MaxErrorBodyBytes);
+            }
 
             try
             {

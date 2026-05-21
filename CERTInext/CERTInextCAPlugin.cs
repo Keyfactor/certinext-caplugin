@@ -39,7 +39,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // A v3.3 gateway host can call SetDomainValidatorFactory between `new` and
         // Initialize() to wire up DCV; on a v3.2 host where the factory type doesn't
         // exist, the field remains null and DCV gracefully no-ops.
-        private IDomainValidatorFactory _domainValidatorFactory;
+        //
+        // `volatile` because the field is written by SetDomainValidatorFactory and
+        // read by EnrollNewAsync/TryRunDcvDuringSyncAsync, which can run on different
+        // threads.  The standard gateway lifecycle wires the factory before the first
+        // operation, but no contract forbids a later re-wire and the cost of `volatile`
+        // is negligible compared to the time spent inside Enroll/Synchronize.
+        private volatile IDomainValidatorFactory _domainValidatorFactory;
 
         // True when the client was passed in via a test-injection constructor and therefore
         // should not be disposed by this class (the test owns the mock's lifetime).
@@ -140,7 +146,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public void SetDomainValidatorFactory(object factory)
         {
-            _domainValidatorFactory = factory as IDomainValidatorFactory;
+            var typed = factory as IDomainValidatorFactory;
+            // SOX change-management / SOC2 CC6.1: log every factory injection so an auditor
+            // can confirm which DNS provider plugin is being used to publish TXT records.
+            // A bad-faith host could otherwise swap the factory mid-lifecycle with no trail.
+            // We deliberately do NOT log the factory instance itself — only its type — to
+            // avoid serialising any state it may carry.
+            _logger.LogInformation(
+                "Domain validator factory set on CERTInext plugin. " +
+                "OfferedType={OfferedType}, Accepted={Accepted}",
+                factory?.GetType().FullName ?? "(null)", typed != null);
+            _domainValidatorFactory = typed;
         }
 
         // ---------------------------------------------------------------------------
@@ -193,12 +209,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "ApiKeyPresent={ApiKeyPresent}, UsernamePresent={UsernamePresent}, " +
                 "PasswordPresent={PasswordPresent}, OAuth2ClientIdPresent={OAuth2ClientIdPresent}, " +
                 "OAuth2ClientSecretPresent={OAuth2ClientSecretPresent}, OAuth2TokenUrlPresent={OAuth2TokenUrlPresent}, " +
-                "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}",
+                "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, " +
+                "DcvEnabled={DcvEnabled}, DcvTxtRecordTemplate={DcvTxtRecordTemplate}, " +
+                "DomainValidatorFactoryInjected={FactoryInjected}",
                 _config.ApiUrl, _config.AuthMode, _config.Enabled,
                 hasApiKey, hasUsername,
                 hasPassword, hasClientId,
                 hasClientSecret, hasTokenUrl,
-                _config.PageSize, _config.IgnoreExpired);
+                _config.PageSize, _config.IgnoreExpired,
+                _config.DcvEnabled, _config.DcvTxtRecordTemplate,
+                _domainValidatorFactory != null);
+
+            // SOC2 CC7.1: surface silent functional downgrades. If DCV is enabled in
+            // config but no factory was injected (e.g. v3.2 gateway host), DCV will be
+            // skipped at runtime. The operator should know that on every restart.
+            if (_config.DcvEnabled && _domainValidatorFactory == null)
+            {
+                _logger.LogWarning(
+                    "DcvEnabled=true but no IDomainValidatorFactory has been injected — " +
+                    "DCV will be silently skipped for every enrollment. This usually means the " +
+                    "gateway host is on a release that does not provide IDomainValidatorFactory " +
+                    "(see GitHub issue #7). Install a DNS provider plugin and upgrade to a " +
+                    "gateway image that supplies the factory, or set DcvEnabled=false to clear " +
+                    "this warning.");
+            }
             _logger.MethodExit(LogLevel.Trace);
         }
 
@@ -351,13 +385,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             // Attempt a live connectivity test using the supplied credentials
+            CERTInextConfig tempConfig = null;
+            CERTInextClient tempClient = null;
             try
             {
                 // Build a transient config from the supplied connectionInfo so we don't
                 // rely on the already-initialized _client (which may hold stale creds)
                 string rawConfig = JsonSerializer.Serialize(connectionInfo);
-                var tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig);
-                var tempClient = new CERTInextClient(tempConfig);
+                tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig);
+                tempClient = new CERTInextClient(tempConfig);
                 await tempClient.PingAsync();
             }
             catch (Exception ex)
@@ -376,6 +412,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 throw new AnyCAValidationException(
                     "Successfully parsed configuration, but could not connect to CERTInext. " +
                     "See gateway logs for details.");
+            }
+            finally
+            {
+                // SOC2 CC6.1 best-effort credential scrubbing: blank out the secret fields
+                // on the transient config so they aren't reachable from the still-rooted
+                // tempClient instance after this method returns. Not a hard guarantee
+                // (the .NET runtime may have already copied them elsewhere) but removes
+                // the most obvious post-validation reference chain.
+                if (tempConfig != null)
+                {
+                    tempConfig.ApiKey = string.Empty;
+                    tempConfig.OAuthClientSecret = string.Empty;
+                    tempConfig.Password = string.Empty;
+                }
             }
 
             _logger.LogInformation(
@@ -443,6 +493,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 throw new AnyCAValidationException(
                     $"Unable to validate profile '{profileId}' against CERTInext. " +
                     "See gateway logs for details.");
+            }
+            finally
+            {
+                // SOC2 CC6.1 best-effort credential scrubbing (see ValidateCAConnectionInfo).
+                if (tempConfig != null)
+                {
+                    tempConfig.ApiKey = string.Empty;
+                    tempConfig.OAuthClientSecret = string.Empty;
+                    tempConfig.Password = string.Empty;
+                }
             }
 
             _logger.LogInformation("Product/profile validation succeeded. ProfileId={ProfileId}", profileId);
@@ -595,12 +655,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string reasonString = StatusMapper.ToRevocationReason(revocationReason);
 
             // SOX: log the revocation attempt before any state change so the intent is
-            // recorded even if the API call subsequently fails.
+            // recorded even if the API call subsequently fails.  Include ManagedThreadId
+            // so revoke events can be correlated against the gateway-supplied
+            // RequestingUser scope when the host enriches Keyfactor.Logging with it
+            // (segregation-of-duties evidence — SOX CC1.3 / SOC2 CC1.4).
             _logger.LogInformation(
                 "Revocation attempt started. " +
                 "CARequestID={Id}, HexSerialNumber={Serial}, " +
-                "ReasonCode={ReasonCode}, ReasonString={ReasonString}",
-                caRequestID, hexSerialNumber, revocationReason, reasonString);
+                "ReasonCode={ReasonCode}, ReasonString={ReasonString}, " +
+                "ManagedThreadId={ThreadId}",
+                caRequestID, hexSerialNumber, revocationReason, reasonString,
+                System.Environment.CurrentManagedThreadId);
 
             // Verify the certificate is in a revocable state before calling the API
             LegacyGetCertificateResponse current;
@@ -762,6 +827,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     {
                         _logger.LogError(ex, "Error processing certificate '{Id}' during synchronization.", cert.Id);
                         errors++;
+
+                        // SOC1 completeness/accuracy: a sync that hits an error-rate cliff
+                        // must report a failure, not silently 'complete' with zero useful
+                        // records. Abort if we have at least 50 records' worth of evidence
+                        // AND more than 25% of all records seen so far are errors.
+                        int totalSeen = synced + skipped + errors;
+                        if (totalSeen >= 50 && errors > totalSeen / 4)
+                        {
+                            _logger.LogError(
+                                "CERTInext synchronization aborted — error rate ({Errors}/{Total}) " +
+                                "exceeded 25% threshold. Likely CA-side outage; will retry on next sync cycle.",
+                                errors, totalSeen);
+                            throw new Exception(
+                                $"CERTInext synchronization aborted after {errors}/{totalSeen} records failed " +
+                                "(>25% error rate). See gateway logs for the underlying CA errors.");
+                        }
                     }
                 }
 
@@ -896,6 +977,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Command injects "PriorCertSN" for renewal flows.
             string priorCertSn = null;
             productInfo.ProductParameters?.TryGetValue("PriorCertSN", out priorCertSn);
+
+            // SOC2 CC6.1: a renewal/reissue read against the gateway's certificate
+            // inventory is a logical-access event and must be logged at Information.
+            _logger.LogInformation(
+                "Renewal/reissue probe — read PriorCertSN from EnrollmentProductInfo. " +
+                "Subject={Subject}, PriorCertSN={PriorCertSN}, RenewalWindowDays={WindowDays}",
+                subject, string.IsNullOrWhiteSpace(priorCertSn) ? "(none)" : priorCertSn,
+                ep.RenewalWindowDays);
 
             if (string.IsNullOrWhiteSpace(priorCertSn))
             {
@@ -1076,7 +1165,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             if (!_dcvInFlight.TryAdd(orderNumber, 0))
             {
-                _logger.LogDebug(
+                // SOC2 CC7.2: concurrent DCV-attempt collisions are security-relevant
+                // (they indicate either a normal overlap of two sync cycles OR an attempt
+                // to interleave operations on the same order). Log at Information so the
+                // event appears in production logs without verbose-debug being enabled.
+                _logger.LogInformation(
                     "DCV already in flight for order {OrderNumber}; skipping concurrent attempt.",
                     orderNumber);
                 return false;
@@ -1168,6 +1261,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             orderNumber, certStatusId);
                         return false;
                     }
+                }
+
+                // Skip if the order itself reached a terminal failure state.  Without this
+                // the cached-DCV path below could still return true on a cancelled order
+                // (domainVerification.Status = "1" survives the cancellation), sending the
+                // caller into a wasted DcvWaitForIssuanceSeconds-long GetCertificate poll
+                // that can never resolve. OrderStatusId 4 = cancelled, 5 = rejected.
+                if (track.OrderDetails?.OrderStatusId is "4" or "5")
+                {
+                    _logger.LogDebug(
+                        "DCV skipped — order {OrderNumber} is cancelled/rejected " +
+                        "(orderStatusId={OrderStatus}).",
+                        orderNumber, track.OrderDetails.OrderStatusId);
+                    return false;
                 }
 
                 domainVerification = track.OrderDetails?.DomainVerification;
@@ -1475,8 +1582,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var pending = new HashSet<string>(domains, StringComparer.OrdinalIgnoreCase);
             int pollSeconds = Math.Max(1, _config.DcvPropagationDelaySeconds);
 
+            // Defense-in-depth deadline: SOX CC7.3 requires every wait to be bounded.
+            // The caller passes a `ct` derived from a CancellationTokenSource that already
+            // cancels after `DcvTimeoutMinutes`, so this method is bounded via that path.
+            // We add an explicit internal deadline so a future refactor breaking the
+            // cancellation chain (e.g. accidentally passing CancellationToken.None) can't
+            // make this loop unbounded — it would still exit on the deadline below.
+            var verificationDeadline = DateTime.UtcNow.AddMinutes(_config.GetEffectiveDcvTimeoutMinutes());
+
             while (pending.Count > 0 && !ct.IsCancellationRequested)
             {
+                if (DateTime.UtcNow >= verificationDeadline)
+                {
+                    _logger.LogWarning(
+                        "DCV verification poll exceeded its internal deadline ({Minutes}min). " +
+                        "OrderNumber={OrderNumber}, StillPendingDomains=[{Pending}].  " +
+                        "Exiting and leaving TXT records for the caller's finally block to clean up.",
+                        _config.GetEffectiveDcvTimeoutMinutes(), orderNumber, string.Join(",", pending));
+                    return;
+                }
+
                 await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
 
                 TrackOrderResponse poll;
@@ -1684,12 +1809,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var cert = parser.ReadCertificate(der);
                 if (cert == null)
                     return "(parse-error)";
-                // Match the prior format produced by X509Certificate2.SerialNumber:
-                // uppercase hex, no separators, no leading zeros for normal serials.
-                return cert.SerialNumber.ToString(16).ToUpperInvariant();
+                // Match X509Certificate2.SerialNumber's format precisely: uppercase hex,
+                // byte-per-byte, *preserving* leading-zero bytes (e.g. serial bytes
+                // 0A 12 34 56 → "0A123456", not "A123456").  BouncyCastle's
+                // BigInteger.ToString(16) drops the leading-zero nibble, which would
+                // break audit-log correlation against Command's stored serial.  Convert
+                // the unsigned-magnitude byte array to hex directly instead.
+                byte[] serialBytes = cert.SerialNumber.ToByteArrayUnsigned();
+                return Convert.ToHexString(serialBytes).ToUpperInvariant();
             }
-            catch
+            catch (Exception ex)
             {
+                // SOC2 CC7.2: never let audit-log generation throw, but log the suppression
+                // at Debug so an auditor diagnosing missing serial numbers can see the cause.
+                LogHandler.GetClassLogger(typeof(CERTInextCAPlugin))
+                    .LogDebug(ex, "ExtractSerialFromPem suppressed parse failure");
                 return "(parse-error)";
             }
         }
