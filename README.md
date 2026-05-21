@@ -243,7 +243,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | Field | Required / Optional | Description | Where to find it | Example |
 |---|---|---|---|---|
 | `ApiUrl` | Required | CERTInext API base URL for your environment. Must include the `/emSignHub-API/` path segment. No trailing slash is required but is accepted. | See the environments table above. | `https://api.certinext.io/emSignHub-API` |
-| `AccountNumber` | Required | Your CERTInext account number (numeric string). Included in the `meta` block of every API request. | Portal → click your name or avatar → **Account Settings** or **My Profile**. | `4461259728` |
+| `AccountNumber` | Required | Your CERTInext account number (numeric string). Included in the `meta` block of every API request. | Portal → click your name or avatar → **Account Settings** or **My Profile**. | `1234567890` |
 | `AuthMode` | Required | Authentication mode. `AccessKey` uses HMAC signing (recommended). `OAuth` uses a bearer token. | N/A — choose based on the credential type you created. | `AccessKey` |
 | `ApiKey` | Conditional | The REST API Access Key generated in the CERTInext portal. Used to compute `authKey = SHA256(accessKey + ts + txn)`. The raw key is never transmitted. Required when `AuthMode` is `AccessKey`. This field is masked in the UI. | Portal → **Integrations → APIs** → generate or view the credential row. | *(generated, masked in UI)* |
 | `OAuthTokenUrl` | Conditional | OAuth token endpoint URL. Required when `AuthMode` is `OAuth`. | Provided by eMudhra for your account. | `https://auth.certinext.io/oauth/token` |
@@ -255,8 +255,8 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `RequestorMobileNumber` | Optional | Requestor mobile number (digits only, no country code). Included in the `requestorInformation` block. | N/A | `5551234567` |
 | `SignerPlace` | Required | City or location of the person accepting the subscriber agreement on behalf of your organization. Required by CERTInext for all orders. | Use the physical city where the signer is located. | `Austin` |
 | `SignerIp` | Required | Public IP address of the host accepting the subscriber agreement. Required by CERTInext for all orders. | Use the outbound IP of the AnyCA Gateway host, or the IP of the workstation from which the agreement was accepted. | `203.0.113.10` |
-| `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in `productDetails.groupNumber` on `GetProductDetails` requests **and** in `delegationInformation.groupNumber` on every SSL order. Some accounts queue orders for additional review when this field is omitted. | Portal → **Delegation → Groups**. | `2171775848` |
-| `OrganizationNumber` | Strongly Recommended | Numeric CERTInext organization number for a pre-vetted organization (e.g. your company). When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. **Without this value, orders are placed without any `organizationDetails` block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours on the sandbox).** Required for OV/EV products in most accounts. | Portal → **Organizations → Pre-vetted Organizations**. | `9876543210` |
+| `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in `productDetails.groupNumber` on `GetProductDetails` requests **and** in `delegationInformation.groupNumber` on every SSL order. Some accounts queue orders for additional review when this field is omitted. | Portal → **Delegation → Groups**. | `2345678901` |
+| `OrganizationNumber` | Strongly Recommended | Numeric CERTInext organization number for a pre-vetted organization (e.g. your company). When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. **Without this value, orders are placed without any `organizationDetails` block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours on the sandbox).** Required for OV/EV products in most accounts. | Portal → **Organizations → Pre-vetted Organizations**. | `3456789012` |
 | `TechnicalContactName` | Optional | Name sent in `technicalPointOfContact.tpcName` on every SSL order. Defaults to `RequestorName` when blank. Some product configurations require a TPoC; omitting it can park orders awaiting manual completion. | N/A | `Jane Smith` |
 | `TechnicalContactEmail` | Optional | Email sent in `technicalPointOfContact.tpcEmail`. Defaults to `RequestorEmail` when blank. | N/A | `tpc@example.com` |
 | `TechnicalContactIsdCode` | Optional | International dialing code for the TPoC phone number. Defaults to `RequestorIsdCode` when blank. | N/A | `1` |
@@ -295,8 +295,8 @@ To retrieve the exact codes available to your account, call the `GetProductDetai
 ### SSL/TLS
 
 The product codes in this table were observed on:
-- the US sandbox account (`accountNumber=9374221333`, April 2026; reconfirmed on the replacement sandbox `4873378853` in May 2026 — same SSL/TLS codes)
-- the Production India instance (`api.certinext.io`) via the live draft-order coverage matrix in `docsource/development.md`
+- the US sandbox environment (`sandbox-us-api.certinext.io`) in April–May 2026
+- the Production India environment (`api.certinext.io`) via the live draft-order coverage matrix in `docsource/development.md`
 
 **Your account may still have different codes.** Always call `GetProductDetails` against your target environment before going live.
 
