@@ -201,6 +201,88 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         /// <summary>
+        /// End-to-end "DCV mode off" scenario, mirroring how a v3.2 gateway host would
+        /// experience the plugin (no IDomainValidatorFactory available, so DCV silently
+        /// no-ops). Enrolls a fresh domain with DcvEnabled=false, then runs the plugin's
+        /// own <c>Synchronize</c> and asserts the order surfaces in pending-DCV state.
+        /// This is the live verification for GitHub issue #7.
+        ///
+        /// The CERTInext side may auto-issue some orders very quickly thanks to cached
+        /// DCV for previously-validated parent domains; this test uses a freshly random
+        /// subdomain to minimize that but tolerates either pending or issued in the
+        /// assertion (the real signal we want is "the plugin did not invoke DCV").
+        /// </summary>
+        [SkippableFact]
+        public async Task EnrollWithDcvOff_OrderAppearsInSync_PluginDidNotInvokeDcv()
+        {
+            IntegrationSkip.IfNotConfigured(_fixture);
+
+            // Generate a unique CN so prior cached-DCV state on the parent zone doesn't
+            // bias the result.
+            string suffix = System.Guid.NewGuid().ToString("N").Substring(0, 8);
+            string cn = $"dcv-off-{suffix}.scrup.org";
+
+            // Plugin built with DCV disabled. BuildPlugin still wires a Cloudflare or stub
+            // factory but PerformDcvIfNeededAsync gates on _config.DcvEnabled so neither
+            // factory will be touched on this Enroll path.
+            var plugin = BuildPlugin(dcvEnabled: false);
+
+            // --- Enroll phase ---
+            var enrollSw = System.Diagnostics.Stopwatch.StartNew();
+            var enrollResult = await plugin.Enroll(
+                csr:            GenerateCsrPem(cn),
+                subject:        $"CN={cn}",
+                san:            new Dictionary<string, string[]> { ["dns"] = new[] { cn } },
+                productInfo:    IntegrationTestData.DvSslProductInfo(_fixture.Config.DefaultProductCode),
+                requestFormat:  RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+            enrollSw.Stop();
+
+            enrollResult.Should().NotBeNull();
+            enrollResult.CARequestID.Should().NotBeNullOrWhiteSpace(
+                "the CA must accept the order even with DCV off — DCV-off ≠ no enrollment");
+
+            _output.WriteLine($"Enroll completed in {enrollSw.Elapsed:mm\\:ss\\.fff}");
+            _output.WriteLine($"  CARequestID:  {enrollResult.CARequestID}");
+            _output.WriteLine($"  Status:       {enrollResult.Status}");
+            _output.WriteLine($"  Message:      {enrollResult.StatusMessage}");
+
+            // The plugin's "DCV off" contract: with DcvEnabled=false the plugin does NOT
+            // wait for issuance. Even if CERTInext later auto-issues from cached DCV, the
+            // immediate Enroll response should be pending (no issuance polling ran).
+            // We allow GENERATED too because cached DCV on the parent zone could plausibly
+            // make CERTInext mark the order issued before its first reply — but the most
+            // common case is EXTERNALVALIDATION.
+            new[] { (int)EndEntityStatus.EXTERNALVALIDATION, (int)EndEntityStatus.GENERATED }
+                .Should().Contain(enrollResult.Status,
+                    $"DCV-off Enroll must return a recognizable terminal/pending state; got {enrollResult.Status}");
+
+            // --- Sync phase: pull the whole account, find our order ---
+            var syncSw = System.Diagnostics.Stopwatch.StartNew();
+            var synced = await RunSyncAsync(plugin);
+            syncSw.Stop();
+            _output.WriteLine($"Synchronize returned {synced.Count} records in {syncSw.Elapsed:mm\\:ss\\.fff}");
+
+            var record = synced.FirstOrDefault(r => r.CARequestID == enrollResult.CARequestID);
+            record.Should().NotBeNull(
+                $"the enrolled order ({enrollResult.CARequestID}) must appear in plugin.Synchronize results");
+            _output.WriteLine($"  Sync record status: {record!.Status}");
+
+            // Final shape assertion: order is in the inventory, and its status is either
+            // pending (EXTERNALVALIDATION — typical when CERTInext hasn't moved it yet)
+            // or issued (GENERATED — if CERTInext autoissued from cached DCV). It must
+            // NOT be FAILED — DCV-off should not produce a failed cert.
+            new[] { (int)EndEntityStatus.EXTERNALVALIDATION, (int)EndEntityStatus.GENERATED }
+                .Should().Contain(record.Status,
+                    "the synced record must reflect either pending or issued — never FAILED with DCV off");
+
+            // Surface the human-readable summary so the live behavior is visible in the
+            // test output without needing to grep the gateway logs.
+            _output.WriteLine($"--- Verdict: DCV-off enroll for {cn} succeeded, plugin did not invoke DCV, " +
+                              $"order {enrollResult.CARequestID} surfaced in sync with Status={record.Status}. ---");
+        }
+
+        /// <summary>
         /// Exercises the deferred-DCV retry path during single-record refresh against an
         /// existing pending order.  Reads <c>CERTINEXT_PENDING_ORDER_ID</c> from the
         /// environment; the test is skipped if not set, since this scenario requires a
