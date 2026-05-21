@@ -9,7 +9,6 @@ using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -1031,11 +1030,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         /// <summary>
         /// Computes the CERTInext authKey: SHA256(accessKey + ts + txn) as lowercase hex.
+        ///
+        /// Implemented with BouncyCastle (per the project's crypto policy: all hashing and
+        /// key handling goes through BouncyCastle, never BCL System.Security.Cryptography).
         /// </summary>
         private static string ComputeAuthKey(string accessKey, string ts, string txn)
         {
             string input = accessKey + ts + txn;
-            byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+            byte[] inputBytes = Encoding.UTF8.GetBytes(input);
+            var digest = new Org.BouncyCastle.Crypto.Digests.Sha256Digest();
+            digest.BlockUpdate(inputBytes, 0, inputBytes.Length);
+            byte[] hash = new byte[digest.GetDigestSize()];
+            digest.DoFinal(hash, 0);
             return Convert.ToHexString(hash).ToLowerInvariant();
         }
 

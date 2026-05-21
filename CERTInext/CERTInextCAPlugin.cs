@@ -1660,6 +1660,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Extracts the X.509 serial number from a PEM-encoded certificate for inclusion
         /// in audit log entries.  Returns "(parse-error)" rather than throwing, so that a
         /// logging failure never suppresses an audit record.
+        ///
+        /// Implemented with BouncyCastle (per the project's crypto policy: all certificate
+        /// and key handling goes through BouncyCastle, never BCL System.Security.Cryptography).
         /// </summary>
         private static string ExtractSerialFromPem(string pem)
         {
@@ -1677,8 +1680,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     return "(empty-pem)";
 
                 byte[] der = Convert.FromBase64String(b64);
-                using var cert = new System.Security.Cryptography.X509Certificates.X509Certificate2(der);
-                return cert.SerialNumber;
+                var parser = new Org.BouncyCastle.X509.X509CertificateParser();
+                var cert = parser.ReadCertificate(der);
+                if (cert == null)
+                    return "(parse-error)";
+                // Match the prior format produced by X509Certificate2.SerialNumber:
+                // uppercase hex, no separators, no leading zeros for normal serials.
+                return cert.SerialNumber.ToString(16).ToUpperInvariant();
             }
             catch
             {
