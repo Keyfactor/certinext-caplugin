@@ -35,7 +35,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         private CERTInextConfig _config;
         private ICERTInextClient _client;
         private ICertificateDataReader _certificateDataReader;
-        private readonly IDomainValidatorFactory _domainValidatorFactory;
+        // Not readonly: SetDomainValidatorFactory mutates this post-construction.
+        // A v3.3 gateway host can call SetDomainValidatorFactory between `new` and
+        // Initialize() to wire up DCV; on a v3.2 host where the factory type doesn't
+        // exist, the field remains null and DCV gracefully no-ops.
+        private IDomainValidatorFactory _domainValidatorFactory;
 
         // True when the client was passed in via a test-injection constructor and therefore
         // should not be disposed by this class (the test owns the mock's lifetime).
@@ -51,30 +55,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Production constructor — called by the gateway framework via constructor DI.
-        /// The gateway injects <see cref="IDomainValidatorFactory"/> when DNS provider
-        /// plugins are installed; DCV is only attempted when <c>DcvEnabled=true</c>
-        /// in the connector configuration.
-        /// </summary>
-        public CERTInextCAPlugin(IDomainValidatorFactory domainValidatorFactory)
-        {
-            _domainValidatorFactory = domainValidatorFactory;
-        }
-
-        /// <summary>
-        /// Parameterless constructor — retained for backwards compatibility with
-        /// gateway versions that do not inject <see cref="IDomainValidatorFactory"/>.
-        /// DCV will not be available when this constructor is used.
+        /// Production constructor — the only public constructor the gateway DI container
+        /// sees. Deliberately parameterless to ensure plugin load succeeds on gateway
+        /// versions whose <c>Keyfactor.AnyGateway.IAnyCAPlugin</c> assembly does not
+        /// contain <see cref="IDomainValidatorFactory"/> (e.g. 25.4.0 ships v3.2.0.0).
+        ///
+        /// If the host gateway exposes an <see cref="IDomainValidatorFactory"/> instance
+        /// it should be injected via <see cref="SetDomainValidatorFactory"/> after
+        /// construction.  When no factory is provided, DCV silently no-ops and orders
+        /// are returned in their pending state for the gateway to advance on the next
+        /// sync cycle.
+        ///
+        /// See <see href="https://github.com/Keyfactor/certinext-caplugin/issues/7"/>.
         /// </summary>
         public CERTInextCAPlugin() { }
 
         /// <summary>
-        /// Test-injection constructor — pass a mock <see cref="ICERTInextClient"/>
-        /// to avoid real network calls in unit tests.  A default configuration is
-        /// supplied so that methods that read <c>_config</c> do not null-fault when
-        /// <see cref="Initialize"/> has not been called.
+        /// Internal constructor used by unit and integration tests to inject a mock
+        /// <see cref="ICERTInextClient"/> and bypass network I/O.  A default
+        /// <see cref="CERTInextConfig"/> is supplied so callers that don't invoke
+        /// <see cref="Initialize"/> can still read <c>_config</c>.
         /// </summary>
-        public CERTInextCAPlugin(ICERTInextClient client)
+        internal CERTInextCAPlugin(ICERTInextClient client)
         {
             _client = client;
             _clientWasInjected = true;
@@ -82,11 +84,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Test-injection constructor — pass both a mock <see cref="ICERTInextClient"/>
+        /// Internal test-injection constructor — pass a mock <see cref="ICERTInextClient"/>
         /// and a mock <see cref="ICertificateDataReader"/> for tests that exercise
         /// RenewOrReissue logic that reads prior certificate data from Command's database.
         /// </summary>
-        public CERTInextCAPlugin(ICERTInextClient client, ICertificateDataReader certDataReader)
+        internal CERTInextCAPlugin(ICERTInextClient client, ICertificateDataReader certDataReader)
         {
             _client = client;
             _clientWasInjected = true;
@@ -95,11 +97,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Test-injection constructor — pass both a mock <see cref="ICERTInextClient"/>
+        /// Internal test-injection constructor — pass a mock <see cref="ICERTInextClient"/>
         /// and a specific <see cref="CERTInextConfig"/> for tests that need to override
         /// configuration fields such as <c>IgnoreExpired</c>.
         /// </summary>
-        public CERTInextCAPlugin(ICERTInextClient client, CERTInextConfig config)
+        internal CERTInextCAPlugin(ICERTInextClient client, CERTInextConfig config)
         {
             _client = client;
             _clientWasInjected = true;
@@ -107,15 +109,38 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Test-injection constructor — pass a mock client, a domain validator factory,
-        /// and an optional config for unit-testing the DCV orchestration path.
+        /// Internal test-injection constructor — pass a mock client, a domain validator
+        /// factory, and an optional config for unit-testing the DCV orchestration path.
+        ///
+        /// This constructor is <c>internal</c> (rather than <c>public</c>) because the
+        /// gateway DI container's constructor-discovery reflection on a v3.2 host would
+        /// trip <see cref="IDomainValidatorFactory"/>'s missing-type load if this signature
+        /// were exposed publicly.  Tests in <c>CERTInext.Tests</c> /
+        /// <c>CERTInext.IntegrationTests</c> can still reach it via
+        /// <c>[InternalsVisibleTo]</c>.  See issue #7.
         /// </summary>
-        public CERTInextCAPlugin(ICERTInextClient client, IDomainValidatorFactory domainValidatorFactory, CERTInextConfig config = null)
+        internal CERTInextCAPlugin(ICERTInextClient client, IDomainValidatorFactory domainValidatorFactory, CERTInextConfig config = null)
         {
             _client = client;
             _clientWasInjected = true;
             _domainValidatorFactory = domainValidatorFactory;
             _config = config ?? new CERTInextConfig();
+        }
+
+        /// <summary>
+        /// Injects an <see cref="IDomainValidatorFactory"/> after construction.  Intended
+        /// for gateway hosts that can resolve the factory from their own service container
+        /// and want DCV enabled — they should call this between <c>new CERTInextCAPlugin()</c>
+        /// and <see cref="Initialize"/>.
+        ///
+        /// Accepts <see cref="object"/> rather than <see cref="IDomainValidatorFactory"/>
+        /// so the public method signature does not pull the v3.3-only type into the type's
+        /// reflection surface on older gateways.  When the supplied value is not an
+        /// <see cref="IDomainValidatorFactory"/>, DCV is left disabled.
+        /// </summary>
+        public void SetDomainValidatorFactory(object factory)
+        {
+            _domainValidatorFactory = factory as IDomainValidatorFactory;
         }
 
         // ---------------------------------------------------------------------------

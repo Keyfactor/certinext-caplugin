@@ -53,6 +53,12 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
 
 The CERTInext AnyCA Gateway REST plugin is compatible with the Keyfactor AnyCA Gateway REST 24.2.0 and later.
 
+### DCV (Domain Control Validation) — gateway-version note
+
+DNS DCV is an opt-in feature (controlled by `DcvEnabled` in the connector config). The plugin's DCV machinery uses `Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory`, which was introduced in `Keyfactor.AnyGateway.IAnyCAPlugin` v3.3 (paired with newer gateway images). On older gateway hosts whose bundled `IAnyCAPlugin` assembly is v3.2 or earlier, the plugin loads cleanly and operates normally for enrollment, sync, and revocation — but DCV is automatically disabled (the plugin returns each pending order with status `EXTERNALVALIDATION` so the gateway picks it up on the next sync, instead of running DNS-01 itself).
+
+To enable DCV on a v3.3+ gateway, the host must invoke `CERTInextCAPlugin.SetDomainValidatorFactory(factory)` after constructing the plugin and before calling `Initialize`. The setter accepts `object` (rather than the v3.3-only interface type) so the plugin's public surface stays loadable on older gateways — see GitHub [issue #7](../../issues/7) for the full reasoning.
+
 ## Support
 The CERTInext AnyCA Gateway REST plugin is open source and there is **no SLA**. Keyfactor will address issues as resources become available. Keyfactor customers may request escalation by opening up a support ticket through their Keyfactor representative. 
 
