@@ -130,7 +130,7 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductCode` | Optional | String | Override the numeric CERTInext product code for this template. Product codes are provisioned per account by eMudhra — obtain the correct code from `GetProductDetails` for your account. Set this explicitly when targeting the sandbox environment or when the connector `DefaultProductCode` should not apply to this template. | `842` (sandbox DV SSL, account-specific) |
+| `ProductCode` | Optional | String | Override the numeric CERTInext product code for this template. Product codes are provisioned per account by eMudhra — obtain the correct code from `GetProductDetails` for your account. Set this explicitly when targeting the sandbox environment or when the connector `DefaultProductCode` should not apply to this template. See the [Product Codes](#product-codes) section for the sandbox/production lookup table. | DV SSL: `842` (sandbox) or `838` (production) |
 | `ProfileId` | Deprecated | String | Legacy alias for `ProductCode`. Accepted for backward compatibility — if `ProductCode` is not set, `ProfileId` is used in its place. New templates should use `ProductCode`. | `838` |
 | `ValidityYears` | Optional | Number | Subscription validity period in years: `1`, `2`, or `3`. Default: `1`. CERTInext certificates are issued within a subscription term at up to 390 days per certificate, with free renewals within the term. | `1` |
 | `ValidityDays` | Deprecated | Number | Legacy validity field. If set, the value is divided by 365 and rounded up to derive a year count. New templates should use `ValidityYears`. | `365` |
@@ -158,36 +158,43 @@ To retrieve the exact codes available to your account, call the `GetProductDetai
 
 ### SSL/TLS
 
-The product codes in this table were observed on the US sandbox account (`accountNumber=9374221333`) in April 2026. Your account will likely have different codes. Always call `GetProductDetails` to confirm the codes provisioned for your account.
+The product codes in this table were observed on:
+- the US sandbox account (`accountNumber=9374221333`, April 2026; reconfirmed on the replacement sandbox `4873378853` in May 2026 — same SSL/TLS codes)
+- the Production India instance (`api.certinext.io`) via the live draft-order coverage matrix in [development.md](development.md)
 
-| Product | Sandbox Code (account 9374221333, April 2026) | Required fields beyond base (`domainName`, `csr`, `requestorInformation`, `subscriptionDetails`, `agreementDetails`) |
-|---|---|---|
-| DV (Domain Validated) | `842` | None. `domainName` is derived from the CSR CN if omitted on the template. |
-| DV Wildcard | `843` | CSR CN must use wildcard format (e.g. `*.example.com`). `domainName` in the order must also use the wildcard format. |
-| DV UCC (Multi-domain) | `844` | `certificateInformation.additionalDomains` — array of additional SAN values beyond the primary `domainName`. |
-| DV Wildcard UCC (Multi-domain Wildcard) | `845` | Combines wildcard and multi-domain requirements. CSR CN and `domainName` must use wildcard format; `certificateInformation.additionalDomains` required. |
-| OV (Organization Validated) | `846` | `organizationDetails.organizationNumber` (your CERTInext org ID); `certificateInformation.locality`, `postalCode`, and full organization address fields (`streetAddress`, `city`, `state`, `country`). |
-| OV Wildcard | `847` | Same as OV (846). CSR CN and `domainName` must use wildcard format. |
-| OV UCC (Multi-domain) | `848` | Same as OV (846) plus `certificateInformation.additionalDomains`. |
-| OV Wildcard UCC (Multi-domain Wildcard) | `849` | Combines OV, wildcard, and multi-domain requirements. Same as OV (846) plus wildcard CN/domainName and `certificateInformation.additionalDomains`. |
-| EV (Extended Validation) | `850` | All OV fields plus: `contractSignerInfo` object (`name`, `email`, `isdCode`, `mobileNumber`, `designation`, `employeeID`); `certificateApproverInfo` object (same fields); `certificateInformation.companyRegistrationNumber`; `streetAddress2` must be non-empty. |
-| EV UCC (Multi-domain EV) | `851` | Same as EV (850) plus `certificateInformation.additionalDomains`. |
+**Your account may still have different codes.** Always call `GetProductDetails` against your target environment before going live.
+
+| Product | Sandbox Code | Production Code | Required fields beyond base (`domainName`, `csr`, `requestorInformation`, `subscriptionDetails`, `agreementDetails`) |
+|---|---|---|---|
+| DV (Domain Validated) | `842` | `838` | None. `domainName` is derived from the CSR CN if omitted on the template. |
+| DV Wildcard | `843` | `839` | CSR CN must use wildcard format (e.g. `*.example.com`). `domainName` in the order must also use the wildcard format. |
+| DV UCC (Multi-domain) | `844` | `840` | `certificateInformation.additionalDomains` — array of additional SAN values beyond the primary `domainName`. |
+| DV Wildcard UCC (Multi-domain Wildcard) | `845` | `841` | Combines wildcard and multi-domain requirements. CSR CN and `domainName` must use wildcard format; `certificateInformation.additionalDomains` required. |
+| OV (Organization Validated) | `846` | `842` | `organizationDetails.organizationNumber` (your CERTInext org ID); `certificateInformation.locality`, `postalCode`, and full organization address fields (`streetAddress`, `city`, `state`, `country`). |
+| OV Wildcard | `847` | `843` | Same as OV. CSR CN and `domainName` must use wildcard format. |
+| OV UCC (Multi-domain) | `848` | `844` | Same as OV plus `certificateInformation.additionalDomains`. |
+| OV Wildcard UCC (Multi-domain Wildcard) | `849` | `845` | Combines OV, wildcard, and multi-domain requirements. Same as OV plus wildcard CN/domainName and `certificateInformation.additionalDomains`. |
+| EV (Extended Validation) | `850` | `846` | All OV fields plus: `contractSignerInfo` object (`name`, `email`, `isdCode`, `mobileNumber`, `designation`, `employeeID`); `certificateApproverInfo` object (same fields); `certificateInformation.companyRegistrationNumber`; `streetAddress2` must be non-empty. |
+| EV UCC (Multi-domain EV) | `851` | `847` | Same as EV plus `certificateInformation.additionalDomains`. |
+
+> Note: SSL/TLS codes appear to be offset by 4 between the US sandbox and Production India in the snapshots we've observed — but treat that as a coincidence, not a guarantee. eMudhra controls the per-account mapping and may use different numeric codes for any new account. Always confirm via `GetProductDetails`.
 
 > Note: The CERTInext portal may display additional short-validity products (e.g. **DV SSL Certificate 1 Month**, **DV SSL Certificate Wildcard 1 Month**) that do not appear in the `GetProductDetails` API response and have no published product code. These products are not accessible via the API and are therefore **not supported by this plugin**. Contact eMudhra to determine whether API ordering is available for these products on your account.
 
 ### Private PKI
 
-| Product | Example Code | Availability |
-|---|---|---|
-| Sandbox emSign Intranet SSL 1 year | `149` (sandbox account 9374221333, April 2026) | Requires special provisioning by eMudhra. Not available on standard production accounts. |
-| emSign Intranet SSL 1 year (production) | `100` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
-| IGTF Host 1 year | `104` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
+| Product | Sandbox Code | Production Code | Availability |
+|---|---|---|---|
+| emSign Intranet SSL 1 year | `149` | `100` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
+| IGTF Host 1 year | (not observed) | `104` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
 
-> Note: Private PKI products are not available for ordering on standard CERTInext accounts. Attempting to place an order will return EMS-1162 (product not provisioned). The sandbox Private PKI code (`149` on account 9374221333) also returns EMS-1162 because the product is not provisioned even though it appears in the `GetProductDetails` list. Contact eMudhra to have these products enabled on your account.
+> Note: Private PKI products are not available for ordering on standard CERTInext accounts. Attempting to place an order will return EMS-1162 (product not provisioned). The sandbox Private PKI code (`149`) also returns EMS-1162 on standard sandbox accounts even though it appears in the `GetProductDetails` list. Contact eMudhra to have these products enabled on your account.
 
 ### S/MIME and Document Signing
 
-| Product | Product Code | Availability |
+The same numeric product codes have been observed for S/MIME and document-signing products on both the US sandbox and Production India in the snapshots we have. **Treat that as an empirical observation, not a contract** — eMudhra is free to assign different codes per account. Always confirm via `GetProductDetails`.
+
+| Product | Sandbox / Production Code | Availability |
 |---|---|---|
 | S/MIME | `894` | Requires a separate S/MIME entitlement on the account. Not available on standard SSL accounts. |
 | Natural Person Doc Signer (tier 1) | `825` | Requires document signing entitlement. Not orderable on standard accounts. |
@@ -204,7 +211,7 @@ The product codes in this table were observed on the US sandbox account (`accoun
 
 To retrieve the full list of product codes available to your account, call the `GetProductDetails` endpoint against your target environment. The sandbox and production APIs each return their own set of codes.
 
-> Note: SSL/TLS products (codes 838–846) are supported on standard accounts. Private PKI (100, 104), S/MIME (894), and document-signing products (819–827) require special provisioning by eMudhra and are not available on standard SSL/TLS accounts — ordering them returns EMS-1162.
+> Note: SSL/TLS products are supported on standard accounts (Production codes `838`–`847`, Sandbox codes `842`–`851` in the snapshots we've seen). Private PKI (Production `100`, `104` / Sandbox `149`), S/MIME (`894`), and document-signing products (`819`–`827`) require special provisioning by eMudhra and are not available on standard SSL/TLS accounts — ordering them returns EMS-1162.
 
 
 ## Mechanics
