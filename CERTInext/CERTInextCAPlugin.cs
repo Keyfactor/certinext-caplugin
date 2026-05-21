@@ -1059,7 +1059,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///   * a bounded DCV timeout linked to the caller's cancellation token,
         ///   * swallowing of non-cancellation exceptions so a single bad order does not
         ///     halt a 12-hour sync — the order will be retried on the next cycle.
-        /// Returns <c>true</c> when DCV actually executed, <c>false</c> when skipped.
+        ///
+        /// Uses a single-shot challenge check (<c>waitForChallengeSeconds=0</c>) by default
+        /// because sync runs periodically: if CERTInext hasn't yet exposed the DCV slot for
+        /// this order, the next sync cycle will pick it up.  Waiting per-order during sync
+        /// scales poorly — a single pending order's 60s budget becomes minutes of wasted
+        /// gateway thread time across an account with many orders.  See PR #2 discussion.
+        ///
+        /// Returns <c>true</c> when DCV actually executed (or DCV is already complete),
+        /// <c>false</c> when skipped.
         /// </summary>
         private async Task<bool> TryRunDcvDuringSyncAsync(string orderNumber, CancellationToken ct)
         {
@@ -1081,10 +1089,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 dcvCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
 
                 _logger.LogInformation(
-                    "Attempting deferred DCV during sync/refresh. OrderNumber={OrderNumber}, DcvTimeoutMinutes={Timeout}",
+                    "Attempting deferred DCV during sync/refresh (single-shot challenge check). " +
+                    "OrderNumber={OrderNumber}, DcvTimeoutMinutes={Timeout}",
                     orderNumber, timeoutMinutes);
 
-                return await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
+                return await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token, waitForChallengeSecondsOverride: 0);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -1110,15 +1119,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///
         /// Rule: if the order is already issued we never attempt DCV — it would be a no-op
         /// at best and could confuse the CA at worst.
+        ///
+        /// <paramref name="waitForChallengeSecondsOverride"/> lets the sync path force a
+        /// single-shot challenge check (pass <c>0</c>) so a sync cycle doesn't spend up to
+        /// <c>DcvWaitForChallengeSeconds</c> per pending order waiting for CERTInext to
+        /// expose the DCV slot — sync runs periodically, so unexposed orders are picked up
+        /// on the next cycle instead.  Enroll passes <c>null</c> to keep the full configured
+        /// budget (user-visible latency benefits from a one-shot end-to-end finish).
         /// </summary>
-        private async Task<bool> PerformDcvIfNeededAsync(string orderNumber, CancellationToken ct)
+        private async Task<bool> PerformDcvIfNeededAsync(
+            string orderNumber,
+            CancellationToken ct,
+            int? waitForChallengeSecondsOverride = null)
         {
             // Poll TrackOrder until CERTInext exposes the DCV challenge (domainVerification
             // populated) OR the cert reaches a terminal state OR the wait budget expires.
             // Under concurrent enrollment load CERTInext sometimes takes a few seconds to
             // materialize the slot after GenerateOrderSSL returns — without this wait a
             // race-condition order skips DCV entirely and waits for the next sync cycle.
-            int waitBudgetSeconds = _config.GetEffectiveDcvWaitForChallengeSeconds();
+            int waitBudgetSeconds = waitForChallengeSecondsOverride
+                ?? _config.GetEffectiveDcvWaitForChallengeSeconds();
             // Challenge-wait poll interval is clamped to [1s, 5s] so it's responsive even
             // when an admin has set DcvPropagationDelaySeconds high for slow zones (that
             // setting governs how long we wait *after* publishing a TXT record, which is a

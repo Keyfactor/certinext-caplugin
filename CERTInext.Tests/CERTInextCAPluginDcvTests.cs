@@ -396,6 +396,65 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Sync path is single-shot for the DCV challenge wait
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task SyncDcvRetry_DoesSingleShotTrackOrder_WhenChallengeNotReady()
+        {
+            // Sync MUST NOT poll the configured DcvWaitForChallengeSeconds budget per
+            // pending order — that would scale O(orders × 60s) per cycle and tie up
+            // gateway threads for minutes per sync.  When TrackOrder returns null
+            // domainVerification, sync exits immediately and lets the next sync cycle
+            // pick the order up.
+            var mock = NewMock();
+
+            // High config budget — would normally drive 6+ polls × 5s waits.  The sync
+            // override of 0 must prevent that.
+            var config = DcvConfig(dcvWaitForChallengeSeconds: 60);
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId       = "1",
+                        CertificateStatusId = "1",
+                        DomainVerification  = null
+                    }
+                });
+
+            // GetSingleRecord calls GetCertificateAsync first to materialize the record;
+            // the sync-DCV-retry kicks in afterwards.  The pending response keeps the
+            // retry path engaged so we exercise the override.
+            mock.Setup(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingCertRecord(MockCertificateData.DcvOrderId));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator), config);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            // GetSingleRecord calls TryRunDcvDuringSyncAsync internally — which is the
+            // sync-style path with waitForChallengeSecondsOverride=0.
+            var record = await plugin.GetSingleRecord(MockCertificateData.DcvOrderId);
+            sw.Stop();
+
+            record.Should().NotBeNull();
+            // The 0-budget single shot must complete well under the 60s config budget.
+            // Use a generous 10s ceiling to tolerate slow CI hosts; the actual cost is
+            // ~1 TrackOrder.  Without the override we'd be ≥60s.
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10),
+                "sync's DCV retry must be single-shot, not poll the configured challenge budget");
+
+            mock.Verify(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
+                Times.Exactly(1),
+                "PerformDcvIfNeededAsync's single-shot challenge check must make exactly ONE " +
+                "TrackOrder call when waitForChallengeSecondsOverride=0 and the slot is null. " +
+                "Without the override, the polling loop would issue many more calls within " +
+                "the 60s budget.");
+        }
+
+        // ---------------------------------------------------------------------------
         // Failure modes
         // ---------------------------------------------------------------------------
 
