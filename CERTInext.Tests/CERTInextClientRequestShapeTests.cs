@@ -96,7 +96,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 "exactly one GenerateOrderSSL POST should have been emitted");
             string body = generateOrderRequests[0].RequestMessage.Body;
             body.Should().NotBeNullOrEmpty();
-            return JsonDocument.Parse(body).RootElement.GetProperty("orderDetails");
+            return JsonDocument.Parse(body!).RootElement.GetProperty("orderDetails");
         }
 
         private static EnrollCertificateRequest BasicEnrollRequest() => new EnrollCertificateRequest

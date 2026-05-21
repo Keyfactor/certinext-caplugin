@@ -689,7 +689,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             pingRequest.RequestMessage.Headers.Should().ContainKey("Authorization",
                 "OAuth mode must inject the Authorization header on outgoing requests");
 
-            var authHeader = pingRequest.RequestMessage.Headers["Authorization"].FirstOrDefault();
+            var authHeader = pingRequest.RequestMessage.Headers!["Authorization"].FirstOrDefault();
             authHeader.Should().Be($"Bearer {expectedToken}",
                 "the injected token must match the one returned by the token endpoint");
         }
@@ -713,7 +713,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .First(e => e.RequestMessage.Path == "/ValidateCredentials");
 
             // Authorization header must be absent in AccessKey mode
-            bool hasAuthHeader = pingRequest.RequestMessage.Headers.ContainsKey("Authorization");
+            bool hasAuthHeader = pingRequest.RequestMessage.Headers!.ContainsKey("Authorization");
             hasAuthHeader.Should().BeFalse(
                 "AccessKey mode authenticates via the authKey field in the JSON body, not an HTTP header");
         }

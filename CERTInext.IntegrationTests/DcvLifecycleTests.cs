@@ -544,7 +544,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             syncPhaseSw.Stop();
 
             // Pagination check — sync must have returned strictly more than one page.
-            synced.Count.Should().BeGreaterThan(100,
+            synced!.Count.Should().BeGreaterThan(100,
                 "with 101 freshly-enrolled orders + any pre-existing, sync must return >100 records " +
                 "to prove the ListCertificatesAsync paginator crossed PageSize=100.");
 

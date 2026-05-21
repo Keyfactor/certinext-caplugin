@@ -772,7 +772,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 enrollmentType: EnrollmentType.New);
 
             capturedRequest.Should().NotBeNull();
-            capturedRequest.ValidityDays.Should().Be(365);
+            capturedRequest!.ValidityDays.Should().Be(365);
             capturedRequest.RequesterName.Should().Be("Jane Smith");
             capturedRequest.RequesterEmail.Should().Be("jane@example.com");
             capturedRequest.KeyType.Should().Be("RSA2048");
@@ -811,7 +811,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             capturedRequest.Should().NotBeNull();
             // ValidityDays == 0 when parse fails, so request should have null
-            capturedRequest.ValidityDays.Should().BeNull(
+            capturedRequest!.ValidityDays.Should().BeNull(
                 "invalid ValidityDays should fall back to null (use profile default)");
         }
 
@@ -883,7 +883,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 enrollmentType: EnrollmentType.New);
 
             capturedRequest.Should().NotBeNull();
-            capturedRequest.Sans.Should().NotBeNull();
+            capturedRequest!.Sans.Should().NotBeNull();
             capturedRequest.Sans.Should().Contain(s => s.Type == "oid",
                 "unknown SAN type should be passed through as-is");
         }
