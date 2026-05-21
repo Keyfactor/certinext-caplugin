@@ -314,6 +314,88 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Issue #7 — IDomainValidatorFactory is optional / injected post-construction
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Dcv_SilentlyNoOps_WhenNoFactoryInjected_AndDcvEnabledTrue()
+        {
+            // Simulates a v3.2 gateway host: plugin instantiated via the parameterless
+            // public production constructor, DcvEnabled=true in the connector config,
+            // but no IDomainValidatorFactory was injected via SetDomainValidatorFactory
+            // (because the host's IAnyCAPlugin assembly doesn't even have that interface).
+            // Enroll must:
+            //   * NOT throw (no missing-type / null-factory exception),
+            //   * NOT touch the CA's TrackOrder for DCV purposes,
+            //   * return the enrollment result the CA gave us (here: pending).
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+
+            // Internal test ctor with factory = null AND DcvEnabled = true.
+            var plugin = new CERTInextCAPlugin(mock.Object, domainValidatorFactory: null, DcvConfig(enabled: true));
+
+            var result = await Enroll(plugin);
+
+            result.Should().NotBeNull();
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "with no factory the CA's pending response must be passed through unchanged");
+            mock.Verify(c => c.TrackOrderAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+                "EnrollNewAsync must short-circuit the DCV block when _domainValidatorFactory is null");
+        }
+
+        [Fact]
+        public async Task SetDomainValidatorFactory_AfterConstruction_WiresFactoryForSubsequentEnroll()
+        {
+            // The v3.3+ gateway path: host instantiates the plugin via the parameterless
+            // public constructor, resolves an IDomainValidatorFactory from its own
+            // service container, then calls SetDomainValidatorFactory(factory) before
+            // Initialize.  Subsequent Enroll() calls must use the injected factory.
+            var (mock, validator) = HappyPathMocks();
+
+            // Plugin starts with NO factory — proves the setter does the wire-up, not
+            // some prior constructor parameter.
+            var plugin = new CERTInextCAPlugin(
+                mock.Object,
+                domainValidatorFactory: null,
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            plugin.SetDomainValidatorFactory(new FakeDomainValidatorFactory(validator));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "the factory injected via SetDomainValidatorFactory must drive DCV end-to-end");
+            validator.StagedRecords.Should().NotBeEmpty(
+                "SetDomainValidatorFactory must populate _domainValidatorFactory so DCV staging runs");
+        }
+
+        [Fact]
+        public void SetDomainValidatorFactory_SecondCall_OverridesFirst()
+        {
+            // Property-style setter semantics: the most recent SetDomainValidatorFactory
+            // call wins. Important for gateway hosts that may resolve a fresh factory
+            // per-initialize cycle.
+            var plugin = new CERTInextCAPlugin();
+            var firstValidator = new FakeDomainValidator();
+            var secondValidator = new FakeDomainValidator();
+
+            plugin.SetDomainValidatorFactory(new FakeDomainValidatorFactory(firstValidator));
+            plugin.SetDomainValidatorFactory(new FakeDomainValidatorFactory(secondValidator));
+
+            // The plugin uses _domainValidatorFactory through internal methods; we reach
+            // the field via reflection to assert the second factory is the one stored.
+            var field = typeof(CERTInextCAPlugin)
+                .GetField("_domainValidatorFactory",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            field.Should().NotBeNull();
+            var stored = field!.GetValue(plugin) as FakeDomainValidatorFactory;
+            stored.Should().NotBeNull();
+            stored!.PrimaryValidator.Should().BeSameAs(secondValidator,
+                "the most recent SetDomainValidatorFactory call must replace the earlier one");
+        }
+
+        // ---------------------------------------------------------------------------
         // Failure modes
         // ---------------------------------------------------------------------------
 

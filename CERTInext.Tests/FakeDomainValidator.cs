@@ -62,5 +62,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public FakeDomainValidatorFactory(IDomainValidator validator = null) => _validator = validator;
 
         public IDomainValidator ResolveDomainValidator(string domain, string validationType) => _validator;
+
+        /// <summary>The validator this factory returns; exposed for assertions in tests.</summary>
+        public IDomainValidator PrimaryValidator => _validator;
     }
 }
