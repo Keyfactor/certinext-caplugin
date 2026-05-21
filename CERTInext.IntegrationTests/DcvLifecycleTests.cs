@@ -345,13 +345,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             // worth noting but not a hard failure (the next sync will pick it up).
             record.Status.Should().BeOneOf((int)EndEntityStatus.GENERATED, (int)EndEntityStatus.EXTERNALVALIDATION);
 
-            // Hard signal we'll always demand: when sync returns GENERATED, there must
-            // be a non-empty PEM. A GENERATED record with no Certificate would mean the
-            // plugin's download path is broken.
+            // Sync is summary-only by design: it iterates ListCertificatesAsync, which
+            // returns the order-report metadata (no cert PEM).  The PEM is materialised
+            // per-record via GetSingleRecord / DownloadCertificateAsync when Command
+            // actually needs the cert.  So even GENERATED records typically have empty
+            // Certificate in the sync output — that is correct behaviour, not a bug.
+            // Confirm the cert is retrievable by issuing the same per-record fetch the
+            // gateway would do for inventory.
             if (record.Status == (int)EndEntityStatus.GENERATED)
             {
-                record.Certificate.Should().NotBeNullOrWhiteSpace(
-                    "GENERATED records must carry the issued PEM in their Certificate field");
+                var fetched = await plugin.GetSingleRecord(enrollResult.CARequestID);
+                fetched.Should().NotBeNull();
+                fetched.Status.Should().Be((int)EndEntityStatus.GENERATED);
+                fetched.Certificate.Should().NotBeNullOrWhiteSpace(
+                    "GetSingleRecord must populate the PEM for a GENERATED order — sync is " +
+                    "summary-only, but the per-record download path is the contract the gateway " +
+                    "uses to materialise the cert.");
+                _output.WriteLine($"  Fetched cert PEM length: {fetched.Certificate.Length}");
             }
 
             _output.WriteLine($"--- Verdict: DCV-on enroll for {cn} drove DCV end-to-end via plugin, " +
