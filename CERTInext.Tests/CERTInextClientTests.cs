@@ -645,5 +645,244 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().ThrowAsync<Exception>();
         }
+
+        // ---------------------------------------------------------------------------
+        // P1-A: OAuth mode injects Authorization: Bearer header on outgoing requests
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task OAuth_InjectsBearerToken_InAuthorizationHeader()
+        {
+            // Arrange token endpoint — returns a known token value
+            const string expectedToken = "fake-bearer-token-abc123";
+
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.OAuth2TokenJson(3600)));
+
+            _server
+                .Given(Request.Create().WithPath("/ValidateCredentials").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.ValidateCredentialsSuccessJson()));
+
+            string tokenUrl = $"{_baseUrl}/oauth/token";
+            var client = BuildOAuthClient(tokenUrl);
+
+            // Act — trigger a real API call so the authenticator fires
+            await client.PingAsync();
+
+            // Assert — the ValidateCredentials request must contain Authorization: Bearer <token>
+            var pingEntry = _server.LogEntries
+                .FirstOrDefault(e => e.RequestMessage.Path == "/ValidateCredentials");
+
+            pingEntry.Should().NotBeNull("ValidateCredentials request was not made");
+
+            // Use the log entry via First() to avoid null-dereference warning (we asserted NotBeNull above)
+            var pingRequest = _server.LogEntries
+                .First(e => e.RequestMessage.Path == "/ValidateCredentials");
+
+            pingRequest.RequestMessage.Headers.Should().ContainKey("Authorization",
+                "OAuth mode must inject the Authorization header on outgoing requests");
+
+            var authHeader = pingRequest.RequestMessage.Headers!["Authorization"].FirstOrDefault();
+            authHeader.Should().Be($"Bearer {expectedToken}",
+                "the injected token must match the one returned by the token endpoint");
+        }
+
+        [Fact]
+        public async Task OAuth_DoesNotInjectBearerToken_InAccessKeyMode()
+        {
+            // In AccessKey mode there should be no Authorization header — auth is in the JSON body.
+            _server
+                .Given(Request.Create().WithPath("/ValidateCredentials").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.ValidateCredentialsSuccessJson()));
+
+            var client = BuildClient(authMode: "AccessKey");
+            await client.PingAsync();
+
+            // Use the log entry via First() (we know it exists because PingAsync succeeded)
+            var pingRequest = _server.LogEntries
+                .First(e => e.RequestMessage.Path == "/ValidateCredentials");
+
+            // Authorization header must be absent in AccessKey mode
+            bool hasAuthHeader = pingRequest.RequestMessage.Headers!.ContainsKey("Authorization");
+            hasAuthHeader.Should().BeFalse(
+                "AccessKey mode authenticates via the authKey field in the JSON body, not an HTTP header");
+        }
+
+        // ---------------------------------------------------------------------------
+        // P3-A: Retry logic — 5xx retried up to 3 times, 4xx not retried
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ExecuteWithRetry_MakesThreeAttempts_WhenServerAlwaysReturns500()
+        {
+            // Always return 500 — the client should make exactly 3 attempts total.
+            _server
+                .Given(Request.Create().WithPath("/ValidateCredentials").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(500)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.ServerErrorJson()));
+
+            var client = BuildClient();
+
+            // All 3 attempts return 500, so PingAsync should ultimately throw.
+            Func<Task> act = () => client.PingAsync();
+            await act.Should().ThrowAsync<Exception>();
+
+            // Verify 3 requests reached the server (original + 2 retries)
+            int pingCallCount = _server.LogEntries.Count(e => e.RequestMessage.Path == "/ValidateCredentials");
+            pingCallCount.Should().Be(3,
+                "ExecuteWithRetryAsync makes 3 total attempts on persistent 5xx errors");
+        }
+
+        // ---------------------------------------------------------------------------
+        // GetDcvAsync — POST /GetDcv
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetDcvAsync_ReturnsToken_WhenServerRespondsOk()
+        {
+            const string token = "abc123token";
+            _server
+                .Given(Request.Create().WithPath("/GetDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetDcvSuccessJson(token)));
+
+            var client = BuildClient();
+
+            var result = await client.GetDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            result.Should().NotBeNull();
+            result.DcvDetails.Should().NotBeNull();
+            result.DcvDetails.Token.Should().Be(token);
+            _server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/GetDcv");
+        }
+
+        [Fact]
+        public async Task GetDcvAsync_Throws_WhenMetaStatusIsFailure()
+        {
+            _server
+                .Given(Request.Create().WithPath("/GetDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetDcvFailureJson("EMS-DCV-001", "DCV not available")));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.GetDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*GetDcv failed*");
+        }
+
+        [Fact]
+        public async Task GetDcvAsync_Throws_WhenServerReturns401()
+        {
+            _server
+                .Given(Request.Create().WithPath("/GetDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(401)
+                    .WithBody(MockCertificateData.UnauthorizedJson()));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.GetDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*Authentication failure*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // VerifyDcvAsync — POST /VerifyDcv
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task VerifyDcvAsync_Succeeds_WhenServerRespondsOk()
+        {
+            _server
+                .Given(Request.Create().WithPath("/VerifyDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.VerifyDcvSuccessJson()));
+
+            var client = BuildClient();
+
+            // Should not throw
+            await client.VerifyDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            _server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/VerifyDcv");
+        }
+
+        [Fact]
+        public async Task VerifyDcvAsync_Throws_WhenMetaStatusIsFailure()
+        {
+            _server
+                .Given(Request.Create().WithPath("/VerifyDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.VerifyDcvFailureJson("EMS-DCV-002", "DNS record not found")));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.VerifyDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*DNS record not found*");
+        }
+
+        [Fact]
+        public async Task VerifyDcvAsync_Throws_WhenServerReturns401()
+        {
+            _server
+                .Given(Request.Create().WithPath("/VerifyDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(401)
+                    .WithBody(MockCertificateData.UnauthorizedJson()));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.VerifyDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*Authentication failure*");
+        }
+
+        [Fact]
+        public async Task VerifyDcvAsync_Throws_WhenServerReturns500()
+        {
+            _server
+                .Given(Request.Create().WithPath("/VerifyDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(500)
+                    .WithBody(MockCertificateData.ServerErrorJson()));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.VerifyDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>();
+        }
     }
 }

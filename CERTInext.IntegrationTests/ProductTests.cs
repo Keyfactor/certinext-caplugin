@@ -15,19 +15,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     /// <summary>
     /// Product discovery integration tests.
     /// Verifies that GetProductDetails calls succeed and, when the account returns products,
-    /// that expected product codes are present.
+    /// that the configured product code is among them.
     ///
-    /// Note: some CERTInext sandbox accounts return an empty product list from
-    /// GetProductDetails even though those product codes are visible in GetOrderReport.
-    /// The test therefore verifies the call succeeds and, if products are returned,
-    /// that product code "838" (DV SSL) is among them.
+    /// Product codes are per-account — they are provisioned by eMudhra during account setup
+    /// and may differ from the codes used by other accounts or in the documentation examples.
+    /// This test uses the CERTINEXT_PRODUCT_CODE from the fixture (loaded from ~/.env_certinext)
+    /// to perform the presence assertion, rather than hardcoding a specific code.
+    ///
+    /// Note: the GetProductDetails API requires groupNumber in the productDetails block to
+    /// return results on some sandbox accounts.  An empty list from GetProductDetails does not
+    /// mean the account has no products — it may indicate the groupNumber was not passed.
     /// </summary>
     public class ProductTests : IClassFixture<IntegrationTestFixture>
     {
         private readonly IntegrationTestFixture _fixture;
-
-        // Known product code for DV SSL 838 that should exist if the account returns products.
-        private const string KnownProductCode = "838";
 
         public ProductTests(IntegrationTestFixture fixture)
         {
@@ -37,11 +38,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Calls <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.Client.ICERTInextClient.GetProductDetailsAsync"/>
         /// and asserts that the call completes without throwing.  When at least one product
-        /// is returned, asserts that product code "838" (DV SSL) is present in the list.
+        /// is returned, asserts that the configured product code from
+        /// <c>CERTINEXT_PRODUCT_CODE</c> is present in the flattened list.
         ///
-        /// Some CERTInext accounts return an empty product list from GetProductDetails
-        /// even though orders with that product code can be placed and listed via
-        /// GetOrderReport.  An empty list is therefore acceptable in this test.
+        /// Some CERTInext accounts may return an empty list when the groupNumber is not
+        /// passed in the productDetails block.  An empty list is therefore treated as
+        /// acceptable — only the absence of an exception is mandatory.
         /// </summary>
         [SkippableFact]
         public async Task GetProductDetails_ReturnsProducts()
@@ -61,12 +63,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             products.Should().NotBeNull(
                 "GetProductDetailsAsync should never return null — an empty list is acceptable");
 
-            // When the account does return products, assert the expected code is present.
-            if (products != null && products.Count > 0)
+            // When the account does return products and CERTINEXT_PRODUCT_CODE is set,
+            // assert that the configured code is present in the list.
+            if (products != null && products.Count > 0 && !string.IsNullOrWhiteSpace(_fixture.ProductCode))
             {
                 products.Should().Contain(
-                    p => p.ProductCode == KnownProductCode,
-                    $"product code \"{KnownProductCode}\" (DV SSL 838) should be available when products are returned");
+                    p => p.ProductCode == _fixture.ProductCode,
+                    $"configured product code \"{_fixture.ProductCode}\" should be available " +
+                    "in the account's product list when GetProductDetails returns results");
             }
         }
     }

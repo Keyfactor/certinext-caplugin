@@ -6,6 +6,7 @@
 // and limitations under the License.
 
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
@@ -151,8 +152,98 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("revocationDetails")]
         public TrackOrderRevocationDetails RevocationDetails { get; set; }
 
+        /// <summary>
+        /// Per-domain DCV state plus a top-level <c>status</c> field. The wire
+        /// shape mixes typed and dynamic keys: <c>{ "&lt;Domain Name&gt;": { ... },
+        /// "status": "..." }</c>, so domain entries are surfaced via
+        /// <see cref="TrackOrderDomainVerification.DomainEntries"/>.
+        /// </summary>
+        [JsonPropertyName("domainVerification")]
+        public TrackOrderDomainVerification DomainVerification { get; set; }
+
         [JsonPropertyName("csr")]
         public string Csr { get; set; }
+    }
+
+    /// <summary>
+    /// <c>domainVerification</c> block from TrackOrder. Wire shape is heterogeneous:
+    /// a known <c>status</c> field at the top level alongside one entry per domain
+    /// keyed by domain name. The per-domain entries are captured via
+    /// <see cref="JsonExtensionDataAttribute"/> and exposed through
+    /// <see cref="GetDomainEntries"/>.
+    /// </summary>
+    public class TrackOrderDomainVerification
+    {
+        /// <summary>Block-level status. Documented values mirror <see cref="DomainVerificationDetail.Status"/>.</summary>
+        [JsonPropertyName("status")]
+        public string Status { get; set; }
+
+        /// <summary>
+        /// Raw per-domain entries as parsed from the response. Keys are the domain
+        /// names exactly as returned by CERTInext. Use <see cref="GetDomainEntries"/>
+        /// for typed access.
+        /// </summary>
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement> RawDomainEntries { get; set; }
+
+        /// <summary>
+        /// Returns a typed dictionary of domain → <see cref="DomainVerificationDetail"/>,
+        /// skipping entries that fail to deserialize (e.g. unexpected scalar values).
+        /// Returns an empty dictionary if no per-domain entries were present.
+        /// </summary>
+        public Dictionary<string, DomainVerificationDetail> GetDomainEntries()
+        {
+            var result = new Dictionary<string, DomainVerificationDetail>();
+            if (RawDomainEntries == null) return result;
+
+            foreach (var kv in RawDomainEntries)
+            {
+                if (kv.Value.ValueKind != JsonValueKind.Object) continue;
+                try
+                {
+                    var detail = kv.Value.Deserialize<DomainVerificationDetail>();
+                    if (detail != null) result[kv.Key] = detail;
+                }
+                catch (JsonException)
+                {
+                    // ignore: entry shape unexpected, skip rather than failing the whole TrackOrder
+                }
+            }
+
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Per-domain DCV detail inside <see cref="TrackOrderDomainVerification"/>.
+    /// </summary>
+    public class DomainVerificationDetail
+    {
+        /// <summary>DCV method used / requested for this domain (typically the human label).</summary>
+        [JsonPropertyName("dcvMethod")]
+        public string DcvMethod { get; set; }
+
+        /// <summary>
+        /// DCV completion status: "0"=Pending, "1"=Validated, "2"=Rejected.
+        /// See <see cref="Constants.Dcv"/>.
+        /// </summary>
+        [JsonPropertyName("dcvStatus")]
+        public string DcvStatus { get; set; }
+
+        /// <summary>Domain status: "1"=Active, "2"=Inactive, "3"=Expired.</summary>
+        [JsonPropertyName("status")]
+        public string Status { get; set; }
+
+        /// <summary>Timestamp at which the domain was successfully verified (when applicable).</summary>
+        [JsonPropertyName("verifiedDate")]
+        public string VerifiedDate { get; set; }
+
+        /// <summary>
+        /// CAA check status: "1"=emSign authorized or no CAA present,
+        /// "2"=Authorization required, "3"=Authorization pending.
+        /// </summary>
+        [JsonPropertyName("caaStatus")]
+        public string CaaStatus { get; set; }
     }
 
     public class TrackOrderRequestorInfo
@@ -187,6 +278,84 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
 
         [JsonPropertyName("revokeRequestStatus")]
         public string RevokeRequestStatus { get; set; }
+    }
+
+    // ---------------------------------------------------------------------------
+    // GetDcv response  — POST {baseURL}GetDcv
+    //
+    // Per the V1 spec the dcvDetails block contains different fields depending
+    // on the dcvMethod that was requested:
+    //   dcvMethod=1 (DNS TXT) → token populated
+    //   dcvMethod=2 (HTTP)    → fileName + fileContent populated
+    //   dcvMethod=3 (email)   → dcvEmails populated
+    //
+    // The TXT record HOSTNAME for dcvMethod=1 is NOT returned by this endpoint.
+    // The CERTInext V1 documentation does not specify the convention. The plugin
+    // uses Constants.Dcv.DefaultTxtRecordTemplate ("_emsign-validation.{0}") by
+    // default, overridable via the DcvTxtRecordTemplate connector config field.
+    // ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// Response from POST {baseURL}GetDcv.
+    /// </summary>
+    public class GetDcvResponse
+    {
+        [JsonPropertyName("meta")]
+        public ResponseMeta Meta { get; set; }
+
+        [JsonPropertyName("dcvDetails")]
+        public DcvResponseDetails DcvDetails { get; set; }
+    }
+
+    /// <summary>
+    /// DCV instructions returned by GetDcv. Field population depends on the
+    /// requested dcvMethod (see class-level remarks on <see cref="GetDcvResponse"/>).
+    /// </summary>
+    public class DcvResponseDetails
+    {
+        /// <summary>
+        /// Token / target address value to publish for DNS TXT-based DCV
+        /// (dcvMethod = 1). Empty for other methods.
+        /// </summary>
+        [JsonPropertyName("token")]
+        public string Token { get; set; }
+
+        /// <summary>
+        /// File name to host under <c>/.well-known/pki-validation/</c> for HTTP
+        /// DCV (dcvMethod = 2). Empty for other methods.
+        /// </summary>
+        [JsonPropertyName("fileName")]
+        public string FileName { get; set; }
+
+        /// <summary>
+        /// File body to serve at the well-known path for HTTP DCV (dcvMethod = 2).
+        /// Empty for other methods.
+        /// </summary>
+        [JsonPropertyName("fileContent")]
+        public string FileContent { get; set; }
+
+        /// <summary>
+        /// CA/B Forum approved approver email candidates for email DCV
+        /// (dcvMethod = 3). Empty for other methods.
+        /// </summary>
+        [JsonPropertyName("dcvEmails")]
+        public List<string> DcvEmails { get; set; }
+    }
+
+    // ---------------------------------------------------------------------------
+    // VerifyDcv response  — POST {baseURL}VerifyDcv
+    // Body contains only the meta block (success/failure status).
+    // ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// Response from POST {baseURL}VerifyDcv. Body is meta-only; the actual
+    /// per-domain verification status is observed via subsequent TrackOrder
+    /// calls (see <see cref="TrackOrderDomainVerification"/>).
+    /// </summary>
+    public class VerifyDcvResponse
+    {
+        [JsonPropertyName("meta")]
+        public ResponseMeta Meta { get; set; }
     }
 
     // ---------------------------------------------------------------------------
@@ -372,6 +541,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
 
     // ---------------------------------------------------------------------------
     // GetProductDetails response  — POST {baseURL}GetProductDetails
+    //
+    // Actual wire format (verified 2026-04):
+    //   productDetails: [
+    //     { categoryName, categoryID, products: [ { productCode, productName, productTypeID,
+    //                                               subscriptionPrice?, price? }, ... ] },
+    //     ...
+    //   ]
+    //
+    // The response is a list of category envelopes, each containing a nested
+    // "products" array.  CERTInextClient.GetProductDetailsAsync flattens this
+    // structure into a List<ProductDetail> for callers.
     // ---------------------------------------------------------------------------
 
     public class GetProductDetailsResponse
@@ -379,22 +559,109 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("meta")]
         public ResponseMeta Meta { get; set; }
 
+        /// <summary>
+        /// Category envelopes as returned by the API.  Each category contains a
+        /// <c>products</c> array.  Call <see cref="FlattenProducts"/> to get a
+        /// flat list of all product codes across all categories.
+        /// </summary>
         [JsonPropertyName("productDetails")]
-        public List<ProductDetail> ProductDetails { get; set; }
+        public List<ProductCategory> Categories { get; set; }
+
+        /// <summary>
+        /// Returns a flat list of all <see cref="ProductDetail"/> records across
+        /// every category in the response.  Returns an empty list when
+        /// <see cref="Categories"/> is null or empty.
+        /// </summary>
+        public List<ProductDetail> FlattenProducts()
+        {
+            var result = new List<ProductDetail>();
+            if (Categories == null) return result;
+
+            foreach (var cat in Categories)
+            {
+                if (cat.Products == null) continue;
+                foreach (var p in cat.Products)
+                {
+                    result.Add(new ProductDetail
+                    {
+                        ProductCode = p.ProductCode,
+                        ProductName = p.ProductName,
+                        ProductType = cat.CategoryName,
+                        Active = true  // API does not return an active flag at this level
+                    });
+                }
+            }
+
+            return result;
+        }
     }
 
-    public class ProductDetail
+    /// <summary>
+    /// One category envelope inside the GetProductDetails response
+    /// (e.g. "SSL/TLS Certificates", "S/MIME Certificates").
+    /// </summary>
+    public class ProductCategory
     {
-        /// <summary>Numeric product code string (e.g. "844").</summary>
+        [JsonPropertyName("categoryName")]
+        public string CategoryName { get; set; }
+
+        [JsonPropertyName("categoryID")]
+        public string CategoryId { get; set; }
+
+        [JsonPropertyName("currencyType")]
+        public string CurrencyType { get; set; }
+
+        [JsonPropertyName("products")]
+        public List<ProductCategoryEntry> Products { get; set; }
+    }
+
+    /// <summary>
+    /// A single product entry inside a <see cref="ProductCategory"/>.
+    /// </summary>
+    public class ProductCategoryEntry
+    {
         [JsonPropertyName("productCode")]
         public string ProductCode { get; set; }
 
         [JsonPropertyName("productName")]
         public string ProductName { get; set; }
 
+        /// <summary>Numeric product type ID (e.g. "13" for DV SSL).</summary>
+        [JsonPropertyName("productTypeID")]
+        public string ProductTypeId { get; set; }
+
+        /// <summary>
+        /// Per-unit price for non-subscription products (e.g. document signing).
+        /// </summary>
+        [JsonPropertyName("price")]
+        public string Price { get; set; }
+    }
+
+    /// <summary>
+    /// Flattened product record returned by
+    /// <see cref="Client.CERTInextClient.GetProductDetailsAsync"/>.
+    /// Consumers use this type; the nested category structure from the wire format
+    /// is an internal implementation detail of the response model.
+    /// </summary>
+    public class ProductDetail
+    {
+        /// <summary>Numeric product code string (e.g. "842").</summary>
+        [JsonPropertyName("productCode")]
+        public string ProductCode { get; set; }
+
+        [JsonPropertyName("productName")]
+        public string ProductName { get; set; }
+
+        /// <summary>
+        /// Product type derived from the category name (e.g. "SSL/TLS Certificates").
+        /// </summary>
         [JsonPropertyName("productType")]
         public string ProductType { get; set; }
 
+        /// <summary>
+        /// Always <c>true</c> for products returned by the API — the API only
+        /// returns products that are available on the account.
+        /// </summary>
         [JsonPropertyName("active")]
         public bool Active { get; set; }
     }
