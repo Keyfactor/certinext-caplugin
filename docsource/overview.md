@@ -2,6 +2,18 @@
 
 The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabilities of the CERTInext platform (by eMudhra) to Keyfactor Command via the Keyfactor AnyCA Gateway REST. See [configuration.md](configuration.md) for full installation and configuration details, [architecture.md](architecture.md) for design notes, and [development.md](development.md) for local development.
 
+## CERTInext CA Certificates
+
+Before the gateway can register a CA backed by this plugin, the Keyfactor Command server (and the AnyCA Gateway REST host) must trust the CERTInext issuing CA chain. Download the root and any intermediate CA certificates from the CERTInext portal for the environment you are targeting:
+
+| Environment | Portal Sign-in URL |
+|---|---|
+| Sandbox | https://sandbox-us.certinext.io/ |
+| Production — India (Global) | https://in.certinext.io/ |
+| Production — US | https://us.certinext.io/ |
+
+After signing in, navigate to the certificate-authority / chain download page in the portal, export each CA in the chain as PEM or DER, and import them into the appropriate Windows certificate stores on the gateway host (Trusted Root for the root CA, Intermediate Certification Authorities for any subordinates). See [configuration.md](configuration.md#gateway-registration) and the [README](../README.md#configuration) for the full Gateway Registration walkthrough.
+
 ## Troubleshooting
 
 ### `"Inactive Account User."` returned from `GenerateOrderSSL`
