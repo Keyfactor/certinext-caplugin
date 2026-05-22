@@ -54,6 +54,19 @@ references them, and the gateway CA config **must** exist before
 Command can register it or import templates from it. Hence steps 2 → 3
 → 4 → 5 in that order.
 
+### Reference JSON for each step
+
+Each step that creates GET-able state has a sanitised JSON snapshot in
+[`docs/reference/`](docs/reference/) from a known-working lab. Linked
+again inline in each step's intro:
+
+| Step | Reference file |
+|---|---|
+| 2 — gateway profiles | [`docs/reference/gateway/certificate-profiles.json`](docs/reference/gateway/certificate-profiles.json) |
+| 3 — gateway CA config | not GET-able (HTTP 405); see [`docs/reference/gateway/claims.json`](docs/reference/gateway/claims.json) for the authz table this step seeds |
+| 4 — Command CA | [`docs/reference/command/certificate-authority.json`](docs/reference/command/certificate-authority.json) |
+| 5 — Command templates | [`docs/reference/command/templates-certinext.json`](docs/reference/command/templates-certinext.json) |
+
 ---
 
 ## Prerequisites
@@ -201,6 +214,12 @@ if (-not $CmdToken) { throw "command token mint failed" }
 
 ## Step 2 — Create the gateway certificate profile
 
+> **Reference state after this step:** see
+> [`docs/reference/gateway/certificate-profiles.json`](docs/reference/gateway/certificate-profiles.json)
+> for the final 8-profile shape (one per sandbox product) the gateway
+> returns from `GET /AnyGatewayREST/config/certificateprofile` after
+> all profiles are in place.
+
 A **certificate profile** on the gateway is a top-level resource: a
 named key-algorithm policy that's independent of any CA. CA
 configurations (created in step 3) reference these profiles by name
@@ -312,6 +331,17 @@ try {
 ---
 
 ## Step 3 — Create the gateway CA configuration
+
+> **Reference state after this step:**
+> [`docs/reference/gateway/claims.json`](docs/reference/gateway/claims.json)
+> shows the gateway authz table — the `akadmin` admin claim is added
+> as part of this step on the kfclab path, so authenticated human users
+> can hit the gateway UI without being denied.
+>
+> The CA configuration itself is **not GET-able** (the gateway returns
+> HTTP 405 on `GET /config/configuration` — POST/PUT only), so there's
+> no live JSON snapshot to compare against. The exact body shape this
+> step submits is documented in the script blocks below.
 
 This is the **single biggest configuration step**. It creates the
 gateway-side CA record, which has four jobs:
@@ -485,6 +515,14 @@ CertificateProfile) entries from above.
 
 ## Step 4 — Register the CA in Command
 
+> **Reference state after this step:** see
+> [`docs/reference/command/certificate-authority.json`](docs/reference/command/certificate-authority.json)
+> for the full CA record Command returns from
+> `GET /KeyfactorAPI/CertificateAuthorities` (filtered to the
+> `LogicalName=certinext-caplugin` entry). Useful to compare against
+> when debugging — every field the API populates is present, and
+> `ClientSecret.SecretValue` is masked by Command on read.
+
 Command needs to know the gateway exists and what auth to use when
 talking to it. The CA registration carries the OAuth client used for
 Command-to-gateway calls (the same gateway OAuth client from Step 1) and
@@ -582,6 +620,15 @@ curl -sk "${COMMAND_URL}/KeyfactorAPI/CertificateAuthorities" \
 ---
 
 ## Step 5 — Import templates into Command
+
+> **Reference state after this step:** see
+> [`docs/reference/command/templates-certinext.json`](docs/reference/command/templates-certinext.json)
+> for the 8 templates Command creates from the 8 ProductIDs registered
+> in Step 3 (filtered from `GET /KeyfactorAPI/Templates` by
+> `ConfigurationTenant=certinext-caplugin`). Confirms the
+> `AnyCA_<ProductID>` naming convention, the `ExtendedKeyUsages` set,
+> the `KeyTypes` list synced from the gateway profile's `key_algs`,
+> and the per-template `Id` / `Oid` shape.
 
 Command's `/Templates/Import` endpoint asks the registered gateway CA
 for its template list and creates corresponding Command-side templates
