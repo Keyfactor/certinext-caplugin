@@ -73,8 +73,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // a regression of either: field types must use only types the v3.2 host
             // ships, with `object` as the typical neutral-typed storage and an `as`
             // cast inside method bodies (JIT-lazy) for actual use.
+            // DeclaredOnly added for symmetry with the nested-type / method tests below
+            // and to make the "we only check this type, not its base classes" intent
+            // explicit in the reflection-query shape.
             var fields = typeof(CERTInextCAPlugin)
-                .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
 
             foreach (var field in fields)
             {

@@ -160,7 +160,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             var result = DeserializeOrThrow<ValidateCredentialsResponse>(resp, "validate credentials");
             if (result.Meta != null && !result.Meta.IsSuccess)
             {
-                LogApiFailure("ValidateCredentials", resp, result.Meta.ErrorCode, result.Meta.ErrorMessage);
+                // Authentication-failure-shaped event: log at Error so SOX-required
+                // SIEM rules on authentication failures fire.  Every other meta-failure
+                // call site logs at the LogApiFailure default (Warning).
+                LogApiFailure("ValidateCredentials", resp,
+                    result.Meta.ErrorCode, result.Meta.ErrorMessage,
+                    level: LogLevel.Error);
                 throw new Exception(
                     $"CERTInext credential validation failed: {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}. " +
                     "See gateway logs for details.");
@@ -187,6 +192,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             GenerateOrderResponse result = null;
             RestResponse resp = null;
+            // Cumulative backoff time across all rate-limit retries this call.  Emitted
+            // on the success branch so an operator scraping gateway logs for rate-limit
+            // pressure (SOC2 CC7.2 anomaly-detection) can correlate by single log line
+            // rather than threading per-attempt warnings by OrderNumber.
+            double totalRateLimitBackoffSeconds = 0.0;
 
             // Issue #8 rate-limit retry: the sandbox returns "Inactive Account User."
             // as a generic error string for several conditions, including burst-rate-limit
@@ -233,6 +243,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     if (IsRateLimitSurface(result.Meta.ErrorMessage) && attempt < RateLimitMaxAttempts)
                     {
                         double waitSeconds = ComputeRateLimitBackoffSeconds(attempt);
+                        totalRateLimitBackoffSeconds += waitSeconds;
                         Logger.LogWarning(
                             "PlaceOrder hit rate-limit-shaped error \"{ErrorMessage}\" (attempt {Attempt}/{Max}). " +
                             "Backing off {WaitSeconds:F1}s before retrying. See Troubleshooting in README for context.",
@@ -253,6 +264,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         "See gateway logs for details.");
                 }
 
+                // Success — if we retried, emit a single summary line so the rate-limit
+                // pressure is correlatable per-call without joining the per-attempt
+                // warnings by OrderNumber.  (SOC2 CC7.2 anomaly-detection enablement.)
+                if (attempt > 1)
+                {
+                    Logger.LogInformation(
+                        "PlaceOrder succeeded after rate-limit retries. OrderNumber={OrderNumber}, " +
+                        "RateLimitRetryCount={RetryCount}, TotalBackoffSeconds={BackoffSeconds:F1}",
+                        result.OrderDetails?.OrderNumber, attempt - 1, totalRateLimitBackoffSeconds);
+                }
                 break; // success
             }
 
@@ -1471,6 +1492,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// True when <paramref name="errorMessage"/> matches the documented rate-limit
         /// surface CERTInext uses on its sandbox. Substring + case-insensitive match;
         /// the trailing punctuation/whitespace varies across observed payloads.
+        ///
+        /// <para>
+        /// <b>Contract:</b> callers MUST only invoke this inside the
+        /// <c>!result.Meta.IsSuccess</c> branch of an API response.  CERTInext's
+        /// successful responses are not currently observed to include this phrase,
+        /// but the predicate is intentionally permissive to handle CA-side wording
+        /// drift, and we want the safety net of the surrounding failure context.
+        /// </para>
+        ///
+        /// <para>
+        /// <b>Known cost:</b> a genuinely-inactive account (admin disabled, billing
+        /// hold) returns the same error string as a rate-limit hit.  Today there is
+        /// no distinguishing <c>errorCode</c> field in the observed payloads, so
+        /// callers gated by this predicate will exhaust their full retry budget
+        /// (5 attempts × ~31 s total wait) before propagating the original failure
+        /// to the gateway.  Quota cost: up to 5 enrollment attempts per affected
+        /// call.  See GitHub issue #8 for the discussion.
+        /// </para>
         /// </summary>
         internal static bool IsRateLimitSurface(string errorMessage)
         {
@@ -1481,7 +1520,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <summary>
         /// Exponential backoff with ±25% jitter for the rate-limit retry inside
         /// <see cref="PlaceOrderAsync"/>.  Attempts 1..5 produce roughly
-        /// 1s / 2s / 4s / 8s / 16s of nominal delay (jitter spreads concurrent callers).
+        /// 1s / 2s / 4s / 8s / 16s of nominal delay.
+        ///
+        /// <para>
+        /// <b>Thundering-herd assumption:</b> jitter is sampled from a process-wide
+        /// <see cref="Org.BouncyCastle.Security.SecureRandom"/> (<c>_txnRandom</c>),
+        /// so concurrent callers in the same process get independent samples.
+        /// Multiple gateway pods hitting the same CERTInext tenant each have their
+        /// own seeded instance, so jitter is also independent across pods.  The
+        /// ±25% spread on the 16s nominal at attempt 5 produces a 4s window — wide
+        /// enough to de-correlate from the documented "~16 orders / 10 s" sandbox
+        /// limit if a multi-pod fleet hits the limit simultaneously.
+        /// </para>
+        ///
         /// Exposed <c>internal</c> so unit tests can verify the schedule.
         /// </summary>
         internal static double ComputeRateLimitBackoffSeconds(int attempt)
@@ -1514,35 +1565,91 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <summary>
-        /// Writes a structured <c>LogWarning</c> capturing every diagnostic field
-        /// available for a non-success CERTInext API response — HTTP status, the
-        /// CERTInext-side error code and message, and the (truncated) raw response
-        /// body.  Call this immediately before throwing so the exception's
-        /// "See gateway logs for details" instruction actually points somewhere useful.
+        /// Scrubs known credential-bearing keys out of a JSON-ish body before it goes
+        /// into a log line.  CERTInext error envelopes are not currently observed to
+        /// echo request fields, but the response shape isn't contractually fixed and
+        /// the <c>authKey</c> digest in the request meta block IS a replayable
+        /// privileged credential under SOX (anyone with one valid
+        /// <c>(ts, txn, authKey)</c> triple can replay until the timestamp window expires).
+        /// Defense-in-depth: redact before logging, not after a leak.
+        ///
+        /// Conservative substring/regex pass — handles JSON, form-urlencoded, and
+        /// header-line shapes.  Exposed <c>internal</c> for unit-testing.
+        /// </summary>
+        internal static string RedactCredentials(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+
+            // JSON: "authKey": "..."  → "authKey":"***REDACTED***"
+            // JSON: "client_secret":"..."  → same
+            // JSON: "ApiKey":"..."  → same (defensive — not currently sent on the wire,
+            //  but the field name is a common one and the cost of redacting it is zero).
+            body = System.Text.RegularExpressions.Regex.Replace(
+                body,
+                @"(?i)""(authKey|client_secret|apiKey|accessKey|password)""\s*:\s*""[^""]*""",
+                @"""$1"":""***REDACTED***""");
+
+            // Form-urlencoded: client_secret=... or authKey=... (before any & or end)
+            body = System.Text.RegularExpressions.Regex.Replace(
+                body,
+                @"(?i)\b(authKey|client_secret|apiKey|accessKey|password)=([^&\s""]+)",
+                "$1=***REDACTED***");
+
+            // Authorization header lines if a header dump ever ends up in body shape.
+            // Match through end-of-line so multi-token values (e.g. "Bearer <token>")
+            // are fully scrubbed, not just the scheme word.
+            body = System.Text.RegularExpressions.Regex.Replace(
+                body,
+                @"(?im)^Authorization:[^\r\n]*",
+                "Authorization: ***REDACTED***");
+
+            return body;
+        }
+
+        /// <summary>
+        /// Writes a structured log capturing every diagnostic field available for a
+        /// non-success CERTInext API response — HTTP status, the CERTInext-side error
+        /// code and message, and the (truncated, credential-scrubbed) raw response body.
+        /// Call this immediately before throwing so the exception's "See gateway logs
+        /// for details" instruction actually points somewhere useful.
         ///
         /// Background: issue #8 surfaced that the sandbox returns the generic string
         /// <c>"Inactive Account User."</c> for several conditions including burst
         /// rate-limit rejection.  Without the raw body in the log, an operator has no
         /// way to disambiguate "the account is genuinely inactive" from "you submitted
         /// 16 orders in 10 seconds and the CA's burst quota kicked in."
+        ///
+        /// <para>
+        /// <b>Do NOT call this helper from the OAuth token-exchange path</b> — that
+        /// request body contains the plaintext <c>client_secret</c>, and while
+        /// <see cref="RedactCredentials"/> scrubs known credential keys defensively,
+        /// the token-exchange path has its own explicit log-suppression comment at
+        /// the existing throw site and we want to keep that path's blast radius tight.
+        /// </para>
+        ///
+        /// Default <paramref name="level"/> is <see cref="LogLevel.Warning"/> — meta-failure-on-HTTP-200
+        /// is the CA saying "no" to a request, a business outcome rather than a plugin
+        /// fault.  Callers handling authentication failures should pass
+        /// <see cref="LogLevel.Error"/> so SOX-loggable authentication events match
+        /// the SIEM-alert level convention.
         /// </summary>
         private static void LogApiFailure(
             string operationContext,
             RestResponse resp,
             string errorCode = null,
-            string errorMessage = null)
+            string errorMessage = null,
+            LogLevel level = LogLevel.Warning)
         {
-            // Keep log level at Warning — meta-failure-on-HTTP-200 is the CA saying
-            // "no" to a request, which is a business outcome, not a plugin error.
-            // True transport/auth failures already log at Error elsewhere.
-            Logger.LogWarning(
+            string sanitizedBody = RedactCredentials(resp?.Content) ?? "(empty)";
+            Logger.Log(
+                level,
                 "CERTInext API non-success. Operation={Operation}, HttpStatus={HttpStatus}, " +
                 "ErrorCode={ErrorCode}, ErrorMessage={ErrorMessage}, ResponseBody={ResponseBody}",
                 operationContext,
                 (int?)resp?.StatusCode ?? 0,
                 errorCode ?? "(none)",
                 errorMessage ?? "(none)",
-                Truncate(resp?.Content, LoggedResponseBodyCapBytes) ?? "(empty)");
+                Truncate(sanitizedBody, LoggedResponseBodyCapBytes));
         }
 
         private static string ExtractErrorMessage(string content, string operation)
