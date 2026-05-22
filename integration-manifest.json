@@ -35,7 +35,7 @@
                 },
                 {
                     "name": "GroupNumber",
-                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation \u2192 Groups."
+                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts will queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation \u2192 Groups."
                 },
                 {
                     "name": "OrganizationNumber",
@@ -43,19 +43,19 @@
                 },
                 {
                     "name": "TechnicalContactName",
-                    "description": "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field."
+                    "description": "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to the configured RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field."
                 },
                 {
                     "name": "TechnicalContactEmail",
-                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every SSL order. Defaults to RequestorEmail when blank."
+                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank."
                 },
                 {
                     "name": "TechnicalContactIsdCode",
-                    "description": "OPTIONAL: International dialing code for the TPoC phone number. Defaults to RequestorIsdCode when blank."
+                    "description": "OPTIONAL: International dialing code for the TPoC phone number. Defaults to the configured RequestorIsdCode when blank."
                 },
                 {
                     "name": "TechnicalContactMobileNumber",
-                    "description": "OPTIONAL: Mobile number for the TPoC (digits only). Defaults to RequestorMobileNumber when blank."
+                    "description": "OPTIONAL: Mobile number for the TPoC (digits only). Defaults to the configured RequestorMobileNumber when blank."
                 },
                 {
                     "name": "AuthMode",
@@ -143,11 +143,11 @@
                 },
                 {
                     "name": "DcvEnabled",
-                    "description": "OPTIONAL: When true, the gateway performs DNS-based Domain Control Validation (DCV) during enrollment for orders that require it. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) deployed on the gateway. Default: false."
+                    "description": "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false."
                 },
                 {
                     "name": "DcvTxtRecordTemplate",
-                    "description": "OPTIONAL: Format string for the DNS TXT record hostname published during DCV. {0} is replaced with the domain being validated. Default: _emsign-validation.{0}."
+                    "description": "OPTIONAL: Format string for the DNS TXT record hostname used during DCV. {0} is replaced with the domain name being validated. Default: _emsign-validation.{0}"
                 },
                 {
                     "name": "DcvPropagationDelaySeconds",
@@ -155,7 +155,15 @@
                 },
                 {
                     "name": "DcvTimeoutMinutes",
-                    "description": "OPTIONAL: Maximum minutes to wait for the entire DCV flow before cancelling the enrollment. Can also be set via the CERTINEXT_DCV_TIMEOUT_MINUTES environment variable; the environment variable takes precedence when both are set. Default: 10."
+                    "description": "OPTIONAL: Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) before timing out the enrollment. Can also be set via the CERTINEXT_DCV_TIMEOUT_MINUTES environment variable; the env var takes precedence when both are set. Default: 10."
+                },
+                {
+                    "name": "DcvWaitForChallengeSeconds",
+                    "description": "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() for CERTInext to expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL before the slot appears. Without this wait, the plugin's initial TrackOrder check sees null and skips DCV \u2014 the order then has to wait for the next gateway sync cycle to be picked up. Setting to 0 disables the wait (single-check behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
+                },
+                {
+                    "name": "DcvWaitForIssuanceSeconds",
+                    "description": "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV verifies for CERTInext to finish generating the certificate. CERTInext issuance is async \u2014 DCV may be verified but the cert PEM isn't yet available for download. Without this wait, Enroll() returns a pending result and the issued cert is picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
                 }
             ],
             "enrollment_config": [

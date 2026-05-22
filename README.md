@@ -53,12 +53,6 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
 
 The CERTInext AnyCA Gateway REST plugin is compatible with the Keyfactor AnyCA Gateway REST 24.2.0 and later.
 
-### DCV (Domain Control Validation) — gateway-version note
-
-DNS DCV is an opt-in feature (controlled by `DcvEnabled` in the connector config). The plugin's DCV machinery uses `Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory`, which was introduced in `Keyfactor.AnyGateway.IAnyCAPlugin` v3.3 (paired with newer gateway images). On older gateway hosts whose bundled `IAnyCAPlugin` assembly is v3.2 or earlier, the plugin loads cleanly and operates normally for enrollment, sync, and revocation — but DCV is automatically disabled (the plugin returns each pending order with status `EXTERNALVALIDATION` so the gateway picks it up on the next sync, instead of running DNS-01 itself).
-
-**No operator action is required.** On a v3.3+ AnyCA Gateway, the gateway host wires `IDomainValidatorFactory` into the plugin automatically — operators just install a DNS provider plugin (e.g. `azure-azuredns-dnsplugin`) and set `DcvEnabled=true` in the connector config. The plugin exposes a public `SetDomainValidatorFactory(object)` method that the gateway host uses as its integration point; the parameter type is `object` (rather than the v3.3-only interface) specifically so the plugin's public surface remains loadable on older gateways. See GitHub [issue #7](../../issues/7) for the full reasoning.
-
 ## Support
 The CERTInext AnyCA Gateway REST plugin is open source and there is **no SLA**. Keyfactor will address issues as resources become available. Keyfactor customers may request escalation by opening up a support ticket through their Keyfactor representative. 
 
@@ -124,8 +118,12 @@ CERTInext operates three separate environments. Use the sandbox environment for 
 
         * **ApiUrl** - REQUIRED: CERTInext API base URL. Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ — Production (US): https://us-api.certinext.io/ — Production (Global/India): https://api.certinext.io/ 
         * **AccountNumber** - REQUIRED: Your CERTInext account number (numeric string). Available in the CERTInext portal. 
-        * **GroupNumber** - OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation → Groups. 
-        * **OrganizationNumber** - STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric CERTInext organization number for a pre-vetted organization (e.g. your company's pre-vetted entry). When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. Without this value, orders are placed without any organizationDetails block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours). Available in the CERTInext portal under Organizations → Pre-vetted Organizations.
+        * **GroupNumber** - OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts will queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation → Groups. 
+        * **OrganizationNumber** - STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric CERTInext organization number for a pre-vetted organization (e.g. your company's pre-vetted entry). When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. Without this value, orders are placed without any organizationDetails block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours). Available in the CERTInext portal under Organizations → Pre-vetted Organizations. 
+        * **TechnicalContactName** - OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to the configured RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field. 
+        * **TechnicalContactEmail** - OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank. 
+        * **TechnicalContactIsdCode** - OPTIONAL: International dialing code for the TPoC phone number. Defaults to the configured RequestorIsdCode when blank. 
+        * **TechnicalContactMobileNumber** - OPTIONAL: Mobile number for the TPoC (digits only). Defaults to the configured RequestorMobileNumber when blank. 
         * **AuthMode** - REQUIRED: Authentication mode. 'AccessKey' (default) — uses authKey = SHA256(accessKey + ts + txn) in every request body. 'OAuth' — uses an OAuth2 bearer token (requires OAuthTokenUrl, OAuthClientId, OAuthClientSecret). 
         * **ApiKey** - REQUIRED when AuthMode is 'AccessKey': the REST API Access Key generated in the CERTInext portal under Integrations → APIs. This value is used to compute authKey = SHA256(accessKey + ts + txn); it is never transmitted directly. 
         * **OAuthTokenUrl** - OAuth token endpoint URL. Required when AuthMode is 'OAuth'. 
@@ -137,20 +135,22 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **RequestorMobileNumber** - Requestor mobile number (digits only, no country code). 
         * **SignerPlace** - City or location of the subscriber agreement signer. Required by CERTInext for all orders. 
         * **SignerIp** - IP address of the subscriber agreement signer. Required by CERTInext for all orders. 
-        * **TechnicalContactName** - OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field.
-        * **TechnicalContactEmail** - OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field. Defaults to RequestorEmail when blank.
-        * **TechnicalContactIsdCode** - OPTIONAL: International dialing code for the TPoC phone number. Defaults to RequestorIsdCode when blank.
-        * **TechnicalContactMobileNumber** - OPTIONAL: Mobile number for the TPoC (digits only). Defaults to RequestorMobileNumber when blank.
         * **DefaultProductCode** - OPTIONAL: Default numeric product code used when not specified at template level. Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). Retrieve available codes from Integrations → APIs → GetProductDetails. 
-        * **AccountingModel** - OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel`. "2" = credit-based (most accounts, default). "1" = cash model.
-        * **EmailNotifications** - OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. "1" = enabled, "0" = silent (recommended for gateway-driven orders so end users aren't surprised by CA emails). Default: "0".
-        * **SubscriptionValidityYears** - OPTIONAL: Default validity in years for SSL orders. "1", "2", or "3". Override per template via the ValidityYears product parameter. Default: "1".
-        * **SubscriptionAutoRenew** - OPTIONAL: Whether CERTInext should auto-renew certificates issued through this connector. "0" = disabled (recommended — renewal is driven by Keyfactor Command), "1" = enabled. Default: "0".
-        * **SubscriptionRenewCriteriaDays** - OPTIONAL: Days before expiry at which CERTInext auto-renews (only honored when SubscriptionAutoRenew = "1"). Typical values: "30" or "60". Default: "30".
-        * **AutoSecureWww** - OPTIONAL: If "1", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. "0" = use only the CN/SANs supplied with the CSR. Default: "0".
+        * **AccountingModel** - OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel`. "2" = credit-based (most accounts, default). "1" = cash model. 
+        * **EmailNotifications** - OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. "1" = enabled, "0" = silent (recommended for gateway-driven orders so end users aren't surprised by CA emails). Default: "0". 
+        * **SubscriptionValidityYears** - OPTIONAL: Default validity in years for SSL orders. "1", "2", or "3". Override per template via the ValidityYears product parameter. Default: "1". 
+        * **SubscriptionAutoRenew** - OPTIONAL: Whether CERTInext should auto-renew certificates issued through this connector. "0" = disabled (recommended — renewal is driven by Keyfactor Command), "1" = enabled. Default: "0". 
+        * **SubscriptionRenewCriteriaDays** - OPTIONAL: Days before expiry at which CERTInext auto-renews (only honored when SubscriptionAutoRenew = "1"). Typical values: "30" or "60". Default: "30". 
+        * **AutoSecureWww** - OPTIONAL: If "1", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. "0" = use only the CN/SANs supplied with the CSR. Default: "0". 
         * **IgnoreExpired** - If true, expired certificates will be skipped during synchronization. Default: false. 
         * **PageSize** - Number of orders to fetch per page during synchronization. Default: 100, max: 500. 
         * **Enabled** - Flag to Enable or Disable gateway functionality. Disabling is primarily used to allow creation of the CA connector prior to configuration information being available. 
+        * **DcvEnabled** - OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false. 
+        * **DcvTxtRecordTemplate** - OPTIONAL: Format string for the DNS TXT record hostname used during DCV. {0} is replaced with the domain name being validated. Default: _emsign-validation.{0} 
+        * **DcvPropagationDelaySeconds** - OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: 30. 
+        * **DcvTimeoutMinutes** - OPTIONAL: Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) before timing out the enrollment. Can also be set via the CERTINEXT_DCV_TIMEOUT_MINUTES environment variable; the env var takes precedence when both are set. Default: 10. 
+        * **DcvWaitForChallengeSeconds** - OPTIONAL: How long (seconds) the plugin will wait inside Enroll() for CERTInext to expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL before the slot appears. Without this wait, the plugin's initial TrackOrder check sees null and skips DCV — the order then has to wait for the next gateway sync cycle to be picked up. Setting to 0 disables the wait (single-check behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60. 
+        * **DcvWaitForIssuanceSeconds** - OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV verifies for CERTInext to finish generating the certificate. CERTInext issuance is async — DCV may be verified but the cert PEM isn't yet available for download. Without this wait, Enroll() returns a pending result and the issued cert is picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60. 
 
 2. A Keyfactor Command certificate template maps an enrollment request to a specific CERTInext product. Create one template per CERTInext product that you want to make available to requesters.
 
@@ -255,19 +255,8 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `RequestorMobileNumber` | Optional | Requestor mobile number (digits only, no country code). Included in the `requestorInformation` block. | N/A | `5551234567` |
 | `SignerPlace` | Required | City or location of the person accepting the subscriber agreement on behalf of your organization. Required by CERTInext for all orders. | Use the physical city where the signer is located. | `Austin` |
 | `SignerIp` | Required | Public IP address of the host accepting the subscriber agreement. Required by CERTInext for all orders. | Use the outbound IP of the AnyCA Gateway host, or the IP of the workstation from which the agreement was accepted. | `203.0.113.10` |
-| `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in `productDetails.groupNumber` on `GetProductDetails` requests **and** in `delegationInformation.groupNumber` on every SSL order. Some accounts queue orders for additional review when this field is omitted. | Portal → **Delegation → Groups**. | `2345678901` |
-| `OrganizationNumber` | Strongly Recommended | Numeric CERTInext organization number for a pre-vetted organization (e.g. your company). When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. **Without this value, orders are placed without any `organizationDetails` block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours on the sandbox).** Required for OV/EV products in most accounts. | Portal → **Organizations → Pre-vetted Organizations**. | `3456789012` |
-| `TechnicalContactName` | Optional | Name sent in `technicalPointOfContact.tpcName` on every SSL order. Defaults to `RequestorName` when blank. Some product configurations require a TPoC; omitting it can park orders awaiting manual completion. | N/A | `Jane Smith` |
-| `TechnicalContactEmail` | Optional | Email sent in `technicalPointOfContact.tpcEmail`. Defaults to `RequestorEmail` when blank. | N/A | `tpc@example.com` |
-| `TechnicalContactIsdCode` | Optional | International dialing code for the TPoC phone number. Defaults to `RequestorIsdCode` when blank. | N/A | `1` |
-| `TechnicalContactMobileNumber` | Optional | Mobile number for the TPoC (digits only). Defaults to `RequestorMobileNumber` when blank. | N/A | `5551234567` |
+| `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in the `productDetails.groupNumber` field of `GetProductDetails` requests. Some sandbox accounts return an empty product list from `GetProductDetails` unless this field is included. Available in the CERTInext portal under **Delegation → Groups**. | Portal → **Delegation → Groups**. | `2345678901` |
 | `DefaultProductCode` | Optional | Default numeric product code to use when no product code is set on the certificate template. If omitted and the template also has no product code, enrollment will fail. Product codes are provisioned per account by eMudhra — contact your eMudhra account representative to obtain the numeric codes available to your account. | Call `GetProductDetails` against your account/environment (see product code table below). | `842` |
-| `AccountingModel` | Optional | CERTInext billing model sent in `orderDetails.accountingModel`. `"2"` = credit-based (most accounts, default). `"1"` = cash model. | N/A | `2` |
-| `EmailNotifications` | Optional | Whether CERTInext sends lifecycle-event emails to the requestor. `"1"` = enabled, `"0"` = silent (recommended for gateway-driven orders so end users aren't surprised by CA emails). Default: `"0"`. | N/A | `0` |
-| `SubscriptionValidityYears` | Optional | Default validity in years for SSL orders. `"1"`, `"2"`, or `"3"`. Override per template via the `ValidityYears` enrollment parameter. Default: `"1"`. | N/A | `1` |
-| `SubscriptionAutoRenew` | Optional | Whether CERTInext auto-renews certificates issued through this connector. `"0"` = disabled (recommended — renewal is driven by Keyfactor Command), `"1"` = enabled. Default: `"0"`. | N/A | `0` |
-| `SubscriptionRenewCriteriaDays` | Optional | Days before expiry at which CERTInext auto-renews (only honored when `SubscriptionAutoRenew = "1"`). Typical values: `"30"` or `"60"`. Default: `"30"`. | N/A | `30` |
-| `AutoSecureWww` | Optional | If `"1"`, CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. `"0"` = use only the CN/SANs supplied with the CSR. Default: `"0"`. | N/A | `0` |
 | `IgnoreExpired` | Optional | If `true`, expired certificates are skipped during synchronization and are not imported into Keyfactor Command. Default: `false`. | N/A | `false` |
 | `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500`. Reduce this value if synchronization requests time out. | N/A | `100` |
 | `Enabled` | Optional | Enables or disables the CA connector. Setting this to `false` allows the connector record to be created before all credentials are available, without triggering a live connectivity test. Default: `true`. | N/A | `true` |
@@ -296,7 +285,7 @@ To retrieve the exact codes available to your account, call the `GetProductDetai
 
 The product codes in this table were observed on:
 - the US sandbox environment (`sandbox-us-api.certinext.io`) in April–May 2026
-- the Production India environment (`api.certinext.io`) via the live draft-order coverage matrix in `docsource/development.md`
+- the Production India environment (`api.certinext.io`) via the live draft-order coverage matrix in [development.md](development.md)
 
 **Your account may still have different codes.** Always call `GetProductDetails` against your target environment before going live.
 
@@ -595,50 +584,6 @@ The table below maps each Keyfactor Command operation to the CERTInext API endpo
 | List available product codes | `POST GetProductDetails` |
 | Attach CSR to draft order | `POST SubmitCSR` |
 
-
-## Troubleshooting
-
-### `"Inactive Account User."` returned from `GenerateOrderSSL`
-
-**Symptom**
-
-Enrollments fail with the gateway exception:
-
-```
-CERTInext order failed: Inactive Account User.. See gateway logs for details.
-```
-
-The same access key / account works perfectly fine before and after the failing window — a `Ping` (`ValidateCredentials`) call seconds earlier returns success, and the next individual enrollment after a brief pause also succeeds.
-
-**Root cause**
-
-The CERTInext sandbox at `https://sandbox-us-api.certinext.io/emSignHub-API` applies a **burst rate limit** on order placement and surfaces rate‑limit rejection through the **generic** error string `"Inactive Account User."` — the same string the API uses for genuinely inactive accounts. There is currently no distinguishing `errorCode`, `Retry-After` header, or structured field to tell the two conditions apart from the meta block alone.
-
-Empirically the limit kicks in at roughly **16+ enrollments submitted within 10 seconds** on the US sandbox. Sustained submission velocity well below that runs cleanly.
-
-**Confirmation steps**
-
-1. Run a single `Ping` against the same `ApiUrl` / `AccessKey`. If it succeeds, the account is active; the prior failure was almost certainly a rate-limit hit.
-2. Check the gateway warning log for the `LogApiFailure` line emitted just before the throw (see issue [#8](../../issues/8) and the `LogApiFailure` helper in `CERTInextClient.cs`). The full raw response body is included there — if CERTInext ever surfaces a distinguishing code or message for rate-limit (as opposed to account-state), it will appear in that line.
-3. Wait 30–60 seconds, then retry the failed enrollment(s). A successful retry confirms it was rate-limit.
-
-**Mitigation**
-
-- **Reduce submission velocity**: throttle order placements to roughly one per 1–2 seconds. The plugin does not yet have a built-in client-side throttle; pacing must come from the caller.
-- **For high-volume migration scenarios**: split the workload into batches of ~10 orders separated by a short pause, rather than firing everything at once.
-- **No client-side automatic retry on this error**: a defensive retry inside `PlaceOrderAsync` would paper over the misleading error string and burn the operator's order quota on retries. We document the gotcha instead.
-
-### Enrollment returns immediately with `Status=90 (EXTERNALVALIDATION)`
-
-The plugin's bounded `Enroll()` budget (`DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds`, defaults 60s each) elapsed before CERTInext finished asynchronous issuance, or DCV could not run because no `IDomainValidatorFactory` was injected. The next gateway sync cycle will pick the cert up — no operator action required.
-
-### `EMS-956 "Invalid Request for this API"` from `GetDcv`
-
-CERTInext exposes the `domainVerification` slot in `TrackOrder` before the `GetDcv` endpoint will accept calls for that order. The plugin's `IsDcvNotYetReady` predicate recognizes this and defers DCV to the next sync cycle without throwing — no operator action required.
-
-### Plugin fails to load with `Could not load type 'Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory'`
-
-Older gateway image (pre-IAnyCAPlugin v3.3) loading a plugin DLL built before the issue [#7](../../issues/7) fix. Upgrade to plugin v1.0 or later.
 
 ## License
 
