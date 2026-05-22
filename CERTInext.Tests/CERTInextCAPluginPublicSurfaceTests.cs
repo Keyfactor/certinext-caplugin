@@ -59,6 +59,91 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public void NoInstanceField_DeclaredTypeReferencesV3Point3OnlyTypes()
+        {
+            // The .NET JIT eagerly resolves the declared types of all instance fields
+            // when it first compiles ANY method on a class. If an instance field is
+            // declared with a missing-type-on-this-host type, TypeLoadException fires
+            // the very first time Initialize / Enroll / Synchronize / anything is
+            // invoked — independent of whether the field is read on that code path.
+            //
+            // Issue #7's original fix patched constructor-signature reflection (the
+            // DI-container surface). The follow-up comment showed a separate failure
+            // path where Enroll trips on field-type loading. This test guards against
+            // a regression of either: field types must use only types the v3.2 host
+            // ships, with `object` as the typical neutral-typed storage and an `as`
+            // cast inside method bodies (JIT-lazy) for actual use.
+            var fields = typeof(CERTInextCAPlugin)
+                .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+            foreach (var field in fields)
+            {
+                string fieldTypeName = field.FieldType.FullName ?? field.FieldType.Name;
+                V3Point3OnlyTypeNames.Should().NotContain(fieldTypeName,
+                    $"instance field '{field.Name}' (declared type {fieldTypeName}) on " +
+                    $"{field.DeclaringType?.FullName} would trigger TypeLoadException when the JIT " +
+                    $"first compiles any method on the class on a v3.2 gateway host. " +
+                    $"Re-type the field as `object` and cast to the v3.3 type inside method " +
+                    $"bodies — see issue #7 follow-up.");
+            }
+        }
+
+        [Fact]
+        public void NoNestedType_ImplementsV3Point3OnlyInterface()
+        {
+            // Nested types declared with a base/interface reference to a v3.3-only
+            // interface put that interface in the containing class's nested-type
+            // metadata. CLR class-load behaviour around nested-type interface
+            // resolution is fragile across .NET versions, so we forbid it outright
+            // as a belt-and-braces measure.
+            var nestedTypes = typeof(CERTInextCAPlugin)
+                .GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic);
+
+            foreach (var nested in nestedTypes)
+            {
+                foreach (var iface in nested.GetInterfaces())
+                {
+                    string ifaceName = iface.FullName ?? iface.Name;
+                    V3Point3OnlyTypeNames.Should().NotContain(ifaceName,
+                        $"nested type '{nested.FullName}' implements v3.3-only interface " +
+                        $"'{ifaceName}', which would leak into the containing class's " +
+                        $"reflection surface on a v3.2 host. Delete the nested type or " +
+                        $"refactor it to not declare the v3.3 interface in its base list.");
+                }
+            }
+        }
+
+        [Fact]
+        public void NoPublicMethod_SignatureReferencesV3Point3OnlyTypes()
+        {
+            // Reflection-driven hosts (anything calling Type.GetMethods()) eagerly
+            // resolve return-type and parameter-type metadata on each method. Public
+            // method signatures must therefore avoid v3.3-only types the same way
+            // public constructors do. SetDomainValidatorFactory's `object` parameter
+            // is the safe pattern.
+            var publicInstanceMethods = typeof(CERTInextCAPlugin)
+                .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+
+            foreach (var method in publicInstanceMethods)
+            {
+                // Property accessors get caught here too — that's intentional.
+                string returnTypeName = method.ReturnType.FullName ?? method.ReturnType.Name;
+                V3Point3OnlyTypeNames.Should().NotContain(returnTypeName,
+                    $"public method '{method.Name}' returns v3.3-only type '{returnTypeName}'. " +
+                    $"Change the return type to `object` and have callers cast at the use site.");
+
+                foreach (var param in method.GetParameters())
+                {
+                    string paramTypeName = param.ParameterType.FullName ?? param.ParameterType.Name;
+                    V3Point3OnlyTypeNames.Should().NotContain(paramTypeName,
+                        $"public method '{method.Name}' parameter '{param.Name}' is " +
+                        $"v3.3-only type '{paramTypeName}'. Change the parameter to `object` " +
+                        $"and cast inside the method body — see SetDomainValidatorFactory.");
+                }
+            }
+        }
+
+        [Fact]
         public void ParameterlessConstructor_IsPublic()
         {
             var parameterlessCtor = typeof(CERTInextCAPlugin)

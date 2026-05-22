@@ -35,17 +35,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         private CERTInextConfig _config;
         private ICERTInextClient _client;
         private ICertificateDataReader _certificateDataReader;
-        // Not readonly: SetDomainValidatorFactory mutates this post-construction.
-        // A v3.3 gateway host can call SetDomainValidatorFactory between `new` and
-        // Initialize() to wire up DCV; on a v3.2 host where the factory type doesn't
-        // exist, the field remains null and DCV gracefully no-ops.
+        // Typed as `object` — NOT `IDomainValidatorFactory` — so the .NET JIT does not
+        // eagerly resolve the v3.3-only IDomainValidatorFactory type when it compiles
+        // any method on this class.  Resolving an instance field's declared type is
+        // part of the JIT's per-class metadata load, distinct from constructor-signature
+        // reflection (which we already protected in the issue #7 first pass).  On a
+        // gateway host whose IAnyCAPlugin assembly is v3.2.0.0 (no IDomainValidatorFactory),
+        // declaring the field with the missing type causes TypeLoadException the first
+        // time ANY instance method on the class is compiled — typically Initialize.
         //
-        // `volatile` because the field is written by SetDomainValidatorFactory and
-        // read by EnrollNewAsync/TryRunDcvDuringSyncAsync, which can run on different
-        // threads.  The standard gateway lifecycle wires the factory before the first
-        // operation, but no contract forbids a later re-wire and the cost of `volatile`
-        // is negligible compared to the time spent inside Enroll/Synchronize.
-        private volatile IDomainValidatorFactory _domainValidatorFactory;
+        // Reads of this field perform an `as IDomainValidatorFactory` cast inside method
+        // bodies (see DomainValidatorFactory below).  Casts in method bodies are JIT-lazy
+        // per-method, so the type is only resolved on hosts that actually have it.
+        //
+        // `volatile` because the field is written by SetDomainValidatorFactory and read
+        // by EnrollNewAsync / TryRunDcvDuringSyncAsync, which can run on different threads.
+        // See GitHub issue #7 for the full reasoning.
+        private volatile object _domainValidatorFactory;
+
+        /// <summary>
+        /// Returns the injected <see cref="IDomainValidatorFactory"/> when one is
+        /// available, or <c>null</c> when DCV is not wired up.  The cast is inside this
+        /// property body (and therefore JIT-lazy) so the missing-type case on a v3.2
+        /// gateway host stays compileable and never triggers <c>TypeLoadException</c>
+        /// at runtime.  All read sites in this class go through this property.
+        /// </summary>
+        private IDomainValidatorFactory DomainValidatorFactory =>
+            _domainValidatorFactory as IDomainValidatorFactory;
 
         // True when the client was passed in via a test-injection constructor and therefore
         // should not be disposed by this class (the test owns the mock's lifetime).
@@ -1125,16 +1141,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             return hasPhrase && !hasOtherEmsCode;
         }
 
-        /// <summary>
-        /// Passes connector configuration to DNS provider plugins for per-domain configuration lookup.
-        /// </summary>
-        private sealed class DomainValidatorConfigProvider : Keyfactor.AnyGateway.Extensions.IDomainValidatorConfigProvider
-        {
-            public Dictionary<string, object> DomainValidationConfiguration { get; }
-
-            public DomainValidatorConfigProvider(Dictionary<string, object> config)
-                => DomainValidationConfiguration = config ?? new Dictionary<string, object>();
-        }
+        // (`DomainValidatorConfigProvider` nested helper removed — it declared an
+        // implementation of `Keyfactor.AnyGateway.Extensions.IDomainValidatorConfigProvider`,
+        // a v3.3-only interface, but the type was never instantiated anywhere in the
+        // plugin. Keeping a nested type whose base list references a missing assembly
+        // type is a hazard for CLR class-load on v3.2 hosts (see issue #7). Dead code
+        // that costs nothing to remove.)
 
         /// <summary>
         /// Best-effort DCV retry for an order that may still be pending validation.
@@ -1414,7 +1426,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     : _config.DcvTxtRecordTemplate;
                 string hostname = string.Format(template, domain);
 
-                var validator = _domainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
+                var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
                 if (validator == null)
                     throw new InvalidOperationException(
                         $"No DNS provider plugin is configured for domain '{domain}'. " +
