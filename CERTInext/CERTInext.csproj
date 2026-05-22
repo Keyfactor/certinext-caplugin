@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <RootNamespace>Keyfactor.Extensions.CAPlugin.CERTInext</RootNamespace>
     <AssemblyName>CERTInextCAPlugin</AssemblyName>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -10,16 +10,18 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.0.0" />
+    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.3.0-PRERELEASE-78770-979f582005" />
     <PackageReference Include="Keyfactor.Logging" Version="1.1.2" />
     <PackageReference Include="Keyfactor.PKI" Version="5.5.0" />
     <PackageReference Include="RestSharp" Version="112.1.0" />
-    <PackageReference Include="System.Text.Json" Version="8.0.5" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <!-- Explicit override of the transitive BouncyCastle.Cryptography 2.0.0 pulled in by
+         Keyfactor.PKI 5.5.0. 2.0.0 has three known-moderate CVEs (GHSA-8xfc-gm6g-vgpv,
+         GHSA-m44j-cfrm-g8qc, GHSA-v435-xc8x-wvr9), all fixed in 2.4.0+. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
     <!-- Suppress TFM support build warnings for transitive dependencies of RestSharp 112.x -->
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
     <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
-    <PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -31,6 +33,9 @@
   <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>CERTInext.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CERTInext.IntegrationTests</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
 </Project>
