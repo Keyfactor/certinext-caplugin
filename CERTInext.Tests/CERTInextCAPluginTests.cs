@@ -104,45 +104,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public void GetProductIds_ReturnsActiveProfileIds()
+        public void GetProductIds_ReturnsStaticProductList()
         {
+            // GetProductIds returns a hardcoded static list — no API call is made.
+            // The list is static because IAnyCAPlugin.GetProductIds() is synchronous and
+            // the doc-tool requires a known list at reflection time.
             var mock = NewMock();
-            mock.Setup(c => c.GetProfilesAsync(It.IsAny<CancellationToken>()))
-                .ReturnsAsync(MockCertificateData.ActiveProfiles());
-
             var plugin = BuildPlugin(mock.Object);
             var ids = plugin.GetProductIds();
 
-            ids.Should().HaveCount(2);
-            ids.Should().Contain(MockCertificateData.ProfileIdTls);
-            ids.Should().Contain(MockCertificateData.ProfileIdClient);
-        }
-
-        [Fact]
-        public void GetProductIds_FiltersOutInactiveProfiles()
-        {
-            var mock = NewMock();
-            mock.Setup(c => c.GetProfilesAsync(It.IsAny<CancellationToken>()))
-                .ReturnsAsync(MockCertificateData.MixedProfiles());
-
-            var plugin = BuildPlugin(mock.Object);
-            var ids = plugin.GetProductIds();
-
-            ids.Should().NotContain("legacy-profile");
-            ids.Should().HaveCount(2);
-        }
-
-        [Fact]
-        public void GetProductIds_ReturnsEmptyList_WhenClientThrows()
-        {
-            var mock = NewMock();
-            mock.Setup(c => c.GetProfilesAsync(It.IsAny<CancellationToken>()))
-                .ThrowsAsync(new Exception("Unavailable"));
-
-            var plugin = BuildPlugin(mock.Object);
-            var ids = plugin.GetProductIds();
-
-            ids.Should().BeEmpty();
+            ids.Should().NotBeEmpty();
+            ids.Should().Contain(Constants.Products.DvSsl);
+            ids.Should().Contain(Constants.Products.OvSsl);
+            ids.Should().Contain(Constants.Products.EvSsl);
+            // Ten products total (DV/OV/EV × single/wildcard/UCC variants)
+            ids.Should().HaveCount(10);
+            mock.VerifyNoOtherCalls();
         }
 
         // ---------------------------------------------------------------------------
@@ -611,7 +588,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var cts = new CancellationTokenSource();
 
             await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: cts.Token);
-            buffer.CompleteAdding();
+            // Synchronize calls CompleteAdding() internally (in the finally block).
+            // Do NOT call buffer.CompleteAdding() again here — it would throw InvalidOperationException.
 
             var results = buffer.ToList();
             results.Should().HaveCount(2);
@@ -644,7 +622,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
 
             await plugin.Synchronize(buffer, lastSync: lastSync, fullSync: false, cancelToken: CancellationToken.None);
-            buffer.CompleteAdding();
+            // CompleteAdding() is called by Synchronize internally.
 
             capturedIssuedAfter.Should().Be(lastSync);
         }
@@ -669,7 +647,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
 
             await plugin.Synchronize(buffer, lastSync: DateTime.UtcNow, fullSync: true, cancelToken: CancellationToken.None);
-            buffer.CompleteAdding();
+            // CompleteAdding() is called by Synchronize internally.
 
             capturedIssuedAfter.Should().BeNull("full sync should pass null issuedAfter");
         }
@@ -700,7 +678,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
 
             await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: CancellationToken.None);
-            buffer.CompleteAdding();
+            // CompleteAdding() is called by Synchronize internally.
 
             var results = buffer.ToList();
             results.Should().HaveCount(1);
@@ -757,12 +735,205 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
 
             await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: CancellationToken.None);
-            buffer.CompleteAdding();
+            // CompleteAdding() is called by Synchronize internally.
 
             var results = buffer.ToList();
             results.Should().HaveCount(1);
             results[0].Status.Should().Be((int)EndEntityStatus.REVOKED);
             results[0].RevocationDate.Should().NotBeNull();
+        }
+
+        // ---------------------------------------------------------------------------
+        // P1-B: Synchronize calls CompleteAdding on normal exit
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Synchronize_CallsCompleteAdding_OnNormalExit()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.ListCertificatesAsync(
+                    It.IsAny<DateTime?>(),
+                    It.IsAny<int>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnum(new List<LegacyGetCertificateResponse>()));
+
+            var plugin = BuildPlugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: CancellationToken.None);
+
+            // If CompleteAdding() was called, IsAddingCompleted is true.
+            buffer.IsAddingCompleted.Should().BeTrue(
+                "Synchronize must call CompleteAdding() so the gateway consumer unblocks.");
+        }
+
+        [Fact]
+        public async Task Synchronize_CallsCompleteAdding_OnCancellation()
+        {
+            var cts = new CancellationTokenSource();
+
+            async IAsyncEnumerable<LegacyGetCertificateResponse> CancellingEnum(
+                [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+            {
+                yield return MockCertificateData.IssuedCertRecord(MockCertificateData.CertId1);
+                cts.Cancel();
+                ct.ThrowIfCancellationRequested();
+                yield return MockCertificateData.IssuedCertRecord(MockCertificateData.CertId2);
+            }
+
+            var mock = NewMock();
+            mock.Setup(c => c.ListCertificatesAsync(
+                    It.IsAny<DateTime?>(),
+                    It.IsAny<int>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns((DateTime? ia, int ps, CancellationToken ct) => CancellingEnum(ct));
+
+            var plugin = BuildPlugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            try
+            {
+                await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected — cancellation re-throws
+            }
+
+            // Even after cancellation, CompleteAdding() must have been called.
+            buffer.IsAddingCompleted.Should().BeTrue(
+                "Synchronize must call CompleteAdding() in its finally block even on cancellation.");
+        }
+
+        // ---------------------------------------------------------------------------
+        // P2-A: Ping skips when connector is disabled
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Ping_SkipsConnectivityTest_WhenConnectorIsDisabled()
+        {
+            var mock = NewMock();
+            // MockBehavior.Strict: PingAsync must NOT be called when disabled
+            var plugin = new CERTInextCAPlugin(mock.Object, new CERTInextConfig { Enabled = false });
+
+            // Should not throw, should not call PingAsync
+            await plugin.Ping();
+
+            mock.VerifyNoOtherCalls();
+        }
+
+        // ---------------------------------------------------------------------------
+        // P2-C: RenewalWindowDays — three semantic cases
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task RenewOrReissue_UsesRenewApi_WhenCertExpiresWithinWindow()
+        {
+            // Case 1: cert expires in 30 days, window = 90 → within window → renewal API
+            var clientMock = new Mock<ICERTInextClient>(MockBehavior.Strict);
+            var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
+
+            readerMock.Setup(r => r.GetRequestIDBySerialNumber(It.IsAny<string>()))
+                .ReturnsAsync(MockCertificateData.CertId1);
+            readerMock.Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.CertId1))
+                .Returns(DateTime.UtcNow.AddDays(30));
+
+            clientMock.Setup(c => c.RenewCertificateAsync(
+                    MockCertificateData.CertId1,
+                    It.IsAny<RenewCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse("renewed-01"));
+
+            var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object);
+            var productInfo = MakeProductInfo(extras: new Dictionary<string, string>
+            {
+                ["PriorCertSN"] = "AABB",
+                ["RenewalWindowDays"] = "90"
+            });
+
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem, "CN=test.example.com", null,
+                productInfo, RequestFormat.PKCS10, EnrollmentType.RenewOrReissue);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            clientMock.Verify(c => c.RenewCertificateAsync(
+                MockCertificateData.CertId1, It.IsAny<RenewCertificateRequest>(),
+                It.IsAny<CancellationToken>()), Times.Once,
+                "cert expiring in 30 days should use the renewal API (within 90-day window)");
+        }
+
+        [Fact]
+        public async Task RenewOrReissue_UsesNewEnroll_WhenCertExpiresOutsideWindow()
+        {
+            // Case 2: cert expires in 120 days, window = 90 → outside window → new order
+            var clientMock = new Mock<ICERTInextClient>(MockBehavior.Strict);
+            var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
+
+            readerMock.Setup(r => r.GetRequestIDBySerialNumber(It.IsAny<string>()))
+                .ReturnsAsync(MockCertificateData.CertId1);
+            readerMock.Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.CertId1))
+                .Returns(DateTime.UtcNow.AddDays(120));
+
+            clientMock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse("reissued-01"));
+
+            var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object);
+            var productInfo = MakeProductInfo(extras: new Dictionary<string, string>
+            {
+                ["PriorCertSN"] = "AABB",
+                ["RenewalWindowDays"] = "90"
+            });
+
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem, "CN=test.example.com", null,
+                productInfo, RequestFormat.PKCS10, EnrollmentType.RenewOrReissue);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            clientMock.Verify(c => c.EnrollCertificateAsync(
+                It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()), Times.Once,
+                "cert expiring in 120 days (beyond 90-day window) should reissue, not renew");
+            clientMock.Verify(c => c.RenewCertificateAsync(
+                It.IsAny<string>(), It.IsAny<RenewCertificateRequest>(),
+                It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task RenewOrReissue_UsesNewEnroll_WhenCertAlreadyExpired()
+        {
+            // Case 3: cert already expired → graceful degradation → new order
+            var clientMock = new Mock<ICERTInextClient>(MockBehavior.Strict);
+            var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
+
+            readerMock.Setup(r => r.GetRequestIDBySerialNumber(It.IsAny<string>()))
+                .ReturnsAsync(MockCertificateData.CertId1);
+            readerMock.Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.CertId1))
+                .Returns(DateTime.UtcNow.AddDays(-5)); // expired 5 days ago
+
+            clientMock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse("new-after-expired-01"));
+
+            var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object);
+            var productInfo = MakeProductInfo(extras: new Dictionary<string, string>
+            {
+                ["PriorCertSN"] = "AABB",
+                ["RenewalWindowDays"] = "90"
+            });
+
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem, "CN=test.example.com", null,
+                productInfo, RequestFormat.PKCS10, EnrollmentType.RenewOrReissue);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            clientMock.Verify(c => c.EnrollCertificateAsync(
+                It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()), Times.Once,
+                "an already-expired cert should fall back to new enrollment");
+            clientMock.Verify(c => c.RenewCertificateAsync(
+                It.IsAny<string>(), It.IsAny<RenewCertificateRequest>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
     }
 }

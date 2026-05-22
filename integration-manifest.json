@@ -8,11 +8,22 @@
     "update_catalog": true,
     "description": "AnyCA REST Gateway plugin for CERTInext (eMudhra) certificate lifecycle management platform",
     "gateway_framework": "24.2.0",
-    "release_dir": "CERTInext/bin/Release/net8.0",
+    "release_dir": "CERTInext/bin/Release",
     "release_project": "CERTInext/CERTInext.csproj",
     "about": {
         "carest": {
-            "product_ids": [],
+            "product_ids": [
+                "DV SSL",
+                "DV SSL Wildcard",
+                "DV SSL Multi-Domain (UCC)",
+                "DV SSL Wildcard Multi-Domain (UCC)",
+                "OV SSL",
+                "OV SSL Wildcard",
+                "OV SSL Multi-Domain (UCC)",
+                "OV SSL Wildcard Multi-Domain (UCC)",
+                "EV SSL",
+                "EV SSL Multi-Domain (UCC)"
+            ],
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
@@ -21,6 +32,30 @@
                 {
                     "name": "AccountNumber",
                     "description": "REQUIRED: Your CERTInext account number (numeric string). Available in the CERTInext portal."
+                },
+                {
+                    "name": "GroupNumber",
+                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts will queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation \u2192 Groups."
+                },
+                {
+                    "name": "OrganizationNumber",
+                    "description": "STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric CERTInext organization number for a pre-vetted organization (e.g. your company's pre-vetted entry). When set, every SSL order is submitted with `organizationDetails.preVetting=\"1\"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. Without this value, orders are placed without any organizationDetails block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours). Available in the CERTInext portal under Organizations \u2192 Pre-vetted Organizations."
+                },
+                {
+                    "name": "TechnicalContactName",
+                    "description": "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to the configured RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field."
+                },
+                {
+                    "name": "TechnicalContactEmail",
+                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank."
+                },
+                {
+                    "name": "TechnicalContactIsdCode",
+                    "description": "OPTIONAL: International dialing code for the TPoC phone number. Defaults to the configured RequestorIsdCode when blank."
+                },
+                {
+                    "name": "TechnicalContactMobileNumber",
+                    "description": "OPTIONAL: Mobile number for the TPoC (digits only). Defaults to the configured RequestorMobileNumber when blank."
                 },
                 {
                     "name": "AuthMode",
@@ -71,6 +106,30 @@
                     "description": "OPTIONAL: Default numeric product code used when not specified at template level. Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). Retrieve available codes from Integrations \u2192 APIs \u2192 GetProductDetails."
                 },
                 {
+                    "name": "AccountingModel",
+                    "description": "OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel`. \"2\" = credit-based (most accounts, default). \"1\" = cash model."
+                },
+                {
+                    "name": "EmailNotifications",
+                    "description": "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. \"1\" = enabled, \"0\" = silent (recommended for gateway-driven orders so end users aren't surprised by CA emails). Default: \"0\"."
+                },
+                {
+                    "name": "SubscriptionValidityYears",
+                    "description": "OPTIONAL: Default validity in years for SSL orders. \"1\", \"2\", or \"3\". Override per template via the ValidityYears product parameter. Default: \"1\"."
+                },
+                {
+                    "name": "SubscriptionAutoRenew",
+                    "description": "OPTIONAL: Whether CERTInext should auto-renew certificates issued through this connector. \"0\" = disabled (recommended \u2014 renewal is driven by Keyfactor Command), \"1\" = enabled. Default: \"0\"."
+                },
+                {
+                    "name": "SubscriptionRenewCriteriaDays",
+                    "description": "OPTIONAL: Days before expiry at which CERTInext auto-renews (only honored when SubscriptionAutoRenew = \"1\"). Typical values: \"30\" or \"60\". Default: \"30\"."
+                },
+                {
+                    "name": "AutoSecureWww",
+                    "description": "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\"."
+                },
+                {
                     "name": "IgnoreExpired",
                     "description": "If true, expired certificates will be skipped during synchronization. Default: false."
                 },
@@ -81,12 +140,36 @@
                 {
                     "name": "Enabled",
                     "description": "Flag to Enable or Disable gateway functionality. Disabling is primarily used to allow creation of the CA connector prior to configuration information being available."
+                },
+                {
+                    "name": "DcvEnabled",
+                    "description": "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false."
+                },
+                {
+                    "name": "DcvTxtRecordTemplate",
+                    "description": "OPTIONAL: Format string for the DNS TXT record hostname used during DCV. {0} is replaced with the domain name being validated. Default: _emsign-validation.{0}"
+                },
+                {
+                    "name": "DcvPropagationDelaySeconds",
+                    "description": "OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: 30."
+                },
+                {
+                    "name": "DcvTimeoutMinutes",
+                    "description": "OPTIONAL: Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) before timing out the enrollment. Can also be set via the CERTINEXT_DCV_TIMEOUT_MINUTES environment variable; the env var takes precedence when both are set. Default: 10."
+                },
+                {
+                    "name": "DcvWaitForChallengeSeconds",
+                    "description": "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() for CERTInext to expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL before the slot appears. Without this wait, the plugin's initial TrackOrder check sees null and skips DCV \u2014 the order then has to wait for the next gateway sync cycle to be picked up. Setting to 0 disables the wait (single-check behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
+                },
+                {
+                    "name": "DcvWaitForIssuanceSeconds",
+                    "description": "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV verifies for CERTInext to finish generating the certificate. CERTInext issuance is async \u2014 DCV may be verified but the cert PEM isn't yet available for download. Without this wait, Enroll() returns a pending result and the issued cert is picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
                 }
             ],
             "enrollment_config": [
                 {
                     "name": "ProductCode",
-                    "description": "REQUIRED: The numeric CERTInext product code for this certificate type (e.g. '844' for DV SSL 1-year). Provided by eMudhra for your account. Overrides the connector-level DefaultProductCode when set."
+                    "description": "OPTIONAL: Override the numeric CERTInext product code for this template. When omitted, the default production code for the selected product is used automatically (e.g. DV SSL \u2192 838). Set this explicitly when targeting sandbox or a non-standard code."
                 },
                 {
                     "name": "ProfileId",
@@ -114,11 +197,27 @@
                 },
                 {
                     "name": "RenewalWindowDays",
-                    "description": "OPTIONAL: Number of days before expiration within which a renewal is attempted instead of a reissue. Default: 90."
+                    "description": "OPTIONAL: Number of days before certificate expiration within which a renewal is triggered. Certificates expiring further than this window are reissued instead. Certificates that have already expired also fall back to reissue. Default: 90."
                 },
                 {
                     "name": "KeyType",
                     "description": "OPTIONAL: Key algorithm to request (e.g. 'RSA2048', 'RSA4096', 'EC256', 'EC384'). If omitted, the profile default is used."
+                },
+                {
+                    "name": "DomainName",
+                    "description": "OPTIONAL: Primary domain for SSL/TLS orders. Derived from the CSR CN if omitted."
+                },
+                {
+                    "name": "SignerName",
+                    "description": "OPTIONAL: Per-template subscriber agreement signer name. Falls back to the connector-level RequestorName if omitted."
+                },
+                {
+                    "name": "SignerPlace",
+                    "description": "OPTIONAL: Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted."
+                },
+                {
+                    "name": "SignerIp",
+                    "description": "OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted."
                 }
             ]
         }
