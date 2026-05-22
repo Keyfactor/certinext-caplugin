@@ -596,6 +596,50 @@ The table below maps each Keyfactor Command operation to the CERTInext API endpo
 | Attach CSR to draft order | `POST SubmitCSR` |
 
 
+## Troubleshooting
+
+### `"Inactive Account User."` returned from `GenerateOrderSSL`
+
+**Symptom**
+
+Enrollments fail with the gateway exception:
+
+```
+CERTInext order failed: Inactive Account User.. See gateway logs for details.
+```
+
+The same access key / account works perfectly fine before and after the failing window — a `Ping` (`ValidateCredentials`) call seconds earlier returns success, and the next individual enrollment after a brief pause also succeeds.
+
+**Root cause**
+
+The CERTInext sandbox at `https://sandbox-us-api.certinext.io/emSignHub-API` applies a **burst rate limit** on order placement and surfaces rate‑limit rejection through the **generic** error string `"Inactive Account User."` — the same string the API uses for genuinely inactive accounts. There is currently no distinguishing `errorCode`, `Retry-After` header, or structured field to tell the two conditions apart from the meta block alone.
+
+Empirically the limit kicks in at roughly **16+ enrollments submitted within 10 seconds** on the US sandbox. Sustained submission velocity well below that runs cleanly.
+
+**Confirmation steps**
+
+1. Run a single `Ping` against the same `ApiUrl` / `AccessKey`. If it succeeds, the account is active; the prior failure was almost certainly a rate-limit hit.
+2. Check the gateway warning log for the `LogApiFailure` line emitted just before the throw (see issue [#8](../../issues/8) and the `LogApiFailure` helper in `CERTInextClient.cs`). The full raw response body is included there — if CERTInext ever surfaces a distinguishing code or message for rate-limit (as opposed to account-state), it will appear in that line.
+3. Wait 30–60 seconds, then retry the failed enrollment(s). A successful retry confirms it was rate-limit.
+
+**Mitigation**
+
+- **Reduce submission velocity**: throttle order placements to roughly one per 1–2 seconds. The plugin does not yet have a built-in client-side throttle; pacing must come from the caller.
+- **For high-volume migration scenarios**: split the workload into batches of ~10 orders separated by a short pause, rather than firing everything at once.
+- **No client-side automatic retry on this error**: a defensive retry inside `PlaceOrderAsync` would paper over the misleading error string and burn the operator's order quota on retries. We document the gotcha instead.
+
+### Enrollment returns immediately with `Status=90 (EXTERNALVALIDATION)`
+
+The plugin's bounded `Enroll()` budget (`DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds`, defaults 60s each) elapsed before CERTInext finished asynchronous issuance, or DCV could not run because no `IDomainValidatorFactory` was injected. The next gateway sync cycle will pick the cert up — no operator action required.
+
+### `EMS-956 "Invalid Request for this API"` from `GetDcv`
+
+CERTInext exposes the `domainVerification` slot in `TrackOrder` before the `GetDcv` endpoint will accept calls for that order. The plugin's `IsDcvNotYetReady` predicate recognizes this and defers DCV to the next sync cycle without throwing — no operator action required.
+
+### Plugin fails to load with `Could not load type 'Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory'`
+
+Older gateway image (pre-IAnyCAPlugin v3.3) loading a plugin DLL built before the issue [#7](../../issues/7) fix. Upgrade to plugin v1.0 or later.
+
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE).

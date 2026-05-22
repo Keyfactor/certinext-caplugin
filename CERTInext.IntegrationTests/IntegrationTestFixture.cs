@@ -159,7 +159,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                         continue;
 
                     string key = line.Substring(0, idx).Trim();
-                    string val = line.Substring(idx + 1).Trim();
+                    string val = ParseEnvValue(line.Substring(idx + 1));
                     result[key] = val;
                 }
             }
@@ -174,6 +174,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Parses a raw value from a <c>KEY=VALUE</c> env-file line: trims surrounding
+        /// whitespace, then strips a single pair of matching surrounding double or single
+        /// quotes if present.  Without quote stripping a line like
+        /// <c>CERTINEXT_REQUESTOR_NAME="Keyfactor Plugin Test"</c> would parse as the 24-char
+        /// literal <c>"Keyfactor Plugin Test"</c> (quotes included), diverging from any
+        /// other shell-style env consumer reading the same file.  See GitHub issue #8.
+        /// Exposed <c>internal</c> for direct unit-testing.
+        /// </summary>
+        internal static string ParseEnvValue(string rawValue)
+        {
+            if (rawValue is null) return string.Empty;
+            string val = rawValue.Trim();
+            if (val.Length >= 2 &&
+                ((val[0] == '"' && val[val.Length - 1] == '"') ||
+                 (val[0] == '\'' && val[val.Length - 1] == '\'')))
+            {
+                val = val.Substring(1, val.Length - 2);
+            }
+            return val;
         }
 
         private static string GetEnvValue(Dictionary<string, string> env, string key)

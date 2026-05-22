@@ -160,9 +160,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             var result = DeserializeOrThrow<ValidateCredentialsResponse>(resp, "validate credentials");
             if (result.Meta != null && !result.Meta.IsSuccess)
             {
-                Logger.LogError(
-                    "CERTInext ValidateCredentials returned failure. ErrorCode={ErrorCode}, ErrorMessage={ErrorMsg}",
-                    result.Meta.ErrorCode, result.Meta.ErrorMessage);
+                LogApiFailure("ValidateCredentials", resp, result.Meta.ErrorCode, result.Meta.ErrorMessage);
                 throw new Exception(
                     $"CERTInext credential validation failed: {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}. " +
                     "See gateway logs for details.");
@@ -187,32 +185,76 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 "Submitting order to CERTInext. ProductCode={ProductCode}",
                 request.OrderDetails?.ProductCode);
 
-            var req = new RestRequest(Constants.Api.GenerateOrderSslPath, Method.Post);
-            req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
+            GenerateOrderResponse result = null;
+            RestResponse resp = null;
 
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await ExecuteWithRetryAsync(req, ct);
-            sw.Stop();
-
-            Logger.LogInformation(
-                "CERTInext API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}, AuthMode={AuthMode}",
-                Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds, _config.AuthMode);
-
-            if (resp.StatusCode == HttpStatusCode.Unauthorized || resp.StatusCode == HttpStatusCode.Forbidden)
+            // Issue #8 rate-limit retry: the sandbox returns "Inactive Account User."
+            // as a generic error string for several conditions, including burst-rate-limit
+            // rejection. Empirically this resolves within seconds; auto-retrying lets a
+            // transient burst limit hit transparently. After RateLimitMaxAttempts the
+            // original exception is propagated unchanged so a genuinely-inactive account
+            // surfaces as the same operator-facing failure today.
+            for (int attempt = 1; ; attempt++)
             {
-                Logger.LogError(
-                    "PlaceOrder API authentication failure. HttpStatus={Status}, AuthMode={AuthMode}",
-                    (int)resp.StatusCode, _config.AuthMode);
-                throw new Exception(
-                    $"Authentication failure during certificate order. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+                // Refresh the request body's meta block on every retry — txn must be
+                // unique per call (CERTInext rejects duplicate txns), and a fresh ts/txn
+                // gives the CA a clean canary for whether the limiter has cleared.
+                if (attempt > 1)
+                    request.Meta = await BuildMetaAsync(ct);
+
+                var req = new RestRequest(Constants.Api.GenerateOrderSslPath, Method.Post);
+                req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
+
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                resp = await ExecuteWithRetryAsync(req, ct);
+                sw.Stop();
+
+                Logger.LogInformation(
+                    "CERTInext API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}, AuthMode={AuthMode}, RateLimitRetryAttempt={Attempt}",
+                    Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds, _config.AuthMode, attempt);
+
+                if (resp.StatusCode == HttpStatusCode.Unauthorized || resp.StatusCode == HttpStatusCode.Forbidden)
+                {
+                    Logger.LogError(
+                        "PlaceOrder API authentication failure. HttpStatus={Status}, AuthMode={AuthMode}",
+                        (int)resp.StatusCode, _config.AuthMode);
+                    throw new Exception(
+                        $"Authentication failure during certificate order. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+                }
+
+                result = DeserializeOrThrow<GenerateOrderResponse>(resp, "place order");
+
+                if (result.Meta != null && !result.Meta.IsSuccess)
+                {
+                    LogApiFailure(Constants.Api.GenerateOrderSslPath, resp,
+                        result.Meta.ErrorCode, result.Meta.ErrorMessage);
+
+                    // Auto-retry the documented rate-limit surface up to RateLimitMaxAttempts.
+                    if (IsRateLimitSurface(result.Meta.ErrorMessage) && attempt < RateLimitMaxAttempts)
+                    {
+                        double waitSeconds = ComputeRateLimitBackoffSeconds(attempt);
+                        Logger.LogWarning(
+                            "PlaceOrder hit rate-limit-shaped error \"{ErrorMessage}\" (attempt {Attempt}/{Max}). " +
+                            "Backing off {WaitSeconds:F1}s before retrying. See Troubleshooting in README for context.",
+                            result.Meta.ErrorMessage, attempt, RateLimitMaxAttempts, waitSeconds);
+                        try
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(waitSeconds), ct);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        continue; // retry
+                    }
+
+                    throw new Exception(
+                        $"CERTInext order failed: {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}. " +
+                        "See gateway logs for details.");
+                }
+
+                break; // success
             }
-
-            var result = DeserializeOrThrow<GenerateOrderResponse>(resp, "place order");
-
-            if (result.Meta != null && !result.Meta.IsSuccess)
-                throw new Exception(
-                    $"CERTInext order failed: {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}. " +
-                    "See gateway logs for details.");
 
             Logger.LogInformation(
                 "CERTInext order placed. OrderNumber={OrderNumber}, RequestNumber={RequestNumber}",
@@ -245,7 +287,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Constants.Api.SubmitCsrPath, (int)resp.StatusCode, sw.ElapsedMilliseconds, _config.AuthMode);
 
             if (!resp.IsSuccessful)
+            {
+                LogApiFailure(Constants.Api.SubmitCsrPath, resp);
                 throw new Exception($"CERTInext SubmitCSR failed. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+            }
 
             Logger.MethodExit(LogLevel.Trace);
         }
@@ -292,6 +337,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // A meta status of "0" with errorCode EMS-913 or similar means the order was not found
             if (result.Meta != null && !result.Meta.IsSuccess)
             {
+                LogApiFailure($"{Constants.Api.TrackOrderPath} {orderNumber}", resp,
+                    result.Meta.ErrorCode, result.Meta.ErrorMessage);
                 if (result.Meta.ErrorCode != null &&
                     (result.Meta.ErrorCode.StartsWith("EMS-9") || result.Meta.ErrorMessage?.Contains("not found", StringComparison.OrdinalIgnoreCase) == true))
                 {
@@ -343,8 +390,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             var result = DeserializeOrThrow<GetCertificateResponse>(resp, $"download certificate {orderNumber}");
 
             if (result.Meta != null && !result.Meta.IsSuccess)
+            {
+                LogApiFailure($"{Constants.Api.GetCertificatePath} {orderNumber}", resp,
+                    result.Meta.ErrorCode, result.Meta.ErrorMessage);
                 throw new Exception(
                     $"CERTInext GetCertificate failed for order '{orderNumber}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
+            }
 
             Logger.MethodExit(LogLevel.Trace);
             return result;
@@ -401,6 +452,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     var revResp = JsonSerializer.Deserialize<ValidateCredentialsResponse>(resp.Content, GetJsonOptions());
                     if (revResp?.Meta != null && !revResp.Meta.IsSuccess)
                     {
+                        LogApiFailure(
+                            $"{Constants.Api.RevokeOrderPath} {request.RevocationDetails?.OrderNumber}",
+                            resp, revResp.Meta.ErrorCode, revResp.Meta.ErrorMessage);
                         throw new Exception(
                             $"CERTInext RevokeOrder returned failure for order " +
                             $"'{request.RevocationDetails?.OrderNumber}': {revResp.Meta.ErrorMessage ?? revResp.Meta.ErrorCode}.");
@@ -888,9 +942,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             if (result.Meta != null && !result.Meta.IsSuccess)
             {
-                Logger.LogError(
-                    "GetDcv returned failure. OrderNumber={OrderNumber}, Domain={Domain}, ErrorCode={ErrorCode}, ErrorMessage={ErrorMessage}",
-                    orderNumber, domainName, result.Meta.ErrorCode, result.Meta.ErrorMessage);
+                LogApiFailure(
+                    $"{Constants.Api.GetDcvPath} {orderNumber}/{domainName}",
+                    resp, result.Meta.ErrorCode, result.Meta.ErrorMessage);
                 throw new Exception(
                     $"CERTInext GetDcv failed for order '{orderNumber}' domain '{domainName}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
             }
@@ -959,11 +1013,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     var verifyResp = JsonSerializer.Deserialize<VerifyDcvResponse>(resp.Content, GetJsonOptions());
                     if (verifyResp?.Meta != null && !verifyResp.Meta.IsSuccess)
                     {
-                        // SOX CC7.3: log the failure outcome explicitly so an auditor can
-                        // distinguish a thrown meta-failure from a silent swallow.
-                        Logger.LogError(
-                            "VerifyDcv returned failure. OrderNumber={OrderNumber}, Domain={Domain}, ErrorCode={ErrorCode}, ErrorMessage={ErrorMessage}",
-                            orderNumber, domainName, verifyResp.Meta.ErrorCode, verifyResp.Meta.ErrorMessage);
+                        // SOX CC7.3 + issue #8: log the failure with the raw body so an
+                        // auditor / operator can see exactly what CERTInext returned.
+                        LogApiFailure(
+                            $"{Constants.Api.VerifyDcvPath} {orderNumber}/{domainName}",
+                            resp, verifyResp.Meta.ErrorCode, verifyResp.Meta.ErrorMessage);
                         throw new Exception(
                             $"CERTInext VerifyDcv returned failure for order '{orderNumber}' domain '{domainName}': {verifyResp.Meta.ErrorMessage ?? verifyResp.Meta.ErrorCode}.");
                     }
@@ -1399,6 +1453,97 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // error envelopes are always under a few KB; a multi-MB body is either a misrouted
         // response or a hostile payload aimed at exhausting our JsonDocument buffer.
         private const int MaxErrorBodyBytes = 64 * 1024;
+
+        // ---------------------------------------------------------------------------
+        // Rate-limit retry — see GitHub issue #8.
+        //
+        // The CERTInext sandbox returns the generic string "Inactive Account User." for
+        // several distinct conditions including burst-rate-limit rejection. Empirically
+        // this resolves within seconds — auto-retrying lets a transient burst limit hit
+        // transparently while still surfacing the original exception text for genuinely
+        // inactive accounts (after RateLimitMaxAttempts the throw is unchanged).
+        // ---------------------------------------------------------------------------
+
+        private const int RateLimitMaxAttempts = 5;
+        private const double RateLimitBaseBackoffSeconds = 1.0;
+
+        /// <summary>
+        /// True when <paramref name="errorMessage"/> matches the documented rate-limit
+        /// surface CERTInext uses on its sandbox. Substring + case-insensitive match;
+        /// the trailing punctuation/whitespace varies across observed payloads.
+        /// </summary>
+        internal static bool IsRateLimitSurface(string errorMessage)
+        {
+            if (string.IsNullOrEmpty(errorMessage)) return false;
+            return errorMessage.IndexOf("Inactive Account User", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
+        /// Exponential backoff with ±25% jitter for the rate-limit retry inside
+        /// <see cref="PlaceOrderAsync"/>.  Attempts 1..5 produce roughly
+        /// 1s / 2s / 4s / 8s / 16s of nominal delay (jitter spreads concurrent callers).
+        /// Exposed <c>internal</c> so unit tests can verify the schedule.
+        /// </summary>
+        internal static double ComputeRateLimitBackoffSeconds(int attempt)
+        {
+            if (attempt < 1) attempt = 1;
+            double nominal = RateLimitBaseBackoffSeconds * Math.Pow(2, attempt - 1);
+            // ±25% jitter via SecureRandom — non-cryptographic randomness is fine for
+            // jitter, but we already have a SecureRandom instance for txn IDs and
+            // reusing it is one fewer source of randomness to think about.
+            double jitterFactor = 0.75 + _txnRandom.NextDouble() * 0.5;
+            return nominal * jitterFactor;
+        }
+
+        // Cap on the response body length we include in operator-facing warning logs.
+        // 4 KB is comfortably more than every observed CERTInext error envelope (typically
+        // <500 B) while still bounding the log line if a misrouted response ever shows up.
+        // See GitHub issue #8 — operators need the raw body to disambiguate misleading
+        // CA error strings (e.g. the sandbox's "Inactive Account User." rate-limit surface).
+        private const int LoggedResponseBodyCapBytes = 4 * 1024;
+
+        /// <summary>
+        /// Truncates <paramref name="s"/> to at most <paramref name="max"/> characters,
+        /// appending a "(truncated, N more chars)" marker so log readers can tell at a
+        /// glance that the value was cut.  Returns the input unchanged when short enough.
+        /// </summary>
+        private static string Truncate(string s, int max)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length <= max) return s;
+            return s.Substring(0, max) + $"…(truncated, {s.Length - max} more chars)";
+        }
+
+        /// <summary>
+        /// Writes a structured <c>LogWarning</c> capturing every diagnostic field
+        /// available for a non-success CERTInext API response — HTTP status, the
+        /// CERTInext-side error code and message, and the (truncated) raw response
+        /// body.  Call this immediately before throwing so the exception's
+        /// "See gateway logs for details" instruction actually points somewhere useful.
+        ///
+        /// Background: issue #8 surfaced that the sandbox returns the generic string
+        /// <c>"Inactive Account User."</c> for several conditions including burst
+        /// rate-limit rejection.  Without the raw body in the log, an operator has no
+        /// way to disambiguate "the account is genuinely inactive" from "you submitted
+        /// 16 orders in 10 seconds and the CA's burst quota kicked in."
+        /// </summary>
+        private static void LogApiFailure(
+            string operationContext,
+            RestResponse resp,
+            string errorCode = null,
+            string errorMessage = null)
+        {
+            // Keep log level at Warning — meta-failure-on-HTTP-200 is the CA saying
+            // "no" to a request, which is a business outcome, not a plugin error.
+            // True transport/auth failures already log at Error elsewhere.
+            Logger.LogWarning(
+                "CERTInext API non-success. Operation={Operation}, HttpStatus={HttpStatus}, " +
+                "ErrorCode={ErrorCode}, ErrorMessage={ErrorMessage}, ResponseBody={ResponseBody}",
+                operationContext,
+                (int?)resp?.StatusCode ?? 0,
+                errorCode ?? "(none)",
+                errorMessage ?? "(none)",
+                Truncate(resp?.Content, LoggedResponseBodyCapBytes) ?? "(empty)");
+        }
 
         private static string ExtractErrorMessage(string content, string operation)
         {
