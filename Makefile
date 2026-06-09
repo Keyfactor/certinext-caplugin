@@ -24,6 +24,8 @@ REPORT_DIR   := /tmp/certinext-coverage-report
         revoke-order \
         submit-csr \
         list-cas \
+        register register-profiles register-ca-config register-claims \
+        register-command-ca register-import register-enrollment \
         create-product \
         generate-order-igtf \
         generate-order-149-fresh \
@@ -298,6 +300,51 @@ submit-csr:
 
 list-cas:
 	@scripts/list-cas.sh
+
+# ---------------------------------------------------------------------------
+# register-* — provision profiles/templates into the AnyCA REST Gateway and
+# Keyfactor Command. These talk to Command/gateway (OAuth2 client_credentials),
+# NOT the CERTInext API — see scripts/lib/command-auth.sh for the env contract
+# (TOKEN_URL, OIDC_CLIENT_ID/SECRET, GATEWAY_HOST, COMMAND_HOST, ...).
+#
+#   make register                     # full provisioning (stages 01..06)
+#   make register DRY_RUN=1            # DRY_RUN forwards to every stage
+#   make register SKIP_03=1            # skip a stage by number
+#
+#   Per-stage (each idempotent; add DRY_RUN=1 for an offline preview):
+#     make register-profiles      # 01 gateway certificate profiles  [CHECK=1]
+#     make register-ca-config     # 02 gateway CAConnection + Templates
+#     make register-claims        # 03 gateway access claims (IAM)
+#     make register-command-ca    # 04 register CA in Command
+#     make register-import        # 05 import templates into Command  [CHECK=1]
+#     make register-enrollment    # 06 enrollment patterns + template KeyRetention
+#
+# Stages 01 and 06 are VERIFIED live; 02-05 are built from docs/reference
+# captures — validate against a live gateway/Command before relying on them.
+# Auth (cookie/token/OAuth), env vars, and gotchas: scripts/register/README.md.
+# NOTE: stage 04 (and stage 02's CA-connection PUT) touch the CA config, which
+# is fragile — leave it alone unless explicitly required.
+# ---------------------------------------------------------------------------
+register:
+	@scripts/register/00-register-all.sh
+
+register-profiles:
+	@scripts/register/01-gateway-profiles.sh
+
+register-ca-config:
+	@scripts/register/02-gateway-ca-config.sh
+
+register-claims:
+	@scripts/register/03-gateway-claims.sh
+
+register-command-ca:
+	@scripts/register/04-command-register-ca.sh
+
+register-import:
+	@scripts/register/05-command-import-templates.sh
+
+register-enrollment:
+	@scripts/register/06-command-enrollment-patterns.sh
 
 # ---------------------------------------------------------------------------
 # create-product — Create a custom product via API
