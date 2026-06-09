@@ -69,21 +69,34 @@ Three ways to authenticate, resolved per side (gateway vs Command) in this order
 | `CONFIGURATION_TENANT` | stages 04–06 | **= the gateway instance name** (e.g. `certinext-0`), which is also the templates' `ConfigurationTenant` in Command. Not the plugin name. |
 | `CURL_INSECURE` | all | `1` (default) passes `-k`; set `0` to verify TLS |
 
-## Quick start (cookie auth — the common case)
+## Quick start
+
+The **typical** path is OAuth2 client_credentials against `/KeyfactorAPI`:
 
 ```sh
-# --- gateway side ---
-export GATEWAY_HOST=intdev01.lab.kfpki.com
-export GATEWAY_BASE_PATH=/certinext-0
-export GATEWAY_COOKIE="$(tr -d '\r\n' < ~/.certinext_gw_cookie)"
-make register-profiles            # stage 01  (add CHECK=1 to verify, DRY_RUN=1 to preview)
-
-# --- command side (after you've imported templates) ---
-export COMMAND_HOST=intdev01.lab.kfpki.com
-export CONFIGURATION_TENANT=certinext-0
-export COMMAND_COOKIE="$(tr -d '\r\n' < ~/.certinext_kfcportal_cookie)"
-make register-enrollment          # stage 06: patterns + KeyRetention=Indefinite
+export GATEWAY_HOST=<gw-host>  COMMAND_HOST=<cmd-host>
+export TOKEN_URL=https://<auth>/application/o/token/
+export OIDC_CLIENT_ID=...  OIDC_CLIENT_SECRET=...
+make register-profiles            # client_creds used automatically (no cookie/token set)
 ```
+
+> **Cookie auth (e.g. the "HV3" lab, intdev01.lab.kfpki.com)** — used when ops
+> can't issue client credentials. This is environment-specific, NOT the norm:
+> the gateway instance path is `/certinext-0` (not `/AnyGatewayREST`), and a
+> Command Portal cookie only works via `/KeyfactorProxy` (auto-selected when
+> `COMMAND_COOKIE` is set). See the deployment's own notes for its values.
+>
+> ```sh
+> # gateway side
+> export GATEWAY_HOST=intdev01.lab.kfpki.com GATEWAY_BASE_PATH=/certinext-0
+> export GATEWAY_COOKIE="$(tr -d '\r\n' < ~/.certinext_gw_cookie)"
+> make register-profiles            # CHECK=1 to verify, DRY_RUN=1 to preview
+>
+> # command side (after templates imported)
+> export COMMAND_HOST=intdev01.lab.kfpki.com CONFIGURATION_TENANT=certinext-0
+> export COMMAND_COOKIE="$(tr -d '\r\n' < ~/.certinext_kfcportal_cookie)"
+> make register-enrollment          # stage 06: patterns + KeyRetention=Indefinite
+> ```
 
 Per-stage env knobs are documented in each script's header comment.
 
