@@ -29,12 +29,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         public string ProductId { get; }
 
         /// <summary>
-        /// The CERTInext product code configured on the template.
-        /// Falls back to ProfileId for backward compat, then to the ProductID from the gateway.
+        /// The CERTInext numeric product code to send to the API.
+        /// Resolution order:
+        ///   1. ProductCode template parameter (explicit override — use for sandbox or non-standard codes)
+        ///   2. ProfileId template parameter (deprecated alias for ProductCode)
+        ///   3. Default production code looked up from the selected product name (ProductId)
         /// </summary>
-        public string ProductCode =>
-            GetString(Constants.EnrollmentParam.ProductCode,
-                GetString(Constants.EnrollmentParam.ProfileId, ProductId));
+        public string ProductCode
+        {
+            get
+            {
+                var explicit_ = GetString(Constants.EnrollmentParam.ProductCode,
+                    GetString(Constants.EnrollmentParam.ProfileId, string.Empty));
+                if (!string.IsNullOrEmpty(explicit_))
+                    return explicit_;
+
+                Constants.Products.DefaultProductCodes.TryGetValue(ProductId ?? string.Empty, out var mapped);
+                return mapped ?? string.Empty;
+            }
+        }
 
         /// <summary>Alias for ProductCode — kept for backward compat.</summary>
         public string ProfileId => ProductCode;
@@ -58,6 +71,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 
         /// <summary>Key algorithm hint (e.g. "RSA2048"). Empty means use profile default.</summary>
         public string KeyType => GetString(Constants.EnrollmentParam.KeyType, string.Empty);
+
+        /// <summary>
+        /// Primary domain name for SSL/TLS orders.
+        /// Derived from the CSR CN by the client if omitted here.
+        /// </summary>
+        public string DomainName => GetString(Constants.EnrollmentParam.DomainName, string.Empty);
+
+        /// <summary>
+        /// Per-template subscriber agreement signer name.
+        /// Falls back to the connector-level <c>RequestorName</c> if empty.
+        /// </summary>
+        public string SignerName => GetString(Constants.EnrollmentParam.SignerName, string.Empty);
+
+        /// <summary>
+        /// Per-template signer city/location.
+        /// Falls back to the connector-level <c>SignerPlace</c> if empty.
+        /// </summary>
+        public string SignerPlace => GetString(Constants.EnrollmentParam.SignerPlace, string.Empty);
+
+        /// <summary>
+        /// Per-template signer IP address.
+        /// Falls back to the connector-level <c>SignerIp</c> if empty.
+        /// </summary>
+        public string SignerIp => GetString(Constants.EnrollmentParam.SignerIp, string.Empty);
 
         // ------------------------------------------------------------------
         // Helpers
