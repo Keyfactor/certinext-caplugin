@@ -1,0 +1,26 @@
+[
+  {
+    "description": "Authentik machine client",
+    "id": 1,
+    "provider": "Authentik",
+    "role": "admin",
+    "type": "OAuth_sub",
+    "value": "ak-anygateway-gateway-certinext-client_credentials"
+  },
+  {
+    "description": "Authentik machine client",
+    "id": 2,
+    "provider": "Authentik",
+    "role": "user",
+    "type": "OAuth_sub",
+    "value": "ak-anygateway-gateway-certinext-client_credentials"
+  },
+  {
+    "description": "Authentik admin user",
+    "id": 3,
+    "provider": "Authentik",
+    "role": "admin",
+    "type": "OAuth_sub",
+    "value": "akadmin"
+  }
+]

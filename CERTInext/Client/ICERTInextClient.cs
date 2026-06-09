@@ -25,7 +25,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
     ///     CARequestID stored in Keyfactor Command.
     ///   - Certificate data is retrieved via separate TrackOrder + GetCertificate calls.
     /// </summary>
-    public interface ICERTInextClient
+    public interface ICERTInextClient : IDisposable
     {
         /// <summary>
         /// Verifies that the CERTInext API is reachable and the credentials are valid
@@ -148,5 +148,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Use <see cref="GetProductDetailsAsync"/> for new code.
         /// </summary>
         Task<List<ProfileInfo>> GetProfilesAsync(CancellationToken ct = default);
+
+        // -----------------------------------------------------------------------
+        // DCV — domain control validation endpoints (used for DV/OV SSL orders)
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// Fetches the DCV token for a single domain on an existing order via POST {baseURL}GetDcv.
+        /// The token is the TXT record value to publish (for dcvMethod=1 / DNS TXT).
+        /// </summary>
+        Task<GetDcvResponse> GetDcvAsync(
+            string orderNumber,
+            string domainName,
+            string dcvMethod,
+            CancellationToken ct = default);
+
+        /// <summary>
+        /// Instructs CERTInext to verify the DCV token for a domain via POST {baseURL}VerifyDcv.
+        /// Call after the DNS TXT record has been published and propagated.
+        /// </summary>
+        Task VerifyDcvAsync(
+            string orderNumber,
+            string domainName,
+            string dcvMethod,
+            CancellationToken ct = default);
     }
 }
