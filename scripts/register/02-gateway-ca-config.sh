@@ -34,7 +34,17 @@ MANIFEST="${MANIFEST:-$REPO_ROOT/integration-manifest.json}"
 DRY_RUN="${DRY_RUN:-0}"
 GATEWAY_LOGICAL_NAME="${GATEWAY_LOGICAL_NAME:-$CONFIGURATION_TENANT}"
 GATEWAY_CERT_FILE="${GATEWAY_CERT_FILE:-$REPO_ROOT/certinext-sandbox-chain.pem}"
-TEMPLATE_PARAMS_JSON="${TEMPLATE_PARAMS_JSON:-{}}"
+# NOTE: do not use ${VAR:-{}} — the first } closes the expansion, appending a
+# stray } when VAR is set. Guard with an explicit empty check instead.
+[ -n "${TEMPLATE_PARAMS_JSON:-}" ] || TEMPLATE_PARAMS_JSON='{}'
+# Per-product CERTInext product code overrides, keyed by product_id, e.g.
+#   {"DV SSL":"842","OV SSL":"846"}. CERTInext numeric product codes are
+# PER-ENVIRONMENT (the plugin's built-in defaults are PRODUCTION codes like
+# 838; sandbox accounts use different codes). When a product_id has an entry
+# here, Parameters.ProductCode is set so the gateway validates against a code
+# that exists in the target account. Discover codes via GetProductDetails
+# (scripts/get-product-details.sh). Products not listed fall back to defaults.
+[ -n "${PRODUCT_CODE_MAP_JSON:-}" ] || PRODUCT_CODE_MAP_JSON='{}'
 FULL_SCAN_MINUTES="${FULL_SCAN_MINUTES:-720}"
 INCR_SCAN_MINUTES="${INCR_SCAN_MINUTES:-5}"
 
@@ -89,7 +99,10 @@ fi
 # --- Templates[] (one per product_id) ---------------------------------------
 TEMPLATES="$(manifest_product_ids "$MANIFEST" | jq -R . | jq -s \
     --argjson params "$TEMPLATE_PARAMS_JSON" \
-    '[.[] | {ProductID: ., CertificateProfile: ., Parameters: $params}]')"
+    --argjson codes "$PRODUCT_CODE_MAP_JSON" \
+    '[.[] | . as $p
+      | {ProductID: $p, CertificateProfile: $p,
+         Parameters: ($params + (if $codes[$p] then {ProductCode: $codes[$p]} else {} end))}]')"
 
 # --- Assemble configuration body --------------------------------------------
 BODY="$(jq -n \

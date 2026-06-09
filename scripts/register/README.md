@@ -87,6 +87,35 @@ make register-enrollment          # stage 06: patterns + KeyRetention=Indefinite
 
 Per-stage env knobs are documented in each script's header comment.
 
+## Stage 02 — gateway CA config (verified 2026-06-09)
+
+The gateway CA config (`PUT /<instance>/config/configuration`) is what maps each
+product to a certificate profile so enrollment can resolve a CA. Two things bite:
+
+- **Product codes are per-environment.** The plugin's built-in `DefaultProductCodes`
+  are PRODUCTION codes (e.g. `DV SSL` → `838`). A sandbox account has different
+  numeric codes (e.g. `842`–`851`) and the gateway validates them at PUT time —
+  you'll get `Profile '838' was not found in CERTInext. Available profiles: …`.
+  Set `PRODUCT_CODE_MAP_JSON` (product_id → code) so each `Templates[].Parameters`
+  carries the right `ProductCode`. Discover codes via `scripts/get-product-details.sh`.
+  Product **IDs/names** are stable across environments; only the numeric codes differ.
+- **`SignerPlace` is required by CERTInext** for every order. It has no fallback
+  (unlike `SignerIp`, which defaults to `127.0.0.1`). If it's absent the order
+  fails with a generic `certificate request failed … see CA logs`. Provide it via
+  `CERTINEXT_SIGNER_PLACE` (the test fixture uses `"Gateway"`); the stage assembles
+  it into `CAConnection`.
+- The gateway has **no GET** for `/config/configuration` (405, POST/PUT only) — it's
+  not introspectable, so a PUT sends the FULL object. Stage 02 rebuilds `CAConnection`
+  from the `CERTINEXT_*` env vars; make sure those match the account the CA uses, or
+  you'll change the live connection. (A successful PUT means the creds validated.)
+
+```sh
+export GATEWAY_LOGICAL_NAME=CertiNext           # the live CA's LogicalName
+export CERTINEXT_SIGNER_PLACE=Gateway
+export PRODUCT_CODE_MAP_JSON='{"DV SSL":"842","OV SSL":"846", ...}'
+make register-ca-config
+```
+
 ## Stage 06 — Command EnrollmentPatterns schema (verified 2026-06-09)
 
 The `/KeyfactorProxy/EnrollmentPatterns` (API v1) POST body that works — the stub
