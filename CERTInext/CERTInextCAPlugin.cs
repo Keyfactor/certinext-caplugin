@@ -19,7 +19,9 @@ using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.Logging;
 using Keyfactor.PKI.Enums.EJBCA;
 using Microsoft.Extensions.Logging;
+#if SUPPORTS_DCV
 using IDomainValidatorFactory = Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory;
+#endif
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext
 {
@@ -51,7 +53,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // `volatile` because the field is written by SetDomainValidatorFactory and read
         // by EnrollNewAsync / TryRunDcvDuringSyncAsync, which can run on different threads.
         // See GitHub issue #7 for the full reasoning.
+        // On the no-DCV build (IAnyCAPlugin 3.2.0, SUPPORTS_DCV undefined) this field is
+        // intentionally never assigned — its assignment sites (the factory ctor and
+        // SetDomainValidatorFactory) are fenced out, so it stays null and the Initialize
+        // DCV-wiring check reports "not wired". Suppress CS0649 for that case; on the
+        // SUPPORTS_DCV build it is assigned normally and the pragma is a no-op.
+#pragma warning disable CS0649
         private volatile object _domainValidatorFactory;
+#pragma warning restore CS0649
 
         /// <summary>
         /// Returns the injected <see cref="IDomainValidatorFactory"/> when one is
@@ -60,8 +69,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// gateway host stays compileable and never triggers <c>TypeLoadException</c>
         /// at runtime.  All read sites in this class go through this property.
         /// </summary>
+#if SUPPORTS_DCV
         private IDomainValidatorFactory DomainValidatorFactory =>
             _domainValidatorFactory as IDomainValidatorFactory;
+#endif
 
         // True when the client was passed in via a test-injection constructor and therefore
         // should not be disposed by this class (the test owns the mock's lifetime).
@@ -141,6 +152,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <c>CERTInext.IntegrationTests</c> can still reach it via
         /// <c>[InternalsVisibleTo]</c>.  See issue #7.
         /// </summary>
+#if SUPPORTS_DCV
         internal CERTInextCAPlugin(ICERTInextClient client, IDomainValidatorFactory domainValidatorFactory, CERTInextConfig config = null)
         {
             _client = client;
@@ -148,6 +160,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _domainValidatorFactory = domainValidatorFactory;
             _config = config ?? new CERTInextConfig();
         }
+#endif
 
         /// <summary>
         /// Injects an <see cref="IDomainValidatorFactory"/> after construction.  Intended
@@ -162,6 +175,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public void SetDomainValidatorFactory(object factory)
         {
+#if SUPPORTS_DCV
             var typed = factory as IDomainValidatorFactory;
             // SOX change-management / SOC2 CC6.1: log every factory injection so an auditor
             // can confirm which DNS provider plugin is being used to publish TXT records.
@@ -173,6 +187,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "OfferedType={OfferedType}, Accepted={Accepted}",
                 factory?.GetType().FullName ?? "(null)", typed != null);
             _domainValidatorFactory = typed;
+#else
+            // DCV is not supported on this build (IAnyCAPlugin 3.2.0 — no IDomainValidatorFactory).
+            // Accept the call for host compatibility but leave DCV disabled. See issue 0003.
+            _logger.LogInformation(
+                "Domain validator factory offered but DCV is not supported on this build " +
+                "(IAnyCAPlugin 3.2.0). OfferedType={OfferedType}",
+                factory?.GetType().FullName ?? "(null)");
+#endif
         }
 
         // ---------------------------------------------------------------------------
@@ -1024,6 +1046,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var enrollResp = await _client.EnrollCertificateAsync(enrollReq);
 
+#if SUPPORTS_DCV
             // DCV: run domain validation if enabled, the factory was injected, and the
             // order was accepted (not immediately failed).
             string orderNumber = enrollResp.Id;
@@ -1086,6 +1109,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                 }
             }
+#endif
 
             return BuildEnrollmentResult(enrollResp, ep.AutoApprove);
         }
@@ -1285,6 +1309,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private async Task<bool> TryRunDcvDuringSyncAsync(string orderNumber, CancellationToken ct, bool fastSync = false)
         {
+#if SUPPORTS_DCV
             if (_domainValidatorFactory == null || !_config.DcvEnabled || string.IsNullOrEmpty(orderNumber))
                 return false;
 
@@ -1330,6 +1355,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 _dcvInFlight.TryRemove(orderNumber, out _);
             }
+#else
+            // DCV is not supported on this build (IAnyCAPlugin 3.2.0). No-op: pending orders
+            // are reported as EXTERNALVALIDATION and not advanced during sync. See issue 0003.
+            await Task.CompletedTask;
+            return false;
+#endif
         }
 
         /// <summary>
@@ -1347,6 +1378,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// on the next cycle instead.  Enroll passes <c>null</c> to keep the full configured
         /// budget (user-visible latency benefits from a one-shot end-to-end finish).
         /// </summary>
+#if SUPPORTS_DCV
         private async Task<bool> PerformDcvIfNeededAsync(
             string orderNumber,
             CancellationToken ct,
@@ -1608,6 +1640,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             return true;
         }
+#endif
 
         /// <summary>
         /// Polls <c>GetCertificateAsync</c> until either (a) the certificate reaches a terminal

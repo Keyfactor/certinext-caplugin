@@ -6,11 +6,19 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>warnings</Nullable>
     <LangVersion>12.0</LangVersion>
+    <!-- DCV requires the v3.3-only IDomainValidatorFactory. This branch targets
+         IAnyCAPlugin 3.2.0 (for 25.5.0 hosts), so SUPPORTS_DCV is intentionally NOT
+         defined and all DCV code is fenced out with #if SUPPORTS_DCV. See issue 0003. -->
+    <!-- <DefineConstants>SUPPORTS_DCV</DefineConstants> -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.3.0-PRERELEASE-78770-979f582005" />
+    <!-- 3.2.0 (NOT 3.3) so the plugin's AnyCAPluginCertificate contract matches gateway
+         hosts shipping IAnyCAPlugin 3.2.0 (e.g. anygateway-rest 25.5.0). DCV requires the
+         3.3-only IDomainValidatorFactory, so the DCV code is disabled on this branch.
+         See issue 0003. -->
+    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.2.0" />
     <PackageReference Include="Keyfactor.Logging" Version="1.1.2" />
     <PackageReference Include="Keyfactor.PKI" Version="5.5.0" />
     <PackageReference Include="RestSharp" Version="112.1.0" />

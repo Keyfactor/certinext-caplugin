@@ -109,7 +109,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             Skip.If(string.IsNullOrWhiteSpace(orderId),
                 "Set CERTINEXT_ORDER_ID in ~/.env_certinext to run this test.");
 
-            var plugin = new CERTInextCAPlugin(_fixture.Client, new StubDomainValidatorFactory(), _fixture.Config);
+            var plugin = new CERTInextCAPlugin(_fixture.Client, _fixture.Config);
             var record = await plugin.GetSingleRecord(orderId);
 
             record.Should().NotBeNull();
@@ -130,7 +130,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             IntegrationSkip.IfNotConfigured(_fixture);
 
-            var plugin = new CERTInextCAPlugin(_fixture.Client, new StubDomainValidatorFactory(), _fixture.Config);
+            var plugin = new CERTInextCAPlugin(_fixture.Client, _fixture.Config);
 
             var orderNumbers = new List<string>();
             await foreach (var entry in _fixture.Client.ListOrdersAsync())
@@ -170,7 +170,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             IntegrationSkip.IfNotConfigured(_fixture);
 
-            var plugin = new CERTInextCAPlugin(_fixture.Client, new StubDomainValidatorFactory(), _fixture.Config);
+            var plugin = new CERTInextCAPlugin(_fixture.Client, _fixture.Config);
 
             var records = new List<Keyfactor.AnyGateway.Extensions.AnyCAPluginCertificate>();
             var blockingCollection = new System.Collections.Concurrent.BlockingCollection<Keyfactor.AnyGateway.Extensions.AnyCAPluginCertificate>();

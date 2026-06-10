@@ -12,6 +12,14 @@
     <ProjectReference Include="..\CERTInext\CERTInext.csproj" />
   </ItemGroup>
 
+  <!-- DCV unit tests + the fake DNS validator implement the v3.3-only IDomainValidator /
+       IDomainValidatorFactory. On the IAnyCAPlugin 3.2.0 (no-DCV) build those types don't
+       exist, so exclude these files unless SUPPORTS_DCV is defined. See issue 0003. -->
+  <ItemGroup Condition="!$(DefineConstants.Contains('SUPPORTS_DCV'))">
+    <Compile Remove="CERTInextCAPluginDcvTests.cs" />
+    <Compile Remove="FakeDomainValidator.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
