@@ -763,6 +763,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int skipped = 0;
             int errors = 0;
 
+            // Bounds on DCV-during-sync so a large pending backlog can't make a pass slow (issue 0002).
+            int ageWindowHours = _config.DcvSyncMaxOrderAgeHours;   // 0 = no age filter
+            int perPassCap = _config.DcvSyncMaxPerPass;             // 0 = no cap
+            int dcvAttempted = 0, dcvSkippedAge = 0, dcvSkippedCap = 0;
+
+            // Emit-side accounting (issue 0003): what the plugin hands to the gateway buffer.
+            int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
+
             try
             {
                 await foreach (var cert in _client.ListCertificatesAsync(
@@ -789,28 +797,46 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                         int status = StatusMapper.ToRequestDisposition(current.Status);
 
-                        // Deferred DCV: if the order is still pending validation (anything not
-                        // GENERATED/REVOKED/FAILED — i.e. EXTERNALVALIDATION), try to advance it
-                        // through DCV now. CERTInext frequently parks fresh orders at
-                        // "Pending for Approver" with domainVerification=null at enroll time and
-                        // only exposes the DCV challenge minutes later; sync is the only place
-                        // we can pick that back up. PerformDcvIfNeededAsync internally short-
-                        // circuits when there's nothing pending, so this is cheap when DCV is
-                        // already done or not yet exposed.
+                        // Deferred DCV: pending orders (EXTERNALVALIDATION) often need DCV driven
+                        // forward during sync — CERTInext parks fresh orders and exposes the DCV
+                        // challenge minutes after enrollment, and scans are the only place that gets
+                        // picked back up. But attempting DCV for EVERY pending order on EVERY pass is
+                        // O(pending) and pathologically slow with a large/abandoned backlog (issue
+                        // 0002). Bound it: only recently-placed orders are eligible (age window), and
+                        // at most N per pass (cap). Aged-out / over-cap orders are emitted as pending
+                        // and revisited on a later pass (the per-minute incremental scan keeps recent
+                        // orders moving). Unknown order age → treat as eligible so we never starve a
+                        // legitimately-new order.
                         if (status == (int)EndEntityStatus.EXTERNALVALIDATION)
                         {
-                            bool dcvDone = await TryRunDcvDuringSyncAsync(current.Id, cancelToken);
-                            if (dcvDone)
+                            var decision = EvaluateDcvSyncEligibility(
+                                current.OrderDate, DateTime.UtcNow, ageWindowHours, dcvAttempted, perPassCap);
+
+                            if (decision == DcvSyncDecision.SkipByAge)
                             {
-                                try
+                                dcvSkippedAge++;
+                            }
+                            else if (decision == DcvSyncDecision.SkipByCap)
+                            {
+                                dcvSkippedCap++;
+                            }
+                            else
+                            {
+                                dcvAttempted++;
+                                bool dcvDone = await TryRunDcvDuringSyncAsync(
+                                    current.Id, cancelToken, fastSync: true);
+                                if (dcvDone)
                                 {
-                                    current = await _client.GetCertificateAsync(current.Id, cancelToken);
-                                    status = StatusMapper.ToRequestDisposition(current.Status);
-                                }
-                                catch (Exception refetchEx)
-                                {
-                                    _logger.LogWarning(refetchEx,
-                                        "Sync DCV completed but post-DCV refetch failed. Id={Id}", current.Id);
+                                    try
+                                    {
+                                        current = await _client.GetCertificateAsync(current.Id, cancelToken);
+                                        status = StatusMapper.ToRequestDisposition(current.Status);
+                                    }
+                                    catch (Exception refetchEx)
+                                    {
+                                        _logger.LogWarning(refetchEx,
+                                            "Sync DCV completed but post-DCV refetch failed. Id={Id}", current.Id);
+                                    }
                                 }
                             }
                         }
@@ -825,7 +851,56 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             continue;
                         }
 
+                        // The order-report listing (ListCertificatesAsync) does NOT include the
+                        // certificate body, so an already-issued order arrives here with
+                        // current.Certificate == null. Command cannot store a record without a
+                        // body, so issued certs were being silently dropped from sync. Refetch the
+                        // full certificate (PEM included) for issued/revoked orders whose body is
+                        // missing — this mirrors GetSingleRecord and the DCV-completed branch above.
+                        // Pending (EXTERNALVALIDATION) records legitimately have no body yet and are
+                        // left as-is.
+                        if (string.IsNullOrWhiteSpace(current.Certificate)
+                            && (status == (int)EndEntityStatus.GENERATED
+                                || status == (int)EndEntityStatus.REVOKED))
+                        {
+                            try
+                            {
+                                current = await _client.GetCertificateAsync(current.Id, cancelToken);
+                                status = StatusMapper.ToRequestDisposition(current.Status);
+                            }
+                            catch (Exception fetchEx)
+                            {
+                                _logger.LogWarning(fetchEx,
+                                    "Sync: failed to fetch certificate body for issued order '{Id}'; " +
+                                    "emitting metadata-only record.", current.Id);
+                            }
+                        }
+
                         var record = MapToAnyCAPluginCertificate(current);
+
+                        // Emit-side observability (issue 0003): account for what the plugin hands to
+                        // the gateway buffer, broken down by status and whether a cert body is present.
+                        // This is the boundary the plugin owns — if these counts show issued records
+                        // emitted WITH bodies but the gateway DB lacks them, the gap is gateway-side
+                        // persistence, not the plugin. Per-record detail is at Debug; the aggregate is
+                        // logged at Information in the completion summary below.
+                        bool recordHasBody = !string.IsNullOrWhiteSpace(record.Certificate);
+                        if (record.Status == (int)EndEntityStatus.GENERATED)
+                        {
+                            if (recordHasBody) emittedGeneratedWithBody++; else emittedGeneratedNoBody++;
+                        }
+                        else if (record.Status == (int)EndEntityStatus.REVOKED)
+                        {
+                            emittedRevoked++;
+                        }
+                        else if (record.Status == (int)EndEntityStatus.EXTERNALVALIDATION)
+                        {
+                            emittedPending++;
+                        }
+                        _logger.LogDebug(
+                            "Sync emit: CARequestID={Id}, Status={Status}, CertBytes={CertBytes}, Subject={Subject}",
+                            record.CARequestID, record.Status, record.Certificate?.Length ?? 0, current.Subject);
+
                         blockingBuffer.Add(record, cancelToken);
                         synced++;
                     }
@@ -863,8 +938,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
 
                 _logger.LogInformation(
-                    "CERTInext synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}",
-                    synced, skipped, errors);
+                    "CERTInext synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}. " +
+                    "Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, GeneratedNoBody={GenNoBody}, " +
+                    "Revoked={Revoked}, Pending={Pending}. " +
+                    "DCV-during-sync: Attempted={DcvAttempted}, SkippedByAge={DcvSkippedAge} (>{AgeHours}h), " +
+                    "SkippedByCap={DcvSkippedCap} (cap={Cap}).",
+                    synced, skipped, errors,
+                    emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
+                    dcvAttempted, dcvSkippedAge, ageWindowHours, dcvSkippedCap, perPassCap);
             }
             catch (OperationCanceledException)
             {
@@ -885,6 +966,38 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // ---------------------------------------------------------------------------
         // Private helpers
         // ---------------------------------------------------------------------------
+
+        /// <summary>The DCV-during-sync gate outcome for a single pending order (issue 0002).</summary>
+        internal enum DcvSyncDecision { Attempt, SkipByAge, SkipByCap }
+
+        /// <summary>
+        /// Decides whether to attempt DCV completion for a pending order during a sync pass,
+        /// bounding the work so a large pending backlog can't make sync slow (issue 0002).
+        /// Pure/stateless so it is unit-testable without the DCV machinery.
+        ///
+        /// Rules (checked in order):
+        ///  - Age: when <paramref name="ageWindowHours"/> &gt; 0, only orders placed within that
+        ///    window are eligible. A missing <paramref name="orderDateUtc"/> is treated as eligible
+        ///    so a legitimately-new order is never starved by unknown age.
+        ///  - Cap: when <paramref name="perPassCap"/> &gt; 0, at most that many orders are attempted
+        ///    per pass; once <paramref name="attemptedSoFar"/> reaches it, the rest are deferred.
+        /// A value of 0 for either bound disables that bound.
+        /// </summary>
+        internal static DcvSyncDecision EvaluateDcvSyncEligibility(
+            DateTime? orderDateUtc, DateTime nowUtc, int ageWindowHours, int attemptedSoFar, int perPassCap)
+        {
+            bool eligibleByAge = ageWindowHours <= 0
+                || !orderDateUtc.HasValue
+                || (nowUtc - orderDateUtc.Value).TotalHours <= ageWindowHours;
+            if (!eligibleByAge)
+                return DcvSyncDecision.SkipByAge;
+
+            bool eligibleByCap = perPassCap <= 0 || attemptedSoFar < perPassCap;
+            if (!eligibleByCap)
+                return DcvSyncDecision.SkipByCap;
+
+            return DcvSyncDecision.Attempt;
+        }
 
         /// <summary>
         /// Handles New and Reissue enrollment flows by submitting a fresh certificate
@@ -1170,7 +1283,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Returns <c>true</c> when DCV actually executed (or DCV is already complete),
         /// <c>false</c> when skipped.
         /// </summary>
-        private async Task<bool> TryRunDcvDuringSyncAsync(string orderNumber, CancellationToken ct)
+        private async Task<bool> TryRunDcvDuringSyncAsync(string orderNumber, CancellationToken ct, bool fastSync = false)
         {
             if (_domainValidatorFactory == null || !_config.DcvEnabled || string.IsNullOrEmpty(orderNumber))
                 return false;
@@ -1198,7 +1311,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "OrderNumber={OrderNumber}, DcvTimeoutMinutes={Timeout}",
                     orderNumber, timeoutMinutes);
 
-                return await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token, waitForChallengeSecondsOverride: 0);
+                return await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token,
+                    waitForChallengeSecondsOverride: 0,
+                    propagationDelaySecondsOverride: fastSync ? Constants.Dcv.SyncPropagationDelaySeconds : (int?)null);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -1235,7 +1350,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         private async Task<bool> PerformDcvIfNeededAsync(
             string orderNumber,
             CancellationToken ct,
-            int? waitForChallengeSecondsOverride = null)
+            int? waitForChallengeSecondsOverride = null,
+            int? propagationDelaySecondsOverride = null)
         {
             // Poll TrackOrder until CERTInext exposes the DCV challenge (domainVerification
             // populated) OR the cert reaches a terminal state OR the wait budget expires.
@@ -1449,8 +1565,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             try
             {
-                // Allow DNS propagation before asking CERTInext to verify
-                int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
+                // Allow DNS propagation before asking CERTInext to verify. The sync path passes
+                // a short override (issue 0002) so a bounded set of recent pending orders doesn't
+                // each burn the full configured delay; Enroll uses the full configured value.
+                int delaySeconds = propagationDelaySecondsOverride
+                    ?? (_config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30);
                 _logger.LogInformation(
                     "Waiting {Delay}s for DNS propagation before verifying DCV. OrderNumber={OrderNumber}",
                     delaySeconds, orderNumber);

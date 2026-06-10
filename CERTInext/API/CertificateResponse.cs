@@ -771,6 +771,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("expiresAt")]
         public System.DateTime? ExpiresAt { get; set; }
 
+        /// <summary>
+        /// Order placement date parsed from orderDate in the order report. Distinct from
+        /// <see cref="IssuedAt"/> (a pending order has no issuance date) — used to bound
+        /// DCV-during-sync to recently-placed orders (issue 0002).
+        /// </summary>
+        [JsonPropertyName("orderDate")]
+        public System.DateTime? OrderDate { get; set; }
+
         /// <summary>Revocation date parsed from revokeProcessedDate in TrackOrder revocationDetails.</summary>
         [JsonPropertyName("revokedAt")]
         public System.DateTime? RevokedAt { get; set; }

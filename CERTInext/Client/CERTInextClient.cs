@@ -1290,12 +1290,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             // Note: GetOrderReport does not return requestor name/email in the ordersArray.
             // Those fields are only available via TrackOrder on individual orders.
+            System.DateTime? orderDate = null;
+            if (!string.IsNullOrWhiteSpace(entry.OrderDate)
+                && System.DateTime.TryParse(entry.OrderDate,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out var parsed))
+            {
+                orderDate = parsed;
+            }
+
             return new LegacyGetCertificateResponse
             {
                 Id = string.IsNullOrWhiteSpace(entry.OrderNumber) ? entry.RequestNumber : entry.OrderNumber,
                 Status = MapCertStatusIdToLegacyString(entry.CertificateStatusId),
                 Subject = entry.DomainName,
-                ProfileId = entry.ProductCode
+                ProfileId = entry.ProductCode,
+                OrderDate = orderDate
             };
         }
 

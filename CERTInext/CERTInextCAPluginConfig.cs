@@ -335,6 +335,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = 60,
                     Type = "Number"
+                },
+                [Constants.Config.DcvSyncMaxOrderAgeHours] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: During synchronization, only pending DV orders younger than this many hours " +
+                               "are eligible to be driven through DCV. This keeps a sync pass fast when there is a " +
+                               "large backlog of old, never-completing pending orders (e.g. abandoned orders or domains " +
+                               "outside the configured DNS provider's zone): they age out and are simply reported as " +
+                               "pending rather than retried every pass. Recently-placed orders (the ones that legitimately " +
+                               "deferred DCV) are always within the window and complete via the normal scan cadence. " +
+                               $"Set to 0 to disable the age filter (attempt DCV for all pending). Default: {Constants.Dcv.DefaultSyncMaxOrderAgeHours}.",
+                    Hidden = false,
+                    DefaultValue = Constants.Dcv.DefaultSyncMaxOrderAgeHours,
+                    Type = "Number"
+                },
+                [Constants.Config.DcvSyncMaxPerPass] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV " +
+                               "in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; " +
+                               "remaining pending orders are reported as-is and picked up on a later pass (the per-minute " +
+                               $"incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: {Constants.Dcv.DefaultSyncMaxPerPass}.",
+                    Hidden = false,
+                    DefaultValue = Constants.Dcv.DefaultSyncMaxPerPass,
+                    Type = "Number"
                 }
             };
         }
@@ -704,6 +727,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         [JsonPropertyName("DcvWaitForIssuanceSeconds")]
         public int DcvWaitForIssuanceSeconds { get; set; } = 60;
+
+        /// <summary>
+        /// During synchronization, only pending DV orders younger than this many hours are
+        /// eligible for DCV completion. Bounds a sync pass against a large backlog of old,
+        /// never-completing pending orders (issue 0002). 0 disables the age filter.
+        /// Default: 24.
+        /// </summary>
+        [JsonPropertyName("DcvSyncMaxOrderAgeHours")]
+        public int DcvSyncMaxOrderAgeHours { get; set; } = Constants.Dcv.DefaultSyncMaxOrderAgeHours;
+
+        /// <summary>
+        /// Maximum number of pending DV orders the plugin attempts to drive through DCV in a
+        /// single sync pass (issue 0002). Bounds per-pass cost regardless of backlog size; the
+        /// remainder are reported pending and revisited on a later pass. 0 disables the cap.
+        /// Default: 50.
+        /// </summary>
+        [JsonPropertyName("DcvSyncMaxPerPass")]
+        public int DcvSyncMaxPerPass { get; set; } = Constants.Dcv.DefaultSyncMaxPerPass;
 
         /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the

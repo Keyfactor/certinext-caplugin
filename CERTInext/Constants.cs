@@ -62,6 +62,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // wait, Enroll() returns pending and the cert is picked up on the next sync.
             public const string DcvWaitForIssuanceSeconds = "DcvWaitForIssuanceSeconds";
 
+            // Bounds on DCV-during-sync so a large pending backlog can't make a sync pass
+            // slow (issue 0002). Only pending orders younger than DcvSyncMaxOrderAgeHours
+            // are eligible for DCV completion during sync, and at most DcvSyncMaxPerPass
+            // orders are attempted per pass; the rest are emitted as pending and revisited
+            // on a later pass (the per-minute incremental cadence keeps recent orders moving).
+            public const string DcvSyncMaxOrderAgeHours = "DcvSyncMaxOrderAgeHours";
+            public const string DcvSyncMaxPerPass = "DcvSyncMaxPerPass";
+
             // Environment variable that overrides DcvTimeoutMinutes when set.
             public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";
             public const string DcvWaitForChallengeSecondsEnvVar = "CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS";
@@ -276,6 +284,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Default TXT record hostname template; {0} is replaced with the bare domain name.
             // Override via the DcvTxtRecordTemplate connector config field.
             public const string DefaultTxtRecordTemplate = "_emsign-validation.{0}";
+
+            // Defaults for the DCV-during-sync bounds (issue 0002).
+            public const int DefaultSyncMaxOrderAgeHours = 24;
+            public const int DefaultSyncMaxPerPass = 50;
+
+            // Propagation delay used on the *sync* DCV path (issue 0002). Sync runs frequently
+            // and bounds work per pass, so it uses a short delay rather than the full
+            // DcvPropagationDelaySeconds (which the Enroll path uses for a one-shot finish).
+            // A few seconds is enough for the staged TXT to be visible to CERTInext's resolver;
+            // if a verify lands too early, the order simply stays pending and is retried next pass.
+            public const int SyncPropagationDelaySeconds = 3;
         }
 
         // Legacy string revocation reasons — retained so StatusMapper still compiles.

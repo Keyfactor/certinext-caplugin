@@ -345,23 +345,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             // worth noting but not a hard failure (the next sync will pick it up).
             record.Status.Should().BeOneOf((int)EndEntityStatus.GENERATED, (int)EndEntityStatus.EXTERNALVALIDATION);
 
-            // Sync is summary-only by design: it iterates ListCertificatesAsync, which
-            // returns the order-report metadata (no cert PEM).  The PEM is materialised
-            // per-record via GetSingleRecord / DownloadCertificateAsync when Command
-            // actually needs the cert.  So even GENERATED records typically have empty
-            // Certificate in the sync output — that is correct behaviour, not a bug.
-            // Confirm the cert is retrievable by issuing the same per-record fetch the
-            // gateway would do for inventory.
+            // Issue 0001: Synchronize now materialises the PEM for issued certs.
+            // ListCertificatesAsync returns order-report metadata (no body), so the plugin
+            // refetches the full certificate for GENERATED/REVOKED records during sync.
             if (record.Status == (int)EndEntityStatus.GENERATED)
             {
+                record.Certificate.Should().NotBeNullOrWhiteSpace(
+                    "Synchronize must populate the cert body for issued orders (issue 0001) — " +
+                    "the order-report listing carries none, so the plugin refetches it.");
+
+                // GetSingleRecord is the same on-demand fetch the gateway uses for inventory.
                 var fetched = await plugin.GetSingleRecord(enrollResult.CARequestID);
                 fetched.Should().NotBeNull();
                 fetched.Status.Should().Be((int)EndEntityStatus.GENERATED);
                 fetched.Certificate.Should().NotBeNullOrWhiteSpace(
-                    "GetSingleRecord must populate the PEM for a GENERATED order — sync is " +
-                    "summary-only, but the per-record download path is the contract the gateway " +
-                    "uses to materialise the cert.");
-                _output.WriteLine($"  Fetched cert PEM length: {fetched.Certificate.Length}");
+                    "GetSingleRecord must populate the PEM for a GENERATED order.");
+                _output.WriteLine($"  Sync cert PEM length: {record.Certificate.Length}; " +
+                                  $"GetSingleRecord PEM length: {fetched.Certificate.Length}");
             }
 
             _output.WriteLine($"--- Verdict: DCV-on enroll for {cn} drove DCV end-to-end via plugin, " +
@@ -575,6 +575,132 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             _output.WriteLine($"--- SUCCESS: {count}/{count} DV orders enrolled, synced, and issued in {passesUsed} sync pass(es). " +
                               $"Enroll={sw.Elapsed:mm\\:ss}  SyncPhase={syncPhaseSw.Elapsed:mm\\:ss}  Total={(sw.Elapsed + syncPhaseSw.Elapsed):mm\\:ss} ---");
+        }
+
+        /// <summary>
+        /// Operational task: drive every <em>existing</em> pending-DV order to completion.
+        ///
+        /// Unlike <see cref="BulkDvEnrollment_AllOrdersIssue_AndPaginationWorks"/>, this enrolls
+        /// nothing — it just runs the plugin's full <c>Synchronize</c> with DCV enabled, which
+        /// invokes <c>TryRunDcvDuringSyncAsync</c> for every order sitting at
+        /// <see cref="EndEntityStatus.EXTERNALVALIDATION"/> (Cloudflare TXT publish → VerifyDcv →
+        /// wait → cleanup). It repeats the sync until no order remains pending or the pass budget
+        /// is exhausted, reporting which orders transitioned to <see cref="EndEntityStatus.GENERATED"/>.
+        ///
+        /// Opt-in (it mutates real CA orders and publishes real DNS records): set
+        /// <c>CERTINEXT_COMPLETE_PENDING=1</c>. Requires Cloudflare DCV credentials.
+        /// </summary>
+        [SkippableFact]
+        public async Task CompleteAllPendingDvOrders()
+        {
+            IntegrationSkip.IfNotConfigured(_fixture);
+            Skip.If(System.Environment.GetEnvironmentVariable("CERTINEXT_COMPLETE_PENDING") != "1",
+                "Opt-in: set CERTINEXT_COMPLETE_PENDING=1 to drive all pending DV orders to completion.");
+            Skip.If(!_fixture.IsCloudflareConfigured,
+                "CERTINEXT_CF_API_TOKEN + CERTINEXT_CF_ZONE_ID required — completing DCV must publish real TXT records.");
+
+            var plugin = BuildPlugin(dcvEnabled: true);
+
+            const int maxSyncPasses = 8;
+            const int delayBetweenPassesSeconds = 30;
+
+            List<AnyCAPluginCertificate> synced = null;
+            int passesUsed = 0;
+            var phaseSw = System.Diagnostics.Stopwatch.StartNew();
+
+            for (int pass = 1; pass <= maxSyncPasses; pass++)
+            {
+                passesUsed = pass;
+                var passSw = System.Diagnostics.Stopwatch.StartNew();
+                synced = await RunSyncAsync(plugin);
+                passSw.Stop();
+
+                var pending = synced.Where(r => r.Status == (int)EndEntityStatus.EXTERNALVALIDATION).ToList();
+                int generated = synced.Count(r => r.Status == (int)EndEntityStatus.GENERATED);
+
+                _output.WriteLine(
+                    $"--- Sync pass #{pass}: {synced.Count} records, {generated} GENERATED, " +
+                    $"{pending.Count} still pending DV, elapsed={passSw.Elapsed:mm\\:ss} ---");
+                foreach (var r in pending.Take(20))
+                    _output.WriteLine($"    pending: {r.CARequestID}");
+
+                if (pending.Count == 0)
+                    break;
+
+                if (pass < maxSyncPasses)
+                {
+                    _output.WriteLine($"    Waiting {delayBetweenPassesSeconds}s before next sync pass…");
+                    await Task.Delay(TimeSpan.FromSeconds(delayBetweenPassesSeconds));
+                }
+            }
+            phaseSw.Stop();
+
+            synced.Should().NotBeNull("Synchronize must have run at least once");
+            var stillPending = synced!.Where(r => r.Status == (int)EndEntityStatus.EXTERNALVALIDATION).ToList();
+
+            _output.WriteLine(
+                $"--- Done after {passesUsed} pass(es) in {phaseSw.Elapsed:mm\\:ss}: " +
+                $"{synced!.Count(r => r.Status == (int)EndEntityStatus.GENERATED)} GENERATED, " +
+                $"{stillPending.Count} still pending DV. ---");
+
+            // Orders may legitimately remain pending if CERTInext is still working server-side or
+            // a domain isn't in the configured Cloudflare zone — surface that rather than failing.
+            stillPending.Should().BeEmpty(
+                $"all pending DV orders should reach GENERATED after {maxSyncPasses} passes; " +
+                $"{stillPending.Count} remain (e.g. {string.Join(", ", stillPending.Take(5).Select(r => r.CARequestID))}). " +
+                "These likely have domains outside the configured Cloudflare zone or are still validating server-side.");
+        }
+
+        // Regression for issue 0001 — a full Synchronize must return every issued cert WITH
+        // its PEM body. The order-report listing carries no body, so the plugin must refetch
+        // the full certificate; before the fix, issued certs synced with a null body and
+        // never appeared in Command. This is the end-to-end "issued certs fill in" check.
+        [SkippableFact]
+        public async Task FullSync_AllIssuedCerts_CarryParseableCertificateBody()
+        {
+            IntegrationSkip.IfNotConfigured(_fixture);
+
+            var plugin = BuildPlugin(dcvEnabled: false);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var synced = await RunSyncAsync(plugin);
+            sw.Stop();
+
+            var issued = synced.Where(r => r.Status == (int)EndEntityStatus.GENERATED).ToList();
+            _output.WriteLine(
+                $"Synchronize returned {synced.Count} records in {sw.Elapsed:mm\\:ss} ({issued.Count} GENERATED).");
+
+            issued.Should().NotBeEmpty(
+                "the account has known issued certs (e.g. scrup.org) that a full sync must surface");
+
+            var parser = new Org.BouncyCastle.X509.X509CertificateParser();
+            var bad = new System.Collections.Generic.List<string>();
+            foreach (var r in issued)
+            {
+                if (string.IsNullOrWhiteSpace(r.Certificate))
+                {
+                    bad.Add($"{r.CARequestID} (empty body)");
+                    continue;
+                }
+                try
+                {
+                    var b64 = r.Certificate
+                        .Replace("-----BEGIN CERTIFICATE-----", string.Empty)
+                        .Replace("-----END CERTIFICATE-----", string.Empty)
+                        .Replace("\r", string.Empty).Replace("\n", string.Empty).Trim();
+                    if (parser.ReadCertificate(Convert.FromBase64String(b64)) == null)
+                        bad.Add($"{r.CARequestID} (unparseable)");
+                }
+                catch (Exception ex)
+                {
+                    bad.Add($"{r.CARequestID} ({ex.GetType().Name})");
+                }
+            }
+
+            bad.Should().BeEmpty(
+                "every issued cert must carry a parseable certificate body after sync; " +
+                $"offenders: {string.Join(", ", bad.Take(10))}");
+            _output.WriteLine($"--- Verdict: all {issued.Count} issued certs carry a valid certificate body. ---");
         }
     }
 
