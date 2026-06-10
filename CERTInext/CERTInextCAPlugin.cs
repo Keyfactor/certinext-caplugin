@@ -221,7 +221,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public void Initialize(IAnyCAPluginConfigProvider configProvider, ICertificateDataReader certificateDataReader)
         {
-            _logger.MethodEntry(LogLevel.Trace);
+            _logger.MethodEntry(LogLevel.Debug);
 
             _certificateDataReader = certificateDataReader;
 
@@ -271,7 +271,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "gateway image that supplies the factory, or set DcvEnabled=false to clear " +
                     "this warning.");
             }
-            _logger.MethodExit(LogLevel.Trace);
+            _logger.MethodExit(LogLevel.Debug);
         }
 
         // ---------------------------------------------------------------------------
@@ -319,12 +319,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <inheritdoc/>
         public async Task Ping()
         {
-            _logger.MethodEntry(LogLevel.Trace);
+            _logger.MethodEntry(LogLevel.Debug);
 
             if (!_config.Enabled)
             {
                 _logger.LogWarning("CERTInext connector is disabled — skipping connectivity test.");
-                _logger.MethodExit(LogLevel.Trace);
+                _logger.MethodExit(LogLevel.Debug);
                 return;
             }
 
@@ -342,14 +342,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             finally
             {
-                _logger.MethodExit(LogLevel.Trace);
+                _logger.MethodExit(LogLevel.Debug);
             }
         }
 
         /// <inheritdoc/>
         public async Task ValidateCAConnectionInfo(Dictionary<string, object> connectionInfo)
         {
-            _logger.MethodEntry(LogLevel.Trace);
+            _logger.MethodEntry(LogLevel.Debug);
 
             // SOX CC6.1 / SOC2 CC6.1: log the access attempt so that every configuration
             // change event is traceable in the audit trail.
@@ -367,7 +367,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogWarning(
                     "CA connection validation skipped — connector is disabled. ApiUrl={ApiUrl}",
                     attemptedApiUrl);
-                _logger.MethodExit(LogLevel.Trace);
+                _logger.MethodExit(LogLevel.Debug);
                 return;
             }
 
@@ -469,13 +469,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation(
                 "CA connection validation succeeded. ApiUrl={ApiUrl}, AuthMode={AuthMode}",
                 attemptedApiUrl, attemptedAuthMode);
-            _logger.MethodExit(LogLevel.Trace);
+            _logger.MethodExit(LogLevel.Debug);
         }
 
         /// <inheritdoc/>
         public async Task ValidateProductInfo(EnrollmentProductInfo productInfo, Dictionary<string, object> connectionInfo)
         {
-            _logger.MethodEntry(LogLevel.Trace);
+            _logger.MethodEntry(LogLevel.Debug);
 
             string rawConfig = JsonSerializer.Serialize(connectionInfo);
             var tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig);
@@ -544,7 +544,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             _logger.LogInformation("Product/profile validation succeeded. ProfileId={ProfileId}", profileId);
-            _logger.MethodExit(LogLevel.Trace);
+            _logger.MethodExit(LogLevel.Debug);
         }
 
         // ---------------------------------------------------------------------------
@@ -560,7 +560,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             RequestFormat requestFormat,
             EnrollmentType enrollmentType)
         {
-            _logger.MethodEntry(LogLevel.Trace);
+            _logger.MethodEntry(LogLevel.Debug);
 
             var ep = new EnrollmentParams(productInfo);
 
@@ -618,7 +618,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 enrollmentType, result.CARequestID, result.Status,
                 result.Certificate != null ? ExtractSerialFromPem(result.Certificate) : "(pending)",
                 subject, ep.ProfileId);
-            _logger.MethodExit(LogLevel.Trace);
+            _logger.MethodExit(LogLevel.Debug);
             return result;
         }
 
@@ -629,7 +629,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <inheritdoc/>
         public async Task<AnyCAPluginCertificate> GetSingleRecord(string caRequestID)
         {
-            _logger.MethodEntry(LogLevel.Trace);
+            _logger.MethodEntry(LogLevel.Debug);
             _logger.LogInformation("GetSingleRecord started. CARequestID={Id}", caRequestID);
 
             try
@@ -666,7 +666,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogInformation(
                     "GetSingleRecord complete. CARequestID={Id}, Status={Status}, SerialNumber={Serial}",
                     caRequestID, cert.Status, cert.SerialNumber ?? "(none)");
-                _logger.MethodExit(LogLevel.Trace);
+                _logger.MethodExit(LogLevel.Debug);
                 return record;
             }
             catch (KeyNotFoundException)
@@ -688,7 +688,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <inheritdoc/>
         public async Task<int> Revoke(string caRequestID, string hexSerialNumber, uint revocationReason)
         {
-            _logger.MethodEntry(LogLevel.Trace);
+            _logger.MethodEntry(LogLevel.Debug);
 
             string reasonString = StatusMapper.ToRevocationReason(revocationReason);
 
@@ -758,7 +758,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "ReasonCode={ReasonCode}, ReasonString={ReasonString}",
                 caRequestID, hexSerialNumber, current.Subject,
                 revocationReason, reasonString);
-            _logger.MethodExit(LogLevel.Trace);
+            _logger.MethodExit(LogLevel.Debug);
             return (int)EndEntityStatus.REVOKED;
         }
 
@@ -773,7 +773,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             bool fullSync,
             CancellationToken cancelToken)
         {
-            _logger.MethodEntry(LogLevel.Trace);
+            _logger.MethodEntry(LogLevel.Debug);
 
             DateTime? issuedAfter = fullSync ? (DateTime?)null : lastSync;
 
@@ -819,6 +819,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                         int status = StatusMapper.ToRequestDisposition(current.Status);
 
+                        // Per-record trace so a sync pass is fully reconstructable from logs
+                        // (info-level only emits start/summary). Enable Trace on this category.
+                        _logger.LogTrace(
+                            "Sync: processing order Id={Id}, listedStatus='{Listed}', mappedStatus={Status}, " +
+                            "orderDate={OrderDate}, bodyInListing={HasBody}",
+                            current.Id, current.Status, status,
+                            current.OrderDate?.ToString("o") ?? "(none)",
+                            !string.IsNullOrWhiteSpace(current.Certificate));
+
                         // Deferred DCV: pending orders (EXTERNALVALIDATION) often need DCV driven
                         // forward during sync — CERTInext parks fresh orders and exposes the DCV
                         // challenge minutes after enrollment, and scans are the only place that gets
@@ -833,6 +842,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         {
                             var decision = EvaluateDcvSyncEligibility(
                                 current.OrderDate, DateTime.UtcNow, ageWindowHours, dcvAttempted, perPassCap);
+
+                            _logger.LogTrace(
+                                "Sync DCV gate: Id={Id}, decision={Decision}, orderDate={OrderDate}, " +
+                                "ageWindowHours={Age}, attemptedSoFar={Attempted}, perPassCap={Cap}",
+                                current.Id, decision, current.OrderDate?.ToString("o") ?? "(none)",
+                                ageWindowHours, dcvAttempted, perPassCap);
 
                             if (decision == DcvSyncDecision.SkipByAge)
                             {
@@ -885,10 +900,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             && (status == (int)EndEntityStatus.GENERATED
                                 || status == (int)EndEntityStatus.REVOKED))
                         {
+                            _logger.LogDebug(
+                                "Sync: issued/revoked order Id={Id} has no body in the listing — refetching full certificate.",
+                                current.Id);
                             try
                             {
                                 current = await _client.GetCertificateAsync(current.Id, cancelToken);
                                 status = StatusMapper.ToRequestDisposition(current.Status);
+                                _logger.LogDebug(
+                                    "Sync: refetched order Id={Id} — status={Status}, certBytes={Bytes}.",
+                                    current.Id, status, current.Certificate?.Length ?? 0);
                             }
                             catch (Exception fetchEx)
                             {
@@ -982,7 +1003,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 blockingBuffer.CompleteAdding();
             }
 
-            _logger.MethodExit(LogLevel.Trace);
+            _logger.MethodExit(LogLevel.Debug);
         }
 
         // ---------------------------------------------------------------------------
@@ -1031,6 +1052,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             Dictionary<string, string[]> san,
             EnrollmentParams ep)
         {
+            _logger.MethodEntry(LogLevel.Debug);
             var enrollReq = new EnrollCertificateRequest
             {
                 ProfileId = ep.ProfileId,
@@ -1111,6 +1133,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 #endif
 
+            _logger.MethodExit(LogLevel.Debug);
             return BuildEnrollmentResult(enrollResp, ep.AutoApprove);
         }
 
@@ -1309,6 +1332,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private async Task<bool> TryRunDcvDuringSyncAsync(string orderNumber, CancellationToken ct, bool fastSync = false)
         {
+            _logger.MethodEntry(LogLevel.Debug);
 #if SUPPORTS_DCV
             if (_domainValidatorFactory == null || !_config.DcvEnabled || string.IsNullOrEmpty(orderNumber))
                 return false;
