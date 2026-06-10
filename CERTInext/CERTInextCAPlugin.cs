@@ -783,12 +783,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             int synced = 0;
             int skipped = 0;
+            int skippedWithBody = 0;   // skipped records that nonetheless carried a cert body (should be 0)
             int errors = 0;
 
-            // Bounds on DCV-during-sync so a large pending backlog can't make a pass slow (issue 0002).
+#if SUPPORTS_DCV
+            // DCV-during-sync only actually runs when DCV is enabled AND a DNS provider factory was
+            // injected by the host. On a gateway that doesn't supply one (e.g. IAnyCAPlugin 3.2.0
+            // hosts), DCV cannot run even on a DCV-capable build — so don't run the gate or report
+            // attempt counts that would imply it did (issue 0003). Bounds apply only when operational.
+            bool dcvOperational = _config.DcvEnabled && _domainValidatorFactory != null;
             int ageWindowHours = _config.DcvSyncMaxOrderAgeHours;   // 0 = no age filter
             int perPassCap = _config.DcvSyncMaxPerPass;             // 0 = no cap
             int dcvAttempted = 0, dcvSkippedAge = 0, dcvSkippedCap = 0;
+#endif
 
             // Emit-side accounting (issue 0003): what the plugin hands to the gateway buffer.
             int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
@@ -813,6 +820,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             _logger.LogTrace(
                                 "Skipping expired certificate '{Id}' (expires {ExpiresAt:u}).",
                                 current.Id, current.ExpiresAt.Value);
+                            if (!string.IsNullOrWhiteSpace(current.Certificate)) skippedWithBody++;
                             skipped++;
                             continue;
                         }
@@ -838,7 +846,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // and revisited on a later pass (the per-minute incremental scan keeps recent
                         // orders moving). Unknown order age → treat as eligible so we never starve a
                         // legitimately-new order.
-                        if (status == (int)EndEntityStatus.EXTERNALVALIDATION)
+#if SUPPORTS_DCV
+                        if (dcvOperational && status == (int)EndEntityStatus.EXTERNALVALIDATION)
                         {
                             var decision = EvaluateDcvSyncEligibility(
                                 current.OrderDate, DateTime.UtcNow, ageWindowHours, dcvAttempted, perPassCap);
@@ -851,6 +860,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                             if (decision == DcvSyncDecision.SkipByAge)
                             {
+                                // Issue 0003 / SOC1 completeness: an order past the age window is no
+                                // longer advanced by sync (it only ages further), so record its
+                                // identity at Information — not just the aggregate count — so an
+                                // auditor can see which orders were left parked, and when.
+                                _logger.LogInformation(
+                                    "Sync: pending DV order aged out of the DCV-during-sync window and will " +
+                                    "not be advanced. CARequestID={Id}, OrderDate={OrderDate}, AgeWindowHours={Age}.",
+                                    current.Id, current.OrderDate?.ToString("o") ?? "(none)", ageWindowHours);
                                 dcvSkippedAge++;
                             }
                             else if (decision == DcvSyncDecision.SkipByCap)
@@ -877,6 +894,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 }
                             }
                         }
+#endif
 
                         // Skip failed/rejected/cancelled certificates — they have no cert body
                         if (status == (int)EndEntityStatus.FAILED)
@@ -884,6 +902,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             _logger.LogTrace(
                                 "Skipping certificate '{Id}' with terminal failure status '{Status}'.",
                                 current.Id, current.Status);
+                            if (!string.IsNullOrWhiteSpace(current.Certificate)) skippedWithBody++;
                             skipped++;
                             continue;
                         }
@@ -903,13 +922,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             _logger.LogDebug(
                                 "Sync: issued/revoked order Id={Id} has no body in the listing — refetching full certificate.",
                                 current.Id);
+                            // The order-report listing carries metadata (Subject/DomainName,
+                            // ProfileId/ProductCode, OrderDate) that GetCertificateAsync (TrackOrder +
+                            // DownloadCertificate) does NOT return. The refetch replaces `current`
+                            // wholesale, so carry that listing metadata across or the emitted record
+                            // loses its Subject and ProductID (ProductID feeds the Command template).
+                            var listed = current;
                             try
                             {
                                 current = await _client.GetCertificateAsync(current.Id, cancelToken);
+                                current.Subject = string.IsNullOrWhiteSpace(current.Subject) ? listed.Subject : current.Subject;
+                                current.ProfileId = string.IsNullOrWhiteSpace(current.ProfileId) ? listed.ProfileId : current.ProfileId;
+                                current.OrderDate ??= listed.OrderDate;
                                 status = StatusMapper.ToRequestDisposition(current.Status);
                                 _logger.LogDebug(
-                                    "Sync: refetched order Id={Id} — status={Status}, certBytes={Bytes}.",
-                                    current.Id, status, current.Certificate?.Length ?? 0);
+                                    "Sync: refetched order Id={Id} — status={Status}, certBytes={Bytes}, subject={Subject}.",
+                                    current.Id, status, current.Certificate?.Length ?? 0, current.Subject);
                             }
                             catch (Exception fetchEx)
                             {
@@ -980,15 +1008,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                 }
 
+                // Build the DCV-during-sync clause for the ACTUAL runtime state so the summary
+                // never implies DCV ran when it couldn't (issue 0003 / SOC2 CC7.3 accuracy).
+                string dcvClause;
+#if SUPPORTS_DCV
+                if (dcvOperational)
+                    dcvClause = $"DCV-during-sync: Attempted={dcvAttempted}, SkippedByAge={dcvSkippedAge} (>{ageWindowHours}h), SkippedByCap={dcvSkippedCap} (cap={perPassCap}).";
+                else
+                    dcvClause = $"DCV-during-sync: not active (DcvEnabled={_config.DcvEnabled}, DnsProviderInjected={_domainValidatorFactory != null}) — pending orders left as EXTERNALVALIDATION.";
+#else
+                dcvClause = "DCV-during-sync: not supported on this build (IAnyCAPlugin 3.2.0).";
+#endif
                 _logger.LogInformation(
-                    "CERTInext synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}. " +
-                    "Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, GeneratedNoBody={GenNoBody}, " +
-                    "Revoked={Revoked}, Pending={Pending}. " +
-                    "DCV-during-sync: Attempted={DcvAttempted}, SkippedByAge={DcvSkippedAge} (>{AgeHours}h), " +
-                    "SkippedByCap={DcvSkippedCap} (cap={Cap}).",
-                    synced, skipped, errors,
+                    "CERTInext synchronization complete. Synced={Synced}, Skipped={Skipped} (withBody={SkippedWithBody}), " +
+                    "Errors={Errors}. Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
+                    "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}. {DcvClause}",
+                    synced, skipped, skippedWithBody, errors,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
-                    dcvAttempted, dcvSkippedAge, ageWindowHours, dcvSkippedCap, perPassCap);
+                    dcvClause);
             }
             catch (OperationCanceledException)
             {
