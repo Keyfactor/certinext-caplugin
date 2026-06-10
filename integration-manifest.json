@@ -167,7 +167,7 @@
                 },
                 {
                     "name": "DcvSyncMaxOrderAgeHours",
-                    "description": "OPTIONAL: During synchronization, only pending DV orders younger than this many hours are eligible to be driven through DCV. Keeps a sync pass fast when there is a large backlog of old, never-completing pending orders (abandoned orders, or domains outside the configured DNS provider's zone) \u2014 they age out and are reported as pending rather than retried every pass. Recently-placed orders (those that legitimately deferred DCV) are always within the window and complete via the normal scan cadence. Set to 0 to disable the age filter. Default: 24."
+                    "description": "OPTIONAL: During synchronization, only pending DV orders younger than this many hours are eligible to be driven through DCV. This keeps a sync pass fast when there is a large backlog of old, never-completing pending orders (e.g. abandoned orders or domains outside the configured DNS provider's zone): they age out and are simply reported as pending rather than retried every pass. Recently-placed orders (the ones that legitimately deferred DCV) are always within the window and complete via the normal scan cadence. Set to 0 to disable the age filter (attempt DCV for all pending). Default: 24."
                 },
                 {
                     "name": "DcvSyncMaxPerPass",
