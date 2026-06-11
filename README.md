@@ -50,7 +50,7 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
 
 ## Compatibility
 
-The CERTInext AnyCA Gateway REST plugin is compatible with the Keyfactor AnyCA Gateway REST 24.2.0 and later.
+The CERTInext AnyCA Gateway REST plugin is compatible with the Keyfactor AnyCA Gateway REST 25.5.0 and later.
 
 ## Support
 The CERTInext AnyCA Gateway REST plugin is open source and there is **no SLA**. Keyfactor will address issues as resources become available. Keyfactor customers may request escalation by opening up a support ticket through their Keyfactor representative.
