@@ -40,6 +40,24 @@ CERTINEXT_SIGNER_IP=
 | Coverage report (browser) | `make coverage-report` | Same as `coverage`, then opens HTML report in the default browser |
 | Clean | `make clean` | `dotnet clean` and wipe coverage output directories |
 
+### Build variants — `DcvSupport` (DCV vs no-DCV)
+
+The plugin builds against two `Keyfactor.AnyGateway.IAnyCAPlugin` contracts from a single
+codebase, selected by the `DcvSupport` MSBuild property. The plugin's `AnyCAPluginCertificate`
+records must match the gateway host's IAnyCAPlugin version to persist, so the build must target
+the host (see issue 0003).
+
+| Build | Command | IAnyCAPlugin | DCV | Target gateway host |
+|---|---|---|---|---|
+| **No-DCV (default)** | `make build` / `dotnet build` | `3.2.0` (stable) | fenced out (`#if SUPPORTS_DCV`) | AnyCA Gateway **25.5.x** (IAnyCAPlugin 3.2.0) |
+| **DCV** | `dotnet build -p:DcvSupport=true` | `3.3.0-PRERELEASE` | enabled | AnyCA Gateway **26.x** (IAnyCAPlugin ≥ 3.3) |
+
+The **default is the no-DCV / 3.2.0 build** — it is the GA artifact that loads and persists on the
+current GA gateway (25.5.x) and depends only on a stable package, so it is what CI ships. Build the
+DCV variant explicitly with `-p:DcvSupport=true` for 26.x hosts. The one property drives the package
+version, the `SUPPORTS_DCV` compile constant, and DCV test-file inclusion across all three projects,
+so the two host targets are a build flag rather than a maintained fork.
+
 ## API Smoke-Test Targets
 
 All API targets source `~/.env_certinext`, compute the HMAC `authKey` (`SHA256(accessKey + ts + txn)`), and call the live CERTInext API via `curl`. All JSON responses are piped through `jq`.

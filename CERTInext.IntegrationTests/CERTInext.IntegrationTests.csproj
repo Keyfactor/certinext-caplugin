@@ -6,9 +6,9 @@
     <LangVersion>12.0</LangVersion>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <!-- Mirror the main project's DcvSupport flag so DCV test files compile in (and SUPPORTS_DCV
-         is defined) on the default DCV build, and are excluded with -p:DcvSupport=false. -->
-    <DcvSupport Condition="'$(DcvSupport)' == ''">true</DcvSupport>
+    <!-- Mirror the main project's DcvSupport flag. Default false → DCV test files are excluded
+         (matches the GA no-DCV build); -p:DcvSupport=true compiles them in with SUPPORTS_DCV. -->
+    <DcvSupport Condition="'$(DcvSupport)' == ''">false</DcvSupport>
     <DefineConstants Condition="'$(DcvSupport)' == 'true'">$(DefineConstants);SUPPORTS_DCV</DefineConstants>
   </PropertyGroup>
 

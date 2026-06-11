@@ -89,4 +89,4 @@ Older gateway image whose bundled `Keyfactor.AnyGateway.IAnyCAPlugin` assembly i
 
 **Mitigation**
 
-Upgrade to the v1.0 release or later. If you are on a build before that fix, the headline error means the plugin DLL was built against the v3.3 prerelease but is being loaded against a v3.2 host with no DCV path — older builds need to be rebuilt against the post-fix `main`.
+Use the build that matches your gateway host. The **default build (no-DCV, IAnyCAPlugin 3.2.0)** is the one that loads *and* persists records on AnyCA Gateway 25.5.x, and it is what the released artifact ships — so on a 25.5.x host, deploy the default build. The DCV-capable build (IAnyCAPlugin 3.3.0, `dotnet build -p:DcvSupport=true`) is for AnyCA Gateway 26.x; loading it on a 25.5.x host triggers the type-load error above and, even when it loads, its records do not persist on a 3.2 host. See the `DcvSupport` build variants in the developer guide.

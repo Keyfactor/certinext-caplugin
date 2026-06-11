@@ -7,21 +7,24 @@
     <Nullable>warnings</Nullable>
     <LangVersion>12.0</LangVersion>
     <!-- DcvSupport toggles DCV (DNS-01 domain validation) across the entire build. Default
-         true → IAnyCAPlugin 3.3.0-PRERELEASE + the SUPPORTS_DCV compile constant (26.x hosts).
-         Build with -p:DcvSupport=false for the IAnyCAPlugin 3.2.0 / no-DCV variant required by
-         25.5.0 hosts — DCV code is then fenced out with #if SUPPORTS_DCV. This one property
-         drives the package version, the compile constant, and DCV test-file inclusion, so the
-         two host targets are a build flag rather than a maintained fork. See issue 0003. -->
-    <DcvSupport Condition="'$(DcvSupport)' == ''">true</DcvSupport>
+         FALSE → IAnyCAPlugin 3.2.0, DCV fenced out via #if SUPPORTS_DCV. This is the contract
+         that persists on the current GA gateway (AnyCA Gateway 25.5.x / IAnyCAPlugin 3.2.0), it
+         depends only on a stable (non-prerelease) package, and it is what CI ships by default —
+         so the released artifact works on GA hosts (see issue 0003). Build with
+         -p:DcvSupport=true for the IAnyCAPlugin 3.3.0-PRERELEASE + SUPPORTS_DCV variant (DCV;
+         AnyCA Gateway 26.x / IAnyCAPlugin >= 3.3). The one property drives the package version,
+         the SUPPORTS_DCV compile constant, and DCV test-file inclusion, so the two host targets
+         are a build flag rather than a maintained fork. -->
+    <DcvSupport Condition="'$(DcvSupport)' == ''">false</DcvSupport>
     <DefineConstants Condition="'$(DcvSupport)' == 'true'">$(DefineConstants);SUPPORTS_DCV</DefineConstants>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- IAnyCAPlugin version follows DcvSupport so the plugin's AnyCAPluginCertificate contract
-         matches the gateway host: 3.3.0-PRERELEASE (DCV / 26.x hosts) by default, or 3.2.0
-         (no-DCV / 25.5.0 hosts, e.g. anygateway-rest 25.5.0) with -p:DcvSupport=false. The
-         3.3-only IDomainValidatorFactory is only referenced from #if SUPPORTS_DCV code, so the
+         matches the gateway host: 3.2.0 (no-DCV / 25.5.x hosts, e.g. anygateway-rest 25.5.0) by
+         default, or 3.3.0-PRERELEASE (DCV / 26.x hosts) with -p:DcvSupport=true. The 3.3-only
+         IDomainValidatorFactory is only referenced from #if SUPPORTS_DCV code, so the default
          3.2.0 build compiles cleanly. See issue 0003. -->
     <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.3.0-PRERELEASE-78770-979f582005" Condition="'$(DcvSupport)' == 'true'" />
     <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.2.0" Condition="'$(DcvSupport)' != 'true'" />
