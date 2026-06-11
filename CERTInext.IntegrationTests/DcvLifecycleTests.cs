@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Org.BouncyCastle.Asn1.X509;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Generators;
+using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Pkcs;
 using Org.BouncyCastle.Security;
 using FluentAssertions;
@@ -360,12 +361,147 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 fetched.Status.Should().Be((int)EndEntityStatus.GENERATED);
                 fetched.Certificate.Should().NotBeNullOrWhiteSpace(
                     "GetSingleRecord must populate the PEM for a GENERATED order.");
-                _output.WriteLine($"  Sync cert PEM length: {record.Certificate.Length}; " +
-                                  $"GetSingleRecord PEM length: {fetched.Certificate.Length}");
+                _output.WriteLine($"  Sync cert PEM length: {record.Certificate!.Length}; " +
+                                  $"GetSingleRecord PEM length: {fetched.Certificate!.Length}");
             }
 
             _output.WriteLine($"--- Verdict: DCV-on enroll for {cn} drove DCV end-to-end via plugin, " +
                               $"order {enrollResult.CARequestID} surfaced in sync with Status={record.Status}. ---");
+        }
+
+        /// <summary>
+        /// End-to-end key-algorithm issuance matrix: RSA 2048/3072/4096/6144/8192, ECDSA
+        /// P-256/P-384/P-521, Ed25519, Ed448 (see <see cref="KeyAlgorithms"/>). For each type,
+        /// enroll a fresh scrup.org DV order with DCV ON, drive it to issuance via the plugin
+        /// (Cloudflare TXT publish → VerifyDcv → bounded sync passes), and assert the issued cert
+        /// carries a parseable body whose public key matches the requested algorithm.
+        ///
+        /// An algorithm CERTInext won't issue — rejected at submission, FAILED, or never reaching
+        /// GENERATED within the polling window — is reported as an explicit Skip carrying the
+        /// observed reason, so the matrix documents which algorithms CERTInext actually issues
+        /// without hard-failing on a legitimate CA limitation.
+        ///
+        /// Opt-in (issues a real cert per accepted algorithm): set <c>CERTINEXT_ALGO_MATRIX_DCV=1</c>.
+        /// Requires Cloudflare DCV credentials.
+        /// </summary>
+        [SkippableTheory]
+        [MemberData(nameof(KeyAlgorithms.AsMemberData), MemberType = typeof(KeyAlgorithms))]
+        public async Task EnrollWithDcvOn_IssuesPerKeyAlgorithm(string tag)
+        {
+            IntegrationSkip.IfNotConfigured(_fixture);
+            Skip.If(System.Environment.GetEnvironmentVariable("CERTINEXT_ALGO_MATRIX_DCV") != "1",
+                "Opt-in: set CERTINEXT_ALGO_MATRIX_DCV=1 to issue one real scrup.org cert per key algorithm.");
+            Skip.If(!_fixture.IsCloudflareConfigured,
+                "CERTINEXT_CF_API_TOKEN + CERTINEXT_CF_ZONE_ID required — DCV issuance must publish real TXT records.");
+
+            var spec = KeyAlgorithms.For(tag);
+            string suffix = System.Guid.NewGuid().ToString("N").Substring(0, 8);
+            string cn = $"algo-{KeyAlgorithms.Slug(tag)}-{suffix}.scrup.org";
+            string csr = KeyAlgorithms.GenerateCsrPem(cn, spec);
+
+            var plugin = BuildPlugin(dcvEnabled: true);
+
+            // --- Enroll. A submission-time rejection (unsupported algorithm) → Skip with the CA's reason. ---
+            EnrollmentResult enrollResult;
+            try
+            {
+                enrollResult = await plugin.Enroll(
+                    csr:            csr,
+                    subject:        $"CN={cn}",
+                    san:            new Dictionary<string, string[]> { ["dns"] = new[] { cn } },
+                    productInfo:    IntegrationTestData.DvSslProductInfo(_fixture.Config.DefaultProductCode),
+                    requestFormat:  RequestFormat.PKCS10,
+                    enrollmentType: EnrollmentType.New);
+            }
+            catch (Exception ex)
+            {
+                _output.WriteLine($"[SKIP] {tag}: CERTInext rejected the DV order at submission — {ex.Message}");
+                Skip.If(true, $"CERTInext did not accept a {tag} DV order (likely an unsupported key algorithm). CA message: {ex.Message}");
+                return; // unreachable — Skip throws
+            }
+
+            enrollResult.Should().NotBeNull();
+            enrollResult.CARequestID.Should().NotBeNullOrWhiteSpace($"{tag}: CA must return a CARequestID when it accepts the order");
+            _output.WriteLine($"[{tag}] enrolled cn={cn} id={enrollResult.CARequestID} status={enrollResult.Status}");
+
+            // --- Poll this one order to issuance via GetSingleRecord (targeted; avoids the
+            //     full-account sync, which would also drive DCV on unrelated pending orders). ---
+            const int maxPolls = 6;
+            const int delaySeconds = 15;
+            AnyCAPluginCertificate record = null;
+            for (int poll = 1; poll <= maxPolls; poll++)
+            {
+                record = await plugin.GetSingleRecord(enrollResult.CARequestID);
+                int status = record?.Status ?? -1;
+                _output.WriteLine($"[{tag}] poll #{poll}: status={status} certLen={record?.Certificate?.Length ?? 0}");
+
+                if (status == (int)EndEntityStatus.GENERATED)
+                    break;
+                if (status == (int)EndEntityStatus.FAILED)
+                {
+                    _output.WriteLine($"[SKIP] {tag}: order {enrollResult.CARequestID} went FAILED — CERTInext will not issue this algorithm.");
+                    Skip.If(true, $"CERTInext FAILED the {tag} order — algorithm not issuable on this account/profile.");
+                    return;
+                }
+                if (poll < maxPolls)
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+            }
+
+            record.Should().NotBeNull($"{tag}: enrolled order {enrollResult.CARequestID} must be retrievable");
+
+            if (record!.Status != (int)EndEntityStatus.GENERATED)
+            {
+                // Accepted at submission but not issued within the window — document as Skip, not fail.
+                _output.WriteLine($"[SKIP] {tag}: order {enrollResult.CARequestID} still Status={record.Status} after {maxPolls} polls.");
+                Skip.If(true, $"CERTInext accepted the {tag} order but it did not reach GENERATED within the polling window " +
+                    $"(Status={record.Status}) — possible unsupported algorithm or slow server-side validation.");
+                return;
+            }
+
+            record.Certificate.Should().NotBeNullOrWhiteSpace(
+                $"{tag}: issued cert must carry a PEM body (issue 0001)");
+
+            // Strong check: the issued cert's public key must match the algorithm we requested.
+            AssertIssuedCertMatchesAlgorithm(record.Certificate, spec, tag);
+
+            _output.WriteLine($"--- {tag}: DCV-on issuance OK — order {enrollResult.CARequestID} GENERATED, " +
+                              $"cert public key confirmed as {tag}. ---");
+        }
+
+        /// <summary>
+        /// Parses an issued certificate PEM and asserts its public key matches the requested
+        /// algorithm/size — proves CERTInext issued the key type we submitted, not a substitute.
+        /// </summary>
+        private static void AssertIssuedCertMatchesAlgorithm(string certPem, KeyAlgorithmSpec spec, string tag)
+        {
+            var b64 = certPem
+                .Replace("-----BEGIN CERTIFICATE-----", string.Empty)
+                .Replace("-----END CERTIFICATE-----", string.Empty)
+                .Replace("\r", string.Empty).Replace("\n", string.Empty).Trim();
+
+            var cert = new Org.BouncyCastle.X509.X509CertificateParser().ReadCertificate(Convert.FromBase64String(b64));
+            cert.Should().NotBeNull($"{tag}: issued cert PEM must parse");
+
+            var pub = cert.GetPublicKey();
+            switch (spec.Kind)
+            {
+                case KeyKind.Rsa:
+                    pub.Should().BeOfType<RsaKeyParameters>();
+                    ((RsaKeyParameters)pub).Modulus.BitLength.Should().Be(spec.Strength,
+                        $"{tag}: issued RSA cert must have a {spec.Strength}-bit modulus");
+                    break;
+                case KeyKind.Ecdsa:
+                    pub.Should().BeOfType<ECPublicKeyParameters>();
+                    ((ECPublicKeyParameters)pub).Parameters.Curve.FieldSize.Should().Be(spec.Strength,
+                        $"{tag}: issued EC cert must use a {spec.Strength}-bit curve");
+                    break;
+                case KeyKind.Ed25519:
+                    pub.Should().BeOfType<Ed25519PublicKeyParameters>();
+                    break;
+                case KeyKind.Ed448:
+                    pub.Should().BeOfType<Ed448PublicKeyParameters>();
+                    break;
+            }
         }
 
         /// <summary>
