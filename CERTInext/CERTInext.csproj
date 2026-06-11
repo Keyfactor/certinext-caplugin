@@ -6,19 +6,25 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>warnings</Nullable>
     <LangVersion>12.0</LangVersion>
-    <!-- DCV requires the v3.3-only IDomainValidatorFactory. This branch targets
-         IAnyCAPlugin 3.2.0 (for 25.5.0 hosts), so SUPPORTS_DCV is intentionally NOT
-         defined and all DCV code is fenced out with #if SUPPORTS_DCV. See issue 0003. -->
-    <!-- <DefineConstants>SUPPORTS_DCV</DefineConstants> -->
+    <!-- DcvSupport toggles DCV (DNS-01 domain validation) across the entire build. Default
+         true → IAnyCAPlugin 3.3.0-PRERELEASE + the SUPPORTS_DCV compile constant (26.x hosts).
+         Build with -p:DcvSupport=false for the IAnyCAPlugin 3.2.0 / no-DCV variant required by
+         25.5.0 hosts — DCV code is then fenced out with #if SUPPORTS_DCV. This one property
+         drives the package version, the compile constant, and DCV test-file inclusion, so the
+         two host targets are a build flag rather than a maintained fork. See issue 0003. -->
+    <DcvSupport Condition="'$(DcvSupport)' == ''">true</DcvSupport>
+    <DefineConstants Condition="'$(DcvSupport)' == 'true'">$(DefineConstants);SUPPORTS_DCV</DefineConstants>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- 3.2.0 (NOT 3.3) so the plugin's AnyCAPluginCertificate contract matches gateway
-         hosts shipping IAnyCAPlugin 3.2.0 (e.g. anygateway-rest 25.5.0). DCV requires the
-         3.3-only IDomainValidatorFactory, so the DCV code is disabled on this branch.
-         See issue 0003. -->
-    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.2.0" />
+    <!-- IAnyCAPlugin version follows DcvSupport so the plugin's AnyCAPluginCertificate contract
+         matches the gateway host: 3.3.0-PRERELEASE (DCV / 26.x hosts) by default, or 3.2.0
+         (no-DCV / 25.5.0 hosts, e.g. anygateway-rest 25.5.0) with -p:DcvSupport=false. The
+         3.3-only IDomainValidatorFactory is only referenced from #if SUPPORTS_DCV code, so the
+         3.2.0 build compiles cleanly. See issue 0003. -->
+    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.3.0-PRERELEASE-78770-979f582005" Condition="'$(DcvSupport)' == 'true'" />
+    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.2.0" Condition="'$(DcvSupport)' != 'true'" />
     <PackageReference Include="Keyfactor.Logging" Version="1.1.2" />
     <PackageReference Include="Keyfactor.PKI" Version="5.5.0" />
     <PackageReference Include="RestSharp" Version="112.1.0" />
