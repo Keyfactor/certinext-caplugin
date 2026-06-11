@@ -161,13 +161,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
             catch (Exception ex)
             {
-                // Per agreed scope: a CA-side rejection (algorithm not supported, or other
-                // account/provisioning gap) becomes an explicit Skip carrying the CA's message,
-                // so the matrix documents real CERTInext support without a hard failure.
-                _output.WriteLine($"[SKIP] {tag}: CERTInext rejected submission — {ex.Message}");
-                Skip.If(true,
-                    $"CERTInext did not accept a {tag} order. This may be an unsupported key algorithm " +
-                    $"or an account/provisioning limitation. CA message: {ex.Message}");
+                // Per agreed scope: a CA-side rejection becomes an explicit Skip carrying the CA's
+                // message (classified so an unsupported algorithm isn't confused with a credit/
+                // account limitation), so the matrix documents real CERTInext support honestly.
+                string reason = KeyAlgorithms.ClassifyRejection(ex.Message);
+                _output.WriteLine($"[SKIP] {tag}: {reason} — {ex.Message}");
+                Skip.If(true, $"CERTInext did not accept a {tag} order: {reason}. CA message: {ex.Message}");
             }
 
             enrollResult.Should().NotBeNull($"{tag}: Enroll must return a non-null result when accepted");

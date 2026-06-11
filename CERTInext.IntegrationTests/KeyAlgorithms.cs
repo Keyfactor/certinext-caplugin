@@ -115,5 +115,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>A filesystem/DNS-safe slug for a tag, e.g. "ECDSA-P256" → "ecdsap256".</summary>
         public static string Slug(string tag) => tag.ToLowerInvariant().Replace("-", string.Empty);
+
+        /// <summary>
+        /// Classifies a CERTInext order-rejection message so the algorithm matrix doesn't
+        /// conflate "this key algorithm is unsupported" with "the account can't place orders
+        /// right now". CERTInext's live envelope (observed): RSA 2048/3072/4096 + ECC P-256/P-384
+        /// are accepted; larger RSA, P-521, and the Ed* curves return "Invalid key size" /
+        /// "Something went Wrong". A credit shortfall returns "Insufficient Credits" regardless
+        /// of algorithm.
+        /// </summary>
+        public static string ClassifyRejection(string caMessage)
+        {
+            caMessage ??= string.Empty;
+            if (caMessage.IndexOf("Invalid key size", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "key algorithm/size not supported by CERTInext";
+            if (caMessage.IndexOf("Insufficient Credits", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "CERTInext account is out of credits — algorithm support was not exercised";
+            return "rejected by CERTInext";
+        }
     }
 }

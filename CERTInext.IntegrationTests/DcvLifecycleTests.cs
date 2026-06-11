@@ -415,8 +415,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
             catch (Exception ex)
             {
-                _output.WriteLine($"[SKIP] {tag}: CERTInext rejected the DV order at submission — {ex.Message}");
-                Skip.If(true, $"CERTInext did not accept a {tag} DV order (likely an unsupported key algorithm). CA message: {ex.Message}");
+                string reason = KeyAlgorithms.ClassifyRejection(ex.Message);
+                _output.WriteLine($"[SKIP] {tag}: {reason} — {ex.Message}");
+                Skip.If(true, $"CERTInext did not issue a {tag} cert: {reason}. CA message: {ex.Message}");
                 return; // unreachable — Skip throws
             }
 
