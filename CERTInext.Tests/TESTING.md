@@ -15,7 +15,7 @@ The split keeps concerns separate. If a test fails in `CERTInextClientTests`, th
 ## Running the Tests
 
 **Prerequisites:**
-- .NET SDK 6.0 or later
+- .NET SDK 8.0 or later
 - NuGet packages restored (`dotnet restore`)
 - No external services required — WireMock runs in-process
 
@@ -62,12 +62,24 @@ Two helper methods build clients:
 
 This test verifies the header matching at the WireMock level: if the client sends the wrong header name or value, WireMock finds no matching stub and the request fails.
 
-### OAuth2 Token Fetch and Caching
+### OAuth2 Token Fetch, Caching, and Header Injection
 
 | Test | Stub | Assertion |
 |------|------|-----------|
-| `OAuth2_FetchesToken_BeforeFirstApiCall` | `POST /oauth/token` → 200, token JSON with `expires_in=3600`; `GET /api/v1/health` → 200 | Log entries contain both `/oauth/token` and `/api/v1/health`, confirming token acquisition precedes the API call |
-| `OAuth2_TokenIsCached_SecondCallDoesNotRefetch` | Same as above | `PingAsync` called twice; `/oauth/token` appears exactly once in log, `/api/v1/health` appears twice |
+| `OAuth2_FetchesToken_BeforeFirstApiCall` | `POST /oauth/token` → 200, token JSON; `POST /ValidateCredentials` → 200 | Log entries contain both `/oauth/token` and `/ValidateCredentials` |
+| `OAuth2_TokenIsCached_SecondCallDoesNotRefetch` | Same as above | `PingAsync` called twice; `/oauth/token` appears exactly once in log; `/ValidateCredentials` appears twice |
+| `OAuth_InjectsBearerToken_InAuthorizationHeader` | Token endpoint → `fake-bearer-token-abc123`; ValidateCredentials → 200 | WireMock log for `/ValidateCredentials` contains header `Authorization: Bearer fake-bearer-token-abc123` |
+| `OAuth_DoesNotInjectBearerToken_InAccessKeyMode` | `/ValidateCredentials` → 200 | WireMock log entry for `/ValidateCredentials` has no `Authorization` header |
+
+The `OAuth_InjectsBearerToken_InAuthorizationHeader` test is the P1-A regression test. Before the fix, `CERTInextClient` stored the token in a `[ThreadStatic]` field that was never injected into actual requests. The fix replaces this with a `CERTInextOAuthAuthenticator : AuthenticatorBase` subclass that injects the header per-request via RestSharp's authenticator interface.
+
+### Retry Logic
+
+| Test | Stub | Assertion |
+|------|------|-----------|
+| `ExecuteWithRetry_MakesThreeAttempts_WhenServerAlwaysReturns500` | `/ValidateCredentials` always → 500 | `PingAsync` throws; WireMock log contains exactly 3 requests to `/ValidateCredentials` |
+
+`ExecuteWithRetryAsync` retries on HTTP 5xx (and network-level failures) for up to `maxAttempts=3` total attempts. 4xx responses are not retried.
 
 ### EnrollCertificateAsync
 
@@ -133,14 +145,15 @@ Two local helpers are used across tests:
 |------|-----------|-----------|
 | `Ping_Succeeds_WhenClientPingAsyncDoesNotThrow` | `PingAsync` returns `Task.CompletedTask` | Does not throw; `PingAsync` called exactly once |
 | `Ping_Rethrows_WhenClientPingThrows` | `PingAsync` throws `Exception("Connection refused")` | Throws `Exception` with message matching `"*CERTInext*Connection refused*"` — verifies the plugin wraps the error with context |
+| `Ping_SkipsConnectivityTest_WhenConnectorIsDisabled` | Strict mock with no setups; `CERTInextConfig.Enabled = false` | Does not throw; no client method is called (verified via `VerifyNoOtherCalls()`) |
 
 ### GetProductIds
 
 | Test | Mock setup | Assertion |
 |------|-----------|-----------|
-| `GetProductIds_ReturnsActiveProfileIds` | `GetProfilesAsync` returns `ActiveProfiles()` (two active profiles) | Returns 2 IDs: `ProfileIdTls` and `ProfileIdClient` |
-| `GetProductIds_FiltersOutInactiveProfiles` | `GetProfilesAsync` returns `MixedProfiles()` (two active, one inactive `"legacy-profile"`) | Returns 2 IDs; `"legacy-profile"` is not present |
-| `GetProductIds_ReturnsEmptyList_WhenClientThrows` | `GetProfilesAsync` throws `Exception("Unavailable")` | Returns an empty list rather than propagating the exception |
+| `GetProductIds_ReturnsStaticProductList` | No mock calls expected (strict mock verifies this) | Returns 10 items; contains `DV SSL`, `OV SSL`, `EV SSL`; no client method is called |
+
+`GetProductIds()` returns a hardcoded static list rather than making a live API call. This is intentional: `IAnyCAPlugin.GetProductIds()` is synchronous (calling `GetAwaiter().GetResult()` risks deadlock), and the Keyfactor integration-manifest tooling requires a known list at reflection time. The `VerifyNoOtherCalls()` assertion on the strict mock confirms no API call is made.
 
 ### ValidateCAConnectionInfo
 
@@ -204,6 +217,24 @@ The plugin looks up the certificate first to check whether it is already revoked
 | `Synchronize_SkipsFailedCertificates` | `ListCertificatesAsync` returns one issued cert and one cert with `status="failed"` and `Certificate=null` | Buffer contains exactly 1 item (`CertId1`); the failed cert is dropped |
 | `Synchronize_HonoursCancellation` | Custom async enumerable that yields one cert, cancels the `CancellationTokenSource`, then calls `ct.ThrowIfCancellationRequested()` before yielding a second | Throws `OperationCanceledException` |
 | `Synchronize_MapsRevokedCertificates_Correctly` | `ListCertificatesAsync` returns one revoked cert (`CertId3`) | Buffer contains 1 item; `Status == EndEntityStatus.REVOKED`; `RevocationDate` is not null |
+| `Synchronize_CallsCompleteAdding_OnNormalExit` | `ListCertificatesAsync` returns empty | `buffer.IsAddingCompleted == true` after `Synchronize` returns normally |
+| `Synchronize_CallsCompleteAdding_OnCancellation` | Custom async enumerable that cancels mid-iteration | `buffer.IsAddingCompleted == true` even after `OperationCanceledException` is thrown |
+
+**Note on `CompleteAdding`:** `Synchronize` calls `blockingBuffer.CompleteAdding()` in a `finally` block. Tests must NOT call `buffer.CompleteAdding()` themselves — doing so after the plugin has already called it throws `InvalidOperationException`.
+
+### RenewalWindowDays — P2-C semantic
+
+`RenewalWindowDays` controls whether a `RenewOrReissue` enrollment uses the CERTInext renew API or falls back to a fresh order. The semantics are "Option A — window before expiry":
+
+```
+useRenewalApi = expiry > DateTime.UtcNow && expiry <= DateTime.UtcNow.AddDays(RenewalWindowDays)
+```
+
+| Test | Expiry | Window | Expected path |
+|------|--------|--------|---------------|
+| `RenewOrReissue_UsesRenewApi_WhenCertExpiresWithinWindow` | now + 30 days | 90 days | Renewal API |
+| `RenewOrReissue_UsesNewEnroll_WhenCertExpiresOutsideWindow` | now + 120 days | 90 days | New enroll (too early) |
+| `RenewOrReissue_UsesNewEnroll_WhenCertAlreadyExpired` | now − 5 days | 90 days | New enroll (graceful degradation) |
 
 ---
 
