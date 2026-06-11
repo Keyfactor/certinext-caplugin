@@ -100,8 +100,15 @@ The table below records live draft-order results against the Production — Indi
 | DV SSL | `838` | ✓ Tested | 4572531551 | Base domain; no extra fields required beyond base set |
 | DV SSL Wildcard | `839` | ✓ Tested | 9149755266 | CSR CN must be `*.domain`; `domainName` must also use wildcard format |
 | DV SSL UCC | `840` | ✓ Tested | 1611445122 | `certificateInformation.additionalDomains` array required |
+| DV SSL Wildcard UCC | `841` | ✗ Blocked | — | EMS-918: "Additional Information cannot be empty" — required fields for this product not yet identified |
 | OV SSL | `842` | ✓ Tested | 5546366498 | Requires `locality` and `postalCode` in `certificateInformation` |
+| OV SSL Wildcard | `843` | ✗ Not tested | — | Draft order not yet placed |
+| OV SSL UCC | `844` | ✗ Not tested | — | Draft order not yet placed |
+| OV SSL Wildcard UCC | `845` | ✗ Blocked | — | EMS-918: "Additional Information cannot be empty" — required fields for this product not yet identified |
 | EV SSL | `846` | ✓ Tested | 3932332114 | Requires `contractSignerInfo`, `certificateApproverInfo`, non-empty `streetAddress2`, `companyRegistrationNumber` |
+| EV SSL UCC | `847` | ✗ Blocked | — | EMS-918: "Additional Information cannot be empty" — required fields for this product not yet identified |
+| DV SSL 1 Month | N/A | ✗ Not supported | — | Visible in portal but not returned by `GetProductDetails` API; no product code available. Not supported by plugin. |
+| DV SSL Wildcard 1 Month | N/A | ✗ Not supported | — | Visible in portal but not returned by `GetProductDetails` API; no product code available. Not supported by plugin. |
 | emSign Intranet SSL | `100` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |
 | IGTF Host | `104` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |
 | S/MIME | `894` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |

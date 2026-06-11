@@ -6,10 +6,22 @@
     <LangVersion>12.0</LangVersion>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- Mirror the main project's DcvSupport flag so DCV test files compile in (and SUPPORTS_DCV
+         is defined) on the default DCV build, and are excluded with -p:DcvSupport=false. -->
+    <DcvSupport Condition="'$(DcvSupport)' == ''">true</DcvSupport>
+    <DefineConstants Condition="'$(DcvSupport)' == 'true'">$(DefineConstants);SUPPORTS_DCV</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\CERTInext\CERTInext.csproj" />
+  </ItemGroup>
+
+  <!-- DCV unit tests + the fake DNS validator implement the v3.3-only IDomainValidator /
+       IDomainValidatorFactory. On the IAnyCAPlugin 3.2.0 (no-DCV) build those types don't
+       exist, so exclude these files unless SUPPORTS_DCV is defined. See issue 0003. -->
+  <ItemGroup Condition="!$(DefineConstants.Contains('SUPPORTS_DCV'))">
+    <Compile Remove="CERTInextCAPluginDcvTests.cs" />
+    <Compile Remove="FakeDomainValidator.cs" />
   </ItemGroup>
 
   <ItemGroup>
