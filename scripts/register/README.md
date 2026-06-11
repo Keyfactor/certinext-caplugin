@@ -1,0 +1,171 @@
+# CERTInext gateway/Command registration scripts
+
+Provision the CERTInext AnyCA REST Gateway plugin into the **AnyCA REST Gateway**
+and **Keyfactor Command**: gateway certificate profiles, the gateway CA
+configuration, Command template import, enrollment patterns, and template
+key-retention. Driven by `integration-manifest.json` (`.about.carest.product_ids`)
+so it stays in sync with the plugin's products.
+
+These scripts talk to **Command and the gateway admin API** — *not* the CERTInext
+vendor API. Shared auth/host logic lives in [`../lib/command-auth.sh`](../lib/command-auth.sh).
+
+## Stages
+
+| Stage | Script | `make` target | Side | Notes |
+|------:|--------|---------------|------|-------|
+| 01 | `01-gateway-profiles.sh` | `register-profiles` | Gateway | one cert profile per product. **Verified.** |
+| 02 | `02-gateway-ca-config.sh` | `register-ca-config` | Gateway | CAConnection + Templates[]. ⚠️ touches CA config — opt-in. |
+| 03 | `03-gateway-claims.sh` | `register-claims` | Gateway | OAuth claim→role mappings. Unverified. |
+| 04 | `04-command-register-ca.sh` | `register-command-ca` | Command | registers the CA. ⚠️ **CA config — leave alone unless asked.** |
+| 05 | `05-command-import-templates.sh` | `register-import` | Command | `POST /Templates/Import`. |
+| 06 | `06-command-enrollment-patterns.sh` | `register-enrollment` | Command | enrollment patterns + template key-retention. **Verified.** |
+| — | `00-register-all.sh` | `register` | both | runs 01→06; skips missing stages and `SKIP_NN=1`. |
+
+Every stage: idempotent (GET→POST/PUT), supports `DRY_RUN=1` (offline preview),
+and reads `~/.env_certinext` + the env contract below.
+
+> ⚠️ **Do not modify the CA configuration** (stage 04, and stage 02's CA-connection
+> PUT) unless explicitly asked — it is fragile and easily broken. Profiles,
+> template import, enrollment patterns, and key-retention are safe to re-run.
+
+## Authentication
+
+Three ways to authenticate, resolved per side (gateway vs Command) in this order:
+
+1. **Session cookie** — `GATEWAY_COOKIE` / `COMMAND_COOKIE`. Paste the full
+   `cookie:` header value from your browser devtools (Copy-as-cURL) into a file:
+   ```sh
+   pbpaste > ~/.certinext_kfcportal_cookie    # re-copy the cookie in devtools first
+   chmod 600 ~/.certinext_kfcportal_cookie
+   export COMMAND_COOKIE="$(tr -d '\r\n' < ~/.certinext_kfcportal_cookie)"
+   ```
+   The `tr -d` strips the trailing newline (a newline in the header → silent 401).
+2. **Bearer token** — `GATEWAY_TOKEN` / `COMMAND_TOKEN` (e.g. copied from an API
+   request's `authorization: Bearer` header).
+3. **OAuth2 client_credentials** — `TOKEN_URL` + `OIDC_CLIENT_ID` +
+   `OIDC_CLIENT_SECRET` (gateway uses scope `keyfactor-anyca-gateway`).
+
+### Auth gotchas learned the hard way
+
+- **The gateway authenticates its admin API with the session cookie directly.**
+  **Command does not** — a `KeyfactorOIDC*` cookie only works against
+  **`/KeyfactorProxy`** (the Portal's reverse proxy that injects the bearer),
+  *not* `/KeyfactorAPI` (which returns 401 for a cookie). The lib auto-selects
+  `COMMAND_BASE_PATH=/KeyfactorProxy` whenever `COMMAND_COOKIE` is set.
+- Cookie mode sends the browser's CSRF headers (`x-requested-with: XMLHttpRequest`)
+  automatically.
+- Tokens/cookies are short-lived; a `401` mid-run usually just means re-grab.
+
+## Environment contract
+
+| Var | Used by | Notes |
+|-----|---------|-------|
+| `GATEWAY_HOST` | gateway stages | host only, no scheme |
+| `GATEWAY_BASE_PATH` | gateway stages | **the gateway instance mount path** — e.g. `/certinext-0`, *not* `/AnyGatewayREST` on a multi-instance gateway. Find it in the Portal/Swagger URL. |
+| `GATEWAY_COOKIE` / `GATEWAY_TOKEN` | gateway stages | see Authentication |
+| `COMMAND_HOST` | command stages | host only |
+| `COMMAND_BASE_PATH` | command stages | auto: `/KeyfactorProxy` if cookie, else `/KeyfactorAPI` |
+| `COMMAND_COOKIE` / `COMMAND_TOKEN` | command stages | see Authentication |
+| `CONFIGURATION_TENANT` | stages 04–06 | **= the gateway instance name** (e.g. `certinext-0`), which is also the templates' `ConfigurationTenant` in Command. Not the plugin name. |
+| `CURL_INSECURE` | all | `1` (default) passes `-k`; set `0` to verify TLS |
+
+## Quick start
+
+The **typical** path is OAuth2 client_credentials against `/KeyfactorAPI`:
+
+```sh
+export GATEWAY_HOST=<gw-host>  COMMAND_HOST=<cmd-host>
+export TOKEN_URL=https://<auth>/application/o/token/
+export OIDC_CLIENT_ID=...  OIDC_CLIENT_SECRET=...
+make register-profiles            # client_creds used automatically (no cookie/token set)
+```
+
+> **Cookie auth (e.g. the "HV3" lab, intdev01.lab.kfpki.com)** — used when ops
+> can't issue client credentials. This is environment-specific, NOT the norm:
+> the gateway instance path is `/certinext-0` (not `/AnyGatewayREST`), and a
+> Command Portal cookie only works via `/KeyfactorProxy` (auto-selected when
+> `COMMAND_COOKIE` is set). See the deployment's own notes for its values.
+>
+> ```sh
+> # gateway side
+> export GATEWAY_HOST=intdev01.lab.kfpki.com GATEWAY_BASE_PATH=/certinext-0
+> export GATEWAY_COOKIE="$(tr -d '\r\n' < ~/.certinext_gw_cookie)"
+> make register-profiles            # CHECK=1 to verify, DRY_RUN=1 to preview
+>
+> # command side (after templates imported)
+> export COMMAND_HOST=intdev01.lab.kfpki.com CONFIGURATION_TENANT=certinext-0
+> export COMMAND_COOKIE="$(tr -d '\r\n' < ~/.certinext_kfcportal_cookie)"
+> make register-enrollment          # stage 06: patterns + KeyRetention=Indefinite
+> ```
+
+Per-stage env knobs are documented in each script's header comment.
+
+## Stage 02 — gateway CA config (verified 2026-06-09)
+
+The gateway CA config (`PUT /<instance>/config/configuration`) is what maps each
+product to a certificate profile so enrollment can resolve a CA. Two things bite:
+
+- **Product codes are per-environment.** The plugin's built-in `DefaultProductCodes`
+  are PRODUCTION codes (e.g. `DV SSL` → `838`). A sandbox account has different
+  numeric codes (e.g. `842`–`851`) and the gateway validates them at PUT time —
+  you'll get `Profile '838' was not found in CERTInext. Available profiles: …`.
+  Set `PRODUCT_CODE_MAP_JSON` (product_id → code) so each `Templates[].Parameters`
+  carries the right `ProductCode`. Discover codes via `scripts/get-product-details.sh`.
+  Product **IDs/names** are stable across environments; only the numeric codes differ.
+- **`SignerPlace` is required by CERTInext** for every order. It has no fallback
+  (unlike `SignerIp`, which defaults to `127.0.0.1`). If it's absent the order
+  fails with a generic `certificate request failed … see CA logs`. Provide it via
+  `CERTINEXT_SIGNER_PLACE` (the test fixture uses `"Gateway"`); the stage assembles
+  it into `CAConnection`.
+- The gateway has **no GET** for `/config/configuration` (405, POST/PUT only) — it's
+  not introspectable, so a PUT sends the FULL object. Stage 02 rebuilds `CAConnection`
+  from the `CERTINEXT_*` env vars; make sure those match the account the CA uses, or
+  you'll change the live connection. (A successful PUT means the creds validated.)
+
+```sh
+export GATEWAY_LOGICAL_NAME=CertiNext           # the live CA's LogicalName
+export CERTINEXT_SIGNER_PLACE=Gateway
+export PRODUCT_CODE_MAP_JSON='{"DV SSL":"842","OV SSL":"846", ...}'
+make register-ca-config
+```
+
+## Stage 06 — Command EnrollmentPatterns schema (verified 2026-06-09)
+
+The `/KeyfactorProxy/EnrollmentPatterns` (API v1) POST body that works — the stub
+originally got every one of these wrong:
+
+```json
+{
+  "Name": "AnyCA (DV SSL)",
+  "Template": 1,                       // INTEGER, not {"Id":1}
+  "AllowedEnrollmentTypes": 3,         // PLURAL (singular is ignored → 0 = no enroll). 3 = CSR+PFX
+  "TemplateDefault": true,             // required for a template's default pattern
+  "AssociatedRoles": ["Command Admin"],// role NAME strings that must already exist
+  "Policies": {}                       // REQUIRED; empty object is accepted
+}
+```
+
+- **Update** an existing pattern with `PUT /EnrollmentPatterns/{id}` (collection
+  `PUT` returns **405**).
+- Role names are instance-specific — this Command has **`Command Admin`**, not
+  `InstanceAdmin`. Check `GET /Security/Roles` and set `ENROLL_ROLE` accordingly.
+
+### Template key-retention
+
+`PUT /Templates` with a **partial** body — other fields are preserved:
+
+```json
+{ "Id": 1, "KeyRetention": "Indefinite", "KeyRetentionDays": 0 }
+```
+
+Set via `TEMPLATE_KEY_RETENTION` (default `Indefinite`). Imported templates
+default to `None`, so this is needed to retain private keys.
+
+## Environment notes for whoever runs this
+
+- **macOS ships bash 3.2** and the default shell is often **zsh**. The scripts use
+  `#!/usr/bin/env bash` and avoid bash-4 features (`mapfile`) + zsh word-split
+  pitfalls (loops use `while read`, not `for x in $unquoted`). Keep it that way
+  if you edit them.
+- `docs/reference/` holds captured "known-good" JSON (profiles, templates, CA,
+  claims) used as validation oracles (`CHECK=1` on stages 01/05).
