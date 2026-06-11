@@ -7,7 +7,7 @@
     "link_github": true,
     "update_catalog": true,
     "description": "AnyCA REST Gateway plugin for CERTInext (eMudhra) certificate lifecycle management platform",
-    "gateway_framework": "24.2.0",
+    "gateway_framework": "25.5.0",
     "release_dir": "CERTInext/bin/Release",
     "release_project": "CERTInext/CERTInext.csproj",
     "about": {
