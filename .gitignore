@@ -33,3 +33,7 @@ terraform/terraform.tfvars
 
 # macOS
 .DS_Store
+
+# Analysis / scratch — never commit
+analysis/
+

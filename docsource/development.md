@@ -40,6 +40,24 @@ CERTINEXT_SIGNER_IP=
 | Coverage report (browser) | `make coverage-report` | Same as `coverage`, then opens HTML report in the default browser |
 | Clean | `make clean` | `dotnet clean` and wipe coverage output directories |
 
+### Build variants — `DcvSupport` (DCV vs no-DCV)
+
+The plugin builds against two `Keyfactor.AnyGateway.IAnyCAPlugin` contracts from a single
+codebase, selected by the `DcvSupport` MSBuild property. The plugin's `AnyCAPluginCertificate`
+records must match the gateway host's IAnyCAPlugin version to persist, so the build must target
+the host (see issue 0003).
+
+| Build | Command | IAnyCAPlugin | DCV | Target gateway host |
+|---|---|---|---|---|
+| **No-DCV (default)** | `make build` / `dotnet build` | `3.2.0` (stable) | fenced out (`#if SUPPORTS_DCV`) | AnyCA Gateway **25.5.x** (IAnyCAPlugin 3.2.0) |
+| **DCV** | `dotnet build -p:DcvSupport=true` | `3.3.0-PRERELEASE` | enabled | AnyCA Gateway **26.x** (IAnyCAPlugin ≥ 3.3) |
+
+The **default is the no-DCV / 3.2.0 build** — it is the GA artifact that loads and persists on the
+current GA gateway (25.5.x) and depends only on a stable package, so it is what CI ships. Build the
+DCV variant explicitly with `-p:DcvSupport=true` for 26.x hosts. The one property drives the package
+version, the `SUPPORTS_DCV` compile constant, and DCV test-file inclusion across all three projects,
+so the two host targets are a build flag rather than a maintained fork.
+
 ## API Smoke-Test Targets
 
 All API targets source `~/.env_certinext`, compute the HMAC `authKey` (`SHA256(accessKey + ts + txn)`), and call the live CERTInext API via `curl`. All JSON responses are piped through `jq`.
@@ -100,8 +118,15 @@ The table below records live draft-order results against the Production — Indi
 | DV SSL | `838` | ✓ Tested | 4572531551 | Base domain; no extra fields required beyond base set |
 | DV SSL Wildcard | `839` | ✓ Tested | 9149755266 | CSR CN must be `*.domain`; `domainName` must also use wildcard format |
 | DV SSL UCC | `840` | ✓ Tested | 1611445122 | `certificateInformation.additionalDomains` array required |
+| DV SSL Wildcard UCC | `841` | ✗ Blocked | — | EMS-918: "Additional Information cannot be empty" — required fields for this product not yet identified |
 | OV SSL | `842` | ✓ Tested | 5546366498 | Requires `locality` and `postalCode` in `certificateInformation` |
+| OV SSL Wildcard | `843` | ✗ Not tested | — | Draft order not yet placed |
+| OV SSL UCC | `844` | ✗ Not tested | — | Draft order not yet placed |
+| OV SSL Wildcard UCC | `845` | ✗ Blocked | — | EMS-918: "Additional Information cannot be empty" — required fields for this product not yet identified |
 | EV SSL | `846` | ✓ Tested | 3932332114 | Requires `contractSignerInfo`, `certificateApproverInfo`, non-empty `streetAddress2`, `companyRegistrationNumber` |
+| EV SSL UCC | `847` | ✗ Blocked | — | EMS-918: "Additional Information cannot be empty" — required fields for this product not yet identified |
+| DV SSL 1 Month | N/A | ✗ Not supported | — | Visible in portal but not returned by `GetProductDetails` API; no product code available. Not supported by plugin. |
+| DV SSL Wildcard 1 Month | N/A | ✗ Not supported | — | Visible in portal but not returned by `GetProductDetails` API; no product code available. Not supported by plugin. |
 | emSign Intranet SSL | `100` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |
 | IGTF Host | `104` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |
 | S/MIME | `894` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |

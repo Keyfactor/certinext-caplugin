@@ -142,6 +142,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public OrganizationDetails OrganizationDetails { get; set; }
 
+        [JsonPropertyName("delegationInformation")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public DelegationInformation DelegationInformation { get; set; }
+
+        [JsonPropertyName("technicalPointOfContact")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public TechnicalPointOfContact TechnicalPointOfContact { get; set; }
+
         [JsonPropertyName("additionalInformation")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public AdditionalInformation AdditionalInformation { get; set; }
@@ -224,6 +232,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         public string OrganizationNumber { get; set; }
     }
 
+    /// <summary>
+    /// Routes the order to a specific account group within CERTInext.  Required by many
+    /// accounts even though the V1 docs list it as optional — without it, orders may be
+    /// placed against the default group and queued for additional review.
+    /// </summary>
+    public class DelegationInformation
+    {
+        [JsonPropertyName("groupNumber")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string GroupNumber { get; set; }
+    }
+
+    /// <summary>
+    /// Technical point of contact metadata sent with SSL orders.  CERTInext uses these
+    /// fields as the secondary contact for issuance-related notifications.  When omitted,
+    /// some product configurations queue the order in <c>Pending System RA</c> waiting
+    /// for the field to be populated manually.
+    /// </summary>
+    public class TechnicalPointOfContact
+    {
+        [JsonPropertyName("tpcName")]
+        public string TpcName { get; set; }
+
+        [JsonPropertyName("tpcEmail")]
+        public string TpcEmail { get; set; }
+
+        [JsonPropertyName("tpcIsdCode")]
+        public string TpcIsdCode { get; set; } = "1";
+
+        [JsonPropertyName("tpcMobileNumber")]
+        public string TpcMobileNumber { get; set; }
+    }
+
     public class AdditionalInformation
     {
         [JsonPropertyName("remarks")]
@@ -286,6 +327,87 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
     {
         [JsonPropertyName("orderNumber")]
         public string OrderNumber { get; set; }
+    }
+
+    // ---------------------------------------------------------------------------
+    // GetDcv  — POST {baseURL}GetDcv
+    // Retrieves Domain Control Validation token / file content / approver emails
+    // for a given (orderNumber, domainName, dcvMethod) tuple.
+    //
+    // The CERTInext V1 spec defines this body as wrapped in a "dcvDetails" block.
+    // Note: the Postman example for GetDcv uses "orderDetails" instead — this is
+    // an example typo; the inline spec, the response body, and the VerifyDcv body
+    // all use "dcvDetails" consistently.
+    // ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// Request body for POST {baseURL}GetDcv.
+    /// Returns DCV instructions (token / file / approver emails) for one domain
+    /// in the given order.
+    /// </summary>
+    public class GetDcvRequest
+    {
+        [JsonPropertyName("meta")]
+        public RequestMeta Meta { get; set; }
+
+        [JsonPropertyName("dcvDetails")]
+        public DcvRequestDetails DcvDetails { get; set; }
+    }
+
+    /// <summary>
+    /// Common request body for both GetDcv and VerifyDcv — both endpoints take the
+    /// same set of identification fields. <see cref="DcvEmail"/> is only set on
+    /// VerifyDcv requests when <see cref="DcvMethod"/> = email (3).
+    /// </summary>
+    public class DcvRequestDetails
+    {
+        /// <summary>Registered requestor email associated with the order.</summary>
+        [JsonPropertyName("requestorEmail")]
+        public string RequestorEmail { get; set; }
+
+        /// <summary>Order number returned by GenerateOrderSSL.</summary>
+        [JsonPropertyName("orderNumber")]
+        public string OrderNumber { get; set; }
+
+        /// <summary>Domain to retrieve / verify DCV for.</summary>
+        [JsonPropertyName("domainName")]
+        public string DomainName { get; set; }
+
+        /// <summary>
+        /// DCV method (numeric string per CERTInext V1 spec):
+        /// "1" = DNS TXT record, "2" = HTTP file, "3" = email approver.
+        /// See <see cref="Constants.Dcv"/>.
+        /// </summary>
+        [JsonPropertyName("dcvMethod")]
+        public string DcvMethod { get; set; }
+
+        /// <summary>
+        /// Approver email address. Required (and only used) on VerifyDcv when
+        /// <see cref="DcvMethod"/> is "3" (email). Must be one of the
+        /// <c>dcvEmails</c> returned by GetDcv.
+        /// </summary>
+        [JsonPropertyName("dcvEmail")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string DcvEmail { get; set; }
+    }
+
+    // ---------------------------------------------------------------------------
+    // VerifyDcv  — POST {baseURL}VerifyDcv
+    // Triggers CERTInext to verify the DCV record placed by the customer.
+    // ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// Request body for POST {baseURL}VerifyDcv.
+    /// Tells CERTInext to attempt domain verification using the previously
+    /// supplied DCV details. Reuses <see cref="DcvRequestDetails"/>.
+    /// </summary>
+    public class VerifyDcvRequest
+    {
+        [JsonPropertyName("meta")]
+        public RequestMeta Meta { get; set; }
+
+        [JsonPropertyName("dcvDetails")]
+        public DcvRequestDetails DcvDetails { get; set; }
     }
 
     // ---------------------------------------------------------------------------
