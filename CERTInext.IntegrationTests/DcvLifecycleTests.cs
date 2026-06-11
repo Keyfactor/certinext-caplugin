@@ -436,7 +436,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 int status = record?.Status ?? -1;
                 _output.WriteLine($"[{tag}] poll #{poll}: status={status} certLen={record?.Certificate?.Length ?? 0}");
 
-                if (status == (int)EndEntityStatus.GENERATED)
+                // Wait for GENERATED *with a materialized body*. CERTInext flips status to
+                // GENERATED a beat before GetCertificate returns the PEM, so an order that
+                // issues quickly can report GENERATED with an empty body for a poll or two.
+                if (status == (int)EndEntityStatus.GENERATED && !string.IsNullOrWhiteSpace(record?.Certificate))
                     break;
                 if (status == (int)EndEntityStatus.FAILED)
                 {
