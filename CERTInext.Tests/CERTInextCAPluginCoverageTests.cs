@@ -260,10 +260,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // A1e: PriorCertSN present, cert outside renewal window → new enroll
-        // The renewal window is "within N days of expiry". The cutoff is computed as
-        // UtcNow - RenewalWindowDays. A cert expired more than RenewalWindowDays ago
-        // is outside the window: expiry < cutoff → useRenewalApi = false.
+        // A1e: PriorCertSN present, cert already expired → new enroll
+        // Semantics: useRenewalApi = expiry > now && expiry <= now + window.
+        // A cert that has already expired (expiry in the past) does NOT satisfy the
+        // first condition → falls back to new enroll (graceful degradation).
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -272,8 +272,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var clientMock = NewMock();
             var readerMock = NewReaderMock();
 
-            // Expiry was 200 days ago, renewal window is 90 days →
-            // cutoff = now - 90 days; expiry(200 days ago) < cutoff → outside window
+            // Already expired (200 days ago) → expiry > now is false → reissue/new
             DateTime expiry = DateTime.UtcNow.AddDays(-200);
 
             readerMock
@@ -492,7 +491,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
             await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: CancellationToken.None);
-            buffer.CompleteAdding();
+            // CompleteAdding() is called by Synchronize internally.
 
             var results = buffer.ToList();
             results.Should().HaveCount(1);
@@ -538,7 +537,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
-            buffer.CompleteAdding();
+            // CompleteAdding() is called by Synchronize internally.
 
             var results = buffer.ToList();
             results.Should().HaveCount(2);
@@ -581,7 +580,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var plugin = new CERTInextCAPlugin(mock.Object);
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
-            buffer.CompleteAdding();
+            // CompleteAdding() is called by Synchronize internally.
 
             var results = buffer.ToList();
             results.Should().HaveCount(1);
@@ -644,7 +643,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var plugin = new CERTInextCAPlugin(mock.Object);
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
-            buffer.CompleteAdding();
+            // CompleteAdding() is called by Synchronize internally.
 
             buffer.ToList().Should().BeEmpty("unknown status maps to FAILED and should be skipped");
         }
@@ -698,7 +697,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var expectedKeys = new[]
             {
                 "ProductCode", "ProfileId", "ValidityYears", "ValidityDays",
-                "AutoApprove", "RequesterName", "RequesterEmail", "RenewalWindowDays", "KeyType"
+                "AutoApprove", "RequesterName", "RequesterEmail", "RenewalWindowDays", "KeyType",
+                // P2-B: four params that were in integration-manifest but missing from annotations
+                "DomainName", "SignerName", "SignerPlace", "SignerIp"
             };
 
             foreach (var key in expectedKeys)
@@ -771,7 +772,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 enrollmentType: EnrollmentType.New);
 
             capturedRequest.Should().NotBeNull();
-            capturedRequest.ValidityDays.Should().Be(365);
+            capturedRequest!.ValidityDays.Should().Be(365);
             capturedRequest.RequesterName.Should().Be("Jane Smith");
             capturedRequest.RequesterEmail.Should().Be("jane@example.com");
             capturedRequest.KeyType.Should().Be("RSA2048");
@@ -810,7 +811,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             capturedRequest.Should().NotBeNull();
             // ValidityDays == 0 when parse fails, so request should have null
-            capturedRequest.ValidityDays.Should().BeNull(
+            capturedRequest!.ValidityDays.Should().BeNull(
                 "invalid ValidityDays should fall back to null (use profile default)");
         }
 
@@ -882,7 +883,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 enrollmentType: EnrollmentType.New);
 
             capturedRequest.Should().NotBeNull();
-            capturedRequest.Sans.Should().NotBeNull();
+            capturedRequest!.Sans.Should().NotBeNull();
             capturedRequest.Sans.Should().Contain(s => s.Type == "oid",
                 "unknown SAN type should be passed through as-is");
         }
