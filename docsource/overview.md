@@ -37,7 +37,7 @@ Empirically the limit kicks in at roughly **16+ enrollments submitted within 10 
 **Confirmation steps**
 
 1. Run a single `Ping` against the same `ApiUrl` / `AccessKey`. If it succeeds, the account is active; the prior failure was almost certainly a rate-limit hit.
-2. Check the gateway warning log for the `LogApiFailure` line emitted just before the throw (see issue [#8](../../issues/8) and the `LogApiFailure` helper in `CERTInextClient.cs`). The full raw response body is included there — if CERTInext ever surfaces a distinguishing code or message for rate-limit (as opposed to account-state), it will appear in that line.
+2. Check the gateway warning log for the `LogApiFailure` line emitted just before the throw (see issue [#8](https://github.com/Keyfactor/certinext-caplugin/issues/8) and the `LogApiFailure` helper in `CERTInextClient.cs`). The full raw response body is included there — if CERTInext ever surfaces a distinguishing code or message for rate-limit (as opposed to account-state), it will appear in that line.
 3. Wait 30–60 seconds, then retry the failed enrollment(s). A successful retry confirms it was rate-limit.
 
 **Mitigation**
@@ -85,8 +85,8 @@ Gateway returns HTTP 500 on CA registration or first enrollment with the body `{
 
 **Root cause**
 
-Older gateway image whose bundled `Keyfactor.AnyGateway.IAnyCAPlugin` assembly is v3.2 or earlier (the `IDomainValidatorFactory` interface is v3.3+). This was fully addressed by the issue [#7](../../issues/7) fix in v1.0 — both the constructor-signature surface AND the field-type surface are now safe to load on v3.2 hosts.
+Older gateway image whose bundled `Keyfactor.AnyGateway.IAnyCAPlugin` assembly is v3.2 or earlier (the `IDomainValidatorFactory` interface is v3.3+). This was fully addressed by the issue [#7](https://github.com/Keyfactor/certinext-caplugin/issues/7) fix in v1.0 — both the constructor-signature surface AND the field-type surface are now safe to load on v3.2 hosts.
 
 **Mitigation**
 
-Use the build that matches your gateway host. The **default build (no-DCV, IAnyCAPlugin 3.2.0)** is the one that loads *and* persists records on AnyCA Gateway 25.5.x, and it is what the released artifact ships — so on a 25.5.x host, deploy the default build. The DCV-capable build (IAnyCAPlugin 3.3.0, `dotnet build -p:DcvSupport=true`) is for AnyCA Gateway 26.x; loading it on a 25.5.x host triggers the type-load error above and, even when it loads, its records do not persist on a 3.2 host. See the `DcvSupport` build variants in the developer guide.
+Deploy the default (no-DCV) build for AnyCA Gateway 25.5.x; do not deploy the DCV build on a 25.5.x host. The **default build (no-DCV, IAnyCAPlugin 3.2.0)** is the one that loads *and* persists records on AnyCA Gateway 25.5.x, and it is what the released artifact ships. The DCV-capable build (IAnyCAPlugin 3.3.0-PRERELEASE, `dotnet build -p:DcvSupport=true`) is for AnyCA Gateway 26.x; loading it on a 25.5.x host triggers the type-load error above and, even when it loads, its records do not persist on a 3.2 host. See the `DcvSupport` build variants in the developer guide.

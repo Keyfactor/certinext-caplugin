@@ -8,7 +8,7 @@ so the project is safe to include in CI pipelines that do not have API access.
 
 ## Prerequisites
 
-- .NET 8 SDK
+- .NET 8 or .NET 10 SDK
 - Access to a CERTInext account (sandbox or production)
 - An API Access Key generated in the CERTInext portal under **Integrations → APIs**
 
@@ -119,7 +119,6 @@ pipeline failure.
 | Test | What it checks |
 |------|---------------|
 | `GetOrderReport_ReturnsOrders` | Fetches page 1; asserts at least one order is returned |
-| `GetOrderReport_ContainsKnownDraftOrder` | Fetches all pages; asserts requestNumber `4572531551` (DV SSL 838 draft) is present |
 | `GetOrderReport_AllOrders_HaveRequiredFields` | For each order on page 1: `requestNumber`, `productCode`, and `orderDate` are non-empty |
 
 ### `PluginSmokeTests`
@@ -162,4 +161,3 @@ never transmitted over the wire — only the derived `authKey` hash is sent.
 | `Ping` fails with 401 | Wrong `CERTINEXT_ACCESS_KEY` | Regenerate the key in the CERTInext portal |
 | `Ping` fails with timeout | Wrong `CERTINEXT_API_URL` | Verify the URL matches your account region |
 | `GetOrderReport` returns 0 orders | Account has no orders | Place a test order first (see `make generate-order` in the project Makefile) |
-| `ContainsKnownDraftOrder` fails | Draft order `4572531551` not on this account | Update `KnownDraftRequestNumber` in `OrderReportTests.cs` to a request number from your account |

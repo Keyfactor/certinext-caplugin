@@ -40,6 +40,11 @@ P-256/384/521 + Ed25519/Ed448" policy. Match this `key_algs` shape on
 new profiles to avoid Command's misleading `0xA0110004` "Key type
 disallowed by policy" error.
 
+> **Note:** The gateway profile defines what Command permits; CERTInext itself only
+> accepts RSA 2048/3072/4096 and ECC P-256/P-384. Orders using P-521, Ed25519,
+> Ed448, or RSA larger than 4096 bits are accepted by Command but rejected by
+> CERTInext with `Invalid key size`.
+
 The profiles **don't** carry CA-binding information; they're top-level
 gateway resources. The CA configuration's `Templates[].CertificateProfile`
 field is what binds a product to its profile by name.

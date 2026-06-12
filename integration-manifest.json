@@ -27,7 +27,7 @@
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
-                    "description": "REQUIRED: CERTInext API base URL. Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ \u2014 Production (US): https://us-api.certinext.io/ \u2014 Production (Global/India): https://api.certinext.io/"
+                    "description": "REQUIRED: CERTInext API base URL. Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ \u2014 Production (US): https://us-api.certinext.io/emSignHub-API/ \u2014 Production (Global/India): https://api.certinext.io/emSignHub-API/"
                 },
                 {
                     "name": "AccountNumber",
@@ -139,7 +139,7 @@
                 },
                 {
                     "name": "Enabled",
-                    "description": "Flag to Enable or Disable gateway functionality. Disabling is primarily used to allow creation of the CA connector prior to configuration information being available."
+                    "description": "Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true."
                 },
                 {
                     "name": "DcvEnabled",

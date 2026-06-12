@@ -322,11 +322,15 @@ try {
 }
 ```
 
-> **Doing this for all 8 sandbox products?** Wrap Steps 2 and 3 in a
-> loop over the (ProductID, ProductCode) pairs. The sandbox product
+> **Note on CERTInext key algorithm restrictions:** The gateway profile's `key_algs` block defines what Command *allows* — it does not reflect what CERTInext will accept. CERTInext additionally restricts enrollments to RSA 2048/3072/4096 and ECC P-256/P-384. Orders submitted with P-521, Ed25519, Ed448, or RSA larger than 4096 bits are accepted by Command and the gateway but rejected by CERTInext with `Invalid key size`. Configure your profiles and templates to only permit the key types CERTInext supports.
+
+> **Doing this for all 8 non-EV sandbox products?** Wrap Steps 2 and 3 in a
+> loop over the (ProductID, ProductCode) pairs. The sandbox non-EV product
 > codes are 842 (DV SSL), 843 (DV Wildcard), 844 (DV UCC), 845 (DV
 > Wildcard UCC), 846 (OV SSL), 847 (OV Wildcard), 848 (OV UCC), 849
-> (OV Wildcard UCC).
+> (OV Wildcard UCC). EV SSL (850) and EV UCC (851) require additional
+> `contractSignerInfo`, `certificateApproverInfo`, and org/contract fields
+> beyond the base product set.
 
 ---
 
@@ -799,4 +803,4 @@ sync pulls down the actual certificate.
 | Step 6 returns `0xA0110004` "Key type 'RSA' disallowed by policy" | Gateway `key_algs` are empty or wrong, or Command hasn't re-imported templates after a profile change | Update `key_algs` (Step 2), re-run `/Templates/Import` (Step 5). |
 | Step 6 returns `0xA0010023` "external validation" with HTTP 400 | The gateway returned a pending response and Command's exception filter translated it — Command 25.x bug | The plugin DID accept the order. Confirm via `GET ${GATEWAY_URL}/AnyGatewayREST/.../v1/certificate/<id>`. Fixed in newer Command builds; rewrite as 200 with disposition `EXTERNAL_VALIDATION`. |
 | Step 6 returns `"Inactive Account User."` from the gateway log | CERTInext sandbox rate limit | Wait 5-25 minutes; retry a single order to confirm the account is alive. See [#8](https://github.com/Keyfactor/certinext-caplugin/issues/8). |
-| Step 6 returns `TypeLoadException IDomainValidatorFactory` in the gateway pod log | Older plugin DLL incompatible with the host gateway's `IAnyCAPlugin` version | Rebuild the plugin from `main` and re-stage; the field re-typing fix is required for gateways shipping `IAnyCAPlugin` < v3.3. |
+| Step 6 returns `TypeLoadException IDomainValidatorFactory` in the gateway pod log | DCV build deployed on a gateway running IAnyCAPlugin 3.2.x (25.5.x) | Deploy the no-DCV build (the default release artifact); do not deploy the DCV build (`-p:DcvSupport=true`) on a gateway running IAnyCAPlugin 3.2.x (25.5.x). Use the DCV build only on 26.x. |

@@ -7,7 +7,7 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
     * Expired certificates can optionally be excluded from synchronization using the `IgnoreExpired` configuration flag.
 * Certificate Enrollment for profiles configured in CERTInext:
     * New certificate enrollment (new keys and certificate).
-    * Certificate renewal via the CERTInext renew API when the prior certificate is within the configured renewal window.
+    * Certificate renewal — submits a new `GenerateOrderSSL` order when the prior certificate is within the configured renewal window (CERTInext has no dedicated renewal endpoint; the renewal-window check governs how Command tracks old→new, not which API is called).
     * Certificate reissuance (new keys with the same or updated subject/SANs) when outside the renewal window or no prior certificate is found.
 * Certificate Revocation:
     * Request revocation of a previously issued certificate using any RFC 5280 CRL reason code.
@@ -17,8 +17,8 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
 
 ## Requirements
 
-* Keyfactor Command 10.x or later
-* AnyCA Gateway REST framework version 24.2.0 or later
+* Keyfactor Command 25.5.x or later
+* AnyCA Gateway REST framework version 25.5.0 or later
 * A CERTInext account with API access enabled and at least one certificate product configured
 * Network connectivity from the AnyCA Gateway host to the CERTInext API endpoint for your region (see table below)
 * The AnyCA Gateway host must trust the TLS certificate presented by the CERTInext API endpoint
@@ -95,7 +95,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 
 | Field | Required / Optional | Description | Where to find it | Example |
 |---|---|---|---|---|
-| `ApiUrl` | Required | CERTInext API base URL for your environment. Must include the `/emSignHub-API/` path segment. No trailing slash is required but is accepted. | See the environments table above. | `https://api.certinext.io/emSignHub-API` |
+| `ApiUrl` | Required | CERTInext API base URL for your environment. Must include the `/emSignHub-API/` path segment. No trailing slash is required but is accepted. | See the environments table above. | `https://api.certinext.io/emSignHub-API/` |
 | `AccountNumber` | Required | Your CERTInext account number (numeric string). Included in the `meta` block of every API request. | Portal → click your name or avatar → **Account Settings** or **My Profile**. | `1234567890` |
 | `AuthMode` | Required | Authentication mode. `AccessKey` uses HMAC signing (recommended). `OAuth` uses a bearer token. | N/A — choose based on the credential type you created. | `AccessKey` |
 | `ApiKey` | Conditional | The REST API Access Key generated in the CERTInext portal. Used to compute `authKey = SHA256(accessKey + ts + txn)`. The raw key is never transmitted. Required when `AuthMode` is `AccessKey`. This field is masked in the UI. | Portal → **Integrations → APIs** → generate or view the credential row. | *(generated, masked in UI)* |
@@ -231,8 +231,8 @@ Where `requestTs` is the ISO 8601 timestamp and `requestTxnId` is a unique trans
 When the gateway calls `Enroll`, the plugin selects between three paths based on the enrollment type and the age of the prior certificate:
 
 1. **New enrollment** — no prior certificate exists. A new `GenerateOrderSSL` request is submitted.
-2. **Renewal** — a prior certificate exists and its expiry is within the `RenewalWindowDays` threshold (default: 90 days). The plugin calls the CERTInext renew API, which reuses the existing subscription term.
-3. **Reissue** — a prior certificate exists but is outside the renewal window. A new order is placed with the updated CSR/subject, replacing the prior certificate under a new subscription.
+2. **Renewal** — a prior certificate exists and its expiry is within the `RenewalWindowDays` threshold (default: 90 days). A new `GenerateOrderSSL` order is submitted within the configured renewal window (CERTInext has no dedicated renewal endpoint; the renewal-window check governs how Command tracks old→new, not which API is called).
+3. **Reissue** — a prior certificate exists but is outside the renewal window. A new `GenerateOrderSSL` order is placed with the updated CSR/subject, replacing the prior certificate under a new subscription.
 
 The `RenewalWindowDays` template parameter controls the renewal/reissue boundary per certificate template.
 

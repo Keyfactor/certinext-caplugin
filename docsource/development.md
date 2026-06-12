@@ -80,6 +80,9 @@ make orders     # lists recent orders — useful to find an ORDER_NUMBER to test
 | Place a draft order | `make generate-order DOMAIN=example.com [CSR_FILE=req.pem] [VALIDITY=1] [SAVE_AND_HOLD=1]` | `GenerateOrderSSL` — places a new order; `SAVE_AND_HOLD=1` (default) creates a draft |
 | Revoke an order | `make revoke-order ORDER_NUMBER=NNNNN [REASON_ID=1]` | `RevokeOrder` — revokes an issued certificate |
 | Attach a CSR to a draft | `make submit-csr ORDER_NUMBER=NNNNN CSR_FILE=req.pem` | `SubmitCSR` — attaches a CSR to a saveAndHold draft order |
+| Discover product codes | `make probe-products` | Places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which ones the account accepts |
+| Cancel one pending order | `scripts/reject-order.sh ORDER_NUMBER=NNNNN` | Shell script — cancels a single pending order (not a `make` target) |
+| Cancel all pending orders | `scripts/reject-all-pending.sh` | Shell script — dry-run by default; set `REJECT_ALL_PENDING=1` to fire (not a `make` target) |
 | Show API target help | `make api-help` | Prints usage for all API targets |
 
 > Note: `TrackOrder` and `GetCertificate` require a formal `orderNumber`, which is only assigned after a draft order is submitted and approved. Draft orders (created with `saveAndHold:"1"`) have a `requestNumber` but no `orderNumber` until that point.

@@ -9,7 +9,7 @@ Initial release of the CERTInext (emSign Hub) AnyCA REST Gateway plugin.
 - feat(sync): Sync-driven DCV retry drives orders left pending validation to completion on later sync passes, bounded by configurable `DcvSyncMaxOrderAgeHours` and `DcvSyncMaxPerPass` caps so large accounts stay fast.
 - feat(revoke): Certificate revocation via `RevokeOrder` with RFC 5280 reason-code mapping.
 - feat(auth): AccessKey (HMAC-SHA256) and OAuth client-credentials authentication modes.
-- feat(build): Single `DcvSupport` MSBuild flag selects the host-matched build from one codebase — default no-DCV (IAnyCAPlugin `3.2.0`, AnyCA Gateway 25.5.x) or `-p:DcvSupport=true` for the DCV build (IAnyCAPlugin `3.3.0`, 26.x). Records persist only when the build matches the host's IAnyCAPlugin version.
+- feat(build): Single `DcvSupport` MSBuild flag selects the host-matched build from one codebase — default no-DCV (IAnyCAPlugin `3.2.0`, AnyCA Gateway 25.5.x) or `-p:DcvSupport=true` for the DCV build (IAnyCAPlugin `3.3.0-PRERELEASE`, 26.x). Records persist only when the build matches the host's IAnyCAPlugin version.
 - feat(config): Connector-level configuration for pre-vetted organization/group/technical-contact injection, DCV timing knobs (challenge/issuance waits), and SSL order defaults.
 - feat(sync): `IgnoreExpired` flag to exclude expired certificates from synchronization.
 
