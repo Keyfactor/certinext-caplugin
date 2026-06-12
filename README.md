@@ -40,7 +40,7 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
     * Expired certificates can optionally be excluded from synchronization using the `IgnoreExpired` configuration flag.
 * Certificate Enrollment for profiles configured in CERTInext:
     * New certificate enrollment (new keys and certificate).
-    * Certificate renewal via the CERTInext renew API when the prior certificate is within the configured renewal window.
+    * Certificate renewal — submits a new `GenerateOrderSSL` order when the prior certificate is within the configured renewal window (CERTInext has no dedicated renewal endpoint; the renewal-window check governs how Command tracks old→new, not which API is called).
     * Certificate reissuance (new keys with the same or updated subject/SANs) when outside the renewal window or no prior certificate is found.
 * Certificate Revocation:
     * Request revocation of a previously issued certificate using any RFC 5280 CRL reason code.
@@ -59,8 +59,8 @@ The CERTInext AnyCA Gateway REST plugin is open source and there is **no SLA**. 
 
 ## Requirements
 
-* Keyfactor Command 10.x or later
-* AnyCA Gateway REST framework version 24.2.0 or later
+* Keyfactor Command 25.5.x or later
+* AnyCA Gateway REST framework version 25.5.0 or later
 * A CERTInext account with API access enabled and at least one certificate product configured
 * Network connectivity from the AnyCA Gateway host to the CERTInext API endpoint for your region (see table below)
 * The AnyCA Gateway host must trust the TLS certificate presented by the CERTInext API endpoint
@@ -115,7 +115,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
 
         Populate using the configuration fields collected in the [requirements](#requirements) section.
 
-        * **ApiUrl** - REQUIRED: CERTInext API base URL. Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ — Production (US): https://us-api.certinext.io/ — Production (Global/India): https://api.certinext.io/
+        * **ApiUrl** - REQUIRED: CERTInext API base URL. Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ — Production (US): https://us-api.certinext.io/emSignHub-API/ — Production (Global/India): https://api.certinext.io/emSignHub-API/
         * **AccountNumber** - REQUIRED: Your CERTInext account number (numeric string). Available in the CERTInext portal.
         * **GroupNumber** - OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts will queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation → Groups.
         * **OrganizationNumber** - STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric CERTInext organization number for a pre-vetted organization (e.g. your company's pre-vetted entry). When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. Without this value, orders are placed without any organizationDetails block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours). Available in the CERTInext portal under Organizations → Pre-vetted Organizations.
@@ -143,7 +143,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **AutoSecureWww** - OPTIONAL: If "1", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. "0" = use only the CN/SANs supplied with the CSR. Default: "0".
         * **IgnoreExpired** - If true, expired certificates will be skipped during synchronization. Default: false.
         * **PageSize** - Number of orders to fetch per page during synchronization. Default: 100, max: 500.
-        * **Enabled** - Flag to Enable or Disable gateway functionality. Disabling is primarily used to allow creation of the CA connector prior to configuration information being available.
+        * **Enabled** - Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true.
         * **DcvEnabled** - OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false.
         * **DcvTxtRecordTemplate** - OPTIONAL: Format string for the DNS TXT record hostname used during DCV. {0} is replaced with the domain name being validated. Default: _emsign-validation.{0}
         * **DcvPropagationDelaySeconds** - OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: 30.
@@ -242,7 +242,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 
 | Field | Required / Optional | Description | Where to find it | Example |
 |---|---|---|---|---|
-| `ApiUrl` | Required | CERTInext API base URL for your environment. Must include the `/emSignHub-API/` path segment. No trailing slash is required but is accepted. | See the environments table above. | `https://api.certinext.io/emSignHub-API` |
+| `ApiUrl` | Required | CERTInext API base URL for your environment. Must include the `/emSignHub-API/` path segment. No trailing slash is required but is accepted. | See the environments table above. | `https://api.certinext.io/emSignHub-API/` |
 | `AccountNumber` | Required | Your CERTInext account number (numeric string). Included in the `meta` block of every API request. | Portal → click your name or avatar → **Account Settings** or **My Profile**. | `1234567890` |
 | `AuthMode` | Required | Authentication mode. `AccessKey` uses HMAC signing (recommended). `OAuth` uses a bearer token. | N/A — choose based on the credential type you created. | `AccessKey` |
 | `ApiKey` | Conditional | The REST API Access Key generated in the CERTInext portal. Used to compute `authKey = SHA256(accessKey + ts + txn)`. The raw key is never transmitted. Required when `AuthMode` is `AccessKey`. This field is masked in the UI. | Portal → **Integrations → APIs** → generate or view the credential row. | *(generated, masked in UI)* |
