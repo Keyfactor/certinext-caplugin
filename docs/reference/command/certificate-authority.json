@@ -1,0 +1,63 @@
+{
+  "Agent": null,
+  "AgentName": null,
+  "AgentUsername": null,
+  "AllowOneClickRenewals": true,
+  "AllowedEnrollmentTypes": 3,
+  "AllowedRequesters": [],
+  "Audience": null,
+  "AuthCertificate": null,
+  "CAType": 1,
+  "CertificateCleanupEnabled": null,
+  "ClientId": "anygateway-gateway-certinext-client",
+  "ClientSecret": {
+    "Parameters": {},
+    "Provider": null,
+    "SecretValue": "********************"
+  },
+  "ConfigurationTenant": "certinext-caplugin",
+  "ConnectorPool": null,
+  "Delegate": false,
+  "DelegateEnrollment": false,
+  "DeleteWithArchivedKey": null,
+  "DenialMax": 0,
+  "EnforceUniqueDN": false,
+  "ExplicitCredentials": false,
+  "ExplicitPassword": null,
+  "ExplicitUser": null,
+  "FailureMax": null,
+  "ForestRoot": "certinext-caplugin",
+  "FullScan": {
+    "Interval": {
+      "Minutes": 720
+    }
+  },
+  "HostName": "https://gateway-gateway-certinext.127.0.0.1.nip.io/AnyGatewayREST/ejbca",
+  "Id": 4,
+  "IncrementalScan": {
+    "Interval": {
+      "Minutes": 5
+    }
+  },
+  "IssuanceMax": null,
+  "IssuanceMin": null,
+  "KeyRetention": 1,
+  "KeyRetentionDays": null,
+  "LastScan": "2026-05-22T19:20:01.2730000",
+  "LogicalName": "certinext-caplugin",
+  "MonitorThresholds": false,
+  "NewEndEntityOnRenewAndReissue": true,
+  "Properties": "{}",
+  "RFCEnforcement": false,
+  "Remote": false,
+  "Scope": "keyfactor-anyca-gateway",
+  "Standalone": false,
+  "SubscriberTerms": false,
+  "ThresholdCheck": null,
+  "TimeAfterExpiration": null,
+  "TimeAfterExpirationUnits": null,
+  "TokenURL": "https://auth.127.0.0.1.nip.io/application/o/token/",
+  "UseAllowedRequesters": false,
+  "UseCAConnector": false,
+  "UseForEnrollment": true
+}
