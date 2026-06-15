@@ -1,25 +1,44 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <RootNamespace>Keyfactor.Extensions.CAPlugin.CERTInext</RootNamespace>
     <AssemblyName>CERTInextCAPlugin</AssemblyName>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>warnings</Nullable>
     <LangVersion>12.0</LangVersion>
+    <!-- DcvSupport toggles DCV (DNS-01 domain validation) across the entire build. Default
+         FALSE → IAnyCAPlugin 3.2.0, DCV fenced out via #if SUPPORTS_DCV. This is the contract
+         that persists on the current GA gateway (AnyCA Gateway 25.5.x / IAnyCAPlugin 3.2.0), it
+         depends only on a stable (non-prerelease) package, and it is what CI ships by default —
+         so the released artifact works on GA hosts (see issue 0003). Build with
+         -p:DcvSupport=true for the IAnyCAPlugin 3.3.0-PRERELEASE + SUPPORTS_DCV variant (DCV;
+         AnyCA Gateway 26.x / IAnyCAPlugin >= 3.3). The one property drives the package version,
+         the SUPPORTS_DCV compile constant, and DCV test-file inclusion, so the two host targets
+         are a build flag rather than a maintained fork. -->
+    <DcvSupport Condition="'$(DcvSupport)' == ''">false</DcvSupport>
+    <DefineConstants Condition="'$(DcvSupport)' == 'true'">$(DefineConstants);SUPPORTS_DCV</DefineConstants>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.0.0" />
+    <!-- IAnyCAPlugin version follows DcvSupport so the plugin's AnyCAPluginCertificate contract
+         matches the gateway host: 3.2.0 (no-DCV / 25.5.x hosts, e.g. anygateway-rest 25.5.0) by
+         default, or 3.3.0-PRERELEASE (DCV / 26.x hosts) with -p:DcvSupport=true. The 3.3-only
+         IDomainValidatorFactory is only referenced from #if SUPPORTS_DCV code, so the default
+         3.2.0 build compiles cleanly. See issue 0003. -->
+    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.3.0-PRERELEASE-78770-979f582005" Condition="'$(DcvSupport)' == 'true'" />
+    <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.2.0" Condition="'$(DcvSupport)' != 'true'" />
     <PackageReference Include="Keyfactor.Logging" Version="1.1.2" />
     <PackageReference Include="Keyfactor.PKI" Version="5.5.0" />
     <PackageReference Include="RestSharp" Version="112.1.0" />
-    <PackageReference Include="System.Text.Json" Version="8.0.5" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <!-- Explicit override of the transitive BouncyCastle.Cryptography 2.0.0 pulled in by
+         Keyfactor.PKI 5.5.0. 2.0.0 has three known-moderate CVEs (GHSA-8xfc-gm6g-vgpv,
+         GHSA-m44j-cfrm-g8qc, GHSA-v435-xc8x-wvr9), all fixed in 2.4.0+. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
     <!-- Suppress TFM support build warnings for transitive dependencies of RestSharp 112.x -->
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
     <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
-    <PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -31,6 +50,9 @@
   <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>CERTInext.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CERTInext.IntegrationTests</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
 </Project>

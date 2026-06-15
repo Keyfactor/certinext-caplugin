@@ -15,6 +15,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string ApiUrl = "ApiUrl";
             public const string ApiKey = "ApiKey";              // the raw Access Key (used to compute authKey)
             public const string AccountNumber = "AccountNumber"; // CERTInext account number
+            public const string GroupNumber = "GroupNumber";     // optional delegation group number
+            public const string OrganizationNumber = "OrganizationNumber"; // pre-vetted organization (declares preVetting=1)
             public const string AuthMode = "AuthMode";
             public const string Enabled = "Enabled";
             public const string IgnoreExpired = "IgnoreExpired";
@@ -23,6 +25,55 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string RequestorEmail = "RequestorEmail";
             public const string RequestorIsdCode = "RequestorIsdCode";
             public const string RequestorMobileNumber = "RequestorMobileNumber";
+            public const string SignerPlace = "SignerPlace";
+            public const string SignerIp = "SignerIp";
+
+            // Technical point-of-contact defaults (TpcName/Email default to Requestor* when blank)
+            public const string TechnicalContactName = "TechnicalContactName";
+            public const string TechnicalContactEmail = "TechnicalContactEmail";
+            public const string TechnicalContactIsdCode = "TechnicalContactIsdCode";
+            public const string TechnicalContactMobileNumber = "TechnicalContactMobileNumber";
+
+            // SSL order body defaults — every value matches a CERTInext-documented field and
+            // is overridable by the connector admin via the gateway's connector-config UI.
+            public const string AccountingModel = "AccountingModel";
+            public const string EmailNotifications = "EmailNotifications";
+            public const string SubscriptionValidityYears = "SubscriptionValidityYears";
+            public const string SubscriptionAutoRenew = "SubscriptionAutoRenew";
+            public const string SubscriptionRenewCriteriaDays = "SubscriptionRenewCriteriaDays";
+            public const string AutoSecureWww = "AutoSecureWww";
+
+            // DCV — domain control validation via DNS provider plugins
+            public const string DcvEnabled = "DcvEnabled";
+            public const string DcvTxtRecordTemplate = "DcvTxtRecordTemplate";
+            public const string DcvPropagationDelaySeconds = "DcvPropagationDelaySeconds";
+            public const string DcvTimeoutMinutes = "DcvTimeoutMinutes";
+
+            // How long to wait inside Enroll() for CERTInext to expose the DCV challenge
+            // (domainVerification metadata in TrackOrder).  Under concurrent load CERTInext
+            // sometimes takes a few seconds after GenerateOrderSSL before the slot appears.
+            // Without this wait, the plugin's single TrackOrder check sees null and skips
+            // DCV; the order then has to wait for the next gateway sync cycle to be picked up.
+            public const string DcvWaitForChallengeSeconds = "DcvWaitForChallengeSeconds";
+
+            // How long to wait inside Enroll() for CERTInext to finish generating the cert
+            // after DCV verification succeeds.  CERTInext's issuance is async — DCV may be
+            // verified but the cert PEM isn't yet available for download.  Without this
+            // wait, Enroll() returns pending and the cert is picked up on the next sync.
+            public const string DcvWaitForIssuanceSeconds = "DcvWaitForIssuanceSeconds";
+
+            // Bounds on DCV-during-sync so a large pending backlog can't make a sync pass
+            // slow (issue 0002). Only pending orders younger than DcvSyncMaxOrderAgeHours
+            // are eligible for DCV completion during sync, and at most DcvSyncMaxPerPass
+            // orders are attempted per pass; the rest are emitted as pending and revisited
+            // on a later pass (the per-minute incremental cadence keeps recent orders moving).
+            public const string DcvSyncMaxOrderAgeHours = "DcvSyncMaxOrderAgeHours";
+            public const string DcvSyncMaxPerPass = "DcvSyncMaxPerPass";
+
+            // Environment variable that overrides DcvTimeoutMinutes when set.
+            public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";
+            public const string DcvWaitForChallengeSecondsEnvVar = "CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS";
+            public const string DcvWaitForIssuanceSecondsEnvVar = "CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS";
 
             // Auth mode values
             public const string AuthModeAccessKey = "AccessKey"; // default; authKey = SHA256(accessKey+ts+txn)
@@ -59,8 +110,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SignerPlace = "SignerPlace";
             public const string SignerIp = "SignerIp";
             public const string DomainName = "DomainName";      // primary domain for SSL/TLS orders
-            public const string SANFormat = "SANFormat";
             public const string KeyType = "KeyType";
+        }
+
+        public static class Products
+        {
+            public const string DvSsl                = "DV SSL";
+            public const string DvSslWildcard        = "DV SSL Wildcard";
+            public const string DvSslUcc             = "DV SSL Multi-Domain (UCC)";
+            public const string DvSslWildcardUcc     = "DV SSL Wildcard Multi-Domain (UCC)";
+            public const string OvSsl                = "OV SSL";
+            public const string OvSslWildcard        = "OV SSL Wildcard";
+            public const string OvSslUcc             = "OV SSL Multi-Domain (UCC)";
+            public const string OvSslWildcardUcc     = "OV SSL Wildcard Multi-Domain (UCC)";
+            public const string EvSsl                = "EV SSL";
+            public const string EvSslUcc             = "EV SSL Multi-Domain (UCC)";
+
+            // Default production numeric codes. These are the standard codes for the
+            // CERTInext production environment. Sandbox codes differ — set ProductCode
+            // explicitly on the template to override when targeting sandbox.
+            public static readonly System.Collections.Generic.Dictionary<string, string> DefaultProductCodes =
+                new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    [DvSsl]             = "838",
+                    [DvSslWildcard]     = "839",
+                    [DvSslUcc]          = "840",
+                    [DvSslWildcardUcc]  = "841",
+                    [OvSsl]             = "842",
+                    [OvSslWildcard]     = "843",
+                    [OvSslUcc]          = "844",
+                    [OvSslWildcardUcc]  = "845",
+                    [EvSsl]             = "846",
+                    [EvSslUcc]          = "847",
+                };
         }
 
         public static class CertificateStatusId
@@ -184,6 +266,35 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // Default fallback when the CRL reason code has no CERTInext equivalent
             public const int Default = KeyCompromise;
+        }
+
+        public static class Dcv
+        {
+            // CERTInext dcvMethod values (dcvDetails.dcvMethod in GetDcv / VerifyDcv)
+            public const string MethodDnsTxt      = "1";              // DNS TXT record (numeric, used in API requests)
+            public const string MethodDnsTxtLabel = "DNS TXT Record"; // DNS TXT record (string label returned by TrackOrder)
+            public const string MethodHttpFile    = "2";              // HTTP file validation
+            public const string MethodEmail       = "3";              // Email validation
+
+            // CERTInext dcvStatus values (per-domain entries in TrackOrder domainVerification)
+            public const string StatusPending   = "0";
+            public const string StatusValidated = "1";
+            public const string StatusRejected  = "2";
+
+            // Default TXT record hostname template; {0} is replaced with the bare domain name.
+            // Override via the DcvTxtRecordTemplate connector config field.
+            public const string DefaultTxtRecordTemplate = "_emsign-validation.{0}";
+
+            // Defaults for the DCV-during-sync bounds (issue 0002).
+            public const int DefaultSyncMaxOrderAgeHours = 24;
+            public const int DefaultSyncMaxPerPass = 50;
+
+            // Propagation delay used on the *sync* DCV path (issue 0002). Sync runs frequently
+            // and bounds work per pass, so it uses a short delay rather than the full
+            // DcvPropagationDelaySeconds (which the Enroll path uses for a one-shot finish).
+            // A few seconds is enough for the staged TXT to be visible to CERTInext's resolver;
+            // if a verify lands too early, the order simply stays pending and is retried next pass.
+            public const int SyncPropagationDelaySeconds = 3;
         }
 
         // Legacy string revocation reasons — retained so StatusMapper still compiles.
