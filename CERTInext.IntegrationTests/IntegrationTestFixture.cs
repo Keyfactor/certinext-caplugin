@@ -33,6 +33,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         public string RequestorEmail { get; }
         public string RequestorName { get; }
 
+        // ---------------------------------------------------------------------------
+        // Cloudflare DCV credentials (optional)
+        // ---------------------------------------------------------------------------
+
+        /// <summary>Cloudflare API token with DNS:Edit permission on <see cref="CloudflareZoneId"/>.</summary>
+        public string CloudflareApiToken { get; }
+
+        /// <summary>Cloudflare Zone ID for the domain used in DCV integration tests.</summary>
+        public string CloudflareZoneId { get; }
+
+        /// <summary>
+        /// True when Cloudflare credentials are present, enabling real DNS DCV tests.
+        /// When false, DCV integration tests fall back to a <see cref="StubDomainValidator"/>.
+        /// </summary>
+        public bool IsCloudflareConfigured { get; }
+
         /// <summary>
         /// True when at minimum ApiUrl and AccessKey are both non-empty,
         /// indicating that live credential configuration is present.
@@ -67,6 +83,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             var env = LoadEnvFile(envPath);
 
+            // Promote env-file values into the process environment so that any code
+            // calling System.Environment.GetEnvironmentVariable() picks them up.
+            foreach (var kv in env)
+                if (System.Environment.GetEnvironmentVariable(kv.Key) == null)
+                    System.Environment.SetEnvironmentVariable(kv.Key, kv.Value);
+
             ApiUrl        = GetEnvValue(env, "CERTINEXT_API_URL");
             AccessKey     = GetEnvValue(env, "CERTINEXT_ACCESS_KEY");
             AccountNumber = GetEnvValue(env, "CERTINEXT_ACCOUNT_NUMBER");
@@ -75,6 +97,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             ProductCode   = GetEnvValue(env, "CERTINEXT_PRODUCT_CODE");
             RequestorEmail = GetEnvValue(env, "CERTINEXT_REQUESTOR_EMAIL");
             RequestorName  = GetEnvValue(env, "CERTINEXT_REQUESTOR_NAME");
+
+            CloudflareApiToken    = GetEnvValue(env, "CERTINEXT_CF_API_TOKEN");
+            CloudflareZoneId      = GetEnvValue(env, "CERTINEXT_CF_ZONE_ID");
+            IsCloudflareConfigured = !string.IsNullOrWhiteSpace(CloudflareApiToken) &&
+                                     !string.IsNullOrWhiteSpace(CloudflareZoneId);
 
             IsConfigured = !string.IsNullOrWhiteSpace(ApiUrl) &&
                            !string.IsNullOrWhiteSpace(AccessKey);
@@ -88,6 +115,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     ApiKey             = AccessKey,
                     AccountNumber      = AccountNumber,
                     GroupNumber        = GroupNumber,
+                    OrganizationNumber = OrgNumber,
                     RequestorName      = string.IsNullOrWhiteSpace(RequestorName)
                                              ? "Keyfactor Integration Test"
                                              : RequestorName,
@@ -131,7 +159,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                         continue;
 
                     string key = line.Substring(0, idx).Trim();
-                    string val = line.Substring(idx + 1).Trim();
+                    string val = ParseEnvValue(line.Substring(idx + 1));
                     result[key] = val;
                 }
             }
@@ -146,6 +174,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Parses a raw value from a <c>KEY=VALUE</c> env-file line: trims surrounding
+        /// whitespace, then strips a single pair of matching surrounding double or single
+        /// quotes if present.  Without quote stripping a line like
+        /// <c>CERTINEXT_REQUESTOR_NAME="Keyfactor Plugin Test"</c> would parse as the 24-char
+        /// literal <c>"Keyfactor Plugin Test"</c> (quotes included), diverging from any
+        /// other shell-style env consumer reading the same file.  See GitHub issue #8.
+        /// Exposed <c>internal</c> for direct unit-testing.
+        /// </summary>
+        internal static string ParseEnvValue(string rawValue)
+        {
+            if (rawValue is null) return string.Empty;
+            string val = rawValue.Trim();
+            if (val.Length >= 2 &&
+                ((val[0] == '"' && val[val.Length - 1] == '"') ||
+                 (val[0] == '\'' && val[val.Length - 1] == '\'')))
+            {
+                val = val.Substring(1, val.Length - 2);
+            }
+            return val;
         }
 
         private static string GetEnvValue(Dictionary<string, string> env, string key)

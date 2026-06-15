@@ -41,7 +41,7 @@ which ones return a `requestNumber` (valid) vs. an error (invalid or not provisi
 
 ## Prerequisites
 
-- .NET 8 SDK
+- .NET 8 or .NET 10 SDK
 - Access to a CERTInext sandbox or production account
 - An API Access Key generated in the CERTInext portal under **Integrations → APIs**
 

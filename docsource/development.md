@@ -40,6 +40,24 @@ CERTINEXT_SIGNER_IP=
 | Coverage report (browser) | `make coverage-report` | Same as `coverage`, then opens HTML report in the default browser |
 | Clean | `make clean` | `dotnet clean` and wipe coverage output directories |
 
+### Build variants — `DcvSupport` (DCV vs no-DCV)
+
+The plugin builds against two `Keyfactor.AnyGateway.IAnyCAPlugin` contracts from a single
+codebase, selected by the `DcvSupport` MSBuild property. The plugin's `AnyCAPluginCertificate`
+records must match the gateway host's IAnyCAPlugin version to persist, so the build must target
+the host (see issue 0003).
+
+| Build | Command | IAnyCAPlugin | DCV | Target gateway host |
+|---|---|---|---|---|
+| **No-DCV (default)** | `make build` / `dotnet build` | `3.2.0` (stable) | fenced out (`#if SUPPORTS_DCV`) | AnyCA Gateway **25.5.x** (IAnyCAPlugin 3.2.0) |
+| **DCV** | `dotnet build -p:DcvSupport=true` | `3.3.0-PRERELEASE` | enabled | AnyCA Gateway **26.x** (IAnyCAPlugin ≥ 3.3) |
+
+The **default is the no-DCV / 3.2.0 build** — it is the GA artifact that loads and persists on the
+current GA gateway (25.5.x) and depends only on a stable package, so it is what CI ships. Build the
+DCV variant explicitly with `-p:DcvSupport=true` for 26.x hosts. The one property drives the package
+version, the `SUPPORTS_DCV` compile constant, and DCV test-file inclusion across all three projects,
+so the two host targets are a build flag rather than a maintained fork.
+
 ## API Smoke-Test Targets
 
 All API targets source `~/.env_certinext`, compute the HMAC `authKey` (`SHA256(accessKey + ts + txn)`), and call the live CERTInext API via `curl`. All JSON responses are piped through `jq`.
@@ -62,6 +80,9 @@ make orders     # lists recent orders — useful to find an ORDER_NUMBER to test
 | Place a draft order | `make generate-order DOMAIN=example.com [CSR_FILE=req.pem] [VALIDITY=1] [SAVE_AND_HOLD=1]` | `GenerateOrderSSL` — places a new order; `SAVE_AND_HOLD=1` (default) creates a draft |
 | Revoke an order | `make revoke-order ORDER_NUMBER=NNNNN [REASON_ID=1]` | `RevokeOrder` — revokes an issued certificate |
 | Attach a CSR to a draft | `make submit-csr ORDER_NUMBER=NNNNN CSR_FILE=req.pem` | `SubmitCSR` — attaches a CSR to a saveAndHold draft order |
+| Discover product codes | `make probe-products` | Places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which ones the account accepts |
+| Cancel one pending order | `scripts/reject-order.sh ORDER_NUMBER=NNNNN` | Shell script — cancels a single pending order (not a `make` target) |
+| Cancel all pending orders | `scripts/reject-all-pending.sh` | Shell script — dry-run by default; set `REJECT_ALL_PENDING=1` to fire (not a `make` target) |
 | Show API target help | `make api-help` | Prints usage for all API targets |
 
 > Note: `TrackOrder` and `GetCertificate` require a formal `orderNumber`, which is only assigned after a draft order is submitted and approved. Draft orders (created with `saveAndHold:"1"`) have a `requestNumber` but no `orderNumber` until that point.

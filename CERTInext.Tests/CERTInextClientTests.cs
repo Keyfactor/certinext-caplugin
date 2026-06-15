@@ -689,7 +689,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             pingRequest.RequestMessage.Headers.Should().ContainKey("Authorization",
                 "OAuth mode must inject the Authorization header on outgoing requests");
 
-            var authHeader = pingRequest.RequestMessage.Headers["Authorization"].FirstOrDefault();
+            var authHeader = pingRequest.RequestMessage.Headers!["Authorization"].FirstOrDefault();
             authHeader.Should().Be($"Bearer {expectedToken}",
                 "the injected token must match the one returned by the token endpoint");
         }
@@ -713,7 +713,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .First(e => e.RequestMessage.Path == "/ValidateCredentials");
 
             // Authorization header must be absent in AccessKey mode
-            bool hasAuthHeader = pingRequest.RequestMessage.Headers.ContainsKey("Authorization");
+            bool hasAuthHeader = pingRequest.RequestMessage.Headers!.ContainsKey("Authorization");
             hasAuthHeader.Should().BeFalse(
                 "AccessKey mode authenticates via the authKey field in the JSON body, not an HTTP header");
         }
@@ -743,6 +743,146 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             int pingCallCount = _server.LogEntries.Count(e => e.RequestMessage.Path == "/ValidateCredentials");
             pingCallCount.Should().Be(3,
                 "ExecuteWithRetryAsync makes 3 total attempts on persistent 5xx errors");
+        }
+
+        // ---------------------------------------------------------------------------
+        // GetDcvAsync — POST /GetDcv
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetDcvAsync_ReturnsToken_WhenServerRespondsOk()
+        {
+            const string token = "abc123token";
+            _server
+                .Given(Request.Create().WithPath("/GetDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetDcvSuccessJson(token)));
+
+            var client = BuildClient();
+
+            var result = await client.GetDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            result.Should().NotBeNull();
+            result.DcvDetails.Should().NotBeNull();
+            result.DcvDetails.Token.Should().Be(token);
+            _server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/GetDcv");
+        }
+
+        [Fact]
+        public async Task GetDcvAsync_Throws_WhenMetaStatusIsFailure()
+        {
+            _server
+                .Given(Request.Create().WithPath("/GetDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetDcvFailureJson("EMS-DCV-001", "DCV not available")));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.GetDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*GetDcv failed*");
+        }
+
+        [Fact]
+        public async Task GetDcvAsync_Throws_WhenServerReturns401()
+        {
+            _server
+                .Given(Request.Create().WithPath("/GetDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(401)
+                    .WithBody(MockCertificateData.UnauthorizedJson()));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.GetDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*Authentication failure*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // VerifyDcvAsync — POST /VerifyDcv
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task VerifyDcvAsync_Succeeds_WhenServerRespondsOk()
+        {
+            _server
+                .Given(Request.Create().WithPath("/VerifyDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.VerifyDcvSuccessJson()));
+
+            var client = BuildClient();
+
+            // Should not throw
+            await client.VerifyDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            _server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/VerifyDcv");
+        }
+
+        [Fact]
+        public async Task VerifyDcvAsync_Throws_WhenMetaStatusIsFailure()
+        {
+            _server
+                .Given(Request.Create().WithPath("/VerifyDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.VerifyDcvFailureJson("EMS-DCV-002", "DNS record not found")));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.VerifyDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*DNS record not found*");
+        }
+
+        [Fact]
+        public async Task VerifyDcvAsync_Throws_WhenServerReturns401()
+        {
+            _server
+                .Given(Request.Create().WithPath("/VerifyDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(401)
+                    .WithBody(MockCertificateData.UnauthorizedJson()));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.VerifyDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*Authentication failure*");
+        }
+
+        [Fact]
+        public async Task VerifyDcvAsync_Throws_WhenServerReturns500()
+        {
+            _server
+                .Given(Request.Create().WithPath("/VerifyDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(500)
+                    .WithBody(MockCertificateData.ServerErrorJson()));
+
+            var client = BuildClient();
+
+            Func<Task> act = () => client.VerifyDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt);
+
+            await act.Should().ThrowAsync<Exception>();
         }
     }
 }

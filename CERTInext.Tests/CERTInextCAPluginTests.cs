@@ -685,6 +685,110 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             results[0].CARequestID.Should().Be(MockCertificateData.CertId1);
         }
 
+        // Regression for issue 0001 — Synchronize dropped issued certs because the
+        // order-report listing (ListCertificatesAsync) carries no PEM body, so the
+        // synced record had Certificate == null and Command couldn't store it.
+        [Fact]
+        public async Task Synchronize_IssuedCertMissingBody_RefetchesFullCertificate()
+        {
+            const string id = MockCertificateData.CertId1;
+
+            // Listing entry as the order report produces it: GENERATED status, NO body.
+            var listingEntry = new LegacyGetCertificateResponse
+            {
+                Id = id,
+                Status = "issued",                       // → EndEntityStatus.GENERATED
+                Certificate = null,                      // order report carries no PEM
+                ProfileId = MockCertificateData.ProfileIdTls
+            };
+
+            var mock = NewMock();
+            mock.Setup(c => c.ListCertificatesAsync(
+                    It.IsAny<DateTime?>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnum(new List<LegacyGetCertificateResponse> { listingEntry }));
+            // Full fetch returns the PEM body (mirrors the real GetCertificateAsync).
+            mock.Setup(c => c.GetCertificateAsync(id, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(id));
+
+            var plugin = BuildPlugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: CancellationToken.None);
+
+            var results = buffer.ToList();
+            results.Should().HaveCount(1);
+            results[0].CARequestID.Should().Be(id);
+            results[0].Certificate.Should().Be(MockCertificateData.FakePemCertificate,
+                "an issued cert must carry the PEM body fetched via GetCertificateAsync, not a null body");
+            mock.Verify(c => c.GetCertificateAsync(id, It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        // Guard the N+1 boundary: when the listing already includes a body, Synchronize
+        // must NOT refetch. The strict mock has no GetCertificateAsync setup, so any call
+        // would throw and fail this test.
+        [Fact]
+        public async Task Synchronize_IssuedCertWithBody_DoesNotRefetch()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.ListCertificatesAsync(
+                    It.IsAny<DateTime?>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnum(new List<LegacyGetCertificateResponse>
+                {
+                    MockCertificateData.IssuedCertRecord(MockCertificateData.CertId1) // already has a body
+                }));
+
+            var plugin = BuildPlugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: CancellationToken.None);
+
+            var results = buffer.ToList();
+            results.Should().HaveCount(1);
+            results[0].Certificate.Should().Be(MockCertificateData.FakePemCertificate);
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        // Regression for issue 0001 (revoked variant) — a cert reported "revoked" during
+        // sync also arrives from the order report with no body and no revocation detail.
+        // The refetch must populate the body AND the revocation date, not just the REVOKED
+        // status. (Complements Synchronize_MapsRevokedCertificates_Correctly, which feeds an
+        // already-populated entry that doesn't exercise the refetch.)
+        [Fact]
+        public async Task Synchronize_RevokedCertMissingBody_RefetchesWithRevocationMetadata()
+        {
+            const string id = MockCertificateData.CertId3;
+
+            var listingEntry = new LegacyGetCertificateResponse
+            {
+                Id = id,
+                Status = "revoked",        // → EndEntityStatus.REVOKED
+                Certificate = null,        // order report carries neither body nor revocation detail
+                RevokedAt = null,
+                ProfileId = MockCertificateData.ProfileIdTls
+            };
+
+            var mock = NewMock();
+            mock.Setup(c => c.ListCertificatesAsync(
+                    It.IsAny<DateTime?>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnum(new List<LegacyGetCertificateResponse> { listingEntry }));
+            mock.Setup(c => c.GetCertificateAsync(id, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.RevokedCertRecord(id)); // body + RevokedAt + reason
+
+            var plugin = BuildPlugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: CancellationToken.None);
+
+            var results = buffer.ToList();
+            results.Should().HaveCount(1);
+            results[0].CARequestID.Should().Be(id);
+            results[0].Status.Should().Be((int)EndEntityStatus.REVOKED);
+            results[0].Certificate.Should().Be(MockCertificateData.FakePemCertificate);
+            results[0].RevocationDate.Should().NotBeNull(
+                "a revoked cert must carry its revocation date after the sync refetch, not just REVOKED status");
+            mock.Verify(c => c.GetCertificateAsync(id, It.IsAny<CancellationToken>()), Times.Once);
+        }
+
         [Fact]
         public async Task Synchronize_HonoursCancellation()
         {
