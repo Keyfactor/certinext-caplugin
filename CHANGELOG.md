@@ -25,3 +25,4 @@ Initial release of the CERTInext (emSign Hub) AnyCA REST Gateway plugin.
 - chore(logging): Verbose Debug/Trace logging across the sync flow with method entry/exit tracing.
 - chore(tests): Live integration tests covering all supported SSL/TLS product types, the DCV enroll → issue → sync flow, and a key-algorithm matrix — confirms CERTInext issues RSA 2048/3072/4096 and ECC P-256/P-384, and rejects larger RSA, ECC P-521, and Ed25519/Ed448.
 - chore(scripts): API smoke-test scripts for every endpoint, including `reject-order` / `reject-all-pending` for cancelling pending orders.
+
