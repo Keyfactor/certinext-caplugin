@@ -172,6 +172,10 @@
                 {
                     "name": "DcvSyncMaxPerPass",
                     "description": "OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; remaining pending orders are reported as-is and picked up on a later pass (the per-minute incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: 50."
+                },
+                {
+                    "name": "DcvFollowCnameDelegation",
+                    "description": "OPTIONAL: When true, and the DNS TXT challenge hostname for a domain is delegated via CNAME to a different DNS zone (e.g. a validation subdomain CNAMEd to a dedicated zone, a common pattern for keeping automation credentials out of the production zone), the plugin follows the CNAME chain (bounded to 10 hops, with loop detection) and both publishes the TXT record and resolves the DNS provider plugin against the terminal (resolved) name instead of the raw challenge hostname. Off by default so existing non-delegated deployments are unaffected. Default: false."
                 }
             ],
             "enrollment_config": [

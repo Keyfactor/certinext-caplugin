@@ -570,6 +570,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("csr")]
         public string Csr { get; set; }
 
+        /// <summary>
+        /// Explicit subscription validity in years (1, 2, or 3), sourced from the
+        /// <c>ValidityYears</c> template enrollment parameter. Takes precedence over
+        /// <see cref="ValidityDays"/> when set. See issue 0005.
+        /// </summary>
+        [JsonPropertyName("validityYears")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? ValidityYears { get; set; }
+
         [JsonPropertyName("validityDays")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public int? ValidityDays { get; set; }

@@ -10,6 +10,7 @@ using FluentAssertions;
 using Keyfactor.AnyGateway.Extensions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
+using Keyfactor.Extensions.CAPlugin.CERTInext.Dcv;
 using Keyfactor.PKI.Enums.EJBCA;
 using Moq;
 using Xunit;
@@ -318,7 +319,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Dcv_SilentlyNoOps_WhenNoFactoryInjected_AndDcvEnabledTrue()
+        public async Task Dcv_NoFactoryInjected_StillReturnsCAsPendingResult_WhenNoGuidanceAvailable()
         {
             // Simulates a v3.2 gateway host: plugin instantiated via the parameterless
             // public production constructor, DcvEnabled=true in the connector config,
@@ -326,11 +327,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // (because the host's IAnyCAPlugin assembly doesn't even have that interface).
             // Enroll must:
             //   * NOT throw (no missing-type / null-factory exception),
-            //   * NOT touch the CA's TrackOrder for DCV purposes,
-            //   * return the enrollment result the CA gave us (here: pending).
+            //   * best-effort probe TrackOrder for manual DCV guidance (issue 0007) —
+            //     this is the one behavior change from the prior "hard no-op": the plugin
+            //     no longer refuses to touch TrackOrder at all, it just can't stage/verify
+            //     anything without a validator,
+            //   * still return the CA's pending status/certificate unchanged when that probe
+            //     turns up no usable domainVerification data (as here).
             var mock = NewMock();
             mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+
+            mock.Setup(c => c.TrackOrderAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId = "1",
+                        CertificateStatusId = "1"
+                        // DomainVerification intentionally null/unpopulated — nothing for the
+                        // guidance probe to report on yet.
+                    }
+                });
 
             // Internal test ctor with factory = null AND DcvEnabled = true.
             var plugin = new CERTInextCAPlugin(mock.Object, domainValidatorFactory: null, DcvConfig(enabled: true));
@@ -339,9 +356,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.Should().NotBeNull();
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
-                "with no factory the CA's pending response must be passed through unchanged");
-            mock.Verify(c => c.TrackOrderAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
-                "EnrollNewAsync must short-circuit the DCV block when _domainValidatorFactory is null");
+                "with no factory and no guidance available, the CA's pending response must be passed through unchanged");
+            result.EnrollmentContext.Should().BeEmpty(
+                "no domainVerification data was available to build manual DCV guidance from");
         }
 
         [Fact]
@@ -815,6 +832,191 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 "post-DCV polling must return the issued status, not the first pending fetch");
             mock.Verify(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
                 Times.AtLeast(2), "plugin should have polled at least twice for issuance");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0007 — no IDomainValidatorFactory wired at all: surface manual DCV
+        // guidance (TXT record name + expected value) via EnrollmentContext/StatusMessage
+        // instead of silently leaving the order pending with only a log line.
+        //
+        // Distinct from Dcv_Throws_WhenNoProviderForDomain above, which covers a factory
+        // that *was* injected but returns null for the specific domain — that case still
+        // throws unchanged; this case is "no factory object at all".
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Dcv_NoFactoryWired_SurfacesManualTxtGuidanceInEnrollmentResult()
+        {
+            var mock = NewMock();
+            string orderNumber = MockCertificateData.DcvOrderId;
+            string domain = MockCertificateData.DcvDomain;
+            string token = MockCertificateData.DcvToken;
+
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = orderNumber, Status = "pending" });
+
+            mock.Setup(c => c.TrackOrderAsync(orderNumber, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvPendingTrackResponse(orderNumber, domain));
+
+            mock.Setup(c => c.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse(token));
+
+            // No factory injected at all — the "unwired" case from issue #7.
+            var plugin = new CERTInextCAPlugin(mock.Object, (IDomainValidatorFactory)null, DcvConfig());
+
+            var result = await Enroll(plugin);
+
+            string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, domain);
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "the order is still genuinely pending — only the message/context changes");
+            result.EnrollmentContext.Should().ContainKey(expectedHostname);
+            result.EnrollmentContext[expectedHostname].Should().Be(token);
+            result.StatusMessage.Should().Contain(expectedHostname).And.Contain(token);
+
+            // No staging/verification attempted — there's no validator to do it with.
+            mock.Verify(c => c.VerifyDcvAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+
+        [Fact]
+        public async Task Dcv_NoFactoryWired_WhenGuidanceLookupFails_FallsBackToPlainPendingMessage()
+        {
+            var mock = NewMock();
+            string orderNumber = MockCertificateData.DcvOrderId;
+
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = orderNumber, Status = "pending" });
+
+            // TrackOrder fails outright — guidance lookup must fail closed, not throw out of Enroll.
+            mock.Setup(c => c.TrackOrderAsync(orderNumber, It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("simulated TrackOrder outage"));
+
+            var plugin = new CERTInextCAPlugin(mock.Object, (IDomainValidatorFactory)null, DcvConfig());
+
+            var result = await Enroll(plugin);
+
+            result.EnrollmentContext.Should().BeEmpty();
+            result.StatusMessage.Should().Contain("pending approval",
+                "behavior must be unchanged from before the fix when guidance can't be built");
+        }
+
+        [Fact]
+        public async Task Dcv_NoFactoryWired_ButDcvDisabled_DoesNotAttemptGuidanceLookup()
+        {
+            var mock = NewMock();
+            string orderNumber = MockCertificateData.DcvOrderId;
+
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = orderNumber, Status = "pending" });
+
+            var config = DcvConfig(enabled: false);
+            var plugin = new CERTInextCAPlugin(mock.Object, (IDomainValidatorFactory)null, config);
+
+            var result = await Enroll(plugin);
+
+            result.EnrollmentContext.Should().BeEmpty();
+            mock.Verify(c => c.TrackOrderAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+                "no DCV work of any kind should be attempted when DcvEnabled=false");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0006 — CNAME delegation for the DCV challenge hostname.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Dcv_CnameDelegationEnabled_RoutesToTerminalNameValidator()
+        {
+            var (mock, _) = HappyPathMocks();
+
+            const string terminalName = "validate.dns-provider.net";
+            string challengeHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, MockCertificateData.DcvDomain);
+
+            var validator = new FakeDomainValidator();
+            // Keyed ONLY on the terminal name — if the plugin still queried the raw domain
+            // (or the raw challenge hostname) this would return null and the enrollment
+            // would throw "No DNS provider plugin is configured".
+            var factory = new KeyedDomainValidatorFactory(new Dictionary<string, IDomainValidator>
+            {
+                [terminalName] = validator
+            });
+
+            var cnameChain = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [challengeHostname] = terminalName
+            };
+            var resolver = new CnameResolver((name, ct) =>
+            {
+                cnameChain.TryGetValue(name, out var target);
+                return Task.FromResult(target);
+            });
+
+            var config = DcvConfig(dcvWaitForIssuanceSeconds: 10);
+            config.DcvFollowCnameDelegation = true;
+
+            var plugin = new CERTInextCAPlugin(mock.Object, factory, config, resolver);
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            factory.RequestedKeys.Should().ContainSingle().Which.Should().Be(terminalName,
+                "the DNS provider factory must be queried with the resolved terminal name, not the raw domain");
+            validator.StagedRecords.Should().ContainSingle().Which.key.Should().Be(terminalName,
+                "the TXT record must be published at the CNAME's terminal name");
+            validator.CleanedUpKeys.Should().ContainSingle().Which.Should().Be(terminalName);
+        }
+
+        [Fact]
+        public async Task Dcv_CnameDelegationDisabled_UsesRawDomainUnchanged()
+        {
+            // Flag left at its default (false): behavior must be byte-for-byte identical to the
+            // pre-issue-0006 happy path — the terminal-name resolver is never even consulted.
+            var (mock, validator) = HappyPathMocks();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, MockCertificateData.DcvDomain);
+            validator.StagedRecords.Should().ContainSingle().Which.Should().Be((expectedHostname, MockCertificateData.DcvToken));
+        }
+
+        [Fact]
+        public async Task Dcv_CnameDelegationEnabled_LoopDetected_ThrowsCleanly()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending" });
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvPendingTrackResponse());
+            mock.Setup(c => c.GetDcvAsync(MockCertificateData.DcvOrderId, MockCertificateData.DcvDomain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse());
+
+            string challengeHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, MockCertificateData.DcvDomain);
+            var loopChain = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [challengeHostname] = "loop-a.example.com",
+                ["loop-a.example.com"] = challengeHostname // cycles back to the start
+            };
+            var resolver = new CnameResolver((name, ct) =>
+            {
+                loopChain.TryGetValue(name, out var target);
+                return Task.FromResult(target);
+            });
+
+            var config = DcvConfig();
+            config.DcvFollowCnameDelegation = true;
+
+            var plugin = new CERTInextCAPlugin(
+                mock.Object, new FakeDomainValidatorFactory(new FakeDomainValidator()), config, resolver);
+
+            Func<Task> act = () => Enroll(plugin);
+
+            await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*loop*");
+
+            // Nothing should have been staged before the loop was detected.
+            mock.Verify(c => c.VerifyDcvAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never);
         }
     }
 }

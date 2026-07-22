@@ -28,6 +28,12 @@
          -78770-...) — see issue 0003. -->
     <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.3.0" Condition="'$(DcvSupport)' == 'true'" />
     <PackageReference Include="Keyfactor.AnyGateway.IAnyCAPlugin" Version="3.2.0" Condition="'$(DcvSupport)' != 'true'" />
+    <!-- DnsClient.NET — used by Dcv/CnameResolver.cs to follow CNAME delegation (issue 0006).
+         Resolves against the OS-configured resolvers correctly cross-platform (including
+         reading /etc/resolv.conf on Linux, which is how the gateway's Kubernetes pods are
+         configured), with native TCP fallback and compression handling — avoids hand-rolling
+         DNS wire-format parsing for a production CA plugin. -->
+    <PackageReference Include="DnsClient" Version="1.8.0" />
     <PackageReference Include="Keyfactor.Logging" Version="1.1.2" />
     <PackageReference Include="Keyfactor.PKI" Version="5.5.0" />
     <PackageReference Include="RestSharp" Version="112.1.0" />

@@ -816,6 +816,73 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Issue 0005: ValidityYears template parameter must reach EnrollCertificateRequest
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Enroll_PassesValidityYearsToRequest()
+        {
+            EnrollCertificateRequest capturedRequest = null;
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<EnrollCertificateRequest, CancellationToken>((req, _) => capturedRequest = req)
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse());
+
+            var plugin = new CERTInextCAPlugin(mock.Object);
+
+            var productInfo = MakeProductInfo(extras: new Dictionary<string, string>
+            {
+                ["ValidityYears"] = "3"
+            });
+
+            await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem,
+                subject: "CN=test.example.com",
+                san: null,
+                productInfo: productInfo,
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            capturedRequest.Should().NotBeNull();
+            capturedRequest!.ValidityYears.Should().Be(3);
+        }
+
+        [Fact]
+        public async Task Enroll_WithInvalidValidityYears_FallsBackToNull()
+        {
+            EnrollCertificateRequest capturedRequest = null;
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<EnrollCertificateRequest, CancellationToken>((req, _) => capturedRequest = req)
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse());
+
+            var plugin = new CERTInextCAPlugin(mock.Object);
+
+            var productInfo = MakeProductInfo(extras: new Dictionary<string, string>
+            {
+                ["ValidityYears"] = "not-a-number"
+            });
+
+            await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem,
+                subject: "CN=test.example.com",
+                san: null,
+                productInfo: productInfo,
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            capturedRequest.Should().NotBeNull();
+            capturedRequest!.ValidityYears.Should().BeNull(
+                "invalid ValidityYears should fall back to null (use ValidityDays/connector default)");
+        }
+
+        // ---------------------------------------------------------------------------
         // C4a: Enroll with SAN dict containing null value array → EnrollCertificateAsync still called
         // ---------------------------------------------------------------------------
 
