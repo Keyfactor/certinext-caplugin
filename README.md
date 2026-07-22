@@ -50,7 +50,7 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
 
 ## Compatibility
 
-The CERTInext AnyCA Gateway REST plugin is compatible with the Keyfactor AnyCA Gateway REST 25.5.0 and later.
+The CERTInext AnyCA Gateway REST plugin is compatible with the Keyfactor AnyCA Gateway REST 26.0.0 and later.
 
 ## Support
 The CERTInext AnyCA Gateway REST plugin is supported by Keyfactor for Keyfactor customers. If you have a support issue, please open a support ticket via the Keyfactor Support Portal at https://support.keyfactor.com.
@@ -83,16 +83,15 @@ CERTInext operates three separate environments. Use the sandbox environment for 
 
 2. On the server hosting the AnyCA Gateway REST, download and unzip the latest [CERTInext AnyCA Gateway REST plugin](https://github.com/Keyfactor/certinext-caplugin/releases/latest) from GitHub.
 
-3. Copy the unzipped directory (usually called `net8.0` or `net10.0`) to the Extensions directory:
+3. Copy the unzipped directory (usually called `net10.0`) to the Extensions directory:
 
 
     ```shell
     Depending on your AnyCA Gateway REST version, copy the unzipped directory to one of the following locations:
-    Program Files\Keyfactor\AnyCA Gateway\AnyGatewayREST\net8.0\Extensions
     Program Files\Keyfactor\AnyCA Gateway\AnyGatewayREST\net10.0\Extensions
     ```
 
-    > The directory containing the CERTInext AnyCA Gateway REST plugin DLLs (`net8.0` or `net10.0`) can be named anything, as long as it is unique within the `Extensions` directory.
+    > The directory containing the CERTInext AnyCA Gateway REST plugin DLLs (`net10.0`) can be named anything, as long as it is unique within the `Extensions` directory.
 
 4. Restart the AnyCA Gateway REST service.
 
@@ -152,6 +151,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **DcvWaitForIssuanceSeconds** - OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV verifies for CERTInext to finish generating the certificate. CERTInext issuance is async — DCV may be verified but the cert PEM isn't yet available for download. Without this wait, Enroll() returns a pending result and the issued cert is picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60.
         * **DcvSyncMaxOrderAgeHours** - OPTIONAL: During synchronization, only pending DV orders younger than this many hours are eligible to be driven through DCV. This keeps a sync pass fast when there is a large backlog of old, never-completing pending orders (e.g. abandoned orders or domains outside the configured DNS provider's zone): they age out and are simply reported as pending rather than retried every pass. Recently-placed orders (the ones that legitimately deferred DCV) are always within the window and complete via the normal scan cadence. Set to 0 to disable the age filter (attempt DCV for all pending). Default: 24.
         * **DcvSyncMaxPerPass** - OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; remaining pending orders are reported as-is and picked up on a later pass (the per-minute incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: 50.
+        * **DcvFollowCnameDelegation** - OPTIONAL: When true, and the DNS TXT challenge hostname for a domain is delegated via CNAME to a different DNS zone (e.g. a validation subdomain CNAMEd to a dedicated zone, a common pattern for keeping automation credentials out of the production zone), the plugin follows the CNAME chain (bounded to 10 hops, with loop detection) and both publishes the TXT record and resolves the DNS provider plugin against the terminal (resolved) name instead of the raw challenge hostname. Off by default so existing non-delegated deployments are unaffected. Default: false.
 
 2. A Keyfactor Command certificate template maps an enrollment request to a specific CERTInext product. Create one template per CERTInext product that you want to make available to requesters.
 
@@ -275,7 +275,7 @@ CERTInext uses numeric product codes to identify certificate types. **Product co
 
 To retrieve the exact codes available to your account, call the `GetProductDetails` endpoint:
 - If you have a `GroupNumber` configured, include it in the request `productDetails` block — some accounts require this to return a non-empty list.
-- Use the `make get-product-details-group` Makefile target to retrieve products from the sandbox with `groupNumber` included.
+- Use the `just get-product-details-group` justfile target to retrieve products from the sandbox with `groupNumber` included.
 
 > Note: Product codes differ between the sandbox and production environments. Always verify the correct code before switching environments.
 
@@ -337,6 +337,58 @@ The same numeric product codes have been observed for S/MIME and document-signin
 To retrieve the full list of product codes available to your account, call the `GetProductDetails` endpoint against your target environment. The sandbox and production APIs each return their own set of codes.
 
 > Note: SSL/TLS products are supported on standard accounts — see the SSL/TLS table above for the exact sandbox/production code pair for each product. Private PKI (Production `100`, `104` / Sandbox `149`), S/MIME (`894`), and document-signing products (`819`–`827`) require special provisioning by eMudhra and are not available on standard SSL/TLS accounts — ordering them returns EMS-1162.
+
+## Mechanics
+
+### Authentication
+
+Every CERTInext API call is an HTTP POST with a JSON body. There is no Authorization header. Instead, the body carries a `meta` block with an `authKey` field computed as:
+
+```
+authKey = SHA256(accessKey + requestTs + requestTxnId)
+```
+
+Where `requestTs` is the ISO 8601 timestamp and `requestTxnId` is a unique transaction UUID generated per request. The raw access key is never transmitted — only the derived hash is sent. This computation happens automatically on every outbound call. When `AuthMode` is `OAuth`, the gateway obtains a bearer token via the configured client credentials flow and injects it into the `meta` block instead.
+
+### Enrollment Decision Logic
+
+When the gateway calls `Enroll`, the plugin selects between three paths based on the enrollment type and the age of the prior certificate:
+
+1. **New enrollment** — no prior certificate exists. A new `GenerateOrderSSL` request is submitted.
+2. **Renewal** — a prior certificate exists and its expiry is within the `RenewalWindowDays` threshold (default: 90 days). A new `GenerateOrderSSL` order is submitted within the configured renewal window (CERTInext has no dedicated renewal endpoint; the renewal-window check governs how Command tracks old→new, not which API is called).
+3. **Reissue** — a prior certificate exists but is outside the renewal window. A new `GenerateOrderSSL` order is placed with the updated CSR/subject, replacing the prior certificate under a new subscription.
+
+The `RenewalWindowDays` template parameter controls the renewal/reissue boundary per certificate template.
+
+### Required Order Fields
+
+The `GenerateOrderSSL` API requires an `additionalInformation.remarks` field in every order request body. The gateway populates this field automatically with the text `"Issued via Keyfactor Command AnyCA REST Gateway."`. If you encounter error `EMS-918: Additional Information cannot be empty`, verify that the gateway version is current and that the field is being sent.
+
+### Order Lifecycle and Pending Approval
+
+CERTInext orders pass through several internal status stages before a certificate is issued. The plugin maps these to Keyfactor enrollment statuses as follows:
+
+- **Issued** (status 9, 20) → certificate returned immediately.
+- **Pending approval** (status 2, 8, 15, 24) → enrollment returns a pending status to Command. If `AutoApprove` is enabled on the template, the plugin attempts automatic approval before returning.
+- **Rejected / cancelled** (status 4, 5, 13, 14) → enrollment fails with an error.
+
+The gateway polls the `TrackOrder` endpoint during sync to pick up certificates that were approved after the initial enrollment call.
+
+### Synchronization
+
+Synchronization uses the `GetOrderReport` endpoint with paginated results (controlled by `PageSize`, default 100, max 500). Each page is fetched sequentially until all orders are retrieved. The plugin maps each order's status to a Keyfactor certificate status and returns the result set to the gateway framework, which reconciles it against the Command inventory.
+
+Expired certificates are included by default. Set `IgnoreExpired: true` on the connector to skip them during sync.
+
+### Product Code Resolution
+
+When an enrollment request arrives, the numeric CERTInext product code is resolved in this order:
+
+1. `ProductCode` template parameter (explicit override — use for sandbox or non-standard codes).
+2. `ProfileId` template parameter (deprecated alias, accepted for backward compatibility).
+3. Default production code looked up from the selected product name (e.g. **DV SSL** → `838`).
+
+If none of these yield a code, enrollment fails with a validation error.
 
 ## Architecture
 

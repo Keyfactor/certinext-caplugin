@@ -1,3 +1,16 @@
+# 1.1.0
+
+## Features
+- feat(dcv): DCV can now follow CNAME-delegated validation zones — useful if your DNS automation credentials live in a separate zone from production. Off by default; opt in with the new `DcvFollowCnameDelegation` setting.
+- feat(dcv): If DCV is enabled but no DNS provider is configured, enrollment now shows the DNS TXT record you need to publish manually, instead of leaving the order stuck with no explanation.
+
+## Bug Fixes
+- fix(enroll): The per-template `ValidityYears` setting is now honored — previously it had no effect, and subscription validity always came from the connector-level default instead.
+
+## Chores
+- chore(compat): Dropped .NET 8 support. DCV requires Keyfactor Command 26.2+, which requires .NET 10+, so the `DcvSupport` build flag now defaults to `true` — pass `-p:DcvSupport=false` if you're not yet on Command 26.2+.
+- chore(deps): Added `DnsClient.NET` for DNS resolution; bumped `WireMock.Net` and its related test dependencies to pick up CVE fixes.
+
 # 1.0.0
 
 Initial release of the CERTInext (emSign Hub) AnyCA REST Gateway plugin.

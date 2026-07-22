@@ -1312,12 +1312,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private GenerateOrderSslRequest BuildOrderRequestFromLegacyEnrollRequest(EnrollCertificateRequest request)
         {
-            // Map ValidityDays → CERTInext's year-based validity. Default 1.
-            string validityYears = request.ValidityDays.HasValue
-                ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
-                : (string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears)
+            // Resolve subscription validity years. Precedence (issue 0005):
+            //   1. Explicit ValidityYears template parameter (request.ValidityYears) — wins outright.
+            //   2. Legacy ValidityDays template parameter, divided by 365 and rounded up.
+            //   3. Connector-level SubscriptionValidityYears config default.
+            string validityYears;
+            if (request.ValidityYears.HasValue && request.ValidityYears.Value > 0)
+            {
+                validityYears = request.ValidityYears.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            else if (request.ValidityDays.HasValue)
+            {
+                validityYears = Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0");
+            }
+            else
+            {
+                validityYears = string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears)
                     ? "1"
-                    : _config.SubscriptionValidityYears);
+                    : _config.SubscriptionValidityYears;
+            }
 
             string requestorName  = request.RequesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
             string requestorEmail = request.RequesterEmail ?? _config.RequestorEmail ?? string.Empty;
