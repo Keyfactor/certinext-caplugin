@@ -288,5 +288,41 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             CapturedOrderBody().GetProperty("subscriptionDetails")
                 .GetProperty("validity").GetString().Should().Be("2");
         }
+
+        // -----------------------------------------------------------------------
+        // Issue 0005 — ValidityYears request-parameter reaches the order body and
+        // takes precedence over both ValidityDays and the connector default.
+        // -----------------------------------------------------------------------
+
+        [Fact]
+        public async Task ValidityYears_OnRequest_OverridesConnectorDefaultAndValidityDays()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.SubscriptionValidityYears = "1"; // connector default = 1 year
+
+            var req = BasicEnrollRequest();
+            req.ValidityDays = 730;  // would compute to 2 years if ValidityYears weren't set
+            req.ValidityYears = 3;   // explicit override — must win
+
+            await BuildClient(cfg).EnrollCertificateAsync(req);
+
+            CapturedOrderBody().GetProperty("subscriptionDetails")
+                .GetProperty("validity").GetString().Should().Be("3");
+        }
+
+        [Fact]
+        public async Task ValidityYears_Unset_FallsBackToValidityDaysThenConnectorDefault()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.SubscriptionValidityYears = "2";
+
+            // ValidityYears not set on the request — connector default must be used.
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            CapturedOrderBody().GetProperty("subscriptionDetails")
+                .GetProperty("validity").GetString().Should().Be("2");
+        }
     }
 }
