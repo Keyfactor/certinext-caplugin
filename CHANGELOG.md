@@ -1,16 +1,15 @@
 # 1.1.0
 
 ## Features
-- feat(dcv): Support DNS CNAME-delegated DCV challenges — when a validation hostname is CNAMEd to a separate zone (e.g. to keep automation credentials out of the production zone), the plugin now follows the chain and routes both the TXT record and the DNS provider lookup to the terminal name. Off by default; opt in with the new `DcvFollowCnameDelegation` setting.
-- feat(dcv): When DCV is enabled but no DNS provider plugin is configured, the enrollment result now surfaces the exact TXT record name and value to publish manually, instead of leaving the order pending with no guidance beyond the plugin log.
+- feat(dcv): DCV can now follow CNAME-delegated validation zones — useful if your DNS automation credentials live in a separate zone from production. Off by default; opt in with the new `DcvFollowCnameDelegation` setting.
+- feat(dcv): If DCV is enabled but no DNS provider is configured, enrollment now shows the DNS TXT record you need to publish manually, instead of leaving the order stuck with no explanation.
 
 ## Bug Fixes
-- fix(enroll): The per-template `ValidityYears` parameter now actually controls subscription validity. Previously it was exposed in Command's UI but silently ignored, with the connector-level default always winning.
+- fix(enroll): The per-template `ValidityYears` setting is now honored — previously it had no effect, and subscription validity always came from the connector-level default instead.
 
-## Build
-- build!: Target `net10.0` only — dropped `net8.0` multi-targeting across the plugin, tests, and integration runner.
-- build!: `DcvSupport` now defaults to `true`. The default/CI-shipped build targets DCV-capable AnyCA Gateway 26.x (`IAnyCAPlugin 3.3.0`, now stable); the previous default — `IAnyCAPlugin 3.2.0`, AnyCA Gateway 25.5.x, no DCV — is available via `-p:DcvSupport=false`.
-- chore(deps): Added `DnsClient.NET` for CNAME resolution. Pinned `WireMock.Net` and its transitive `Scriban.Signed` / `System.Linq.Dynamic.Core` / `OpenTelemetry.*` dependencies past several CVEs that only surfaced once `net10.0` became the sole restore target.
+## Chores
+- chore(compat): Dropped .NET 8 support. DCV requires Keyfactor Command 26.2+, which requires .NET 10+, so the `DcvSupport` build flag now defaults to `true` — pass `-p:DcvSupport=false` if you're not yet on Command 26.2+.
+- chore(deps): Added `DnsClient.NET` for DNS resolution; bumped `WireMock.Net` and its related test dependencies to pick up CVE fixes.
 
 # 1.0.0
 
