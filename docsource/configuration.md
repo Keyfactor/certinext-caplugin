@@ -150,7 +150,7 @@ CERTInext uses numeric product codes to identify certificate types. **Product co
 
 To retrieve the exact codes available to your account, call the `GetProductDetails` endpoint:
 - If you have a `GroupNumber` configured, include it in the request `productDetails` block — some accounts require this to return a non-empty list.
-- Use the `make get-product-details-group` Makefile target to retrieve products from the sandbox with `groupNumber` included.
+- Use the `just get-product-details-group` justfile target to retrieve products from the sandbox with `groupNumber` included.
 
 > Note: Product codes differ between the sandbox and production environments. Always verify the correct code before switching environments.
 

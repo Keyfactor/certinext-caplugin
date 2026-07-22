@@ -107,5 +107,5 @@ echo ""
 echo "==> Full response:"
 echo "$result" | jq .
 echo ""
-echo "==> requestNumber (draft ID — use with make submit-csr):"
+echo "==> requestNumber (draft ID — use with just submit-csr):"
 echo "$result" | jq -r '.orderDetails.requestNumber // .meta.errorMessage // "none"'
