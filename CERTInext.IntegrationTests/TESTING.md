@@ -31,7 +31,7 @@ Key findings verified against sandbox account `9374221333` in April 2026:
 To discover the valid product codes for a new account, use:
 
 ```sh
-make probe-products
+just probe-products
 ```
 
 This places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports
@@ -73,7 +73,7 @@ CERTINEXT_REQUESTOR_MOBILE=0000000000
 | `CERTINEXT_ACCOUNT_NUMBER` | Yes | Your CERTInext account number (numeric string) |
 | `CERTINEXT_GROUP_NUMBER` | No | Group number for order placement, filtering, and `GetProductDetails`. Required on some sandbox accounts for `GetProductDetails` to return a non-empty list. |
 | `CERTINEXT_ORG_NUMBER` | No | Organization number for OV/EV order placement |
-| `CERTINEXT_PRODUCT_CODE` | Yes | Numeric product code for the target account. **This is per-account** — obtain the correct code for your account by calling `GetProductDetails` (or `make probe-products`). Default shown is for sandbox account `9374221333`. |
+| `CERTINEXT_PRODUCT_CODE` | Yes | Numeric product code for the target account. **This is per-account** — obtain the correct code for your account by calling `GetProductDetails` (or `just probe-products`). Default shown is for sandbox account `9374221333`. |
 | `CERTINEXT_REQUESTOR_EMAIL` | Yes | Email submitted with test orders — must be registered in the account |
 | `CERTINEXT_REQUESTOR_NAME` | Yes | Name submitted with test orders |
 | `CERTINEXT_REQUESTOR_MOBILE` | No | Mobile number submitted with test orders |
@@ -258,16 +258,16 @@ never transmitted over the wire — only the derived `authKey` hash is sent.
 
 When setting up a brand-new CERTInext sandbox account to run integration tests:
 
-1. **Discover valid product codes** — run `make probe-products` from the repo root.  This places
+1. **Discover valid product codes** — run `just probe-products` from the repo root.  This places
    `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which ones your
    account accepts.  Use the first DV SSL code that returns a `requestNumber` as your
    `CERTINEXT_PRODUCT_CODE`.
 
-2. **Set `CERTINEXT_GROUP_NUMBER`** — if `make probe-products` or `GetProductDetails` returns no
+2. **Set `CERTINEXT_GROUP_NUMBER`** — if `just probe-products` or `GetProductDetails` returns no
    products, find your group number in the CERTInext portal under **Delegation → Groups** and add
    it to `~/.env_certinext`.  The `GetProductDetails` API requires it on some accounts.
 
-3. **Run connectivity tests first** — `make integration-test` or
+3. **Run connectivity tests first** — `just integration-test` or
    `dotnet test CERTInext.IntegrationTests/ -v normal`.  The `ConnectivityTests` class verifies
    credentials.  The `LifecycleTests` class places real orders — it can be run even before any
    orders exist.
@@ -293,10 +293,10 @@ When setting up a brand-new CERTInext sandbox account to run integration tests:
 | All tests skipped | Missing or empty `~/.env_certinext` | Create the file with `CERTINEXT_API_URL` and `CERTINEXT_ACCESS_KEY` |
 | `Ping` fails with 401/403 | Wrong `CERTINEXT_ACCESS_KEY` | Regenerate the key in the CERTInext portal under Integrations → APIs |
 | `Ping` fails with timeout or 404 | Wrong `CERTINEXT_API_URL` | Verify the URL matches your account region (see API URL table above) |
-| `Enroll` fails with "Invalid Product Code" (EMS-1162) | Wrong `CERTINEXT_PRODUCT_CODE` | Run `make probe-products` to discover the codes provisioned for your account |
+| `Enroll` fails with "Invalid Product Code" (EMS-1162) | Wrong `CERTINEXT_PRODUCT_CODE` | Run `just probe-products` to discover the codes provisioned for your account |
 | `GetProductDetails` returns empty list | `CERTINEXT_GROUP_NUMBER` not set | Add your group number to `~/.env_certinext`; some accounts require it for `GetProductDetails` to return results |
 | `Enroll` fails with "Additional Information cannot be empty" (EMS-918) | Old plugin version missing `additionalInformation.remarks` | Rebuild and redeploy the plugin — the `remarks` field is now populated automatically |
 | `Enroll` fails with "Invalid Organization Number" (EMS-1073) | OV/EV product code selected with an unregistered org | Use a DV SSL product code for automated tests, or register and approve your org in CERTInext first |
 | Revoke step skips with "not GENERATED" | Sandbox DV SSL order requires domain validation and RA approval | Expected behavior for public DV SSL in sandbox — log in to the CERTInext portal and approve the pending order, then re-run; or use a private PKI product that auto-approves |
 | `OrderReportTests` all skip | Fresh account with no orders | Run `LifecycleTests` first to place at least one order |
-| `ProductTests` asserts configured product code is not found | `CERTINEXT_PRODUCT_CODE` set to a code not provisioned for the account | Run `make probe-products` and update `CERTINEXT_PRODUCT_CODE` with a valid code |
+| `ProductTests` asserts configured product code is not found | `CERTINEXT_PRODUCT_CODE` set to a code not provisioned for the account | Run `just probe-products` and update `CERTINEXT_PRODUCT_CODE` with a valid code |

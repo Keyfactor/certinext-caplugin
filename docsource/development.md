@@ -5,8 +5,9 @@ This document covers local development, testing, and live API smoke-testing for 
 ## Prerequisites
 
 - .NET SDK 8.0 or later
-- `python3` (used for HMAC computation in Makefile API targets)
-- `jq` (used for JSON pretty-printing in Makefile API targets)
+- [`just`](https://github.com/casey/just) (command runner used for build/test/API targets)
+- `python3` (used for HMAC computation in justfile API targets)
+- `jq` (used for JSON pretty-printing in justfile API targets)
 - `~/.env_certinext` populated with credentials (see below)
 
 ## Credentials File
@@ -33,12 +34,12 @@ CERTINEXT_SIGNER_IP=
 
 | Target | Command | Description |
 |---|---|---|
-| Build | `make build` | `dotnet build` the solution |
-| Unit tests | `make test` | Run all mock/unit tests |
-| Integration tests | `make integration-test` | Run live API tests (requires `~/.env_certinext`; tests skip automatically if credentials are absent) |
-| Coverage report (terminal) | `make coverage` | Run tests with XPlat coverage and print summary |
-| Coverage report (browser) | `make coverage-report` | Same as `coverage`, then opens HTML report in the default browser |
-| Clean | `make clean` | `dotnet clean` and wipe coverage output directories |
+| Build | `just build` | `dotnet build` the solution |
+| Unit tests | `just test` | Run all mock/unit tests |
+| Integration tests | `just integration-test` | Run live API tests (requires `~/.env_certinext`; tests skip automatically if credentials are absent) |
+| Coverage report (terminal) | `just coverage` | Run tests with XPlat coverage and print summary |
+| Coverage report (browser) | `just coverage-report` | Same as `coverage`, then opens HTML report in the default browser |
+| Clean | `just clean` | `dotnet clean` and wipe coverage output directories |
 
 ### Build variants — `DcvSupport` (DCV vs no-DCV)
 
@@ -49,7 +50,7 @@ the host (see issue 0003).
 
 | Build | Command | IAnyCAPlugin | DCV | Target gateway host |
 |---|---|---|---|---|
-| **No-DCV (default)** | `make build` / `dotnet build` | `3.2.0` (stable) | fenced out (`#if SUPPORTS_DCV`) | AnyCA Gateway **25.5.x** (IAnyCAPlugin 3.2.0) |
+| **No-DCV (default)** | `just build` / `dotnet build` | `3.2.0` (stable) | fenced out (`#if SUPPORTS_DCV`) | AnyCA Gateway **25.5.x** (IAnyCAPlugin 3.2.0) |
 | **DCV** | `dotnet build -p:DcvSupport=true` | `3.3.0-PRERELEASE` | enabled | AnyCA Gateway **26.x** (IAnyCAPlugin ≥ 3.3) |
 
 The **default is the no-DCV / 3.2.0 build** — it is the GA artifact that loads and persists on the
@@ -65,31 +66,31 @@ All API targets source `~/.env_certinext`, compute the HMAC `authKey` (`SHA256(a
 **Start here when setting up a new environment:**
 
 ```bash
-make ping       # should return {"meta": {"status": "1", ...}}
-make products   # lists product codes for your account
-make orders     # lists recent orders — useful to find an ORDER_NUMBER to test with
+just ping       # should return {"meta": {"status": "1", ...}}
+just products   # lists product codes for your account
+just orders     # lists recent orders — useful to find an ORDER_NUMBER to test with
 ```
 
 | Target | Command | Description |
 |---|---|---|
-| Verify credentials | `make ping` | `ValidateCredentials` — confirms the access key and account number are accepted |
-| List products | `make products` | `GetProductDetails` — shows all certificate product codes available to your group |
-| List orders | `make orders [PAGE=1] [PAGE_SIZE=10]` | `GetOrderReport` — paginated order listing |
-| Track an order | `make get-order ORDER_NUMBER=NNNNN` | `TrackOrder` — returns current status for a specific order |
-| Download a certificate | `make get-cert ORDER_NUMBER=NNNNN` | `GetCertificate` — returns the PEM chain for a specific order |
-| Place a draft order | `make generate-order DOMAIN=example.com [CSR_FILE=req.pem] [VALIDITY=1] [SAVE_AND_HOLD=1]` | `GenerateOrderSSL` — places a new order; `SAVE_AND_HOLD=1` (default) creates a draft |
-| Revoke an order | `make revoke-order ORDER_NUMBER=NNNNN [REASON_ID=1]` | `RevokeOrder` — revokes an issued certificate |
-| Attach a CSR to a draft | `make submit-csr ORDER_NUMBER=NNNNN CSR_FILE=req.pem` | `SubmitCSR` — attaches a CSR to a saveAndHold draft order |
-| Discover product codes | `make probe-products` | Places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which ones the account accepts |
-| Cancel one pending order | `scripts/reject-order.sh ORDER_NUMBER=NNNNN` | Shell script — cancels a single pending order (not a `make` target) |
-| Cancel all pending orders | `scripts/reject-all-pending.sh` | Shell script — dry-run by default; set `REJECT_ALL_PENDING=1` to fire (not a `make` target) |
-| Show API target help | `make api-help` | Prints usage for all API targets |
+| Verify credentials | `just ping` | `ValidateCredentials` — confirms the access key and account number are accepted |
+| List products | `just products` | `GetProductDetails` — shows all certificate product codes available to your group |
+| List orders | `just PAGE=1 PAGE_SIZE=10 orders` | `GetOrderReport` — paginated order listing |
+| Track an order | `just ORDER_NUMBER=NNNNN get-order` | `TrackOrder` — returns current status for a specific order |
+| Download a certificate | `just ORDER_NUMBER=NNNNN get-cert` | `GetCertificate` — returns the PEM chain for a specific order |
+| Place a draft order | `just DOMAIN=example.com [CSR_FILE=req.pem] [VALIDITY=1] [SAVE_AND_HOLD=1] generate-order` | `GenerateOrderSSL` — places a new order; `SAVE_AND_HOLD=1` (default) creates a draft |
+| Revoke an order | `just ORDER_NUMBER=NNNNN [REASON_ID=1] revoke-order` | `RevokeOrder` — revokes an issued certificate |
+| Attach a CSR to a draft | `just ORDER_NUMBER=NNNNN CSR_FILE=req.pem submit-csr` | `SubmitCSR` — attaches a CSR to a saveAndHold draft order |
+| Discover product codes | `just probe-products` | Places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which ones the account accepts |
+| Cancel one pending order | `scripts/reject-order.sh ORDER_NUMBER=NNNNN` | Shell script — cancels a single pending order (not a `just` target) |
+| Cancel all pending orders | `scripts/reject-all-pending.sh` | Shell script — dry-run by default; set `REJECT_ALL_PENDING=1` to fire (not a `just` target) |
+| Show API target help | `just api-help` | Prints usage for all API targets |
 
 > Note: `TrackOrder` and `GetCertificate` require a formal `orderNumber`, which is only assigned after a draft order is submitted and approved. Draft orders (created with `saveAndHold:"1"`) have a `requestNumber` but no `orderNumber` until that point.
 
 ## Draft Orders (saveAndHold)
 
-Setting `SAVE_AND_HOLD=1` (the default) on `make generate-order` places an order in "On Hold" state without triggering billing, DCV, or CA issuance. This is useful for validating that an order payload is accepted by the API.
+Setting `SAVE_AND_HOLD=1` (the default) on `just generate-order` places an order in "On Hold" state without triggering billing, DCV, or CA issuance. This is useful for validating that an order payload is accepted by the API.
 
 Draft orders behave as follows:
 
@@ -107,7 +108,7 @@ The `CERTInext.IntegrationTests/` project contains live API tests that run again
 Run them with:
 
 ```bash
-make integration-test
+just integration-test
 ```
 
 See `CERTInext.IntegrationTests/INTEGRATION_TESTING.md` for a full description of each test, what it validates, and the expected API state.

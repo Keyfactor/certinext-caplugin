@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // At http://www.apache.org/licenses/LICENSE-2.0
 
@@ -65,5 +65,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         /// <summary>The validator this factory returns; exposed for assertions in tests.</summary>
         public IDomainValidator PrimaryValidator => _validator;
+    }
+
+    /// <summary>
+    /// Factory that resolves a different validator per exact <c>domain</c> lookup key, keyed
+    /// case-insensitively. Used by CNAME-delegation tests (issue 0006) to prove that the
+    /// terminal (resolved) name — not the raw enrollment domain — is what gets used to look up
+    /// the DNS provider plugin.
+    /// </summary>
+    internal sealed class KeyedDomainValidatorFactory : IDomainValidatorFactory
+    {
+        private readonly Dictionary<string, IDomainValidator> _validatorsByDomain;
+
+        public KeyedDomainValidatorFactory(Dictionary<string, IDomainValidator> validatorsByDomain)
+        {
+            _validatorsByDomain = new Dictionary<string, IDomainValidator>(
+                validatorsByDomain, System.StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>Every lookup key this factory was asked to resolve, in call order.</summary>
+        public List<string> RequestedKeys { get; } = new();
+
+        public IDomainValidator ResolveDomainValidator(string domain, string validationType)
+        {
+            RequestedKeys.Add(domain);
+            return _validatorsByDomain.TryGetValue(domain, out var validator) ? validator : null;
+        }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -358,6 +358,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = Constants.Dcv.DefaultSyncMaxPerPass,
                     Type = "Number"
+                },
+                [Constants.Config.DcvFollowCnameDelegation] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: When true, and the DNS TXT challenge hostname for a domain is delegated via " +
+                               "CNAME to a different DNS zone (e.g. a validation subdomain CNAMEd to a dedicated zone, " +
+                               "a common pattern for keeping automation credentials out of the production zone), the " +
+                               $"plugin follows the CNAME chain (bounded to {Constants.Dcv.MaxCnameDepth} hops, with loop " +
+                               "detection) and both publishes the TXT record and resolves the DNS provider plugin against " +
+                               "the terminal (resolved) name instead of the raw challenge hostname. Off by default so " +
+                               "existing non-delegated deployments are unaffected. Default: false.",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
                 }
             };
         }
@@ -745,6 +758,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         [JsonPropertyName("DcvSyncMaxPerPass")]
         public int DcvSyncMaxPerPass { get; set; } = Constants.Dcv.DefaultSyncMaxPerPass;
+
+        /// <summary>
+        /// When true, follows CNAME delegation for the DCV challenge hostname (bounded to
+        /// <see cref="Constants.Dcv.MaxCnameDepth"/> hops, with loop detection), using the
+        /// resolved terminal name for both the TXT record target and the DNS-provider-plugin
+        /// lookup key (issue 0006). Off by default — existing non-delegated deployments are
+        /// unaffected.
+        /// </summary>
+        [JsonPropertyName("DcvFollowCnameDelegation")]
+        public bool DcvFollowCnameDelegation { get; set; } = false;
 
         /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the
