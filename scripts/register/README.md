@@ -11,7 +11,7 @@ vendor API. Shared auth/host logic lives in [`../lib/command-auth.sh`](../lib/co
 
 ## Stages
 
-| Stage | Script | `make` target | Side | Notes |
+| Stage | Script | `just` target | Side | Notes |
 |------:|--------|---------------|------|-------|
 | 01 | `01-gateway-profiles.sh` | `register-profiles` | Gateway | one cert profile per product. **Verified.** |
 | 02 | `02-gateway-ca-config.sh` | `register-ca-config` | Gateway | CAConnection + Templates[]. ⚠️ touches CA config — opt-in. |
@@ -77,7 +77,7 @@ The **typical** path is OAuth2 client_credentials against `/KeyfactorAPI`:
 export GATEWAY_HOST=<gw-host>  COMMAND_HOST=<cmd-host>
 export TOKEN_URL=https://<auth>/application/o/token/
 export OIDC_CLIENT_ID=...  OIDC_CLIENT_SECRET=...
-make register-profiles            # client_creds used automatically (no cookie/token set)
+just register-profiles            # client_creds used automatically (no cookie/token set)
 ```
 
 > **Cookie auth (e.g. the "HV3" lab, intdev01.lab.kfpki.com)** — used when ops
@@ -90,12 +90,12 @@ make register-profiles            # client_creds used automatically (no cookie/t
 > # gateway side
 > export GATEWAY_HOST=intdev01.lab.kfpki.com GATEWAY_BASE_PATH=/certinext-0
 > export GATEWAY_COOKIE="$(tr -d '\r\n' < ~/.certinext_gw_cookie)"
-> make register-profiles            # CHECK=1 to verify, DRY_RUN=1 to preview
+> just register-profiles            # CHECK=1 to verify, DRY_RUN=1 to preview
 >
 > # command side (after templates imported)
 > export COMMAND_HOST=intdev01.lab.kfpki.com CONFIGURATION_TENANT=certinext-0
 > export COMMAND_COOKIE="$(tr -d '\r\n' < ~/.certinext_kfcportal_cookie)"
-> make register-enrollment          # stage 06: patterns + KeyRetention=Indefinite
+> just register-enrollment          # stage 06: patterns + KeyRetention=Indefinite
 > ```
 
 Per-stage env knobs are documented in each script's header comment.
@@ -126,7 +126,7 @@ product to a certificate profile so enrollment can resolve a CA. Two things bite
 export GATEWAY_LOGICAL_NAME=CertiNext           # the live CA's LogicalName
 export CERTINEXT_SIGNER_PLACE=Gateway
 export PRODUCT_CODE_MAP_JSON='{"DV SSL":"842","OV SSL":"846", ...}'
-make register-ca-config
+just register-ca-config
 ```
 
 ## Stage 06 — Command EnrollmentPatterns schema (verified 2026-06-09)
