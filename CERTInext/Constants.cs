@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -69,6 +69,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // on a later pass (the per-minute incremental cadence keeps recent orders moving).
             public const string DcvSyncMaxOrderAgeHours = "DcvSyncMaxOrderAgeHours";
             public const string DcvSyncMaxPerPass = "DcvSyncMaxPerPass";
+
+            // When true, follows CNAME delegation for the DCV challenge hostname before staging
+            // the TXT record / resolving the DNS provider plugin (issue 0006). Off by default.
+            public const string DcvFollowCnameDelegation = "DcvFollowCnameDelegation";
 
             // Environment variable that overrides DcvTimeoutMinutes when set.
             public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";
@@ -295,6 +299,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // A few seconds is enough for the staged TXT to be visible to CERTInext's resolver;
             // if a verify lands too early, the order simply stays pending and is retried next pass.
             public const int SyncPropagationDelaySeconds = 3;
+
+            // Maximum number of CNAME hops followed when DcvFollowCnameDelegation is enabled
+            // (issue 0006). Bounds worst-case resolution time and backstops the loop-detection
+            // check against pathological/misconfigured zones.
+            public const int MaxCnameDepth = 10;
         }
 
         // Legacy string revocation reasons — retained so StatusMapper still compiles.

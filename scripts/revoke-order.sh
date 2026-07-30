@@ -16,5 +16,5 @@ read -r ts txn authKey <<< "$(certinext_meta)"
 echo "RevokeOrder  orderNumber=$ORDER_NUMBER  revokeReasonId=$REASON_ID  ts=$ts  txn=$txn"
 curl -s -X POST "$CERTINEXT_API_URL/RevokeOrder" \
      -H "Content-Type: application/json" \
-     -d "{\"meta\":{\"ver\":\"1.0\",\"ts\":\"$ts\",\"txn\":\"$txn\",\"accountNumber\":\"$CERTINEXT_ACCOUNT_NUMBER\",\"authKey\":\"$authKey\"},\"revocationDetails\":{\"orderNumber\":\"$ORDER_NUMBER\",\"requestorEmail\":\"$CERTINEXT_REQUESTOR_EMAIL\",\"revokeReasonId\":\"$REASON_ID\",\"revokeRemarks\":\"Revoked via Makefile smoke test.\"}}" \
+     -d "{\"meta\":{\"ver\":\"1.0\",\"ts\":\"$ts\",\"txn\":\"$txn\",\"accountNumber\":\"$CERTINEXT_ACCOUNT_NUMBER\",\"authKey\":\"$authKey\"},\"revocationDetails\":{\"orderNumber\":\"$ORDER_NUMBER\",\"requestorEmail\":\"$CERTINEXT_REQUESTOR_EMAIL\",\"revokeReasonId\":\"$REASON_ID\",\"revokeRemarks\":\"Revoked via justfile smoke test.\"}}" \
 | jq .
