@@ -37,3 +37,6 @@ terraform/terraform.tfvars
 # Analysis / scratch — never commit
 analysis/
 
+# Local-only working notes — never commit
+DCV_BUILD_SUPPORT.md
+

@@ -70,10 +70,10 @@ The file is parsed line by line:
 dotnet test CERTInext.IntegrationTests/ --verbosity normal
 ```
 
-### Using the Makefile
+### Using the justfile
 
 ```sh
-make integration-test
+just integration-test
 ```
 
 ### From the solution root (all tests including unit tests)
@@ -160,4 +160,4 @@ never transmitted over the wire — only the derived `authKey` hash is sent.
 | All tests skipped | Missing or empty `~/.env_certinext` | Create the file with required variables |
 | `Ping` fails with 401 | Wrong `CERTINEXT_ACCESS_KEY` | Regenerate the key in the CERTInext portal |
 | `Ping` fails with timeout | Wrong `CERTINEXT_API_URL` | Verify the URL matches your account region |
-| `GetOrderReport` returns 0 orders | Account has no orders | Place a test order first (see `make generate-order` in the project Makefile) |
+| `GetOrderReport` returns 0 orders | Account has no orders | Place a test order first (see `just generate-order` in the project justfile) |

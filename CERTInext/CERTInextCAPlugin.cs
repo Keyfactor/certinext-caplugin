@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Keyfactor.AnyGateway.Extensions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
+using Keyfactor.Extensions.CAPlugin.CERTInext.Dcv;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.Logging;
 using Keyfactor.PKI.Enums.EJBCA;
@@ -82,6 +83,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // cycles, or a sync overlapping with a GetSingleRecord refresh, must not both try
         // to stage TXT records for the same order. The value byte is unused; this is a set.
         private readonly ConcurrentDictionary<string, byte> _dcvInFlight = new();
+
+#if SUPPORTS_DCV
+        // Issue 0006: resolves CNAME delegation for the DCV challenge hostname when
+        // DcvFollowCnameDelegation is enabled. Only ever referenced from PerformDcvIfNeededAsync,
+        // which is itself SUPPORTS_DCV-only, so this stays fenced alongside it. Defaults to the
+        // real DNS-backed resolver; test constructors may override it with a fake.
+        private ICnameResolver _cnameResolver = new CnameResolver();
+#endif
 
         // ---------------------------------------------------------------------------
         // Constructors
@@ -153,12 +162,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <c>[InternalsVisibleTo]</c>.  See issue #7.
         /// </summary>
 #if SUPPORTS_DCV
-        internal CERTInextCAPlugin(ICERTInextClient client, IDomainValidatorFactory domainValidatorFactory, CERTInextConfig config = null)
+        internal CERTInextCAPlugin(
+            ICERTInextClient client,
+            IDomainValidatorFactory domainValidatorFactory,
+            CERTInextConfig config = null,
+            ICnameResolver cnameResolver = null)
         {
             _client = client;
             _clientWasInjected = true;
             _domainValidatorFactory = domainValidatorFactory;
             _config = config ?? new CERTInextConfig();
+            if (cnameResolver != null)
+                _cnameResolver = cnameResolver;
         }
 #endif
 
@@ -1094,6 +1109,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 ProfileId = ep.ProfileId,
                 Csr = csr,
+                ValidityYears = ep.ValidityYears > 0 ? ep.ValidityYears : (int?)null,
                 ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                 Subject = subject,
                 Sans = BuildSanList(san),
@@ -1168,11 +1184,115 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                 }
             }
+            else if (_domainValidatorFactory == null && _config.DcvEnabled && !string.IsNullOrEmpty(orderNumber))
+            {
+                // Issue 0007: DCV is enabled but no IDomainValidatorFactory was ever injected
+                // (see the startup warning in Initialize), so the plugin cannot stage the DNS
+                // TXT record automatically — the order will simply sit at EXTERNALVALIDATION
+                // until an operator notices. Best-effort surface the exact record they need to
+                // publish manually via EnrollmentContext/StatusMessage so Command's UI shows it,
+                // instead of leaving them with only a log line to go on.
+                var guidance = await TryBuildManualDcvGuidanceAsync(orderNumber, CancellationToken.None);
+                if (guidance.HasValue)
+                {
+                    var pendingResult = BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+                    pendingResult.StatusMessage = $"{pendingResult.StatusMessage} {guidance.Value.message}";
+                    foreach (var kvp in guidance.Value.context)
+                        pendingResult.EnrollmentContext[kvp.Key] = kvp.Value;
+
+                    _logger.MethodExit(LogLevel.Debug);
+                    return pendingResult;
+                }
+            }
 #endif
 
             _logger.MethodExit(LogLevel.Debug);
             return BuildEnrollmentResult(enrollResp, ep.AutoApprove);
         }
+
+#if SUPPORTS_DCV
+        /// <summary>
+        /// Best-effort helper for issue 0007: when DCV is enabled but no
+        /// <see cref="IDomainValidatorFactory"/> has been injected, the plugin cannot stage the
+        /// DNS TXT record automatically. Rather than leave the operator with only a log line,
+        /// this builds the exact TXT record name(s) and expected value(s) they need to publish
+        /// by hand, reusing the same TrackOrder/GetDcv calls <see cref="PerformDcvIfNeededAsync"/>
+        /// would have used — without attempting to stage/verify anything itself (there's no
+        /// validator to do that with).
+        ///
+        /// Returns <c>null</c> when no pending DNS-TXT domains could be identified (e.g. the
+        /// order isn't yet DCV-eligible) or the lookup itself failed — in that case behavior is
+        /// unchanged from before this fix: the caller falls back to the original pending message
+        /// and the operator has to consult logs, same as before.
+        /// </summary>
+        private async Task<(string message, Dictionary<string, string> context)?> TryBuildManualDcvGuidanceAsync(
+            string orderNumber, CancellationToken ct)
+        {
+            try
+            {
+                var track = await _client.TrackOrderAsync(orderNumber, ct);
+                var domainVerification = track.OrderDetails?.DomainVerification;
+                if (domainVerification == null)
+                    return null;
+
+                var pendingDomains = domainVerification.GetDomainEntries()
+                    .Where(kvp =>
+                    {
+                        if (!string.Equals(kvp.Value?.DcvStatus, Constants.Dcv.StatusPending, StringComparison.Ordinal))
+                            return false;
+                        string method = kvp.Value?.DcvMethod ?? string.Empty;
+                        return string.IsNullOrEmpty(method)
+                            || string.Equals(method, Constants.Dcv.MethodDnsTxt, StringComparison.Ordinal)
+                            || string.Equals(method, Constants.Dcv.MethodDnsTxtLabel, StringComparison.OrdinalIgnoreCase);
+                    })
+                    .ToList();
+
+                if (pendingDomains.Count == 0)
+                    return null;
+
+                string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
+                    ? Constants.Dcv.DefaultTxtRecordTemplate
+                    : _config.DcvTxtRecordTemplate;
+
+                var context = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (domain, _) in pendingDomains)
+                {
+                    try
+                    {
+                        var dcvResp = await _client.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
+                        string token = dcvResp?.DcvDetails?.Token;
+                        if (!string.IsNullOrWhiteSpace(token))
+                            context[string.Format(template, domain)] = token;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Could not retrieve DCV token while building manual-publish guidance. " +
+                            "OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                    }
+                }
+
+                if (context.Count == 0)
+                    return null;
+
+                string message =
+                    "DCV is enabled but no DNS provider plugin is configured on this gateway, so the " +
+                    "required DNS TXT record(s) could not be published automatically. Publish the " +
+                    "following record(s) manually to complete validation: " +
+                    string.Join("; ", context.Select(kvp => $"{kvp.Key} = {kvp.Value}")) +
+                    ". The certificate will be issued once the record(s) resolve and the order is " +
+                    "picked up by a later synchronization.";
+
+                return (message, context);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to build manual DCV guidance for order {OrderNumber}.", orderNumber);
+                return null;
+            }
+        }
+#endif
 
         /// <summary>
         /// Handles Renew and RenewOrReissue enrollment flows.
@@ -1635,10 +1755,46 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     : _config.DcvTxtRecordTemplate;
                 string hostname = string.Format(template, domain);
 
-                var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
+                // Issue 0006: when the operator has delegated the challenge subdomain to a
+                // separate validation zone via CNAME (a common pattern to keep automation
+                // credentials out of the production zone), follow that delegation to the
+                // terminal name so both the TXT record target and the DNS-provider lookup key
+                // route to the zone that actually owns the record. Off by default — when
+                // DcvFollowCnameDelegation is false, hostname/lookup key are unchanged from
+                // today (byte-for-byte identical behavior for existing, non-delegated deployments).
+                string validatorLookupKey = domain;
+                if (_config.DcvFollowCnameDelegation)
+                {
+                    string terminalName;
+                    try
+                    {
+                        terminalName = await _cnameResolver.ResolveTerminalNameAsync(hostname, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "CNAME delegation resolution failed for DCV challenge hostname '{Hostname}' " +
+                            "(order {OrderNumber}, domain {Domain}).",
+                            hostname, orderNumber, domain);
+                        throw;
+                    }
+
+                    if (!string.Equals(terminalName, hostname, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation(
+                            "DCV CNAME delegation followed. OrderNumber={OrderNumber}, Domain={Domain}, " +
+                            "ChallengeHostname={Hostname}, ResolvedTerminal={Terminal}",
+                            orderNumber, domain, hostname, terminalName);
+                    }
+
+                    hostname = terminalName;
+                    validatorLookupKey = terminalName;
+                }
+
+                var validator = DomainValidatorFactory.ResolveDomainValidator(validatorLookupKey, "dns-01");
                 if (validator == null)
                     throw new InvalidOperationException(
-                        $"No DNS provider plugin is configured for domain '{domain}'. " +
+                        $"No DNS provider plugin is configured for domain '{validatorLookupKey}'. " +
                         "Ensure the appropriate DNS provider plugin is deployed and configured on the gateway.");
 
                 _logger.LogInformation(

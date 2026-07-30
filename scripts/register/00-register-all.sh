@@ -5,9 +5,9 @@
 # runs them in sequence, skipping any stage whose script does not yet exist
 # (stages 02-06 are added incrementally) or whose SKIP_<NN> flag is set to 1.
 #
-#   make register
-#   SKIP_03=1 make register      # skip claims
-#   DRY_RUN=1 make register      # forwarded to every stage
+#   just register
+#   SKIP_03=1 just register      # skip claims
+#   DRY_RUN=1 just register      # forwarded to every stage
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

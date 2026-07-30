@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -569,6 +569,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
 
         [JsonPropertyName("csr")]
         public string Csr { get; set; }
+
+        /// <summary>
+        /// Explicit subscription validity in years (1, 2, or 3), sourced from the
+        /// <c>ValidityYears</c> template enrollment parameter. Takes precedence over
+        /// <see cref="ValidityDays"/> when set. See issue 0005.
+        /// </summary>
+        [JsonPropertyName("validityYears")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? ValidityYears { get; set; }
 
         [JsonPropertyName("validityDays")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

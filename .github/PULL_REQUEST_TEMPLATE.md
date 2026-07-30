@@ -10,9 +10,9 @@
 
 <!-- How was this validated? Check all that apply. -->
 
-- [ ] `make test` passes (unit tests)
-- [ ] `make integration-test` passes (requires `~/.env_certinext`)
-- [ ] `make coverage` shows no coverage regression
+- [ ] `just test` passes (unit tests)
+- [ ] `just integration-test` passes (requires `~/.env_certinext`)
+- [ ] `just coverage` shows no coverage regression
 - [ ] Terraform changes validated with `terraform plan`
 - [ ] Tested only docs/config — no runtime changes
 

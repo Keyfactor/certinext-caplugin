@@ -27,5 +27,5 @@ curl -s -X POST "$CERTINEXT_V2_API_URL/api/certinext/v2/ssl-certificates/$ORDER_
      -H "Authorization: Bearer $CERTINEXT_V2_TOKEN" \
      -H "Content-Type: application/json" \
      -H "Idempotency-Key: $idempotency_key" \
-     -d "$(jq -n --arg reason "$REASON" '{reason:$reason,note:"Revoked via Makefile smoke test."}')" \
+     -d "$(jq -n --arg reason "$REASON" '{reason:$reason,note:"Revoked via justfile smoke test."}')" \
 | jq .

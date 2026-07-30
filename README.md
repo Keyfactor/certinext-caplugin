@@ -50,7 +50,7 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
 
 ## Compatibility
 
-The CERTInext AnyCA Gateway REST plugin is compatible with the Keyfactor AnyCA Gateway REST 25.5.0 and later.
+The CERTInext AnyCA Gateway REST plugin is compatible with the Keyfactor AnyCA Gateway REST 26.2.0 and later.
 
 ## Support
 The CERTInext AnyCA Gateway REST plugin is supported by Keyfactor for Keyfactor customers. If you have a support issue, please open a support ticket via the Keyfactor Support Portal at https://support.keyfactor.com.
@@ -83,16 +83,15 @@ CERTInext operates three separate environments. Use the sandbox environment for 
 
 2. On the server hosting the AnyCA Gateway REST, download and unzip the latest [CERTInext AnyCA Gateway REST plugin](https://github.com/Keyfactor/certinext-caplugin/releases/latest) from GitHub.
 
-3. Copy the unzipped directory (usually called `net8.0` or `net10.0`) to the Extensions directory:
+3. Copy the unzipped directory (usually called `net10.0`) to the Extensions directory:
 
 
     ```shell
     Depending on your AnyCA Gateway REST version, copy the unzipped directory to one of the following locations:
-    Program Files\Keyfactor\AnyCA Gateway\AnyGatewayREST\net8.0\Extensions
     Program Files\Keyfactor\AnyCA Gateway\AnyGatewayREST\net10.0\Extensions
     ```
 
-    > The directory containing the CERTInext AnyCA Gateway REST plugin DLLs (`net8.0` or `net10.0`) can be named anything, as long as it is unique within the `Extensions` directory.
+    > The directory containing the CERTInext AnyCA Gateway REST plugin DLLs (`net10.0`) can be named anything, as long as it is unique within the `Extensions` directory.
 
 4. Restart the AnyCA Gateway REST service.
 
@@ -152,6 +151,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **DcvWaitForIssuanceSeconds** - OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV verifies for CERTInext to finish generating the certificate. CERTInext issuance is async — DCV may be verified but the cert PEM isn't yet available for download. Without this wait, Enroll() returns a pending result and the issued cert is picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60.
         * **DcvSyncMaxOrderAgeHours** - OPTIONAL: During synchronization, only pending DV orders younger than this many hours are eligible to be driven through DCV. This keeps a sync pass fast when there is a large backlog of old, never-completing pending orders (e.g. abandoned orders or domains outside the configured DNS provider's zone): they age out and are simply reported as pending rather than retried every pass. Recently-placed orders (the ones that legitimately deferred DCV) are always within the window and complete via the normal scan cadence. Set to 0 to disable the age filter (attempt DCV for all pending). Default: 24.
         * **DcvSyncMaxPerPass** - OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; remaining pending orders are reported as-is and picked up on a later pass (the per-minute incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: 50.
+        * **DcvFollowCnameDelegation** - OPTIONAL: When true, and the DNS TXT challenge hostname for a domain is delegated via CNAME to a different DNS zone (e.g. a validation subdomain CNAMEd to a dedicated zone, a common pattern for keeping automation credentials out of the production zone), the plugin follows the CNAME chain (bounded to 10 hops, with loop detection) and both publishes the TXT record and resolves the DNS provider plugin against the terminal (resolved) name instead of the raw challenge hostname. Off by default so existing non-delegated deployments are unaffected. Default: false.
 
 2. A Keyfactor Command certificate template maps an enrollment request to a specific CERTInext product. Create one template per CERTInext product that you want to make available to requesters.
 
@@ -275,7 +275,7 @@ CERTInext uses numeric product codes to identify certificate types. **Product co
 
 To retrieve the exact codes available to your account, call the `GetProductDetails` endpoint:
 - If you have a `GroupNumber` configured, include it in the request `productDetails` block — some accounts require this to return a non-empty list.
-- Use the `make get-product-details-group` Makefile target to retrieve products from the sandbox with `groupNumber` included.
+- Use the `just get-product-details-group` justfile target to retrieve products from the sandbox with `groupNumber` included.
 
 > Note: Product codes differ between the sandbox and production environments. Always verify the correct code before switching environments.
 

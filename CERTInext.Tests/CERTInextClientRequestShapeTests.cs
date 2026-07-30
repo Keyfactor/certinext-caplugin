@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -284,6 +284,42 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             req.ValidityDays = 730;                // 2 years
 
             await BuildClient(cfg).EnrollCertificateAsync(req);
+
+            CapturedOrderBody().GetProperty("subscriptionDetails")
+                .GetProperty("validity").GetString().Should().Be("2");
+        }
+
+        // -----------------------------------------------------------------------
+        // Issue 0005 — ValidityYears request-parameter reaches the order body and
+        // takes precedence over both ValidityDays and the connector default.
+        // -----------------------------------------------------------------------
+
+        [Fact]
+        public async Task ValidityYears_OnRequest_OverridesConnectorDefaultAndValidityDays()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.SubscriptionValidityYears = "1"; // connector default = 1 year
+
+            var req = BasicEnrollRequest();
+            req.ValidityDays = 730;  // would compute to 2 years if ValidityYears weren't set
+            req.ValidityYears = 3;   // explicit override — must win
+
+            await BuildClient(cfg).EnrollCertificateAsync(req);
+
+            CapturedOrderBody().GetProperty("subscriptionDetails")
+                .GetProperty("validity").GetString().Should().Be("3");
+        }
+
+        [Fact]
+        public async Task ValidityYears_Unset_FallsBackToValidityDaysThenConnectorDefault()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.SubscriptionValidityYears = "2";
+
+            // ValidityYears not set on the request — connector default must be used.
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
 
             CapturedOrderBody().GetProperty("subscriptionDetails")
                 .GetProperty("validity").GetString().Should().Be("2");
