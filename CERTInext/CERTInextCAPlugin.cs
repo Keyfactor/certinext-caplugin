@@ -573,10 +573,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             _logger.LogInformation(
                 "Enrollment attempt started. " +
-                "EnrollmentType={EnrollmentType}, Subject={Subject}, " +
+                "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
                 "ProfileId={ProfileId}, SANs={SANs}, " +
                 "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
-                enrollmentType, subject,
+                enrollmentType, requestFormat, subject,
                 ep.ProfileId, sanSummary,
                 ep.RequesterName, ep.RequesterEmail);
 
