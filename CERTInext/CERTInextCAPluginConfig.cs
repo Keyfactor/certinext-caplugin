@@ -5,9 +5,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions
 // and limitations under the License.
 
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 using Keyfactor.AnyGateway.Extensions;
+using Keyfactor.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext
 {
@@ -271,6 +274,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = true,
                     Type = "Boolean"
+                },
+                [Constants.Config.EnrollmentWaitSeconds] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Total seconds Enroll() polls CERTInext for the issued certificate " +
+                               "after submitting an order for a DV product (polled every " +
+                               $"{Constants.Polling.CertificatePollIntervalSeconds} seconds), so fast-issuing " +
+                               "orders return the certificate synchronously in the same enrollment call. " +
+                               "This is approximately the maximum time an enrollment call can occupy a " +
+                               "Keyfactor Command worker thread (a small internal grace margin applies) — " +
+                               "keep it under ~90 seconds. " +
+                               "OV/EV products never poll: CERTInext issues them asynchronously by design " +
+                               "(organization verification takes minutes and may be human-gated), so those " +
+                               "orders return pending and are completed by the next synchronization. " +
+                               "Set to 0 (or any negative value) to disable the poll entirely. " +
+                               $"Can also be set via the {Constants.Config.EnrollmentWaitSecondsEnvVar} environment " +
+                               "variable; the env var takes precedence when both are set. Default: 50.",
+                    Hidden = false,
+                    DefaultValue = Constants.EnrollmentWait.DefaultSeconds,
+                    Type = "Number"
                 },
                 [Constants.Config.DcvEnabled] = new PropertyConfigInfo
                 {
@@ -679,6 +701,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("IgnoreExpired")]
         public bool IgnoreExpired { get; set; } = false;
 
+        /// <summary>
+        /// Total seconds <c>Enroll()</c> polls <c>GetCertificate</c> after submitting an order
+        /// for a DV product, waiting for CERTInext to issue so the certificate can be returned
+        /// synchronously (mirrors the legacy Sectigo connector's pickup loop). Polled every
+        /// <see cref="Constants.Polling.CertificatePollIntervalSeconds"/> seconds. Set to 0 to
+        /// disable the poll entirely (the certificate is then picked up on the next
+        /// synchronization). Overridden by <c>CERTINEXT_ENROLLMENT_WAIT_SECONDS</c> when set.
+        /// Default: 50.
+        /// </summary>
+        [JsonPropertyName("EnrollmentWaitSeconds")]
+        public int EnrollmentWaitSeconds { get; set; } = Constants.EnrollmentWait.DefaultSeconds;
+
         [JsonPropertyName("PageSize")]
         public int PageSize { get; set; } = Constants.Api.DefaultPageSize;
 
@@ -769,41 +803,85 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("DcvFollowCnameDelegation")]
         public bool DcvFollowCnameDelegation { get; set; } = false;
 
+        private static readonly ILogger EffectiveConfigLogger = LogHandler.GetClassLogger<CERTInextConfig>();
+
+        // Tracks (envVar, rejected value) pairs already warned about so a misconfigured
+        // env var produces one audit-trail warning per distinct value per process, not one
+        // per enrollment/sync pass.
+        private static readonly ConcurrentDictionary<string, byte> WarnedInvalidEnvValues = new();
+
+        /// <summary>
+        /// Shared resolution for the numeric "GetEffective*" knobs: the environment variable
+        /// wins when set and parseable, then the configured field, then the compiled default.
+        /// <paramref name="zeroAllowed"/> distinguishes knobs where 0 is a meaningful
+        /// "disabled" value from knobs that require a positive value.
+        /// <paramref name="negativeMeansZero"/> makes negative values coerce to 0 rather
+        /// than being rejected — for the enrollment-wait knob, where "-1 to disable" is a
+        /// common operator convention and silently re-enabling the compiled default would be
+        /// the opposite of the operator's intent.
+        /// A set-but-invalid env var is rejected with a Warning (SOX change management /
+        /// SOC2 CC7.2: the override changes runtime control behavior, so silently ignoring
+        /// it would leave the deployed value unexplained in the audit trail).
+        /// </summary>
+        private static int GetEffectiveInt(string envVarName, int configured, int fallback,
+            bool zeroAllowed, bool negativeMeansZero = false)
+        {
+            bool Valid(int v) => zeroAllowed ? v >= 0 : v > 0;
+            int Normalize(int v) => negativeMeansZero && v < 0 ? 0 : v;
+
+            configured = Normalize(configured);
+            int effective = Valid(configured) ? configured : fallback;
+
+            var env = System.Environment.GetEnvironmentVariable(envVarName);
+            if (string.IsNullOrEmpty(env))
+                return effective;
+
+            if (int.TryParse(env, out int envVal))
+            {
+                envVal = Normalize(envVal);
+                if (Valid(envVal))
+                    return envVal;
+            }
+
+            if (WarnedInvalidEnvValues.TryAdd($"{envVarName}={env}", 0))
+            {
+                EffectiveConfigLogger.LogWarning(
+                    "Environment variable {EnvVar} is set to '{Value}', which is not a valid value for this " +
+                    "setting; falling back to the configured/default value {Effective}.",
+                    envVarName, env, effective);
+            }
+            return effective;
+        }
+
         /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the
         /// config field so operators can adjust the ceiling without a connector reconfiguration.
         /// </summary>
-        public int GetEffectiveDcvTimeoutMinutes()
-        {
-            var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvTimeoutMinutesEnvVar);
-            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal > 0)
-                return envVal;
-            return DcvTimeoutMinutes > 0 ? DcvTimeoutMinutes : 10;
-        }
+        public int GetEffectiveDcvTimeoutMinutes() =>
+            GetEffectiveInt(Constants.Config.DcvTimeoutMinutesEnvVar, DcvTimeoutMinutes, 10, zeroAllowed: false);
 
         /// <summary>
         /// Returns the effective wait for the DCV challenge to appear in TrackOrder, preferring
         /// the env var so operators can tune without re-saving the connector. A value of 0
         /// (either field or env var) disables the wait entirely.
         /// </summary>
-        public int GetEffectiveDcvWaitForChallengeSeconds()
-        {
-            var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvWaitForChallengeSecondsEnvVar);
-            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal >= 0)
-                return envVal;
-            return DcvWaitForChallengeSeconds >= 0 ? DcvWaitForChallengeSeconds : 60;
-        }
+        public int GetEffectiveDcvWaitForChallengeSeconds() =>
+            GetEffectiveInt(Constants.Config.DcvWaitForChallengeSecondsEnvVar, DcvWaitForChallengeSeconds, 60, zeroAllowed: true);
 
         /// <summary>
         /// Returns the effective post-DCV wait for cert issuance, preferring the env var.
         /// A value of 0 disables the wait.
         /// </summary>
-        public int GetEffectiveDcvWaitForIssuanceSeconds()
-        {
-            var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvWaitForIssuanceSecondsEnvVar);
-            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal >= 0)
-                return envVal;
-            return DcvWaitForIssuanceSeconds >= 0 ? DcvWaitForIssuanceSeconds : 60;
-        }
+        public int GetEffectiveDcvWaitForIssuanceSeconds() =>
+            GetEffectiveInt(Constants.Config.DcvWaitForIssuanceSecondsEnvVar, DcvWaitForIssuanceSeconds, 60, zeroAllowed: true);
+
+        /// <summary>
+        /// Returns the effective synchronous-enrollment-wait total budget in seconds,
+        /// preferring the env var so operators can tune without re-saving the connector.
+        /// 0 (or any negative value) disables the poll.
+        /// </summary>
+        public int GetEffectiveEnrollmentWaitSeconds() =>
+            GetEffectiveInt(Constants.Config.EnrollmentWaitSecondsEnvVar, EnrollmentWaitSeconds, Constants.EnrollmentWait.DefaultSeconds,
+                zeroAllowed: true, negativeMeansZero: true);
     }
 }
