@@ -1182,13 +1182,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             // but the cert PEM isn't immediately available.  Without this poll, Enroll
                             // returns a pending result and the cert is picked up on the next sync cycle,
                             // which is undesirable when the whole thing completes in under a minute.
-                            // Fixed 3-second poll interval: the post-DCV issuance step typically
-                            // completes within 5–15s, so a slower cadence would push typical-case
-                            // latency toward the budget ceiling. Decoupled from
-                            // DcvPropagationDelaySeconds (a DNS concern) so admins tuning DNS
+                            // Fixed poll interval (Constants.Polling.CertificatePollIntervalSeconds,
+                            // shared with the synchronous enrollment-wait poll): the post-DCV
+                            // issuance step typically completes within 5–15s, so a slower cadence
+                            // would push typical-case latency toward the budget ceiling. Decoupled
+                            // from DcvPropagationDelaySeconds (a DNS concern) so admins tuning DNS
                             // settings don't accidentally make this polling chunky.
                             var postDcv = await WaitForIssuanceAsync(
-                                orderNumber, _config.GetEffectiveDcvWaitForIssuanceSeconds(), 3, "PostDcv", dcvCts.Token);
+                                orderNumber, _config.GetEffectiveDcvWaitForIssuanceSeconds(),
+                                Constants.Polling.CertificatePollIntervalSeconds, "PostDcv", dcvCts.Token);
                             // Only a genuine terminal outcome ends the enroll call here. A GENERATED
                             // result without a PEM (a transient download failure during the wait)
                             // must fall through to the pending path so a later sync refetches the
@@ -1589,36 +1591,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return pendingResult;
             }
 
-            int attempts = _config.GetEffectiveEnrollmentWaitAttempts();
-            int delaySeconds = _config.GetEffectiveEnrollmentWaitIntervalSeconds();
-            if (attempts <= 0 || delaySeconds <= 0)
+            int configuredBudgetSeconds = _config.GetEffectiveEnrollmentWaitSeconds();
+            if (configuredBudgetSeconds <= 0)
             {
-                // SOC2 CC7.2 / SOX change management: the effective values may come from env
-                // vars rather than the connector record, so this Information line is the only
+                // SOC2 CC7.2 / SOX change management: the effective value may come from an env
+                // var rather than the connector record, so this Information line is the only
                 // production-log evidence distinguishing "enrollment wait disabled by operator"
                 // from "enrollment wait never attempted".
                 _logger.LogInformation(
-                    "Synchronous enrollment wait disabled by configuration (effective EnrollmentWaitAttempts={Attempts}, " +
-                    "EnrollmentWaitIntervalSeconds={Delay}). Order {OrderNumber} will be picked up on the next sync cycle.",
-                    attempts, delaySeconds, orderNumber);
+                    "Synchronous enrollment wait disabled by configuration (effective EnrollmentWaitSeconds={Budget}). " +
+                    "Order {OrderNumber} will be picked up on the next sync cycle.",
+                    configuredBudgetSeconds, orderNumber);
                 return DegradeBodylessIssuedToPending(pendingResult);
             }
 
-            // Compute the budget in long first: both knobs accept arbitrary non-negative ints
-            // from env vars, and an int overflow here would go negative and make the CTS
-            // constructor throw (silently disabling the enrollment wait via the catch below).
             // Clamp to the hard ceiling — Command abandons enrollment calls long before it, so a
-            // larger budget would only orphan a worker thread (docs: keep attempts × interval
+            // larger budget would only orphan a worker thread (docs: keep EnrollmentWaitSeconds
             // under ~90 s).
-            long configuredBudgetSeconds = (long)attempts * delaySeconds;
-            int budgetSeconds = (int)Math.Min(configuredBudgetSeconds, Constants.EnrollmentWait.MaxBudgetSeconds);
+            int budgetSeconds = Math.Min(configuredBudgetSeconds, Constants.EnrollmentWait.MaxBudgetSeconds);
             if (configuredBudgetSeconds > Constants.EnrollmentWait.MaxBudgetSeconds)
             {
                 // SOX CC7.3: the clamp is a policy decision — evidence it.
                 _logger.LogWarning(
-                    "Configured enrollment-wait budget ({Configured}s = EnrollmentWaitAttempts {Attempts} × EnrollmentWaitIntervalSeconds {Delay}) " +
-                    "exceeds the hard ceiling; clamped to {Max}s for order {OrderNumber}.",
-                    configuredBudgetSeconds, attempts, delaySeconds, Constants.EnrollmentWait.MaxBudgetSeconds, orderNumber);
+                    "Configured enrollment-wait budget ({Configured}s = EnrollmentWaitSeconds) exceeds the " +
+                    "hard ceiling; clamped to {Max}s for order {OrderNumber}.",
+                    configuredBudgetSeconds, Constants.EnrollmentWait.MaxBudgetSeconds, orderNumber);
             }
 
             try
@@ -1626,7 +1623,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // One ceiling bounds the ENTIRE enrollment wait — catalog classification
                 // included — so a hung catalog endpoint cannot hold a Command worker thread
                 // beyond the configured budget (+ grace for one in-flight request). This is what
-                // keeps the documented "attempts × interval = max Command-occupied time" honest.
+                // keeps the documented "EnrollmentWaitSeconds = max Command-occupied time" honest.
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(budgetSeconds + 30));
 
                 var validationType = ProductValidationType.Unknown;
@@ -1663,10 +1660,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 _logger.LogInformation(
                     "Synchronous enrollment-wait poll started. OrderNumber={OrderNumber}, ProductCode={ProductCode}, " +
-                    "ValidationType={ValidationType}, Attempts={Attempts}, DelaySeconds={Delay}, BudgetSeconds={Budget}",
-                    orderNumber, productCode, validationType, attempts, delaySeconds, budgetSeconds);
+                    "ValidationType={ValidationType}, BudgetSeconds={Budget}",
+                    orderNumber, productCode, validationType, budgetSeconds);
 
-                var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, delaySeconds, "EnrollmentWait", cts.Token);
+                var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, Constants.Polling.CertificatePollIntervalSeconds, "EnrollmentWait", cts.Token);
 
                 // A GENERATED result is only a completed enrollment wait once the PEM is present.
                 // WaitForIssuanceAsync keeps polling a body-less GENERATED, but the budget can
@@ -2270,10 +2267,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// time after the triggering call returns.  Without this poll the plugin would catch
         /// the cert in pending state and return it that way, forcing the gateway to wait for
         /// the next sync cycle.  Used by both the post-DCV wait (budget =
-        /// <c>DcvWaitForIssuanceSeconds</c>, 3 s interval) and the general synchronous
-        /// enrollment wait in <see cref="TryEnrollmentWaitForCertificateAsync"/> (budget =
-        /// <c>EnrollmentWaitAttempts × EnrollmentWaitIntervalSeconds</c>,
-        /// <c>EnrollmentWaitIntervalSeconds</c> interval).
+        /// <c>DcvWaitForIssuanceSeconds</c>) and the general synchronous enrollment wait in
+        /// <see cref="TryEnrollmentWaitForCertificateAsync"/> (budget =
+        /// <c>EnrollmentWaitSeconds</c>). Both poll every
+        /// <see cref="Constants.Polling.CertificatePollIntervalSeconds"/> seconds.
         /// </summary>
         private async Task<LegacyGetCertificateResponse> WaitForIssuanceAsync(
             string orderNumber, int waitBudgetSeconds, int pollIntervalSeconds, string phase, CancellationToken ct)
@@ -2293,10 +2290,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     phase, orderNumber);
                 return null;
             }
-            // Clamp the interval into [1, budget] so a pathological EnrollmentWaitIntervalSeconds
-            // override (e.g. from CERTINEXT_ENROLLMENT_WAIT_INTERVAL_SECONDS) can never make
-            // Task.Delay outlast the budget. Correctness here no longer depends on the deadline
-            // check happening to run before the sleep — the wait is bounded by construction.
+            // Clamp the interval into [1, budget] so a budget smaller than the fixed poll
+            // interval (e.g. EnrollmentWaitSeconds configured under
+            // Constants.Polling.CertificatePollIntervalSeconds) can never make Task.Delay
+            // outlast the budget. Correctness here no longer depends on the deadline check
+            // happening to run before the sleep — the wait is bounded by construction.
             pollIntervalSeconds = Math.Min(Math.Max(1, pollIntervalSeconds), Math.Max(1, waitBudgetSeconds));
 
             // Deterministic upper bound on the poll count. The documented "retries × delay ⇒

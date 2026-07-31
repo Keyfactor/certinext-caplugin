@@ -334,8 +334,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             // Enrollment wait disabled: this test verifies the pending-status mapping, not
             // the synchronous enrollment wait (which has its own suite) — with the default
-            // 5×10 s budget the poll would otherwise spend ~50 s retrying the strict mock.
-            var plugin = new CERTInextCAPlugin(mock.Object, new CERTInextConfig { EnrollmentWaitAttempts = 0 });
+            // 50s budget the poll would otherwise spend that long retrying the strict mock.
+            var plugin = new CERTInextCAPlugin(mock.Object, new CERTInextConfig { EnrollmentWaitSeconds = 0 });
 
             var result = await plugin.Enroll(
                 csr: MockCertificateData.FakeCsrPem,

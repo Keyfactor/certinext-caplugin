@@ -40,15 +40,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private static Mock<ICERTInextClient> NewMock() => new Mock<ICERTInextClient>(MockBehavior.Strict);
 
         /// <summary>
-        /// Config with a 1-second poll interval so tests that complete the poll run fast.
-        /// The default retry count is deliberately generous: the poll loop runs against the
-        /// real clock, so a small budget makes tests that expect the poll to *complete*
-        /// flaky under CI load (a slow first poll can exhaust the budget before the second,
-        /// issuing, poll). Tests that specifically exercise budget exhaustion pass a small
-        /// explicit retry count instead.
+        /// Config with a fixed 5-second poll interval (Constants.Polling.CertificatePollIntervalSeconds,
+        /// no longer configurable). The default budget mirrors the plugin's production default
+        /// (50s ⇒ 10 max polls) so tests that need a few polls to resolve have headroom without
+        /// hitting exhaustion. Tests that specifically exercise budget exhaustion pass a small
+        /// explicit totalSeconds instead, sized to the fixed 5s interval — e.g. 10s ⇒ exactly 2 polls.
         /// </summary>
-        private static CERTInextConfig EnrollmentWaitConfig(int attempts = 10, int delaySeconds = 1) =>
-            new CERTInextConfig { EnrollmentWaitAttempts = attempts, EnrollmentWaitIntervalSeconds = delaySeconds };
+        private static CERTInextConfig EnrollmentWaitConfig(int totalSeconds = 50) =>
+            new CERTInextConfig { EnrollmentWaitSeconds = totalSeconds };
 
         private static List<ProductDetail> SslCatalog() => new List<ProductDetail>
         {
@@ -254,20 +253,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.PendingCertRecord(MockCertificateData.CertId2));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 2, delaySeconds: 1));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(10));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
                 "exhausting the enrollment-wait budget must degrade to the pending result, never throw");
             result.StatusMessage.Should().Contain("later synchronization");
-            // EnrollmentWaitAttempts=2 yields exactly 2 polls. The poll count is now capped deterministically
-            // (maxPolls = budget / interval) rather than emerging from wall-clock arithmetic, so this
-            // is an exact assertion — no real-clock tolerance needed. This is the off-by-one guard:
-            // the old bug yielded attempts + 1 = 3.
+            // A 10s budget over the fixed 5s interval yields exactly 2 polls. The poll count is
+            // capped deterministically (maxPolls = budget / interval) rather than emerging from
+            // wall-clock arithmetic, so this is an exact assertion — no real-clock tolerance
+            // needed. This is the off-by-one guard: the old bug yielded one extra poll.
             mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.Exactly(2),
-                "EnrollmentWaitAttempts=2 must yield exactly two polls");
+                "a 10s budget over the fixed 5s interval must yield exactly two polls");
         }
 
         [Fact]
@@ -295,11 +294,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task EnrollmentWait_Disabled_WhenRetriesNegative()
         {
             // "-1 to disable" is a common operator convention — it must not silently
-            // fall back to the enabled default of 5.
+            // fall back to the enabled default of 50s.
             var mock = NewMock();
             SetupPendingEnroll(mock);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: -1));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(-1));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -319,7 +318,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ThrowsAsync(new Exception("CERTInext API 500"));
 
             // Small explicit budget: every poll throws, so this test runs to exhaustion.
-            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 2));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(10));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -361,7 +360,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var mock = NewMock();
             SetupPendingEnroll(mock);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 0));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(0));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -454,7 +453,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Id = MockCertificateData.CertId2, Status = "issued", Certificate = null
                 });
 
-            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 3, delaySeconds: 1));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(15));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -487,7 +486,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Id = MockCertificateData.CertId2, Status = "issued", Certificate = null
                 });
 
-            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 3, delaySeconds: 1));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(15));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -500,7 +499,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task EnrollmentWait_Disabled_DowngradesIssuedWithoutPem_ToPending()
         {
-            // Enrollment wait disabled (EnrollmentWaitAttempts=0) short-circuits before any poll. If the enroll
+            // Enrollment wait disabled (EnrollmentWaitSeconds=0) short-circuits before any poll. If the enroll
             // response is issued-without-PEM, returning it verbatim would hand Command a bodyless
             // GENERATED. The disabled path must still enforce the no-bodyless-GENERATED invariant
             // and degrade to pending so a later sync imports the certificate.
@@ -511,7 +510,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(issuedNoPem);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 0));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(0));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 

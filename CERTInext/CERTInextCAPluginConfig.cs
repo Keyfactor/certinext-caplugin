@@ -275,33 +275,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = true,
                     Type = "Boolean"
                 },
-                [Constants.Config.EnrollmentWaitAttempts] = new PropertyConfigInfo
+                [Constants.Config.EnrollmentWaitSeconds] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Number of times Enroll() polls CERTInext for the issued certificate " +
-                               "after submitting an order for a DV product, so fast-issuing orders return the " +
-                               "certificate synchronously in the same enrollment call. " +
-                               "EnrollmentWaitAttempts × EnrollmentWaitIntervalSeconds ≈ the maximum time an " +
-                               "enrollment call can occupy a Keyfactor Command worker thread (a small internal " +
-                               "grace margin applies) — keep the product under ~90 seconds. " +
+                    Comments = "OPTIONAL: Total seconds Enroll() polls CERTInext for the issued certificate " +
+                               "after submitting an order for a DV product (polled every " +
+                               $"{Constants.Polling.CertificatePollIntervalSeconds} seconds), so fast-issuing " +
+                               "orders return the certificate synchronously in the same enrollment call. " +
+                               "This is approximately the maximum time an enrollment call can occupy a " +
+                               "Keyfactor Command worker thread (a small internal grace margin applies) — " +
+                               "keep it under ~90 seconds. " +
                                "OV/EV products never poll: CERTInext issues them asynchronously by design " +
                                "(organization verification takes minutes and may be human-gated), so those " +
                                "orders return pending and are completed by the next synchronization. " +
                                "Set to 0 (or any negative value) to disable the poll entirely. " +
-                               $"Can also be set via the {Constants.Config.EnrollmentWaitAttemptsEnvVar} environment " +
-                               "variable; the env var takes precedence when both are set. Default: 5.",
+                               $"Can also be set via the {Constants.Config.EnrollmentWaitSecondsEnvVar} environment " +
+                               "variable; the env var takes precedence when both are set. Default: 50.",
                     Hidden = false,
-                    DefaultValue = Constants.EnrollmentWait.DefaultAttempts,
-                    Type = "Number"
-                },
-                [Constants.Config.EnrollmentWaitIntervalSeconds] = new PropertyConfigInfo
-                {
-                    Comments = "OPTIONAL: Seconds between synchronous enrollment-wait polls inside Enroll() (see " +
-                               "EnrollmentWaitAttempts). Setting this to 0 (or any negative value) disables the " +
-                               "poll entirely — it does NOT mean back-to-back polling. " +
-                               $"Can also be set via the {Constants.Config.EnrollmentWaitIntervalSecondsEnvVar} environment " +
-                               "variable; the env var takes precedence when both are set. Default: 10.",
-                    Hidden = false,
-                    DefaultValue = Constants.EnrollmentWait.DefaultIntervalSeconds,
+                    DefaultValue = Constants.EnrollmentWait.DefaultSeconds,
                     Type = "Number"
                 },
                 [Constants.Config.DcvEnabled] = new PropertyConfigInfo
@@ -712,24 +702,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public bool IgnoreExpired { get; set; } = false;
 
         /// <summary>
-        /// Number of times <c>Enroll()</c> polls <c>GetCertificate</c> after submitting an
-        /// order for a DV product, waiting for CERTInext to issue so the certificate can be
-        /// returned synchronously (mirrors the legacy Sectigo connector's pickup loop).
-        /// <c>EnrollmentWaitAttempts × EnrollmentWaitIntervalSeconds</c> is the maximum time an
-        /// enrollment call can occupy a Command worker thread. Set to 0 to disable the poll
-        /// entirely (the certificate is then picked up on the next synchronization). Overridden
-        /// by <c>CERTINEXT_ENROLLMENT_WAIT_ATTEMPTS</c> when set. Default: 5.
+        /// Total seconds <c>Enroll()</c> polls <c>GetCertificate</c> after submitting an order
+        /// for a DV product, waiting for CERTInext to issue so the certificate can be returned
+        /// synchronously (mirrors the legacy Sectigo connector's pickup loop). Polled every
+        /// <see cref="Constants.Polling.CertificatePollIntervalSeconds"/> seconds. Set to 0 to
+        /// disable the poll entirely (the certificate is then picked up on the next
+        /// synchronization). Overridden by <c>CERTINEXT_ENROLLMENT_WAIT_SECONDS</c> when set.
+        /// Default: 50.
         /// </summary>
-        [JsonPropertyName("EnrollmentWaitAttempts")]
-        public int EnrollmentWaitAttempts { get; set; } = Constants.EnrollmentWait.DefaultAttempts;
-
-        /// <summary>
-        /// Seconds between synchronous enrollment-wait polls inside <c>Enroll()</c>. See
-        /// <see cref="EnrollmentWaitAttempts"/>. Overridden by
-        /// <c>CERTINEXT_ENROLLMENT_WAIT_INTERVAL_SECONDS</c> when set. Default: 10.
-        /// </summary>
-        [JsonPropertyName("EnrollmentWaitIntervalSeconds")]
-        public int EnrollmentWaitIntervalSeconds { get; set; } = Constants.EnrollmentWait.DefaultIntervalSeconds;
+        [JsonPropertyName("EnrollmentWaitSeconds")]
+        public int EnrollmentWaitSeconds { get; set; } = Constants.EnrollmentWait.DefaultSeconds;
 
         [JsonPropertyName("PageSize")]
         public int PageSize { get; set; } = Constants.Api.DefaultPageSize;
@@ -834,7 +816,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <paramref name="zeroAllowed"/> distinguishes knobs where 0 is a meaningful
         /// "disabled" value from knobs that require a positive value.
         /// <paramref name="negativeMeansZero"/> makes negative values coerce to 0 rather
-        /// than being rejected — for the enrollment-wait knobs, where "-1 to disable" is a
+        /// than being rejected — for the enrollment-wait knob, where "-1 to disable" is a
         /// common operator convention and silently re-enabling the compiled default would be
         /// the opposite of the operator's intent.
         /// A set-but-invalid env var is rejected with a Warning (SOX change management /
@@ -894,20 +876,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             GetEffectiveInt(Constants.Config.DcvWaitForIssuanceSecondsEnvVar, DcvWaitForIssuanceSeconds, 60, zeroAllowed: true);
 
         /// <summary>
-        /// Returns the effective synchronous-enrollment-wait attempt count, preferring the env
-        /// var so operators can tune without re-saving the connector. 0 (or any negative value)
-        /// disables the poll.
+        /// Returns the effective synchronous-enrollment-wait total budget in seconds,
+        /// preferring the env var so operators can tune without re-saving the connector.
+        /// 0 (or any negative value) disables the poll.
         /// </summary>
-        public int GetEffectiveEnrollmentWaitAttempts() =>
-            GetEffectiveInt(Constants.Config.EnrollmentWaitAttemptsEnvVar, EnrollmentWaitAttempts, Constants.EnrollmentWait.DefaultAttempts,
-                zeroAllowed: true, negativeMeansZero: true);
-
-        /// <summary>
-        /// Returns the effective interval between synchronous enrollment-wait polls, preferring
-        /// the env var. 0 (or any negative value) disables the poll.
-        /// </summary>
-        public int GetEffectiveEnrollmentWaitIntervalSeconds() =>
-            GetEffectiveInt(Constants.Config.EnrollmentWaitIntervalSecondsEnvVar, EnrollmentWaitIntervalSeconds, Constants.EnrollmentWait.DefaultIntervalSeconds,
+        public int GetEffectiveEnrollmentWaitSeconds() =>
+            GetEffectiveInt(Constants.Config.EnrollmentWaitSecondsEnvVar, EnrollmentWaitSeconds, Constants.EnrollmentWait.DefaultSeconds,
                 zeroAllowed: true, negativeMeansZero: true);
     }
 }

@@ -50,8 +50,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 // This suite tests DCV behavior, not the synchronous enrollment wait (which
                 // has its own suite, including the DCV interaction cases). Disable it so
                 // tests with DcvEnabled=false and pending orders don't spend the default
-                // 5×10 s poll budget retrying strict mocks.
-                EnrollmentWaitAttempts     = 0
+                // 50s poll budget retrying strict mocks.
+                EnrollmentWaitSeconds      = 0
             };
 
         private static Mock<ICERTInextClient> NewMock() =>
