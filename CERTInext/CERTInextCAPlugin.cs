@@ -1231,6 +1231,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                     $"Post-DCV status: {postDcv.Status}.", ep.AutoApprove);
                             }
                         }
+                        // Intentional: when PerformDcvIfNeededAsync returns false (no challenge
+                        // slot within budget, no pending DNS-TXT domains, GetDcv not yet ready,
+                        // cancelled/rejected order) dcvIssuanceWaitRan stays false so the general
+                        // enrollment-wait poll below STILL runs. That path legitimately catches a
+                        // fast DV / cached-validation issuance that CERTInext completes without ever
+                        // exposing a challenge — see the regression test
+                        // Dcv_EnrollmentWaitStillRuns_WhenDcvShortCircuitsWithoutAnIssuanceWait.
+                        // The only short-circuits that set the flag
+                        // true (skipping the poll) are the ones where the order definitively will
+                        // NOT fast-issue in this call: the DcvTimeoutMinutes cancellation below, the
+                        // _dcvInFlight duplicate guard, and the no-guidance branch. Worst case here
+                        // (full challenge-wait budget + full enrollment-wait budget) stays within the
+                        // DcvTimeoutMinutes envelope a DCV-enabled gateway already accepts; do NOT
+                        // add a blanket `else` that sets the flag true — it silently defeats DV
+                        // pickup on every DCV gateway.
                     }
                     catch (OperationCanceledException) when (dcvCts.IsCancellationRequested)
                     {
@@ -1701,20 +1716,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(budgetSeconds + 30));
 
                 var validationType = ProductValidationType.Unknown;
+                var validationTypeSource = "n/a";
                 if (pendingApproval)
                 {
-                    validationType = await ResolveProductValidationTypeAsync(productCode, ep.ProductId, cts.Token);
+                    (validationType, validationTypeSource) = await ResolveProductValidationTypeAsync(productCode, ep.ProductId, cts.Token);
                     if (validationType is ProductValidationType.Ov or ProductValidationType.Ev)
                     {
                         string typeLabel = validationType == ProductValidationType.Ov ? "OV" : "EV";
 
                         // SOC2 CC7.2: the decision to defer is policy-relevant — log at
-                        // Information so it survives production log filters.
+                        // Information so it survives production log filters. ValidationTypeSource
+                        // records whether this was an authoritative (catalog) classification or a
+                        // best-effort (template-name) one, so the deferral is reconstructable.
                         _logger.LogInformation(
                             "Synchronous enrollment wait skipped — {Type} products are issued asynchronously by " +
                             "CERTInext (organization verification). OrderNumber={OrderNumber}, " +
-                            "ProductCode={ProductCode}. The certificate will be imported by a later synchronization.",
-                            typeLabel, orderNumber, productCode);
+                            "ProductCode={ProductCode}, ValidationTypeSource={Source}. The certificate will be " +
+                            "imported by a later synchronization.",
+                            typeLabel, orderNumber, productCode, validationTypeSource);
 
                         pendingResult.StatusMessage =
                             $"Certificate request accepted by CERTInext. ID: {orderNumber}. " +
@@ -1734,8 +1753,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 _logger.LogInformation(
                     "Synchronous enrollment-wait poll started. OrderNumber={OrderNumber}, ProductCode={ProductCode}, " +
-                    "ValidationType={ValidationType}, BudgetSeconds={Budget}, PollIntervalSeconds={Interval}",
-                    orderNumber, productCode, validationType, budgetSeconds, Constants.Polling.CertificatePollIntervalSeconds);
+                    "ValidationType={ValidationType}, ValidationTypeSource={Source}, BudgetSeconds={Budget}, PollIntervalSeconds={Interval}",
+                    orderNumber, productCode, validationType, validationTypeSource, budgetSeconds, Constants.Polling.CertificatePollIntervalSeconds);
 
                 var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, Constants.Polling.CertificatePollIntervalSeconds, "EnrollmentWait", cts.Token);
 
@@ -1793,7 +1812,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// product name (e.g. "OV SSL Wildcard") is the fallback when the catalog is
         /// unavailable or doesn't list the code.  Never throws.
         /// </summary>
-        private async Task<ProductValidationType> ResolveProductValidationTypeAsync(
+        private async Task<(ProductValidationType type, string source)> ResolveProductValidationTypeAsync(
             string productCode, string templateProductName, CancellationToken ct)
         {
             if (!string.IsNullOrWhiteSpace(productCode))
@@ -1809,11 +1828,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 if (map != null && map.TryGetValue(productCode.Trim(), out var fromCatalog)
                     && fromCatalog != ProductValidationType.Unknown)
                 {
-                    return fromCatalog;
+                    // "catalog" — the authoritative account catalog classified this code.
+                    return (fromCatalog, "catalog");
                 }
             }
 
-            return ProductClassifier.ClassifyName(templateProductName);
+            // "template-name" — best-effort classification from the Command template's
+            // product name because the catalog was unavailable or didn't list the code.
+            // Surfaced in the caller's audit log so an auditor can tell an authoritative
+            // OV/EV-skip decision from a name-based one (SOC2 CC7.2), mirroring the
+            // API-confirmed-vs-best-effort distinction the renewal path already records.
+            return (ProductClassifier.ClassifyName(templateProductName), "template-name");
         }
 
         /// <summary>

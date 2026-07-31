@@ -1,11 +1,12 @@
 # 1.2.0
 
 ## Features
-- feat(enroll): `Enroll()` now runs a synchronous enrollment-wait poll on every enrollment path (new, reissue, and renewal) on both build flavors — DV orders that issue within the poll budget return the issued certificate in the same call instead of waiting for the next synchronization, restoring the behavior expiration-renewal workflows relied on with the legacy Sectigo connector. Configurable via the new `EnrollmentWaitSeconds` connector setting (default 50, polled every 5 seconds, ≈ maximum time an enrollment call occupies a Command worker thread, hard-capped at 300 s); set to `0` (or a negative value) to disable. Transient API failures consume a poll rather than aborting the wait. The post-DCV issuance poll's interval was also aligned to the same 5-second cadence.
-- feat(enroll): OV/EV orders skip the enrollment-wait poll and return pending immediately with a status message explaining that CERTInext issues these products asynchronously by design (organization verification; confirmed by CERTInext support) — the certificate is imported by the next synchronization. The product's validation level is resolved from the account's product catalog (`GetProductDetails`, cached for 60 minutes), with the template product name as fallback.
+- feat(enroll): `Enroll()` now briefly polls for the issued certificate on every enrollment path (new, reissue, renewal; both build flavors), so fast-issuing DV orders return the certificate in the same call instead of waiting for the next sync — restoring the legacy Sectigo connector's pickup behavior. New `EnrollmentWaitSeconds` setting (default 50, 5-second poll interval, hard-capped at 300 s); set to `0` to disable.
+- feat(enroll): OV/EV orders skip the poll and return pending immediately — CERTInext issues them asynchronously by design (organization verification). Validation level is resolved from the account product catalog (cached 60 minutes), falling back to the template product name.
 
 ## Bug Fixes
-- fix(build): The `-p:DcvSupport=false` (no-DCV, IAnyCAPlugin 3.2.0) flavor of `CERTInext.IntegrationTests` failed to compile — `CnameResolverLiveDnsTests.cs` references a helper defined in the DCV-only `DcvLifecycleTests.cs` and is itself a DCV feature test, so it is now excluded from the no-DCV build alongside the other DCV test files.
+- fix(enroll): Order and CSR submissions are no longer retried after a transient/network failure. A timeout can land *after* CERTInext already created the order, so the retry was rejected as a duplicate (EMS-947) and orphaned the order; submits now fail closed and reconcile on the next sync.
+- fix(build): The `-p:DcvSupport=false` flavor of `CERTInext.IntegrationTests` now compiles — DCV-only test files are excluded from the no-DCV build.
 
 # 1.1.0
 
