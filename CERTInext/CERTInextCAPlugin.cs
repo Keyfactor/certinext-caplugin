@@ -1189,10 +1189,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             // settings don't accidentally make this polling chunky.
                             var postDcv = await WaitForIssuanceAsync(
                                 orderNumber, _config.GetEffectiveDcvWaitForIssuanceSeconds(), 3, "PostDcv", dcvCts.Token);
+                            // Only a genuine terminal outcome ends the enroll call here. A GENERATED
+                            // result without a PEM (a transient download failure during the wait)
+                            // must fall through to the pending path so a later sync refetches the
+                            // body — never surface a bodyless "issued" result. REVOKED/FAILED carry
+                            // no body and are surfaced as-is.
                             if (postDcv != null)
                             {
-                                return BuildEnrollmentResultFromCertificate(postDcv, orderNumber,
-                                    $"Post-DCV status: {postDcv.Status}.", ep.AutoApprove);
+                                int postDcvDisposition = StatusMapper.ToRequestDisposition(postDcv.Status);
+                                if (postDcvDisposition == (int)EndEntityStatus.REVOKED
+                                    || postDcvDisposition == (int)EndEntityStatus.FAILED
+                                    || (postDcvDisposition == (int)EndEntityStatus.GENERATED
+                                        && !string.IsNullOrWhiteSpace(postDcv.Certificate)))
+                                {
+                                    return BuildEnrollmentResultFromCertificate(postDcv, orderNumber,
+                                        $"Post-DCV status: {postDcv.Status}.", ep.AutoApprove);
+                                }
                             }
                         }
                     }
@@ -1524,8 +1536,36 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             EnrollmentResult pendingResult, string orderNumber, EnrollmentParams ep,
             string productCode, bool dcvOwnsIssuanceWait)
         {
+            // Invariant enforced on EVERY return that hands back the caller's result (including the
+            // guards below): never hand Command a GENERATED result with no certificate body. An
+            // issued-but-PEM-missing state the poll could not recover — the download kept failing,
+            // pickup is disabled, or there is no order number to poll/refetch with — must degrade to
+            // EXTERNALVALIDATION so a later synchronization refetches the body; otherwise Command
+            // persists a bodyless "issued" record, the exact outcome the pickup exists to prevent.
+            // Poll-success and REVOKED/FAILED returns already carry a body (or legitimately have
+            // none), so they no-op through this. Declared first so no early return can bypass it.
+            EnrollmentResult DegradeBodylessIssuedToPending(EnrollmentResult r)
+            {
+                if (r != null
+                    && r.Status == (int)EndEntityStatus.GENERATED
+                    && string.IsNullOrWhiteSpace(r.Certificate))
+                {
+                    _logger.LogInformation(
+                        "Order {OrderNumber} is issued but its certificate body was not retrievable " +
+                        "in-call; returning pending so a later synchronization imports it.", orderNumber);
+                    r.Status = (int)EndEntityStatus.EXTERNALVALIDATION;
+                    r.StatusMessage =
+                        $"Certificate for order {orderNumber} was issued by CERTInext but its body was " +
+                        "not retrievable within this enrollment call; it will be imported by a later " +
+                        "synchronization.";
+                }
+                return r;
+            }
+
+            // No order number means we cannot poll or refetch — but still enforce the invariant so a
+            // bodyless issued result never escapes (the null case no-ops inside the helper).
             if (pendingResult == null || string.IsNullOrWhiteSpace(orderNumber))
-                return pendingResult;
+                return DegradeBodylessIssuedToPending(pendingResult);
 
             // Two states can still benefit from a poll: pending approval (the normal case),
             // and issued-but-PEM-missing (order fulfilled but the post-submit certificate
@@ -1560,7 +1600,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "Synchronous pickup disabled by configuration (effective PickupRetries={Retries}, " +
                     "PickupDelaySeconds={Delay}). Order {OrderNumber} will be picked up on the next sync cycle.",
                     retries, delaySeconds, orderNumber);
-                return pendingResult;
+                return DegradeBodylessIssuedToPending(pendingResult);
             }
 
             // Compute the budget in long first: both knobs accept arbitrary non-negative ints
@@ -1626,12 +1666,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, delaySeconds, "Pickup", cts.Token);
 
+                // A GENERATED result is only a completed pickup once the PEM is present.
+                // WaitForIssuanceAsync keeps polling a body-less GENERATED, but the budget can
+                // still expire while the download keeps failing transiently — in that case fall
+                // through to the pending soft-fallback (sync refetches the body later) rather
+                // than surface a bogus "issued, no certificate" result. REVOKED/FAILED are real
+                // terminal outcomes with no body and must still be surfaced.
+                int finalDisposition = final == null
+                    ? (int)EndEntityStatus.EXTERNALVALIDATION
+                    : StatusMapper.ToRequestDisposition(final.Status);
                 if (final != null
-                    && StatusMapper.ToRequestDisposition(final.Status) != (int)EndEntityStatus.EXTERNALVALIDATION)
+                    && (finalDisposition == (int)EndEntityStatus.REVOKED
+                        || finalDisposition == (int)EndEntityStatus.FAILED
+                        || (finalDisposition == (int)EndEntityStatus.GENERATED
+                            && !string.IsNullOrWhiteSpace(final.Certificate))))
                 {
                     _logger.LogInformation(
-                        "Synchronous pickup complete. OrderNumber={OrderNumber}, Status={Status}",
-                        orderNumber, final.Status);
+                        "Synchronous pickup complete. OrderNumber={OrderNumber}, Status={Status}, SerialNumber={Serial}",
+                        orderNumber, final.Status,
+                        string.IsNullOrWhiteSpace(final.SerialNumber) ? "(none)" : final.SerialNumber);
                     // Neutral wording: this message is surfaced verbatim in the operator-visible
                     // StatusMessage by BuildEnrollmentResult's FAILED branch, so it must not
                     // claim "issued" for an order that was rejected during the poll.
@@ -1660,7 +1713,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "sync will pick up the certificate later.", orderNumber);
             }
 
-            return pendingResult;
+            return DegradeBodylessIssuedToPending(pendingResult);
         }
 
         /// <summary>
@@ -1739,9 +1792,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    // The caller's pickup budget expired mid-fetch — not a catalog outage.
-                    // Propagate so the caller's soft-fallback handles it, without arming the
-                    // failure back-off or logging a misleading catalog warning.
+                    // The caller's pickup budget expired mid-fetch. The fetch had the full
+                    // budget PLUS the ~30 s grace on the pickup CTS, so a cancellation here means
+                    // the catalog endpoint is structurally slower than any enrollment can wait —
+                    // not a transient blip. Arm the back-off so the NEXT enrollment doesn't spend
+                    // its whole budget on the same doomed fetch; it will classify from the stale
+                    // catalog (or the template product name) until the endpoint recovers. Still
+                    // propagate, because THIS enrollment's budget is already spent — its
+                    // soft-fallback returns the pending result.
+                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.Pickup.FailureBackoffMinutes);
+                    _logger.LogWarning(
+                        "Product catalog fetch for synchronous-pickup gating exceeded the enrollment budget; " +
+                        "catalog refresh backed off for {BackoffMinutes} minutes. Subsequent enrollments will " +
+                        "classify from {Fallback} until it recovers.",
+                        Constants.Pickup.FailureBackoffMinutes,
+                        _productTypeByCode != null ? "the stale cached catalog" : "the template product name");
                     throw;
                 }
                 catch (Exception ex)
@@ -2225,7 +2290,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     phase, orderNumber);
                 return null;
             }
-            pollIntervalSeconds = Math.Max(1, pollIntervalSeconds);
+            // Clamp the interval into [1, budget] so a pathological PickupDelaySeconds override
+            // (e.g. from CERTINEXT_PICKUP_DELAY_SECONDS) can never make Task.Delay outlast the
+            // budget. Correctness here no longer depends on the deadline check happening to run
+            // before the sleep — the wait is bounded by construction.
+            pollIntervalSeconds = Math.Min(Math.Max(1, pollIntervalSeconds), Math.Max(1, waitBudgetSeconds));
+
+            // Deterministic upper bound on the poll count. The documented "retries × delay ⇒
+            // retries polls" contract must hold exactly, not merely emerge from wall-clock
+            // arithmetic — Task.Delay can fire a hair early at the exact budget boundary and the
+            // deadline check below would then admit one extra poll (a real, if rare, off-by-one).
+            // Capping the attempt count removes that race. The wall-clock deadline is retained as
+            // the early-stop when individual polls run long, so a slow endpoint still cannot blow
+            // the time budget (and the CTS remains the hard backstop).
+            int maxPolls = Math.Max(1, waitBudgetSeconds / pollIntervalSeconds);
 
             int attempt = 0;
             while (true)
@@ -2258,19 +2336,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     last = current;
                     int disposition = StatusMapper.ToRequestDisposition(last.Status);
-                    if (disposition == (int)EndEntityStatus.GENERATED
-                        || disposition == (int)EndEntityStatus.REVOKED
-                        || disposition == (int)EndEntityStatus.FAILED)
+
+                    // GENERATED is only terminal once the PEM is actually in hand.
+                    // GetCertificateAsync maps status from TrackOrder but swallows a
+                    // transient DownloadCertificate failure (logs a warning, returns
+                    // Certificate == null). Treating that as terminal would hand Command a
+                    // "successfully issued" result with no cert body and burn the remaining
+                    // budget that could have recovered the PEM. Keep polling instead — each
+                    // GetCertificateAsync re-attempts the download — mirroring the same
+                    // refetch defense Synchronize() already applies. REVOKED/FAILED are
+                    // genuinely terminal and carry no body, so they short-circuit as before.
+                    bool terminal =
+                        disposition == (int)EndEntityStatus.REVOKED
+                        || disposition == (int)EndEntityStatus.FAILED
+                        || (disposition == (int)EndEntityStatus.GENERATED
+                            && !string.IsNullOrWhiteSpace(last.Certificate));
+                    if (terminal)
                     {
                         return last;
                     }
                 }
 
-                // Stop when the NEXT poll would land at or past the deadline. This makes a
-                // budget of retries × delay yield exactly `retries` polls (t = 0, delay,
-                // 2×delay, …), matching the documented PickupRetries semantics — checking
-                // the deadline alone after the sleep would sneak in an extra boundary poll.
-                if (DateTime.UtcNow.AddSeconds(pollIntervalSeconds) >= deadline)
+                // Stop when we have used the deterministic poll budget, OR when the NEXT poll
+                // would land at or past the wall-clock deadline. The attempt cap makes a budget
+                // of retries × delay yield at most `retries` polls regardless of timer jitter;
+                // the deadline check stops early when polls themselves run long.
+                if (attempt >= maxPolls
+                    || DateTime.UtcNow.AddSeconds(pollIntervalSeconds) >= deadline)
                 {
                     _logger.LogInformation(
                         "Issuance not complete within {Budget}s for order {OrderNumber} (Phase={Phase}). " +
@@ -2402,6 +2494,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 case (int)EndEntityStatus.GENERATED:
                     message = $"Certificate issued successfully. CERTInext ID: {resp.Id}.";
+                    // SOC2 CC7.2 / SOX completeness: certificate issuance is the privileged
+                    // act this plugin performs; record it so an auditor can reconstruct which
+                    // orders received a credential and its serial. Both the immediate-issuance
+                    // and pickup-completed paths funnel through here, so this one line covers
+                    // both. The PEM itself is never logged.
+                    _logger.LogInformation(
+                        "Certificate issued. CERTInextId={Id}, SerialNumber={Serial}, Status={Status}.",
+                        resp.Id, string.IsNullOrWhiteSpace(resp.SerialNumber) ? "(pending download)" : resp.SerialNumber,
+                        resp.Status);
                     break;
 
                 case (int)EndEntityStatus.EXTERNALVALIDATION:

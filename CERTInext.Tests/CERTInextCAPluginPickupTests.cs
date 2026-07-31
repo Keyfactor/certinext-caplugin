@@ -261,13 +261,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
                 "exhausting the pickup budget must degrade to the pending result, never throw");
             result.StatusMessage.Should().Contain("later synchronization");
-            // Upper bound 2 is the documented PickupRetries semantics (the old off-by-one
-            // yielded retries+1 = 3). Lower bound 1 rather than exactly 2 because the poll
-            // loop runs against the real clock — a stalled test runner can legitimately
-            // exhaust the 2 s budget after a single poll.
+            // PickupRetries=2 yields exactly 2 polls. The poll count is now capped deterministically
+            // (maxPolls = budget / interval) rather than emerging from wall-clock arithmetic, so this
+            // is an exact assertion — no real-clock tolerance needed. This is the off-by-one guard:
+            // the old bug yielded retries + 1 = 3.
             mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
-                Times.Between(1, 2, Moq.Range.Inclusive),
-                "PickupRetries=2 must never yield more than two polls");
+                Times.Exactly(2),
+                "PickupRetries=2 must yield exactly two polls");
         }
 
         [Fact]
@@ -408,6 +408,146 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.Status.Should().Be((int)EndEntityStatus.GENERATED);
             result.Certificate.Should().Contain("BEGIN CERTIFICATE",
                 "the pickup must recover the PEM for an issued order whose download failed");
+        }
+
+        [Fact]
+        public async Task Pickup_KeepsPolling_WhenGeneratedWithoutBody_ThenRecoversPem()
+        {
+            // GetCertificateAsync maps status from TrackOrder but swallows a transient
+            // DownloadCertificate failure, returning Status=issued with Certificate=null.
+            // A body-less GENERATED must NOT be treated as terminal mid-poll — the loop must
+            // keep going (each attempt re-downloads) and recover the PEM within the budget.
+            var mock = NewMock();
+            SetupPendingEnroll(mock);
+            SetupCatalog(mock);
+            mock.SetupSequence(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new LegacyGetCertificateResponse
+                {
+                    Id = MockCertificateData.CertId2, Status = "issued", Certificate = null
+                })
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.CertId2));
+
+            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+
+            var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            result.Certificate.Should().Contain("BEGIN CERTIFICATE",
+                "a body-less 'issued' response must not end the poll — the next attempt recovers the PEM");
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Exactly(2), "the poll must continue past a GENERATED-without-body response");
+        }
+
+        [Fact]
+        public async Task Pickup_SoftFallsBackToPending_WhenGeneratedBodyNeverArrives()
+        {
+            // Every poll reports issued but the PEM download keeps failing (Certificate=null),
+            // and the budget expires with only a body-less GENERATED in hand. The pickup must
+            // NOT surface that as a successful "issued, no certificate" result — Command would
+            // store a body-less record — but degrade to pending so a later sync refetches the PEM.
+            var mock = NewMock();
+            SetupPendingEnroll(mock);
+            SetupCatalog(mock);
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new LegacyGetCertificateResponse
+                {
+                    Id = MockCertificateData.CertId2, Status = "issued", Certificate = null
+                });
+
+            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 3, delaySeconds: 1));
+
+            var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "an issued order whose PEM never downloads within the budget must degrade to " +
+                "pending, never a GENERATED result with no certificate body");
+            result.Certificate.Should().BeNullOrEmpty(
+                "a bodyless GENERATED must not be returned as a successful pickup");
+            result.StatusMessage.Should().Contain("later synchronization");
+        }
+
+        [Fact]
+        public async Task Pickup_SoftFallsBackToPending_WhenEnrollIssuedWithoutPem_AndBodyNeverArrives()
+        {
+            // Entry state (not just a mid-poll read) is issued-without-PEM: EnrollCertificateAsync
+            // reported issued but swallowed the post-submit download failure (Certificate=null).
+            // The pickup polls to recover the body; if every poll also comes back body-less and the
+            // budget expires, the RESULT returned to Command must degrade to pending — it must NOT
+            // return the original GENERATED entry state with a null certificate.
+            var mock = NewMock();
+            var issuedNoPem = MockCertificateData.IssuedEnrollResponse();
+            issuedNoPem.Certificate = null;
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(issuedNoPem);
+            SetupCatalog(mock);
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new LegacyGetCertificateResponse
+                {
+                    Id = MockCertificateData.CertId2, Status = "issued", Certificate = null
+                });
+
+            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 3, delaySeconds: 1));
+
+            var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "an issued-without-PEM enroll that the poll cannot recover must be returned pending, " +
+                "never as GENERATED with no certificate body");
+            result.Certificate.Should().BeNullOrEmpty();
+        }
+
+        [Fact]
+        public async Task Pickup_Disabled_DowngradesIssuedWithoutPem_ToPending()
+        {
+            // Pickup disabled (PickupRetries=0) short-circuits before any poll. If the enroll
+            // response is issued-without-PEM, returning it verbatim would hand Command a bodyless
+            // GENERATED. The disabled path must still enforce the no-bodyless-GENERATED invariant
+            // and degrade to pending so a later sync imports the certificate.
+            var mock = NewMock();
+            var issuedNoPem = MockCertificateData.IssuedEnrollResponse();
+            issuedNoPem.Certificate = null;
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(issuedNoPem);
+
+            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 0));
+
+            var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "with pickup disabled a bodyless issued result must still degrade to pending");
+            result.Certificate.Should().BeNullOrEmpty();
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never, "disabled pickup must not poll");
+        }
+
+        [Fact]
+        public async Task Pickup_DegradesIssuedWithoutPem_ToPending_WhenOrderNumberEmpty()
+        {
+            // The no-order-number guard is the first return in the pickup and cannot poll or
+            // refetch. If the enroll response is issued-without-PEM but carries no order number,
+            // that guard must STILL enforce the no-bodyless-GENERATED invariant rather than return
+            // the broken result verbatim. (Defense-in-depth: the shipped client throws before
+            // returning an empty Id, but the pickup must not depend on that upstream guarantee.)
+            var mock = NewMock();
+            var issuedNoPemNoId = MockCertificateData.IssuedEnrollResponse();
+            issuedNoPemNoId.Certificate = null;
+            issuedNoPemNoId.Id = "";
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(issuedNoPemNoId);
+
+            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+
+            var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "a bodyless issued result must degrade to pending even when there is no order " +
+                "number to poll with");
+            result.Certificate.Should().BeNullOrEmpty();
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never, "an empty order number cannot be polled");
         }
 
         // ---------------------------------------------------------------------------
