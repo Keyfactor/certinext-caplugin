@@ -1,3 +1,12 @@
+# 1.2.0
+
+## Features
+- feat(enroll): `Enroll()` now runs a synchronous enrollment-wait poll on every enrollment path (new, reissue, and renewal) on both build flavors — DV orders that issue within the poll budget return the issued certificate in the same call instead of waiting for the next synchronization, restoring the behavior expiration-renewal workflows relied on with the legacy Sectigo connector. Configurable via the new `EnrollmentWaitAttempts` (default 5) and `EnrollmentWaitIntervalSeconds` (default 10) connector settings (`attempts × interval` ≈ maximum time an enrollment call occupies a Command worker thread, hard-capped at 300 s); set either to `0` (or a negative value) to disable. Transient API failures consume an attempt rather than aborting the poll.
+- feat(enroll): OV/EV orders skip the enrollment-wait poll and return pending immediately with a status message explaining that CERTInext issues these products asynchronously by design (organization verification; confirmed by CERTInext support) — the certificate is imported by the next synchronization. The product's validation level is resolved from the account's product catalog (`GetProductDetails`, cached for 60 minutes), with the template product name as fallback.
+
+## Bug Fixes
+- fix(build): The `-p:DcvSupport=false` (no-DCV, IAnyCAPlugin 3.2.0) flavor of `CERTInext.IntegrationTests` failed to compile — `CnameResolverLiveDnsTests.cs` references a helper defined in the DCV-only `DcvLifecycleTests.cs` and is itself a DCV feature test, so it is now excluded from the no-DCV build alongside the other DCV test files.
+
 # 1.1.0
 
 ## Features
