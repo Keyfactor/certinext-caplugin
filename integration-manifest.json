@@ -142,6 +142,14 @@
                     "description": "Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true."
                 },
                 {
+                    "name": "PickupRetries",
+                    "description": "OPTIONAL: Number of times Enroll() polls CERTInext for the issued certificate after submitting an order for a DV product, so fast-issuing orders return the certificate synchronously in the same enrollment call. PickupRetries \u00d7 PickupDelaySeconds \u2248 the maximum time an enrollment call can occupy a Keyfactor Command worker thread (a small internal grace margin applies) \u2014 keep the product under ~90 seconds. OV/EV products never poll: CERTInext issues them asynchronously by design (organization verification), so those orders return pending and are completed by the next synchronization. Set to 0 to disable. Can also be set via the CERTINEXT_PICKUP_RETRIES environment variable; the env var takes precedence. Default: 5."
+                },
+                {
+                    "name": "PickupDelaySeconds",
+                    "description": "OPTIONAL: Seconds between synchronous pickup polls inside Enroll() (see PickupRetries). Can also be set via the CERTINEXT_PICKUP_DELAY_SECONDS environment variable; the env var takes precedence. Default: 10."
+                },
+                {
                     "name": "DcvEnabled",
                     "description": "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false."
                 },

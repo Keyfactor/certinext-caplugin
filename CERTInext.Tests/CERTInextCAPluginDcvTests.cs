@@ -463,7 +463,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.Never,
-                "Enroll must not enter WaitForIssuanceAfterDcvAsync when the order is " +
+                "Enroll must not enter the post-DCV issuance wait (WaitForIssuanceAsync) when the order is " +
                 "cancelled/rejected, even if DCV happens to be in a 'validated' state");
             validator.StagedRecords.Should().BeEmpty(
                 "DCV staging must not run for a cancelled/rejected order");

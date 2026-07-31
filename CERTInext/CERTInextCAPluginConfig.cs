@@ -272,6 +272,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = true,
                     Type = "Boolean"
                 },
+                [Constants.Config.PickupRetries] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Number of times Enroll() polls CERTInext for the issued certificate " +
+                               "after submitting an order for a DV product, so fast-issuing orders return the " +
+                               "certificate synchronously in the same enrollment call. " +
+                               "PickupRetries × PickupDelaySeconds ≈ the maximum time an enrollment call can " +
+                               "occupy a Keyfactor Command worker thread (a small internal grace margin applies) " +
+                               "— keep the product under ~90 seconds. " +
+                               "OV/EV products never poll: CERTInext issues them asynchronously by design " +
+                               "(organization verification takes minutes and may be human-gated), so those " +
+                               "orders return pending and are completed by the next synchronization. " +
+                               "Set to 0 to disable the poll entirely. " +
+                               $"Can also be set via the {Constants.Config.PickupRetriesEnvVar} environment " +
+                               "variable; the env var takes precedence when both are set. Default: 5.",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultRetries,
+                    Type = "Number"
+                },
+                [Constants.Config.PickupDelaySeconds] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Seconds between synchronous pickup polls inside Enroll() (see " +
+                               "PickupRetries). " +
+                               $"Can also be set via the {Constants.Config.PickupDelaySecondsEnvVar} environment " +
+                               "variable; the env var takes precedence when both are set. Default: 10.",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultDelaySeconds,
+                    Type = "Number"
+                },
                 [Constants.Config.DcvEnabled] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) " +
@@ -679,6 +707,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("IgnoreExpired")]
         public bool IgnoreExpired { get; set; } = false;
 
+        /// <summary>
+        /// Number of times <c>Enroll()</c> polls <c>GetCertificate</c> after submitting an
+        /// order for a DV product, waiting for CERTInext to issue so the certificate can be
+        /// returned synchronously (mirrors the legacy Sectigo connector's pickup loop).
+        /// <c>PickupRetries × PickupDelaySeconds</c> is the maximum time an enrollment call
+        /// can occupy a Command worker thread. Set to 0 to disable the poll entirely (the
+        /// certificate is then picked up on the next synchronization). Overridden by
+        /// <c>CERTINEXT_PICKUP_RETRIES</c> when set. Default: 5.
+        /// </summary>
+        [JsonPropertyName("PickupRetries")]
+        public int PickupRetries { get; set; } = Constants.Pickup.DefaultRetries;
+
+        /// <summary>
+        /// Seconds between synchronous pickup polls inside <c>Enroll()</c>. See
+        /// <see cref="PickupRetries"/>. Overridden by <c>CERTINEXT_PICKUP_DELAY_SECONDS</c>
+        /// when set. Default: 10.
+        /// </summary>
+        [JsonPropertyName("PickupDelaySeconds")]
+        public int PickupDelaySeconds { get; set; } = Constants.Pickup.DefaultDelaySeconds;
+
         [JsonPropertyName("PageSize")]
         public int PageSize { get; set; } = Constants.Api.DefaultPageSize;
 
@@ -770,40 +818,54 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public bool DcvFollowCnameDelegation { get; set; } = false;
 
         /// <summary>
+        /// Shared resolution for the numeric "GetEffective*" knobs: the environment variable
+        /// wins when set and parseable, then the configured field, then the compiled default.
+        /// <paramref name="zeroAllowed"/> distinguishes knobs where 0 is a meaningful
+        /// "disabled" value from knobs that require a positive value.
+        /// </summary>
+        private static int GetEffectiveInt(string envVarName, int configured, int fallback, bool zeroAllowed)
+        {
+            bool Valid(int v) => zeroAllowed ? v >= 0 : v > 0;
+            var env = System.Environment.GetEnvironmentVariable(envVarName);
+            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && Valid(envVal))
+                return envVal;
+            return Valid(configured) ? configured : fallback;
+        }
+
+        /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the
         /// config field so operators can adjust the ceiling without a connector reconfiguration.
         /// </summary>
-        public int GetEffectiveDcvTimeoutMinutes()
-        {
-            var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvTimeoutMinutesEnvVar);
-            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal > 0)
-                return envVal;
-            return DcvTimeoutMinutes > 0 ? DcvTimeoutMinutes : 10;
-        }
+        public int GetEffectiveDcvTimeoutMinutes() =>
+            GetEffectiveInt(Constants.Config.DcvTimeoutMinutesEnvVar, DcvTimeoutMinutes, 10, zeroAllowed: false);
 
         /// <summary>
         /// Returns the effective wait for the DCV challenge to appear in TrackOrder, preferring
         /// the env var so operators can tune without re-saving the connector. A value of 0
         /// (either field or env var) disables the wait entirely.
         /// </summary>
-        public int GetEffectiveDcvWaitForChallengeSeconds()
-        {
-            var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvWaitForChallengeSecondsEnvVar);
-            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal >= 0)
-                return envVal;
-            return DcvWaitForChallengeSeconds >= 0 ? DcvWaitForChallengeSeconds : 60;
-        }
+        public int GetEffectiveDcvWaitForChallengeSeconds() =>
+            GetEffectiveInt(Constants.Config.DcvWaitForChallengeSecondsEnvVar, DcvWaitForChallengeSeconds, 60, zeroAllowed: true);
 
         /// <summary>
         /// Returns the effective post-DCV wait for cert issuance, preferring the env var.
         /// A value of 0 disables the wait.
         /// </summary>
-        public int GetEffectiveDcvWaitForIssuanceSeconds()
-        {
-            var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvWaitForIssuanceSecondsEnvVar);
-            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal >= 0)
-                return envVal;
-            return DcvWaitForIssuanceSeconds >= 0 ? DcvWaitForIssuanceSeconds : 60;
-        }
+        public int GetEffectiveDcvWaitForIssuanceSeconds() =>
+            GetEffectiveInt(Constants.Config.DcvWaitForIssuanceSecondsEnvVar, DcvWaitForIssuanceSeconds, 60, zeroAllowed: true);
+
+        /// <summary>
+        /// Returns the effective synchronous-pickup retry count, preferring the env var so
+        /// operators can tune without re-saving the connector. 0 disables the pickup poll.
+        /// </summary>
+        public int GetEffectivePickupRetries() =>
+            GetEffectiveInt(Constants.Config.PickupRetriesEnvVar, PickupRetries, Constants.Pickup.DefaultRetries, zeroAllowed: true);
+
+        /// <summary>
+        /// Returns the effective delay between synchronous-pickup polls, preferring the env
+        /// var. 0 disables the pickup poll.
+        /// </summary>
+        public int GetEffectivePickupDelaySeconds() =>
+            GetEffectiveInt(Constants.Config.PickupDelaySecondsEnvVar, PickupDelaySeconds, Constants.Pickup.DefaultDelaySeconds, zeroAllowed: true);
     }
 }
