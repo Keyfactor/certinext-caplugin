@@ -1178,11 +1178,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
                 else
                 {
+                    // SOC2 CC7.2: if the outer DcvTimeoutMinutes ceiling fires, this tells the
+                    // catch below which phase was in flight — domain validation itself, or the
+                    // post-DCV issuance poll — instead of leaving that ambiguous in the log.
+                    string dcvPhaseInFlight = "domain validation";
                     try
                     {
                         bool dcvDone = await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
                         if (dcvDone)
                         {
+                            dcvPhaseInFlight = "the post-DCV issuance poll";
                             // Poll GetCertificate until CERTInext finishes generating the cert OR the
                             // issuance budget expires.  CERTInext issuance is async — DCV may verify
                             // but the cert PEM isn't immediately available.  Without this poll, Enroll
@@ -1232,9 +1237,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // of letting the cancellation escape Enroll() unhandled — every other
                         // exit from this feature does the same "never throws" soft-fallback.
                         _logger.LogWarning(
-                            "DCV timed out (DcvTimeoutMinutes={Timeout}) for order {OrderNumber}; " +
-                            "returning the pending result so a later synchronization completes it.",
-                            dcvTimeoutMinutes, orderNumber);
+                            "DCV timed out (DcvTimeoutMinutes={Timeout}) during {Phase} for order " +
+                            "{OrderNumber}; returning the pending result so a later synchronization " +
+                            "completes it.",
+                            dcvTimeoutMinutes, dcvPhaseInFlight, orderNumber);
                     }
                     finally
                     {
@@ -1506,7 +1512,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // orders with the connector's DefaultProductCode. When the response omits it
                 // (order went out with an empty code), the template's code is only a
                 // best-effort guess for the gate.
-                string renewedProductCode = !string.IsNullOrWhiteSpace(renewResp.ProfileId)
+                bool renewedProductCodeIsApiReported = !string.IsNullOrWhiteSpace(renewResp.ProfileId);
+                string renewedProductCode = renewedProductCodeIsApiReported
                     ? renewResp.ProfileId
                     : ep.ProductCode;
                 if (!string.Equals(renewedProductCode, ep.ProductCode, StringComparison.Ordinal))
@@ -1516,6 +1523,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "({OrderedCode}), which differs from this template's product code ({TemplateCode}). " +
                         "The synchronous enrollment-wait gate classifies the ordered code.",
                         renewResp.Id, renewedProductCode, ep.ProductCode);
+                }
+                else if (!renewedProductCodeIsApiReported)
+                {
+                    // SOC2 CC9.2: the response omitted ProfileId, so this classification is a
+                    // best-effort guess (the template's code), not an API-confirmed value —
+                    // record that distinction even when the guess happens to match, so a log
+                    // reviewer doesn't mistake it for a confirmed classification.
+                    _logger.LogDebug(
+                        "Renewal order {OrderNumber} response omitted ProfileId; classifying with the " +
+                        "template's product code ({TemplateCode}) as a best-effort guess.",
+                        renewResp.Id, ep.ProductCode);
                 }
                 renewResult = await TryEnrollmentWaitForCertificateAsync(
                     renewResult, renewResp.Id, ep, renewedProductCode, dcvOwnsIssuanceWait: false);
