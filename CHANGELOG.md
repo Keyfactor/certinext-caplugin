@@ -1,3 +1,12 @@
+# 1.0.1
+
+## Features
+- feat(enroll): `Enroll()` now polls for the issued certificate after submitting an order, so fast-issuing (DV / already-approved) orders return in the same call instead of waiting for the next sync. Tunable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s); ~55s default ceiling. Orders not issued within the window are returned pending and imported by a later sync, as before.
+- chore(enroll): The enrollment-start log line now includes `RequestFormat` for diagnostics.
+
+## Bug Fixes
+- fix(client): Order submission (`GenerateOrderSSL`) and CSR submission are no longer auto-retried on a network-level timeout. Because a timeout can occur after the CA has already created the order, re-sending the same transaction was being rejected as a duplicate (`EMS-947 "Duplicate requestTxn"`), failing the enrollment while orphaning the created order. Non-idempotent submissions now run once; if the CA created the order it is imported by the next synchronization. A duplicate-transaction response is also now reported with a clear, actionable message. (Idempotent read calls are unaffected and still retry.)
+
 # 1.0.0
 
 Initial release of the CERTInext (emSign Hub) AnyCA REST Gateway plugin.
