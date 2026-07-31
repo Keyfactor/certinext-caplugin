@@ -1280,6 +1280,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     _logger.MethodExit(LogLevel.Debug);
                     return pendingResult;
                 }
+                // No usable guidance either (e.g. domain verification data hasn't appeared yet,
+                // or the TrackOrder probe itself failed) — this order is stuck waiting on manual
+                // DNS/TXT action that only an operator can take, not on CERTInext completing
+                // issuance, so a general enrollment-wait poll here is essentially guaranteed
+                // wasted work. Skip it rather than burn a bounded-but-still-costly attempt.
+                dcvIssuanceWaitRan = true;
             }
 #endif
 
