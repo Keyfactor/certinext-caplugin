@@ -587,6 +587,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
                         ProductCode = p.ProductCode,
                         ProductName = p.ProductName,
                         ProductType = cat.CategoryName,
+                        ProductTypeId = p.ProductTypeId,
                         Active = true  // API does not return an active flag at this level
                     });
                 }
@@ -657,6 +658,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         /// </summary>
         [JsonPropertyName("productType")]
         public string ProductType { get; set; }
+
+        /// <summary>
+        /// Raw numeric product type ID from the API (e.g. "13" for DV SSL). The full
+        /// value space is not documented by CERTInext, so validation-level (DV/OV/EV)
+        /// classification is derived from <see cref="ProductName"/> instead; this is
+        /// retained for logging and diagnostics.
+        /// </summary>
+        [JsonPropertyName("productTypeID")]
+        public string ProductTypeId { get; set; }
 
         /// <summary>
         /// Always <c>true</c> for products returned by the API — the API only
