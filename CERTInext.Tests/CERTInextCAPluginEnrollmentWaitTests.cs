@@ -20,14 +20,14 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Unit tests for the synchronous pickup poll (<c>TryPickupIssuedCertificateAsync</c>)
+    /// Unit tests for the synchronous enrollment-wait poll (<c>TryEnrollmentWaitForCertificateAsync</c>)
     /// that runs at the end of every enrollment path on both build flavors:
     /// DV products poll <c>GetCertificate</c> and return GENERATED + PEM when CERTInext
     /// issues within the budget; OV/EV products defer immediately (async by CA design,
     /// support ticket #162763); exhaustion or any failure soft-falls back to the pending
     /// result without throwing. Compiles on both the DCV (3.3.0) and no-DCV (3.2.0) flavors.
     /// </summary>
-    public class CERTInextCAPluginPickupTests
+    public class CERTInextCAPluginEnrollmentWaitTests
     {
         private const string DvCode = "842";
         private const string OvCode = "846";
@@ -47,8 +47,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         /// issuing, poll). Tests that specifically exercise budget exhaustion pass a small
         /// explicit retry count instead.
         /// </summary>
-        private static CERTInextConfig PickupConfig(int retries = 10, int delaySeconds = 1) =>
-            new CERTInextConfig { PickupRetries = retries, PickupDelaySeconds = delaySeconds };
+        private static CERTInextConfig EnrollmentWaitConfig(int attempts = 10, int delaySeconds = 1) =>
+            new CERTInextConfig { EnrollmentWaitAttempts = attempts, EnrollmentWaitIntervalSeconds = delaySeconds };
 
         private static List<ProductDetail> SslCatalog() => new List<ProductDetail>
         {
@@ -92,7 +92,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Pickup_DvProduct_PendingThenIssued_ReturnsGeneratedWithPem()
+        public async Task EnrollmentWait_DvProduct_PendingThenIssued_ReturnsGeneratedWithPem()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
@@ -101,12 +101,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ReturnsAsync(MockCertificateData.PendingCertRecord(MockCertificateData.CertId2))
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.CertId2));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
             result.Status.Should().Be((int)EndEntityStatus.GENERATED,
-                "a DV order that issues within the pickup budget must return synchronously");
+                "a DV order that issues within the enrollment-wait budget must return synchronously");
             result.Certificate.Should().Contain("BEGIN CERTIFICATE");
             result.CARequestID.Should().Be(MockCertificateData.CertId2);
 
@@ -115,7 +115,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Pickup_DvProduct_IssuedOnFirstPoll_ReturnsGenerated()
+        public async Task EnrollmentWait_DvProduct_IssuedOnFirstPoll_ReturnsGenerated()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
@@ -123,7 +123,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.CertId2));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -137,13 +137,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Pickup_OvProduct_ReturnsPendingImmediately_WithoutPolling()
+        public async Task EnrollmentWait_OvProduct_ReturnsPendingImmediately_WithoutPolling()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
             SetupCatalog(mock);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.OvSsl, OvCode));
 
@@ -160,13 +160,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Pickup_EvProduct_ReturnsPendingImmediately_WithoutPolling()
+        public async Task EnrollmentWait_EvProduct_ReturnsPendingImmediately_WithoutPolling()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
             SetupCatalog(mock);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.EvSsl, EvCode));
 
@@ -176,14 +176,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Pickup_OvByTemplateName_Defers_WhenCatalogUnavailable()
+        public async Task EnrollmentWait_OvByTemplateName_Defers_WhenCatalogUnavailable()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
             mock.Setup(c => c.GetProductDetailsAsync(It.IsAny<CancellationToken>()))
                 .ThrowsAsync(new Exception("catalog endpoint down"));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             // Template product name carries the OV token — the fallback classifier
             // must still prevent a futile poll when the catalog can't be fetched.
@@ -199,13 +199,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Pickup_ProductCatalog_IsCachedAcrossEnrollments()
+        public async Task EnrollmentWait_ProductCatalog_IsCachedAcrossEnrollments()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
             SetupCatalog(mock);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
             var ov = ProductInfo(Constants.Products.OvSsl, OvCode);
 
             await Enroll(plugin, ov);
@@ -221,7 +221,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Pickup_UnknownProduct_PollsOptimistically()
+        public async Task EnrollmentWait_UnknownProduct_PollsOptimistically()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
@@ -230,7 +230,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.CertId2));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             // Neither the catalog nor the product name identify DV/OV/EV → the bounded poll
             // runs anyway (a wasted wait beats silently breaking a fast product's sync return).
@@ -246,7 +246,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Pickup_SoftFallsBackToPending_WhenBudgetExhausted()
+        public async Task EnrollmentWait_SoftFallsBackToPending_WhenBudgetExhausted()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
@@ -254,24 +254,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.PendingCertRecord(MockCertificateData.CertId2));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 2, delaySeconds: 1));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 2, delaySeconds: 1));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
-                "exhausting the pickup budget must degrade to the pending result, never throw");
+                "exhausting the enrollment-wait budget must degrade to the pending result, never throw");
             result.StatusMessage.Should().Contain("later synchronization");
-            // PickupRetries=2 yields exactly 2 polls. The poll count is now capped deterministically
+            // EnrollmentWaitAttempts=2 yields exactly 2 polls. The poll count is now capped deterministically
             // (maxPolls = budget / interval) rather than emerging from wall-clock arithmetic, so this
             // is an exact assertion — no real-clock tolerance needed. This is the off-by-one guard:
-            // the old bug yielded retries + 1 = 3.
+            // the old bug yielded attempts + 1 = 3.
             mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.Exactly(2),
-                "PickupRetries=2 must yield exactly two polls");
+                "EnrollmentWaitAttempts=2 must yield exactly two polls");
         }
 
         [Fact]
-        public async Task Pickup_SurvivesTransientFailure_AndReturnsIssuedOnRetry()
+        public async Task EnrollmentWait_SurvivesTransientFailure_AndReturnsIssuedOnRetry()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
@@ -280,7 +280,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ThrowsAsync(new Exception("momentary CERTInext 500"))
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.CertId2));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -292,14 +292,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Pickup_Disabled_WhenRetriesNegative()
+        public async Task EnrollmentWait_Disabled_WhenRetriesNegative()
         {
             // "-1 to disable" is a common operator convention — it must not silently
             // fall back to the enabled default of 5.
             var mock = NewMock();
             SetupPendingEnroll(mock);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: -1));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: -1));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -310,7 +310,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Pickup_SoftFallsBackToPending_WhenGetCertificateThrows()
+        public async Task EnrollmentWait_SoftFallsBackToPending_WhenGetCertificateThrows()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
@@ -319,17 +319,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ThrowsAsync(new Exception("CERTInext API 500"));
 
             // Small explicit budget: every poll throws, so this test runs to exhaustion.
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 2));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 2));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
-                "a failing pickup poll must not fail the enrollment — the order was accepted");
+                "a failing enrollment-wait poll must not fail the enrollment — the order was accepted");
             result.CARequestID.Should().Be(MockCertificateData.CertId2);
         }
 
         [Fact]
-        public async Task Pickup_ReturnsFailed_WhenOrderReachesTerminalFailure()
+        public async Task EnrollmentWait_ReturnsFailed_WhenOrderReachesTerminalFailure()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
@@ -341,12 +341,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Status = "failed"
                 });
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
             result.Status.Should().Be((int)EndEntityStatus.FAILED,
-                "a terminal failure discovered during pickup must be surfaced, not left pending");
+                "a terminal failure discovered during the enrollment wait must be surfaced, not left pending");
             result.StatusMessage.Should().NotContain("Issued",
                 "the operator-visible message for a rejected order must not claim the certificate was issued");
         }
@@ -356,41 +356,41 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Pickup_Disabled_WhenRetriesZero()
+        public async Task EnrollmentWait_Disabled_WhenRetriesZero()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 0));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 0));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
             mock.Verify(c => c.GetProductDetailsAsync(It.IsAny<CancellationToken>()), Times.Never,
-                "with pickup disabled the catalog must not be fetched either");
+                "with the enrollment wait disabled the catalog must not be fetched either");
             mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.Never);
         }
 
         [Fact]
-        public async Task Pickup_Skipped_WhenEnrollReturnsIssuedWithPem()
+        public async Task EnrollmentWait_Skipped_WhenEnrollReturnsIssuedWithPem()
         {
             var mock = NewMock();
             mock.Setup(c => c.EnrollCertificateAsync(
                     It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.IssuedEnrollResponse());
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
             result.Status.Should().Be((int)EndEntityStatus.GENERATED);
             mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
-                Times.Never, "an already-complete result needs no pickup");
+                Times.Never, "an already-complete result needs no enrollment wait");
         }
 
         [Fact]
-        public async Task Pickup_FetchesPem_WhenEnrollReturnsIssuedWithoutPem()
+        public async Task EnrollmentWait_FetchesPem_WhenEnrollReturnsIssuedWithoutPem()
         {
             var mock = NewMock();
             var issuedNoPem = MockCertificateData.IssuedEnrollResponse();
@@ -401,17 +401,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord());
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
             result.Status.Should().Be((int)EndEntityStatus.GENERATED);
             result.Certificate.Should().Contain("BEGIN CERTIFICATE",
-                "the pickup must recover the PEM for an issued order whose download failed");
+                "the enrollment wait must recover the PEM for an issued order whose download failed");
         }
 
         [Fact]
-        public async Task Pickup_KeepsPolling_WhenGeneratedWithoutBody_ThenRecoversPem()
+        public async Task EnrollmentWait_KeepsPolling_WhenGeneratedWithoutBody_ThenRecoversPem()
         {
             // GetCertificateAsync maps status from TrackOrder but swallows a transient
             // DownloadCertificate failure, returning Status=issued with Certificate=null.
@@ -427,7 +427,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 })
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.CertId2));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -439,10 +439,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Pickup_SoftFallsBackToPending_WhenGeneratedBodyNeverArrives()
+        public async Task EnrollmentWait_SoftFallsBackToPending_WhenGeneratedBodyNeverArrives()
         {
             // Every poll reports issued but the PEM download keeps failing (Certificate=null),
-            // and the budget expires with only a body-less GENERATED in hand. The pickup must
+            // and the budget expires with only a body-less GENERATED in hand. The enrollment wait must
             // NOT surface that as a successful "issued, no certificate" result — Command would
             // store a body-less record — but degrade to pending so a later sync refetches the PEM.
             var mock = NewMock();
@@ -454,7 +454,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Id = MockCertificateData.CertId2, Status = "issued", Certificate = null
                 });
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 3, delaySeconds: 1));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 3, delaySeconds: 1));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -462,16 +462,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 "an issued order whose PEM never downloads within the budget must degrade to " +
                 "pending, never a GENERATED result with no certificate body");
             result.Certificate.Should().BeNullOrEmpty(
-                "a bodyless GENERATED must not be returned as a successful pickup");
+                "a bodyless GENERATED must not be returned as a successful enrollment wait");
             result.StatusMessage.Should().Contain("later synchronization");
         }
 
         [Fact]
-        public async Task Pickup_SoftFallsBackToPending_WhenEnrollIssuedWithoutPem_AndBodyNeverArrives()
+        public async Task EnrollmentWait_SoftFallsBackToPending_WhenEnrollIssuedWithoutPem_AndBodyNeverArrives()
         {
             // Entry state (not just a mid-poll read) is issued-without-PEM: EnrollCertificateAsync
             // reported issued but swallowed the post-submit download failure (Certificate=null).
-            // The pickup polls to recover the body; if every poll also comes back body-less and the
+            // The enrollment wait polls to recover the body; if every poll also comes back body-less and the
             // budget expires, the RESULT returned to Command must degrade to pending — it must NOT
             // return the original GENERATED entry state with a null certificate.
             var mock = NewMock();
@@ -487,7 +487,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Id = MockCertificateData.CertId2, Status = "issued", Certificate = null
                 });
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 3, delaySeconds: 1));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 3, delaySeconds: 1));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -498,9 +498,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Pickup_Disabled_DowngradesIssuedWithoutPem_ToPending()
+        public async Task EnrollmentWait_Disabled_DowngradesIssuedWithoutPem_ToPending()
         {
-            // Pickup disabled (PickupRetries=0) short-circuits before any poll. If the enroll
+            // Enrollment wait disabled (EnrollmentWaitAttempts=0) short-circuits before any poll. If the enroll
             // response is issued-without-PEM, returning it verbatim would hand Command a bodyless
             // GENERATED. The disabled path must still enforce the no-bodyless-GENERATED invariant
             // and degrade to pending so a later sync imports the certificate.
@@ -511,25 +511,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(issuedNoPem);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 0));
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig(attempts: 0));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
-                "with pickup disabled a bodyless issued result must still degrade to pending");
+                "with the enrollment wait disabled a bodyless issued result must still degrade to pending");
             result.Certificate.Should().BeNullOrEmpty();
             mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
-                Times.Never, "disabled pickup must not poll");
+                Times.Never, "the disabled enrollment wait must not poll");
         }
 
         [Fact]
-        public async Task Pickup_DegradesIssuedWithoutPem_ToPending_WhenOrderNumberEmpty()
+        public async Task EnrollmentWait_DegradesIssuedWithoutPem_ToPending_WhenOrderNumberEmpty()
         {
-            // The no-order-number guard is the first return in the pickup and cannot poll or
+            // The no-order-number guard is the first return in the enrollment wait and cannot poll or
             // refetch. If the enroll response is issued-without-PEM but carries no order number,
             // that guard must STILL enforce the no-bodyless-GENERATED invariant rather than return
             // the broken result verbatim. (Defense-in-depth: the shipped client throws before
-            // returning an empty Id, but the pickup must not depend on that upstream guarantee.)
+            // returning an empty Id, but the enrollment wait must not depend on that upstream guarantee.)
             var mock = NewMock();
             var issuedNoPemNoId = MockCertificateData.IssuedEnrollResponse();
             issuedNoPemNoId.Certificate = null;
@@ -538,7 +538,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(issuedNoPemNoId);
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -555,7 +555,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Pickup_CatalogFailure_IsBackedOff_NotRetriedPerEnrollment()
+        public async Task EnrollmentWait_CatalogFailure_IsBackedOff_NotRetriedPerEnrollment()
         {
             var mock = NewMock();
             SetupPendingEnroll(mock);
@@ -564,7 +564,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.CertId2));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, EnrollmentWaitConfig());
             var dv = ProductInfo(Constants.Products.DvSsl, DvCode);
 
             await Enroll(plugin, dv);
@@ -581,7 +581,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Pickup_RenewPath_PendingThenIssued_ReturnsGenerated()
+        public async Task EnrollmentWait_RenewPath_PendingThenIssued_ReturnsGenerated()
         {
             var clientMock = NewMock();
             var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
@@ -600,7 +600,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             clientMock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord("renewed-01"));
 
-            var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object, PickupConfig());
+            var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object, EnrollmentWaitConfig());
             var productInfo = new EnrollmentProductInfo
             {
                 ProductID = Constants.Products.DvSsl,
@@ -615,18 +615,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var result = await Enroll(plugin, productInfo, EnrollmentType.RenewOrReissue);
 
             result.Status.Should().Be((int)EndEntityStatus.GENERATED,
-                "the renew API path must run the same synchronous pickup as new enrollment — " +
+                "the renew API path must run the same synchronous enrollment wait as new enrollment — " +
                 "this is the expiration-renewal workflow scenario");
             result.Certificate.Should().Contain("BEGIN CERTIFICATE");
             clientMock.Verify(c => c.GetCertificateAsync("renewed-01", It.IsAny<CancellationToken>()),
-                Times.Once, "the pickup must poll the NEW order number returned by the renewal");
+                Times.Once, "the enrollment wait must poll the NEW order number returned by the renewal");
         }
 
         [Fact]
-        public async Task Pickup_RenewPath_RunsEvenWhenDcvEnabled()
+        public async Task EnrollmentWait_RenewPath_RunsEvenWhenDcvEnabled()
         {
             // In-call DCV only exists on the New/Reissue path, so DcvEnabled must NOT
-            // suppress the pickup for renewals — that is the expiration-renewal scenario
+            // suppress the enrollment wait for renewals — that is the expiration-renewal scenario
             // this feature exists for.
             var clientMock = NewMock();
             var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
@@ -645,7 +645,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             clientMock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord("renewed-02"));
 
-            var config = PickupConfig();
+            var config = EnrollmentWaitConfig();
             config.DcvEnabled = true;
             var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object, config);
             var productInfo = new EnrollmentProductInfo
@@ -662,11 +662,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var result = await Enroll(plugin, productInfo, EnrollmentType.RenewOrReissue);
 
             result.Status.Should().Be((int)EndEntityStatus.GENERATED,
-                "DcvEnabled must not disable the renew-path pickup — no in-call DCV runs there");
+                "DcvEnabled must not disable the renew-path enrollment wait — no in-call DCV runs there");
         }
 
         [Fact]
-        public async Task Pickup_FetchesPem_ForIssuedOrder_EvenWhenDcvEnabled()
+        public async Task EnrollmentWait_FetchesPem_ForIssuedOrder_EvenWhenDcvEnabled()
         {
             // An issued-but-PEM-missing order is past validation entirely, so the recovery
             // fetch must run regardless of DCV configuration.
@@ -685,7 +685,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ThrowsAsync(new Exception("not relevant to this test"));
 #endif
 
-            var config = PickupConfig();
+            var config = EnrollmentWaitConfig();
             config.DcvEnabled = true;
             var plugin = new CERTInextCAPlugin(mock.Object, config);
 
@@ -697,7 +697,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Pickup_RenewPath_ClassifiesTheProductCodeActuallyOrdered()
+        public async Task EnrollmentWait_RenewPath_ClassifiesTheProductCodeActuallyOrdered()
         {
             // CERTInextClient.RenewCertificateAsync places the renewal order with the
             // connector's DefaultProductCode (not the template's code) and reports the
@@ -720,7 +720,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ReturnsAsync(renewPending);
             SetupCatalog(clientMock);
 
-            var config = PickupConfig();
+            var config = EnrollmentWaitConfig();
             config.DefaultProductCode = OvCode; // what RenewCertificateAsync orders with
             var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object, config);
             var productInfo = new EnrollmentProductInfo

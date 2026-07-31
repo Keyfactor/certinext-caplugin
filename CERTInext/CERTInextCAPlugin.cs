@@ -85,10 +85,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         private readonly ConcurrentDictionary<string, byte> _dcvInFlight = new();
 
         // Cached productCode → DV/OV/EV classification built from GetProductDetails, used by
-        // the synchronous pickup gate (TryPickupIssuedCertificateAsync). Refreshed at most
-        // once per Constants.Pickup.ProductTypeCacheMinutes so the catalog is never fetched
-        // per-enrollment; a fetch failure falls back to the stale map (or template-name
-        // classification) rather than failing the enrollment.
+        // the synchronous enrollment-wait gate (TryEnrollmentWaitForCertificateAsync). Refreshed
+        // at most once per Constants.EnrollmentWait.ProductTypeCacheMinutes so the catalog is
+        // never fetched per-enrollment; a fetch failure falls back to the stale map (or
+        // template-name classification) rather than failing the enrollment.
         private readonly SemaphoreSlim _productTypeCacheLock = new(1, 1);
         private volatile Dictionary<string, ProductValidationType> _productTypeByCode;
         private DateTime _productTypeCacheExpiresUtc = DateTime.MinValue;
@@ -1247,7 +1247,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             dcvOwnsIssuanceWait = _config.DcvEnabled;
 #endif
             var newResult = BuildEnrollmentResult(enrollResp, ep.AutoApprove);
-            newResult = await TryPickupIssuedCertificateAsync(
+            newResult = await TryEnrollmentWaitForCertificateAsync(
                 newResult, enrollResp.Id, ep, ep.ProductCode, dcvOwnsIssuanceWait);
 
             _logger.MethodExit(LogLevel.Debug);
@@ -1480,10 +1480,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     _logger.LogWarning(
                         "Renewal order {OrderNumber} was placed with the connector DefaultProductCode " +
                         "({OrderedCode}), which differs from this template's product code ({TemplateCode}). " +
-                        "The synchronous-pickup gate classifies the ordered code.",
+                        "The synchronous enrollment-wait gate classifies the ordered code.",
                         renewResp.Id, renewedProductCode, ep.ProductCode);
                 }
-                renewResult = await TryPickupIssuedCertificateAsync(
+                renewResult = await TryEnrollmentWaitForCertificateAsync(
                     renewResult, renewResp.Id, ep, renewedProductCode, dcvOwnsIssuanceWait: false);
 
                 return renewResult;
@@ -1498,7 +1498,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         // ---------------------------------------------------------------------------
-        // Synchronous pickup — DCV-independent, both build flavors
+        // Synchronous enrollment wait — DCV-independent, both build flavors
         // ---------------------------------------------------------------------------
 
         /// <summary>
@@ -1530,20 +1530,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// flow already performed (or deliberately deferred) the issuance wait — a pending
         /// order there is waiting on domain validation that only the sync-driven DCV path can
         /// advance, so a second poll cannot win.  The renew path never runs in-call DCV and
-        /// must always be eligible for pickup.
+        /// must always be eligible for the enrollment-wait poll.
         /// </param>
-        private async Task<EnrollmentResult> TryPickupIssuedCertificateAsync(
+        private async Task<EnrollmentResult> TryEnrollmentWaitForCertificateAsync(
             EnrollmentResult pendingResult, string orderNumber, EnrollmentParams ep,
             string productCode, bool dcvOwnsIssuanceWait)
         {
             // Invariant enforced on EVERY return that hands back the caller's result (including the
             // guards below): never hand Command a GENERATED result with no certificate body. An
             // issued-but-PEM-missing state the poll could not recover — the download kept failing,
-            // pickup is disabled, or there is no order number to poll/refetch with — must degrade to
-            // EXTERNALVALIDATION so a later synchronization refetches the body; otherwise Command
-            // persists a bodyless "issued" record, the exact outcome the pickup exists to prevent.
-            // Poll-success and REVOKED/FAILED returns already carry a body (or legitimately have
-            // none), so they no-op through this. Declared first so no early return can bypass it.
+            // the enrollment wait is disabled, or there is no order number to poll/refetch with —
+            // must degrade to EXTERNALVALIDATION so a later synchronization refetches the body;
+            // otherwise Command persists a bodyless "issued" record, the exact outcome the
+            // enrollment wait exists to prevent. Poll-success and REVOKED/FAILED returns already
+            // carry a body (or legitimately have none), so they no-op through this. Declared first
+            // so no early return can bypass it.
             EnrollmentResult DegradeBodylessIssuedToPending(EnrollmentResult r)
             {
                 if (r != null
@@ -1583,48 +1584,49 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // SOC2 CC7.2: Information so the enrollment timeline shows which mechanism
                 // owned the in-call wait (pairs with the "Starting DCV for order" line).
                 _logger.LogInformation(
-                    "Skipping synchronous pickup for order {OrderNumber} — the in-call DCV flow owns this order's issuance wait.",
+                    "Skipping synchronous enrollment wait for order {OrderNumber} — the in-call DCV flow owns this order's issuance wait.",
                     orderNumber);
                 return pendingResult;
             }
 
-            int retries = _config.GetEffectivePickupRetries();
-            int delaySeconds = _config.GetEffectivePickupDelaySeconds();
-            if (retries <= 0 || delaySeconds <= 0)
+            int attempts = _config.GetEffectiveEnrollmentWaitAttempts();
+            int delaySeconds = _config.GetEffectiveEnrollmentWaitIntervalSeconds();
+            if (attempts <= 0 || delaySeconds <= 0)
             {
                 // SOC2 CC7.2 / SOX change management: the effective values may come from env
                 // vars rather than the connector record, so this Information line is the only
-                // production-log evidence distinguishing "pickup disabled by operator" from
-                // "pickup never attempted".
+                // production-log evidence distinguishing "enrollment wait disabled by operator"
+                // from "enrollment wait never attempted".
                 _logger.LogInformation(
-                    "Synchronous pickup disabled by configuration (effective PickupRetries={Retries}, " +
-                    "PickupDelaySeconds={Delay}). Order {OrderNumber} will be picked up on the next sync cycle.",
-                    retries, delaySeconds, orderNumber);
+                    "Synchronous enrollment wait disabled by configuration (effective EnrollmentWaitAttempts={Attempts}, " +
+                    "EnrollmentWaitIntervalSeconds={Delay}). Order {OrderNumber} will be picked up on the next sync cycle.",
+                    attempts, delaySeconds, orderNumber);
                 return DegradeBodylessIssuedToPending(pendingResult);
             }
 
             // Compute the budget in long first: both knobs accept arbitrary non-negative ints
             // from env vars, and an int overflow here would go negative and make the CTS
-            // constructor throw (silently disabling pickup via the catch below). Clamp to the
-            // hard ceiling — Command abandons enrollment calls long before it, so a larger
-            // budget would only orphan a worker thread (docs: keep retries × delay under ~90 s).
-            long configuredBudgetSeconds = (long)retries * delaySeconds;
-            int budgetSeconds = (int)Math.Min(configuredBudgetSeconds, Constants.Pickup.MaxBudgetSeconds);
-            if (configuredBudgetSeconds > Constants.Pickup.MaxBudgetSeconds)
+            // constructor throw (silently disabling the enrollment wait via the catch below).
+            // Clamp to the hard ceiling — Command abandons enrollment calls long before it, so a
+            // larger budget would only orphan a worker thread (docs: keep attempts × interval
+            // under ~90 s).
+            long configuredBudgetSeconds = (long)attempts * delaySeconds;
+            int budgetSeconds = (int)Math.Min(configuredBudgetSeconds, Constants.EnrollmentWait.MaxBudgetSeconds);
+            if (configuredBudgetSeconds > Constants.EnrollmentWait.MaxBudgetSeconds)
             {
                 // SOX CC7.3: the clamp is a policy decision — evidence it.
                 _logger.LogWarning(
-                    "Configured pickup budget ({Configured}s = PickupRetries {Retries} × PickupDelaySeconds {Delay}) " +
+                    "Configured enrollment-wait budget ({Configured}s = EnrollmentWaitAttempts {Attempts} × EnrollmentWaitIntervalSeconds {Delay}) " +
                     "exceeds the hard ceiling; clamped to {Max}s for order {OrderNumber}.",
-                    configuredBudgetSeconds, retries, delaySeconds, Constants.Pickup.MaxBudgetSeconds, orderNumber);
+                    configuredBudgetSeconds, attempts, delaySeconds, Constants.EnrollmentWait.MaxBudgetSeconds, orderNumber);
             }
 
             try
             {
-                // One ceiling bounds the ENTIRE pickup — catalog classification included — so
-                // a hung catalog endpoint cannot hold a Command worker thread beyond the
-                // configured budget (+ grace for one in-flight request). This is what keeps
-                // the documented "retries × delay = max Command-occupied time" honest.
+                // One ceiling bounds the ENTIRE enrollment wait — catalog classification
+                // included — so a hung catalog endpoint cannot hold a Command worker thread
+                // beyond the configured budget (+ grace for one in-flight request). This is what
+                // keeps the documented "attempts × interval = max Command-occupied time" honest.
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(budgetSeconds + 30));
 
                 var validationType = ProductValidationType.Unknown;
@@ -1638,7 +1640,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // SOC2 CC7.2: the decision to defer is policy-relevant — log at
                         // Information so it survives production log filters.
                         _logger.LogInformation(
-                            "Synchronous pickup skipped — {Type} products are issued asynchronously by " +
+                            "Synchronous enrollment wait skipped — {Type} products are issued asynchronously by " +
                             "CERTInext (organization verification). OrderNumber={OrderNumber}, " +
                             "ProductCode={ProductCode}. The certificate will be imported by a later synchronization.",
                             typeLabel, orderNumber, productCode);
@@ -1660,13 +1662,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
 
                 _logger.LogInformation(
-                    "Synchronous pickup poll started. OrderNumber={OrderNumber}, ProductCode={ProductCode}, " +
-                    "ValidationType={ValidationType}, Retries={Retries}, DelaySeconds={Delay}, BudgetSeconds={Budget}",
-                    orderNumber, productCode, validationType, retries, delaySeconds, budgetSeconds);
+                    "Synchronous enrollment-wait poll started. OrderNumber={OrderNumber}, ProductCode={ProductCode}, " +
+                    "ValidationType={ValidationType}, Attempts={Attempts}, DelaySeconds={Delay}, BudgetSeconds={Budget}",
+                    orderNumber, productCode, validationType, attempts, delaySeconds, budgetSeconds);
 
-                var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, delaySeconds, "Pickup", cts.Token);
+                var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, delaySeconds, "EnrollmentWait", cts.Token);
 
-                // A GENERATED result is only a completed pickup once the PEM is present.
+                // A GENERATED result is only a completed enrollment wait once the PEM is present.
                 // WaitForIssuanceAsync keeps polling a body-less GENERATED, but the budget can
                 // still expire while the download keeps failing transiently — in that case fall
                 // through to the pending soft-fallback (sync refetches the body later) rather
@@ -1778,45 +1780,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         var classified = ProductClassifier.ClassifyName(p.ProductName);
                         map[p.ProductCode.Trim()] = classified;
                         _logger.LogDebug(
-                            "Catalog product classified for pickup gating. ProductCode={Code}, " +
+                            "Catalog product classified for enrollment-wait gating. ProductCode={Code}, " +
                             "ProductTypeId={TypeId}, ProductName={Name}, ValidationType={Type}",
                             p.ProductCode, p.ProductTypeId, p.ProductName, classified);
                     }
 
                     _productTypeByCode = map;
-                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.Pickup.ProductTypeCacheMinutes);
+                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.EnrollmentWait.ProductTypeCacheMinutes);
                     _logger.LogInformation(
-                        "Product-type catalog cached for synchronous-pickup gating. Products={Count}, " +
-                        "CacheMinutes={Minutes}", map.Count, Constants.Pickup.ProductTypeCacheMinutes);
+                        "Product-type catalog cached for synchronous-enrollment-wait gating. Products={Count}, " +
+                        "CacheMinutes={Minutes}", map.Count, Constants.EnrollmentWait.ProductTypeCacheMinutes);
                     return map;
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    // The caller's pickup budget expired mid-fetch. The fetch had the full
-                    // budget PLUS the ~30 s grace on the pickup CTS, so a cancellation here means
-                    // the catalog endpoint is structurally slower than any enrollment can wait —
-                    // not a transient blip. Arm the back-off so the NEXT enrollment doesn't spend
-                    // its whole budget on the same doomed fetch; it will classify from the stale
-                    // catalog (or the template product name) until the endpoint recovers. Still
-                    // propagate, because THIS enrollment's budget is already spent — its
-                    // soft-fallback returns the pending result.
-                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.Pickup.FailureBackoffMinutes);
+                    // The caller's enrollment-wait budget expired mid-fetch. The fetch had the
+                    // full budget PLUS the ~30 s grace on the enrollment-wait CTS, so a
+                    // cancellation here means the catalog endpoint is structurally slower than
+                    // any enrollment can wait — not a transient blip. Arm the back-off so the
+                    // NEXT enrollment doesn't spend its whole budget on the same doomed fetch; it
+                    // will classify from the stale catalog (or the template product name) until
+                    // the endpoint recovers. Still propagate, because THIS enrollment's budget is
+                    // already spent — its soft-fallback returns the pending result.
+                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.EnrollmentWait.FailureBackoffMinutes);
                     _logger.LogWarning(
-                        "Product catalog fetch for synchronous-pickup gating exceeded the enrollment budget; " +
+                        "Product catalog fetch for synchronous-enrollment-wait gating exceeded the enrollment budget; " +
                         "catalog refresh backed off for {BackoffMinutes} minutes. Subsequent enrollments will " +
                         "classify from {Fallback} until it recovers.",
-                        Constants.Pickup.FailureBackoffMinutes,
+                        Constants.EnrollmentWait.FailureBackoffMinutes,
                         _productTypeByCode != null ? "the stale cached catalog" : "the template product name");
                     throw;
                 }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex,
-                        "Could not refresh the product catalog for synchronous-pickup gating; falling back to " +
+                        "Could not refresh the product catalog for synchronous-enrollment-wait gating; falling back to " +
                         "{Fallback}. Retry backed off for {BackoffMinutes} minutes.",
                         _productTypeByCode != null ? "the stale cached catalog" : "template-name classification",
-                        Constants.Pickup.FailureBackoffMinutes);
-                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.Pickup.FailureBackoffMinutes);
+                        Constants.EnrollmentWait.FailureBackoffMinutes);
+                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.EnrollmentWait.FailureBackoffMinutes);
                     return _productTypeByCode;
                 }
             }
@@ -2268,9 +2270,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// time after the triggering call returns.  Without this poll the plugin would catch
         /// the cert in pending state and return it that way, forcing the gateway to wait for
         /// the next sync cycle.  Used by both the post-DCV wait (budget =
-        /// <c>DcvWaitForIssuanceSeconds</c>, 3 s interval) and the general synchronous pickup
-        /// in <see cref="TryPickupIssuedCertificateAsync"/> (budget = <c>PickupRetries ×
-        /// PickupDelaySeconds</c>, <c>PickupDelaySeconds</c> interval).
+        /// <c>DcvWaitForIssuanceSeconds</c>, 3 s interval) and the general synchronous
+        /// enrollment wait in <see cref="TryEnrollmentWaitForCertificateAsync"/> (budget =
+        /// <c>EnrollmentWaitAttempts × EnrollmentWaitIntervalSeconds</c>,
+        /// <c>EnrollmentWaitIntervalSeconds</c> interval).
         /// </summary>
         private async Task<LegacyGetCertificateResponse> WaitForIssuanceAsync(
             string orderNumber, int waitBudgetSeconds, int pollIntervalSeconds, string phase, CancellationToken ct)
@@ -2290,10 +2293,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     phase, orderNumber);
                 return null;
             }
-            // Clamp the interval into [1, budget] so a pathological PickupDelaySeconds override
-            // (e.g. from CERTINEXT_PICKUP_DELAY_SECONDS) can never make Task.Delay outlast the
-            // budget. Correctness here no longer depends on the deadline check happening to run
-            // before the sleep — the wait is bounded by construction.
+            // Clamp the interval into [1, budget] so a pathological EnrollmentWaitIntervalSeconds
+            // override (e.g. from CERTINEXT_ENROLLMENT_WAIT_INTERVAL_SECONDS) can never make
+            // Task.Delay outlast the budget. Correctness here no longer depends on the deadline
+            // check happening to run before the sleep — the wait is bounded by construction.
             pollIntervalSeconds = Math.Min(Math.Max(1, pollIntervalSeconds), Math.Max(1, waitBudgetSeconds));
 
             // Deterministic upper bound on the poll count. The documented "retries × delay ⇒

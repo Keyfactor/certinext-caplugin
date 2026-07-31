@@ -140,7 +140,7 @@ sequenceDiagram
     alt Certificate issued immediately
         Plugin-->>CMD: Certificate ready — PEM returned
     else Pending, product is DV, and DCV does not own the wait
-        loop Synchronous pickup<br/>(up to PickupRetries × PickupDelaySeconds)
+        loop Synchronous enrollment wait<br/>(up to EnrollmentWaitAttempts × EnrollmentWaitIntervalSeconds)
             Plugin->>API: Fetch certificate
             API-->>Plugin: Issued, or still pending
         end
@@ -154,9 +154,9 @@ sequenceDiagram
     Plugin->>Plugin: Record enrollment outcome in audit log<br/>(order number, serial number, status)
 ```
 
-The synchronous pickup step mirrors the legacy Sectigo connector's behavior: DV orders that CERTInext issues within the poll budget are returned in the same enrollment call, so automated workflows (e.g. expiration renewal) receive the certificate without waiting for a sync cycle. The product's validation level is resolved from the account's product catalog (cached), falling back to the template product name. OV/EV orders are never polled — their organization-verification step takes minutes and may be human-gated, so the plugin returns pending immediately with a message explaining the deferral.
+The synchronous enrollment-wait step mirrors the legacy Sectigo connector's behavior: DV orders that CERTInext issues within the poll budget are returned in the same enrollment call, so automated workflows (e.g. expiration renewal) receive the certificate without waiting for a sync cycle. The product's validation level is resolved from the account's product catalog (cached), falling back to the template product name. OV/EV orders are never polled — their organization-verification step takes minutes and may be human-gated, so the plugin returns pending immediately with a message explaining the deferral.
 
-On gateways with `DcvEnabled` (DCV build flavor), pending **new/reissue** orders skip this pickup loop entirely — the in-call DCV flow owns those waits, and its post-validation issuance poll is budgeted by `DcvWaitForIssuanceSeconds` (3-second interval), not by `PickupRetries × PickupDelaySeconds`. Renewals never run in-call DCV, so the pickup loop above applies to them on every flavor, as does the recovery fetch for orders that issued but whose certificate download initially failed.
+On gateways with `DcvEnabled` (DCV build flavor), pending **new/reissue** orders skip this enrollment-wait loop entirely — the in-call DCV flow owns those waits, and its post-validation issuance poll is budgeted by `DcvWaitForIssuanceSeconds` (3-second interval), not by `EnrollmentWaitAttempts × EnrollmentWaitIntervalSeconds`. Renewals never run in-call DCV, so the enrollment-wait loop above applies to them on every flavor, as does the recovery fetch for orders that issued but whose certificate download initially failed.
 
 ### Renewal
 

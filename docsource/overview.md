@@ -56,13 +56,13 @@ Enrollment completes successfully but the cert is not yet issued — Command sho
 
 This is the expected return shape on three paths:
 
-1. **The product is OV or EV.** CERTInext issues OV/EV certificates asynchronously by design — the mandatory organization-verification step takes minutes and may require human review, and there is no CA-side setting that makes these products return in a single call (confirmed by CERTInext support). The plugin deliberately skips its synchronous pickup poll for OV/EV and returns pending immediately with a status message explaining this.
-2. **The product is DV but issuance outran the pickup budget.** `Enroll()` polls for the issued certificate up to `PickupRetries × PickupDelaySeconds` (default ≈ 50 s) before returning pending.
+1. **The product is OV or EV.** CERTInext issues OV/EV certificates asynchronously by design — the mandatory organization-verification step takes minutes and may require human review, and there is no CA-side setting that makes these products return in a single call (confirmed by CERTInext support). The plugin deliberately skips its synchronous enrollment-wait poll for OV/EV and returns pending immediately with a status message explaining this.
+2. **The product is DV but issuance outran the enrollment-wait budget.** `Enroll()` polls for the issued certificate up to `EnrollmentWaitAttempts × EnrollmentWaitIntervalSeconds` (default ≈ 50 s) before returning pending.
 3. **DCV builds only:** the DCV-specific `Enroll()` budget (`DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds`, defaults 60s each) elapsed before CERTInext finished asynchronous issuance, or the plugin was loaded on an older gateway host (pre-IAnyCAPlugin v3.3) that does not inject `IDomainValidatorFactory`, so DCV could not run in-call.
 
 **Mitigation**
 
-The next gateway sync cycle will pick the cert up and transition it to `GENERATED`. For OV/EV this is the designed flow — no tuning changes it. For DV, raise `PickupRetries`/`PickupDelaySeconds` if your orders reliably issue just past the default budget (keep the product under ~90 s — it holds a Command worker thread). The plugin's sync-driven DCV retry is single-shot per record, so even with hundreds of pending orders the sync completes in seconds, not minutes — see [configuration.md](configuration.md) for the `PickupRetries`/`PickupDelaySeconds` and `DcvWaitForChallengeSeconds`/`DcvWaitForIssuanceSeconds` knobs.
+The next gateway sync cycle will pick the cert up and transition it to `GENERATED`. For OV/EV this is the designed flow — no tuning changes it. For DV, raise `EnrollmentWaitAttempts`/`EnrollmentWaitIntervalSeconds` if your orders reliably issue just past the default budget (keep the product under ~90 s — it holds a Command worker thread). The plugin's sync-driven DCV retry is single-shot per record, so even with hundreds of pending orders the sync completes in seconds, not minutes — see [configuration.md](configuration.md) for the `EnrollmentWaitAttempts`/`EnrollmentWaitIntervalSeconds` and `DcvWaitForChallengeSeconds`/`DcvWaitForIssuanceSeconds` knobs.
 
 ### `EMS-956 "Invalid Request for this API"` from `GetDcv`
 
