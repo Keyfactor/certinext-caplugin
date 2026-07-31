@@ -365,9 +365,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 if (transientFailure)
                 {
                     Logger.LogWarning(
-                        "SubmitCSR received no usable response (HttpStatus={Status}, LatencyMs={Latency}); not retrying " +
-                        "(non-idempotent). If CERTInext already received the CSR, do not resubmit immediately.",
-                        (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                        "SubmitCSR received no usable response (OrderNumber={OrderNumber}, HttpStatus={Status}, " +
+                        "LatencyMs={Latency}); not retrying (non-idempotent). If CERTInext already received the CSR, " +
+                        "do not resubmit immediately.",
+                        request.OrderDetails?.OrderNumber, (int)resp.StatusCode, sw.ElapsedMilliseconds);
                     // Parity with PlaceOrderAsync: carry the actionable guidance into the surfaced
                     // exception, not only the log line.
                     throw new Exception(

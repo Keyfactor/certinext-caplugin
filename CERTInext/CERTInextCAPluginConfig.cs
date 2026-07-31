@@ -286,10 +286,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.PickupDelay] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Number of seconds between certificate-pickup retries. The total number of retries " +
-                               "times this delay (plus a short initial delay) is the maximum time an enrollment call " +
-                               "occupies a Command worker thread. If the duration is too long the request may time out, so " +
-                               $"keep the total well under ~90s. Default: {Constants.Pickup.DefaultDelaySeconds} " +
+                    Comments = "OPTIONAL: Number of seconds between certificate-pickup retries. PickupRetries times this " +
+                               "delay (plus a short initial delay) is the maximum time an enrollment call occupies a Command " +
+                               "worker thread. If the duration is too long the request may time out, so target a total well " +
+                               $"under ~90s. As a safety backstop the plugin additionally caps the effective total at " +
+                               $"{Constants.Pickup.MaxTotalWaitSeconds}s regardless of how PickupRetries/PickupDelay are set, " +
+                               $"reducing the retry count to fit. Default: {Constants.Pickup.DefaultDelaySeconds} " +
                                $"(with default retries this yields a ~{Constants.Pickup.InitialDelaySeconds + Constants.Pickup.DefaultRetries * Constants.Pickup.DefaultDelaySeconds}s ceiling).",
                     Hidden = false,
                     DefaultValue = Constants.Pickup.DefaultDelaySeconds,

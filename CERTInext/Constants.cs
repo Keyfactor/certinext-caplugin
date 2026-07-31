@@ -292,10 +292,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // issuing before we poll at all, avoiding a guaranteed-miss first attempt.
             public const int InitialDelaySeconds = 5;
 
-            // Safety clamps so a mis-configured connector cannot orphan a worker thread. Command
-            // abandons enrollment calls well before these bounds; they only backstop absurd input.
+            // Per-factor safety clamps so a single mis-typed value cannot produce a tight busy-loop
+            // or an absurd per-attempt delay. These bound each knob independently; the *product*
+            // (retries * delay) is bounded separately by MaxTotalWaitSeconds below.
             public const int MaxRetries = 30;
             public const int MaxDelaySeconds = 60;
+
+            // Hard ceiling on total in-call pickup occupancy (initial delay + retries * delay).
+            // The per-factor clamps above still permit a ~1805s product at the extremes, which could
+            // push Enroll() past Command's enrollment timeout; PickUpEnrolledCertificateAsync caps the
+            // effective retry count so the total never exceeds this. Kept comfortably under a typical
+            // enrollment timeout while leaving room for the documented ~90s default guidance.
+            public const int MaxTotalWaitSeconds = 180;
         }
 
         public static class Dcv

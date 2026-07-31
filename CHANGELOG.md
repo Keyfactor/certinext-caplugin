@@ -1,11 +1,10 @@
 # 1.0.1
 
 ## Features
-- feat(enroll): `Enroll()` now polls for the issued certificate after submitting an order, so fast-issuing (DV / already-approved) orders return in the same call instead of waiting for the next sync. Tunable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s); ~55s default ceiling. Orders not issued within the window are returned pending and imported by a later sync, as before.
-- chore(enroll): The enrollment-start log line now includes `RequestFormat` for diagnostics.
+- **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly for the certificate and returns it in the same request when it issues fast (DV and already-approved orders), instead of always waiting for the next synchronization. Two new optional settings control the wait: `PickupRetries` (default 5; set to `0` to disable) and `PickupDelay` (default 10 seconds) — about a 55-second wait by default, with a built-in ceiling so it can't run long enough to time out the enrollment. Orders that don't issue in that window — including OV/EV, which CERTInext validates asynchronously over minutes to hours — return pending and are imported by a later sync, exactly as before. Works with or without DNS-based DCV.
 
 ## Bug Fixes
-- fix(client): Order submission (`GenerateOrderSSL`) and CSR submission are no longer auto-retried on a network-level timeout. Because a timeout can occur after the CA has already created the order, re-sending the same transaction was being rejected as a duplicate (`EMS-947 "Duplicate requestTxn"`), failing the enrollment while orphaning the created order. Non-idempotent submissions now run once; if the CA created the order it is imported by the next synchronization. A duplicate-transaction response is also now reported with a clear, actionable message. (Idempotent read calls are unaffected and still retry.)
+- **No more duplicate or orphaned orders after a network timeout.** Order and CSR submissions are no longer retried after a network timeout. A timeout can happen *after* the CA has already accepted the request, so the automatic retry was being rejected as a duplicate — failing the enrollment and leaving an orphaned order behind. These requests now run once; if the order was created it is imported by the next synchronization, and duplicate responses are reported with clear, actionable guidance. (Read-only calls are unaffected and still retry.)
 
 # 1.0.0
 
