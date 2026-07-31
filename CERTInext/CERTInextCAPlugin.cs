@@ -573,10 +573,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             _logger.LogInformation(
                 "Enrollment attempt started. " +
-                "EnrollmentType={EnrollmentType}, Subject={Subject}, " +
+                "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
                 "ProfileId={ProfileId}, SANs={SANs}, " +
                 "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
-                enrollmentType, subject,
+                enrollmentType, requestFormat, subject,
                 ep.ProfileId, sanSummary,
                 ep.RequesterName, ep.RequesterEmail);
 
@@ -1170,8 +1170,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 #endif
 
+            // Synchronous certificate pickup (Sectigo-parity): poll for the issued certificate so
+            // a fast-issuing order returns GENERATED + PEM in this same call. No-op for the
+            // already-issued/failed case and for OV/EV orders that CERTInext issues asynchronously
+            // — those fall back to the pending result and are imported by the next sync.
+            var newResult = BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+            newResult = await PickUpEnrolledCertificateAsync(newResult, enrollResp.Id);
+
             _logger.MethodExit(LogLevel.Debug);
-            return BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+            return newResult;
         }
 
         /// <summary>
@@ -1296,6 +1303,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "Renewal via CERTInext renew API complete. " +
                     "PriorCARequestID={PriorId}, NewCARequestID={NewId}, Status={Status}",
                     priorCaRequestId, renewResult.CARequestID, renewResult.Status);
+
+                // Synchronous certificate pickup (Sectigo-parity), same as the new-enrollment path.
+                renewResult = await PickUpEnrolledCertificateAsync(renewResult, renewResp.Id);
 
                 return renewResult;
             }
@@ -1866,6 +1876,130 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Synchronous certificate pickup — parity with the legacy Sectigo connector's
+        /// <c>PickUpEnrolledCertificate</c>. After an order is submitted, polls
+        /// <c>GetCertificate</c> up to <c>PickupRetries</c> times, <c>PickupDelay</c> seconds
+        /// apart (after a fixed initial delay), so an order that issues quickly is returned
+        /// GENERATED + PEM in the same enrollment call instead of waiting for the next
+        /// synchronization. If the certificate has not issued within the budget, the original
+        /// pending result is returned unchanged and the order is imported by a later sync —
+        /// behaviour identical to before this feature.
+        ///
+        /// Applies to ALL products. CERTInext issues OV/EV asynchronously (organization
+        /// verification, minutes to hours; confirmed by CERTInext support ticket #162763), so
+        /// those typically exhaust the budget and fall back to pending; only DV / already-approved
+        /// orders return in-call. Never throws — any polling error degrades to the pending result.
+        /// </summary>
+        private async Task<EnrollmentResult> PickUpEnrolledCertificateAsync(
+            EnrollmentResult pendingResult, string orderNumber)
+        {
+            // Only a still-pending (external-validation) result can benefit from a pickup poll.
+            // An already issued/failed/revoked result, or a missing order number, is returned as-is.
+            if (pendingResult == null
+                || pendingResult.Status != (int)EndEntityStatus.EXTERNALVALIDATION
+                || string.IsNullOrWhiteSpace(orderNumber))
+                return pendingResult;
+
+            int retries = _config.GetEffectivePickupRetries();
+            if (retries <= 0)
+            {
+                _logger.LogInformation(
+                    "Synchronous certificate pickup disabled (PickupRetries<=0). Order {OrderNumber} " +
+                    "will be picked up on the next synchronization.", orderNumber);
+                return pendingResult;
+            }
+
+            int delaySeconds = _config.GetEffectivePickupDelaySeconds();
+            _logger.LogInformation(
+                "Starting synchronous certificate pickup. OrderNumber={OrderNumber}, PickupRetries={Retries}, " +
+                "PickupDelaySeconds={Delay} (max ~{Max}s including a {Initial}s initial delay).",
+                orderNumber, retries, delaySeconds,
+                Constants.Pickup.InitialDelaySeconds + retries * delaySeconds, Constants.Pickup.InitialDelaySeconds);
+
+            try
+            {
+                // Small static delay before the first poll — mirrors the Sectigo connector's
+                // attempt to let a fast order finish issuing before we start polling at all.
+                await Task.Delay(TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds));
+
+                for (int attempt = 1; attempt <= retries; attempt++)
+                {
+                    try
+                    {
+                        var cert = await _client.GetCertificateAsync(orderNumber);
+                        int disposition = StatusMapper.ToRequestDisposition(cert.Status);
+
+                        // Issued: only surface GENERATED when the PEM is actually present — never
+                        // hand Command a body-less "issued" record. A body-less issued state keeps
+                        // polling until the body appears or the budget runs out.
+                        if (disposition == (int)EndEntityStatus.GENERATED
+                            && !string.IsNullOrWhiteSpace(cert.Certificate))
+                        {
+                            _logger.LogInformation(
+                                "Synchronous pickup complete. OrderNumber={OrderNumber}, SerialNumber={Serial}, " +
+                                "Attempt={Attempt}/{Retries}.",
+                                orderNumber,
+                                string.IsNullOrWhiteSpace(cert.SerialNumber) ? "(none)" : cert.SerialNumber,
+                                attempt, retries);
+                            return new EnrollmentResult
+                            {
+                                CARequestID = string.IsNullOrWhiteSpace(cert.Id) ? orderNumber : cert.Id,
+                                Certificate = cert.Certificate,
+                                Status = (int)EndEntityStatus.GENERATED,
+                                StatusMessage = $"Certificate issued successfully. CERTInext ID: {orderNumber}."
+                            };
+                        }
+
+                        // Terminal non-issued outcomes carry no body and are surfaced immediately.
+                        if (disposition == (int)EndEntityStatus.REVOKED
+                            || disposition == (int)EndEntityStatus.FAILED)
+                        {
+                            _logger.LogInformation(
+                                "Order {OrderNumber} reached terminal status '{Status}' during synchronous pickup.",
+                                orderNumber, cert.Status);
+                            return new EnrollmentResult
+                            {
+                                CARequestID = string.IsNullOrWhiteSpace(cert.Id) ? orderNumber : cert.Id,
+                                Certificate = cert.Certificate,
+                                Status = disposition,
+                                StatusMessage = $"Order {orderNumber} reached status '{cert.Status}' during enrollment pickup."
+                            };
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // A transient fetch failure consumes an attempt rather than aborting the
+                        // wait; if it never recovers the pending result is returned below.
+                        _logger.LogWarning(ex,
+                            "Pickup GetCertificate failed for order {OrderNumber} (attempt {Attempt}/{Retries}).",
+                            orderNumber, attempt, retries);
+                    }
+
+                    // Delay after every attempt (including the last), matching the Sectigo
+                    // connector's pickup cadence so the max-occupancy ceiling is identical.
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+                }
+
+                _logger.LogInformation(
+                    "Synchronous pickup did not complete within {Retries} attempts for order {OrderNumber}. " +
+                    "Returning pending result; the certificate will be imported by the next synchronization. " +
+                    "CERTInext issues OV/EV asynchronously by design (support ticket #162763).",
+                    retries, orderNumber);
+                pendingResult.StatusMessage =
+                    $"{pendingResult.StatusMessage} The certificate was not issued within the enrollment-pickup " +
+                    "window; it will be imported by a later synchronization.";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Synchronous pickup failed for order {OrderNumber}. Returning pending result; " +
+                    "sync will pick up the certificate later.", orderNumber);
+            }
+
+            return pendingResult;
         }
 
         /// <summary>
