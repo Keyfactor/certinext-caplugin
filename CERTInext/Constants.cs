@@ -21,6 +21,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string Enabled = "Enabled";
             public const string IgnoreExpired = "IgnoreExpired";
             public const string PageSize = "PageSize";
+
+            // Synchronous certificate pickup (parity with the legacy Sectigo connector).
+            // After submitting an order, Enroll() polls GetCertificate up to PickupRetries
+            // times, PickupDelay seconds apart (after a fixed initial delay), so a fast-issuing
+            // order returns the issued certificate in the same enrollment call instead of
+            // waiting for the next synchronization. On timeout the order is returned pending and
+            // imported by a later sync — behaviour identical to before this feature.
+            public const string PickupRetries = "PickupRetries";
+            public const string PickupDelay = "PickupDelay";
+
             public const string RequestorName = "RequestorName";
             public const string RequestorEmail = "RequestorEmail";
             public const string RequestorIsdCode = "RequestorIsdCode";
@@ -266,6 +276,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // Default fallback when the CRL reason code has no CERTInext equivalent
             public const int Default = KeyCompromise;
+        }
+
+        public static class Pickup
+        {
+            // Defaults mirror the legacy Sectigo connector's PickUpEnrolledCertificate:
+            // a 5-second initial delay, then up to 5 poll attempts 10 seconds apart, so the
+            // maximum time an enrollment call occupies a Command worker thread is
+            // InitialDelaySeconds + DefaultRetries * DefaultDelaySeconds = 5 + 5*10 = 55 seconds.
+            // Set PickupRetries to 0 to disable the wait entirely (immediate pending return).
+            public const int DefaultRetries = 5;
+            public const int DefaultDelaySeconds = 10;
+
+            // Small static delay before the first poll — gives a fast order a chance to finish
+            // issuing before we poll at all, avoiding a guaranteed-miss first attempt.
+            public const int InitialDelaySeconds = 5;
+
+            // Safety clamps so a mis-configured connector cannot orphan a worker thread. Command
+            // abandons enrollment calls well before these bounds; they only backstop absurd input.
+            public const int MaxRetries = 30;
+            public const int MaxDelaySeconds = 60;
         }
 
         public static class Dcv
