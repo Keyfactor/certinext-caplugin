@@ -221,6 +221,90 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public async Task Dcv_EnrollmentWaitStillRuns_WhenDcvShortCircuitsWithoutAnIssuanceWait()
+        {
+            // Regression: dcvOwnsIssuanceWait/dcvIssuanceWaitRan must reflect whether an
+            // in-call DCV issuance wait actually ran for THIS order, not merely whether
+            // DcvEnabled is set. When PerformDcvIfNeededAsync short-circuits (here: the DCV
+            // challenge slot never appears) without ever calling WaitForIssuanceAsync, the
+            // general synchronous enrollment-wait poll must still get a chance to run —
+            // previously it was unconditionally skipped whenever DcvEnabled=true, silently
+            // defeating the whole feature on every DCV-enabled gateway.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending" });
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId       = "1",
+                        CertificateStatusId = "1",
+                        DomainVerification  = null
+                    }
+                });
+
+            // The product isn't in any catalog → falls back to Unknown/optimistic polling,
+            // mirroring EnrollmentWait_UnknownProduct_PollsOptimistically.
+            mock.Setup(c => c.GetProductDetailsAsync(It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("catalog endpoint down"));
+            mock.Setup(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.DcvOrderId));
+
+            var validator = new FakeDomainValidator();
+            var config = DcvConfig(); // dcvWaitForChallengeSeconds/dcvWaitForIssuanceSeconds default to 0
+            config.EnrollmentWaitSeconds = 10; // re-enable the general enrollment-wait poll
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator), config);
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "the enrollment-wait poll must still run and pick up the issued cert even though " +
+                "DCV short-circuited without ever performing its own issuance wait");
+            mock.Verify(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
+                Times.AtLeastOnce,
+                "the general enrollment-wait poll must actually attempt GetCertificate for this order");
+        }
+
+        [Fact]
+        public async Task Dcv_RecoversPem_WhenPostDcvIssuanceWaitEndsWithGeneratedButNoBody()
+        {
+            // Regression: when a real DCV run's post-DCV issuance wait (WaitForIssuanceAsync,
+            // "PostDcv") ends non-terminal with a GENERATED-but-no-PEM result, that outcome
+            // must feed the fallback EnrollmentResult passed into
+            // TryEnrollmentWaitForCertificateAsync instead of being discarded in favor of the
+            // stale pre-DCV pending response — otherwise the issued-without-PEM recovery poll
+            // (which is supposed to run "regardless of DCV") never gets a chance to fire,
+            // because the stale response looks like plain pending-approval and gets skipped by
+            // the dcvOwnsIssuanceWait guard.
+            var (mock, validator) = HappyPathMocks();
+
+            // Post-DCV poll (budget=5s over the fixed 5s interval ⇒ exactly 1 poll) returns
+            // issued but without a body; the general enrollment-wait poll's next attempt
+            // finally recovers it.
+            mock.SetupSequence(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new LegacyGetCertificateResponse
+                {
+                    Id = MockCertificateData.DcvOrderId, Status = "issued", Certificate = null
+                })
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.DcvOrderId));
+
+            var config = DcvConfig(dcvWaitForIssuanceSeconds: 5);
+            config.EnrollmentWaitSeconds = 10;
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator), config);
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            result.Certificate.Should().Contain("BEGIN CERTIFICATE",
+                "the general enrollment-wait poll must recover the PEM for an order whose post-DCV " +
+                "issuance wait ended issued-but-bodyless, instead of being skipped as 'DCV owns this wait'");
+            mock.Verify(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
+                Times.Exactly(2), "one post-DCV poll (bodyless) plus one enrollment-wait recovery poll (with body)");
+        }
+
+        [Fact]
         public async Task Dcv_SkipsStaging_AndDoesNotIssuancePoll_WhenAllDomainsAlreadyValidated_AndIssuanceBudgetZero()
         {
             // With DcvWaitForIssuanceSeconds=0 (the test fixture's DcvConfig default), an

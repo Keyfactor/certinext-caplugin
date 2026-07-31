@@ -1139,6 +1139,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var enrollResp = await _client.EnrollCertificateAsync(enrollReq);
 
+            // Tracks whether an in-call DCV issuance wait actually ran (and its outcome) for
+            // THIS order — as opposed to merely "DcvEnabled is set" — so the enrollment-wait
+            // gate below only defers when something genuinely already waited. Declared outside
+            // the #if so both build flavors see the same fallback-construction logic.
+            LegacyGetCertificateResponse postDcv = null;
+            bool dcvIssuanceWaitRan = false;
 #if SUPPORTS_DCV
             // DCV: run domain validation if enabled, the factory was injected, and the
             // order was accepted (not immediately failed).
@@ -1188,27 +1194,41 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             // would push typical-case latency toward the budget ceiling. Decoupled
                             // from DcvPropagationDelaySeconds (a DNS concern) so admins tuning DNS
                             // settings don't accidentally make this polling chunky.
-                            var postDcv = await WaitForIssuanceAsync(
+                            postDcv = await WaitForIssuanceAsync(
                                 orderNumber, _config.GetEffectiveDcvWaitForIssuanceSeconds(),
                                 Constants.Polling.CertificatePollIntervalSeconds, "PostDcv", dcvCts.Token);
+                            // A genuine issuance wait ran for this order — the fallback-result
+                            // construction and the enrollment-wait gate below must reflect that,
+                            // whether or not the outcome turned out to be terminal.
+                            dcvIssuanceWaitRan = true;
+
                             // Only a genuine terminal outcome ends the enroll call here. A GENERATED
                             // result without a PEM (a transient download failure during the wait)
                             // must fall through to the pending path so a later sync refetches the
                             // body — never surface a bodyless "issued" result. REVOKED/FAILED carry
                             // no body and are surfaced as-is.
-                            if (postDcv != null)
+                            if (postDcv != null
+                                && StatusMapper.IsTerminalIssuance(
+                                    StatusMapper.ToRequestDisposition(postDcv.Status), postDcv.Certificate))
                             {
-                                int postDcvDisposition = StatusMapper.ToRequestDisposition(postDcv.Status);
-                                if (postDcvDisposition == (int)EndEntityStatus.REVOKED
-                                    || postDcvDisposition == (int)EndEntityStatus.FAILED
-                                    || (postDcvDisposition == (int)EndEntityStatus.GENERATED
-                                        && !string.IsNullOrWhiteSpace(postDcv.Certificate)))
-                                {
-                                    return BuildEnrollmentResultFromCertificate(postDcv, orderNumber,
-                                        $"Post-DCV status: {postDcv.Status}.", ep.AutoApprove);
-                                }
+                                return BuildEnrollmentResultFromCertificate(postDcv, orderNumber,
+                                    $"Post-DCV status: {postDcv.Status}.", ep.AutoApprove);
                             }
                         }
+                    }
+                    catch (OperationCanceledException) when (dcvCts.IsCancellationRequested)
+                    {
+                        // DcvTimeoutMinutes expired mid-DCV or mid-post-DCV-poll — neither
+                        // PerformDcvIfNeededAsync's TrackOrder loop nor WaitForIssuanceAsync's
+                        // GetCertificate loop catches this themselves (their own budgets are
+                        // meant to be shorter than this outer ceiling, but a hung endpoint can
+                        // still exhaust it first). Degrade to the pending fallback below instead
+                        // of letting the cancellation escape Enroll() unhandled — every other
+                        // exit from this feature does the same "never throws" soft-fallback.
+                        _logger.LogWarning(
+                            "DCV timed out (DcvTimeoutMinutes={Timeout}) for order {OrderNumber}; " +
+                            "returning the pending result so a later synchronization completes it.",
+                            dcvTimeoutMinutes, orderNumber);
                     }
                     finally
                     {
@@ -1238,19 +1258,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 #endif
 
-            // Synchronous pickup (both build flavors): poll for the issued certificate so
-            // fast-issuing (DV) orders return GENERATED + PEM in this same call instead of
-            // deferring to the next sync cycle. No-ops for OV/EV, when the in-call DCV flow
-            // owns the wait, or when the result is already terminal.
-            bool dcvOwnsIssuanceWait = false;
-#if SUPPORTS_DCV
-            // When DCV is enabled, the DCV branch above already performed (or deliberately
-            // deferred to the sync-driven DCV path) the issuance wait for this new order.
-            dcvOwnsIssuanceWait = _config.DcvEnabled;
-#endif
-            var newResult = BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+            // Synchronous enrollment wait (both build flavors): poll for the issued certificate
+            // so fast-issuing (DV) orders return GENERATED + PEM in this same call instead of
+            // deferring to the next sync cycle. No-ops for OV/EV, when an in-call DCV issuance
+            // wait already ran for this order (dcvIssuanceWaitRan — NOT merely "DcvEnabled is
+            // set": DCV can short-circuit without ever waiting, e.g. no pending domains, the
+            // challenge timeout, an already-in-flight duplicate, or a DCV-timeout cancellation
+            // above), or when the result is already terminal.
+            //
+            // If a post-DCV wait DID run, build the fallback from ITS outcome (postDcv) rather
+            // than the stale pre-DCV enrollResp — an issued-but-PEM-missing postDcv result must
+            // be visible to TryEnrollmentWaitForCertificateAsync as such so its recovery poll
+            // (which runs "regardless of DCV" for that specific state) gets a chance to fire,
+            // instead of looking like a plain still-pending order and being skipped outright.
+            var newResult = postDcv != null
+                ? BuildEnrollmentResultFromCertificate(postDcv, enrollResp.Id,
+                    $"Post-DCV status: {postDcv.Status}.", ep.AutoApprove)
+                : BuildEnrollmentResult(enrollResp, ep.AutoApprove);
             newResult = await TryEnrollmentWaitForCertificateAsync(
-                newResult, enrollResp.Id, ep, ep.ProductCode, dcvOwnsIssuanceWait);
+                newResult, enrollResp.Id, ep, ep.ProductCode, dcvIssuanceWaitRan);
 
             _logger.MethodExit(LogLevel.Debug);
             return newResult;
@@ -1600,8 +1626,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // from "enrollment wait never attempted".
                 _logger.LogInformation(
                     "Synchronous enrollment wait disabled by configuration (effective EnrollmentWaitSeconds={Budget}). " +
-                    "Order {OrderNumber} will be picked up on the next sync cycle.",
-                    configuredBudgetSeconds, orderNumber);
+                    "Order {OrderNumber} (ProductCode={ProductCode}) will be picked up on the next sync cycle.",
+                    configuredBudgetSeconds, orderNumber, productCode);
                 return DegradeBodylessIssuedToPending(pendingResult);
             }
 
@@ -1614,8 +1640,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // SOX CC7.3: the clamp is a policy decision — evidence it.
                 _logger.LogWarning(
                     "Configured enrollment-wait budget ({Configured}s = EnrollmentWaitSeconds) exceeds the " +
-                    "hard ceiling; clamped to {Max}s for order {OrderNumber}.",
-                    configuredBudgetSeconds, Constants.EnrollmentWait.MaxBudgetSeconds, orderNumber);
+                    "hard ceiling; clamped to {Max}s for order {OrderNumber} (ProductCode={ProductCode}).",
+                    configuredBudgetSeconds, Constants.EnrollmentWait.MaxBudgetSeconds, orderNumber, productCode);
             }
 
             try
@@ -1660,8 +1686,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 _logger.LogInformation(
                     "Synchronous enrollment-wait poll started. OrderNumber={OrderNumber}, ProductCode={ProductCode}, " +
-                    "ValidationType={ValidationType}, BudgetSeconds={Budget}",
-                    orderNumber, productCode, validationType, budgetSeconds);
+                    "ValidationType={ValidationType}, BudgetSeconds={Budget}, PollIntervalSeconds={Interval}",
+                    orderNumber, productCode, validationType, budgetSeconds, Constants.Polling.CertificatePollIntervalSeconds);
 
                 var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, Constants.Polling.CertificatePollIntervalSeconds, "EnrollmentWait", cts.Token);
 
@@ -1674,11 +1700,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 int finalDisposition = final == null
                     ? (int)EndEntityStatus.EXTERNALVALIDATION
                     : StatusMapper.ToRequestDisposition(final.Status);
-                if (final != null
-                    && (finalDisposition == (int)EndEntityStatus.REVOKED
-                        || finalDisposition == (int)EndEntityStatus.FAILED
-                        || (finalDisposition == (int)EndEntityStatus.GENERATED
-                            && !string.IsNullOrWhiteSpace(final.Certificate))))
+                if (final != null && StatusMapper.IsTerminalIssuance(finalDisposition, final.Certificate))
                 {
                     _logger.LogInformation(
                         "Synchronous pickup complete. OrderNumber={OrderNumber}, Status={Status}, SerialNumber={Serial}",
@@ -2318,7 +2340,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
                 catch (OperationCanceledException)
                 {
-                    // The budget's token fired mid-call — hand back whatever we have.
+                    // SOC2 CC7.2: the budget's token fired mid-call — log so this is
+                    // distinguishable in the audit trail from routine budget exhaustion
+                    // (the "not complete within {Budget}s" line below never fires here).
+                    _logger.LogWarning(
+                        "GetCertificate poll cancelled by the wait budget for order {OrderNumber} " +
+                        "(attempt {Attempt}, Phase={Phase}). Returning {Outcome}.",
+                        orderNumber, attempt, phase,
+                        last == null ? "pending fallback (no successful poll)" : "last pending result");
                     return last;
                 }
                 catch (Exception ex)
@@ -2338,6 +2367,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     last = current;
                     int disposition = StatusMapper.ToRequestDisposition(last.Status);
 
+                    // SOC2 CC9.2: record every third-party poll response, not just the
+                    // terminal/exhaustion outcome, so the full poll sequence is reconstructable.
+                    _logger.LogDebug(
+                        "GetCertificate poll attempt {Attempt} for order {OrderNumber}: Status={Status} (Phase={Phase}).",
+                        attempt, orderNumber, last.Status, phase);
+
                     // GENERATED is only terminal once the PEM is actually in hand.
                     // GetCertificateAsync maps status from TrackOrder but swallows a
                     // transient DownloadCertificate failure (logs a warning, returns
@@ -2347,12 +2382,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     // GetCertificateAsync re-attempts the download — mirroring the same
                     // refetch defense Synchronize() already applies. REVOKED/FAILED are
                     // genuinely terminal and carry no body, so they short-circuit as before.
-                    bool terminal =
-                        disposition == (int)EndEntityStatus.REVOKED
-                        || disposition == (int)EndEntityStatus.FAILED
-                        || (disposition == (int)EndEntityStatus.GENERATED
-                            && !string.IsNullOrWhiteSpace(last.Certificate));
-                    if (terminal)
+                    if (StatusMapper.IsTerminalIssuance(disposition, last.Certificate))
                     {
                         return last;
                     }
@@ -2366,9 +2396,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     || DateTime.UtcNow.AddSeconds(pollIntervalSeconds) >= deadline)
                 {
                     _logger.LogInformation(
-                        "Issuance not complete within {Budget}s for order {OrderNumber} (Phase={Phase}). " +
-                        "Returning {Outcome}; sync will pick up the cert later.",
-                        waitBudgetSeconds, orderNumber, phase,
+                        "Issuance not complete within {Budget}s (polled every {Interval}s) for order " +
+                        "{OrderNumber} (Phase={Phase}). Returning {Outcome}; sync will pick up the cert later.",
+                        waitBudgetSeconds, pollIntervalSeconds, orderNumber, phase,
                         last == null ? "pending fallback (no successful poll)" : "last pending result");
                     return last;
                 }
@@ -2379,6 +2409,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
                 catch (OperationCanceledException)
                 {
+                    // SOC2 CC7.2: same audit-trail rationale as the GetCertificate cancellation
+                    // above — this is the hard-ceiling cancellation firing between polls.
+                    _logger.LogWarning(
+                        "Issuance wait cancelled by the wait budget for order {OrderNumber} " +
+                        "(attempt {Attempt}, Phase={Phase}). Returning {Outcome}.",
+                        orderNumber, attempt, phase,
+                        last == null ? "pending fallback (no successful poll)" : "last pending result");
                     return last;
                 }
             }
