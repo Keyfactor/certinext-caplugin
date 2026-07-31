@@ -245,10 +245,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 if (transientFailure)
                 {
                     Logger.LogWarning(
-                        "PlaceOrder received no usable response (HttpStatus={Status}, LatencyMs={Latency}). " +
+                        "PlaceOrder received no usable response (DomainName={Domain}, HttpStatus={Status}, LatencyMs={Latency}). " +
                         "Not retrying to avoid a duplicate order (EMS-947). If CERTInext created the order it " +
                         "will be imported by the next synchronization.",
-                        (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                        request.OrderDetails?.CertificateInformation?.DomainName, (int)resp.StatusCode, sw.ElapsedMilliseconds);
                     throw new Exception(
                         "CERTInext did not return a usable response to the order submission. If the order was " +
                         "created it will be imported by the next synchronization — do not resubmit immediately. " +
@@ -296,9 +296,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         // benign duplicate rather than a hard failure.
                         Logger.LogWarning(
                             "PlaceOrder classified {ErrorCode} as a duplicate transaction (not a hard failure). " +
-                            "Path={Path}, HttpStatus={Status}, LatencyMs={Latency}. If an order exists for this " +
-                            "transaction it will be imported by the next synchronization.",
-                            result.Meta.ErrorCode, Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                            "DomainName={Domain}, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}. If an order exists " +
+                            "for this transaction it will be imported by the next synchronization.",
+                            result.Meta.ErrorCode, request.OrderDetails?.CertificateInformation?.DomainName, Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds);
                         throw new Exception(
                             "CERTInext reported a duplicate order transaction (EMS-947). If an order was created " +
                             "for this transaction it will be imported by the next synchronization — do not resubmit " +
@@ -368,6 +368,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         "SubmitCSR received no usable response (HttpStatus={Status}, LatencyMs={Latency}); not retrying " +
                         "(non-idempotent). If CERTInext already received the CSR, do not resubmit immediately.",
                         (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                    // Parity with PlaceOrderAsync: carry the actionable guidance into the surfaced
+                    // exception, not only the log line.
+                    throw new Exception(
+                        "CERTInext did not return a usable response to the CSR submission. If the CSR was received " +
+                        "it will take effect — do not resubmit immediately. See gateway logs for details.");
                 }
                 throw new Exception($"CERTInext SubmitCSR failed. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
             }
