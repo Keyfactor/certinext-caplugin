@@ -272,6 +272,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = true,
                     Type = "Boolean"
                 },
+                [Constants.Config.PickupRetries] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Number of times Enroll() will poll CERTInext to download the certificate after a " +
+                               "successful order submission. If the certificate has not issued within this window it is " +
+                               "picked up during the next synchronization instead. Set to 0 to disable the wait. " +
+                               $"Default: {Constants.Pickup.DefaultRetries}. NOTE: CERTInext issues OV/EV certificates " +
+                               "asynchronously (organization verification, minutes to hours), so those typically exhaust " +
+                               "the wait and are returned pending regardless of this value.",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultRetries,
+                    Type = "Number"
+                },
+                [Constants.Config.PickupDelay] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Number of seconds between certificate-pickup retries. The total number of retries " +
+                               "times this delay (plus a short initial delay) is the maximum time an enrollment call " +
+                               "occupies a Command worker thread. If the duration is too long the request may time out, so " +
+                               $"keep the total well under ~90s. Default: {Constants.Pickup.DefaultDelaySeconds} " +
+                               $"(with default retries this yields a ~{Constants.Pickup.InitialDelaySeconds + Constants.Pickup.DefaultRetries * Constants.Pickup.DefaultDelaySeconds}s ceiling).",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultDelaySeconds,
+                    Type = "Number"
+                },
                 [Constants.Config.DcvEnabled] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) " +
@@ -695,6 +718,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Seconds to wait after publishing the DNS TXT record before calling VerifyDcv.
         /// Default: 30.
         /// </summary>
+        /// <summary>
+        /// Number of GetCertificate poll attempts inside <c>Enroll()</c> after an order is
+        /// submitted, before falling back to a pending result (picked up by the next sync).
+        /// Mirrors the legacy Sectigo connector's <c>PickupRetries</c>. Set to 0 to disable.
+        /// Default: 5.
+        /// </summary>
+        [JsonPropertyName("PickupRetries")]
+        public int PickupRetries { get; set; } = Constants.Pickup.DefaultRetries;
+
+        /// <summary>
+        /// Seconds between certificate-pickup retries. <c>PickupRetries * PickupDelay</c> (plus a
+        /// short initial delay) bounds the time an enrollment call occupies a Command worker
+        /// thread. Mirrors the legacy Sectigo connector's <c>PickupDelay</c>. Default: 10.
+        /// </summary>
+        [JsonPropertyName("PickupDelay")]
+        public int PickupDelayInSeconds { get; set; } = Constants.Pickup.DefaultDelaySeconds;
+
         [JsonPropertyName("DcvPropagationDelaySeconds")]
         public int DcvPropagationDelaySeconds { get; set; } = 30;
 
@@ -782,5 +822,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return envVal;
             return DcvWaitForIssuanceSeconds >= 0 ? DcvWaitForIssuanceSeconds : 60;
         }
+
+        /// <summary>
+        /// Effective number of certificate-pickup retries, clamped to
+        /// [0, <see cref="Constants.Pickup.MaxRetries"/>]. 0 disables the synchronous pickup.
+        /// </summary>
+        public int GetEffectivePickupRetries()
+            => System.Math.Max(0, System.Math.Min(PickupRetries, Constants.Pickup.MaxRetries));
+
+        /// <summary>
+        /// Effective seconds between pickup retries, clamped to
+        /// [1, <see cref="Constants.Pickup.MaxDelaySeconds"/>]. A non-positive configured value
+        /// falls back to the default rather than producing a tight busy-loop.
+        /// </summary>
+        public int GetEffectivePickupDelaySeconds()
+            => System.Math.Max(1, System.Math.Min(
+                PickupDelayInSeconds > 0 ? PickupDelayInSeconds : Constants.Pickup.DefaultDelaySeconds,
+                Constants.Pickup.MaxDelaySeconds));
     }
 }
