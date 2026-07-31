@@ -236,7 +236,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             if (!_clientWasInjected)
                 (_client as IDisposable)?.Dispose();
-            _productTypeCacheLock.Dispose();
+            // _productTypeCacheLock is deliberately NOT disposed: SemaphoreSlim.Dispose is
+            // not safe concurrently with WaitAsync/Release, and the gateway can recycle the
+            // plugin (config re-save, service stop) while an enrollment's pickup is mid
+            // catalog refresh — disposing here would fault that in-flight enrollment for no
+            // benefit (a SemaphoreSlim whose AvailableWaitHandle is never touched holds no
+            // unmanaged resources).
         }
 
         // ---------------------------------------------------------------------------
@@ -1183,7 +1188,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             // DcvPropagationDelaySeconds (a DNS concern) so admins tuning DNS
                             // settings don't accidentally make this polling chunky.
                             var postDcv = await WaitForIssuanceAsync(
-                                orderNumber, _config.GetEffectiveDcvWaitForIssuanceSeconds(), 3, dcvCts.Token);
+                                orderNumber, _config.GetEffectiveDcvWaitForIssuanceSeconds(), 3, "PostDcv", dcvCts.Token);
                             if (postDcv != null)
                             {
                                 return BuildEnrollmentResultFromCertificate(postDcv, orderNumber,
@@ -1449,14 +1454,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // original Sectigo-parity scenario). In-call DCV never runs on this path, so
                 // the pickup is always eligible (on DCV-enabled gateways a renewal that does
                 // need fresh domain validation simply exhausts the bounded budget and falls
-                // back to pending). The renewal order is actually placed with the connector's
-                // DefaultProductCode (see CERTInextClient.RenewCertificateAsync), which can
-                // differ from the template's code — classify the code that reached the API.
-                // When DefaultProductCode is blank the order went out with an empty code and
-                // the template's code is only a best-effort guess for the gate.
-                string renewedProductCode = string.IsNullOrWhiteSpace(_config.DefaultProductCode)
-                    ? ep.ProductCode
-                    : _config.DefaultProductCode;
+                // back to pending). Classify the product code the renewal order was actually
+                // placed with — the client reports it on the response (renewResp.ProfileId),
+                // which can differ from the template's code because RenewCertificateAsync
+                // orders with the connector's DefaultProductCode. When the response omits it
+                // (order went out with an empty code), the template's code is only a
+                // best-effort guess for the gate.
+                string renewedProductCode = !string.IsNullOrWhiteSpace(renewResp.ProfileId)
+                    ? renewResp.ProfileId
+                    : ep.ProductCode;
                 if (!string.Equals(renewedProductCode, ep.ProductCode, StringComparison.Ordinal))
                 {
                     _logger.LogWarning(
@@ -1534,7 +1540,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // order is past validation entirely, so the fetch below is useful regardless of DCV.
             if (dcvOwnsIssuanceWait && pendingApproval)
             {
-                _logger.LogDebug(
+                // SOC2 CC7.2: Information so the enrollment timeline shows which mechanism
+                // owned the in-call wait (pairs with the "Starting DCV for order" line).
+                _logger.LogInformation(
                     "Skipping synchronous pickup for order {OrderNumber} — the in-call DCV flow owns this order's issuance wait.",
                     orderNumber);
                 return pendingResult;
@@ -1544,20 +1552,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int delaySeconds = _config.GetEffectivePickupDelaySeconds();
             if (retries <= 0 || delaySeconds <= 0)
             {
-                _logger.LogDebug(
-                    "Synchronous pickup disabled (PickupRetries={Retries}, PickupDelaySeconds={Delay}). " +
-                    "Order {OrderNumber} will be picked up on the next sync cycle.",
+                // SOC2 CC7.2 / SOX change management: the effective values may come from env
+                // vars rather than the connector record, so this Information line is the only
+                // production-log evidence distinguishing "pickup disabled by operator" from
+                // "pickup never attempted".
+                _logger.LogInformation(
+                    "Synchronous pickup disabled by configuration (effective PickupRetries={Retries}, " +
+                    "PickupDelaySeconds={Delay}). Order {OrderNumber} will be picked up on the next sync cycle.",
                     retries, delaySeconds, orderNumber);
                 return pendingResult;
             }
 
             // Compute the budget in long first: both knobs accept arbitrary non-negative ints
             // from env vars, and an int overflow here would go negative and make the CTS
-            // constructor throw (silently disabling pickup via the catch below). Clamp to a
-            // ceiling far above any sane configuration — the docs tell operators to stay
-            // under ~90 s.
-            const int maxBudgetSeconds = 3600;
-            int budgetSeconds = (int)Math.Min((long)retries * delaySeconds, maxBudgetSeconds);
+            // constructor throw (silently disabling pickup via the catch below). Clamp to the
+            // hard ceiling — Command abandons enrollment calls long before it, so a larger
+            // budget would only orphan a worker thread (docs: keep retries × delay under ~90 s).
+            long configuredBudgetSeconds = (long)retries * delaySeconds;
+            int budgetSeconds = (int)Math.Min(configuredBudgetSeconds, Constants.Pickup.MaxBudgetSeconds);
+            if (configuredBudgetSeconds > Constants.Pickup.MaxBudgetSeconds)
+            {
+                // SOX CC7.3: the clamp is a policy decision — evidence it.
+                _logger.LogWarning(
+                    "Configured pickup budget ({Configured}s = PickupRetries {Retries} × PickupDelaySeconds {Delay}) " +
+                    "exceeds the hard ceiling; clamped to {Max}s for order {OrderNumber}.",
+                    configuredBudgetSeconds, retries, delaySeconds, Constants.Pickup.MaxBudgetSeconds, orderNumber);
+            }
 
             try
             {
@@ -1604,7 +1624,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "ValidationType={ValidationType}, Retries={Retries}, DelaySeconds={Delay}, BudgetSeconds={Budget}",
                     orderNumber, productCode, validationType, retries, delaySeconds, budgetSeconds);
 
-                var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, delaySeconds, cts.Token);
+                var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, delaySeconds, "Pickup", cts.Token);
 
                 if (final != null
                     && StatusMapper.ToRequestDisposition(final.Status) != (int)EndEntityStatus.EXTERNALVALIDATION)
@@ -1727,9 +1747,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex,
-                        "Could not refresh the product catalog for synchronous-pickup gating; falling back to {Fallback}.",
-                        _productTypeByCode != null ? "the stale cached catalog" : "template-name classification");
-                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(5);
+                        "Could not refresh the product catalog for synchronous-pickup gating; falling back to " +
+                        "{Fallback}. Retry backed off for {BackoffMinutes} minutes.",
+                        _productTypeByCode != null ? "the stale cached catalog" : "template-name classification",
+                        Constants.Pickup.FailureBackoffMinutes);
+                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.Pickup.FailureBackoffMinutes);
                     return _productTypeByCode;
                 }
             }
@@ -2186,7 +2208,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// PickupDelaySeconds</c>, <c>PickupDelaySeconds</c> interval).
         /// </summary>
         private async Task<LegacyGetCertificateResponse> WaitForIssuanceAsync(
-            string orderNumber, int waitBudgetSeconds, int pollIntervalSeconds, CancellationToken ct)
+            string orderNumber, int waitBudgetSeconds, int pollIntervalSeconds, string phase, CancellationToken ct)
         {
             DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Max(0, waitBudgetSeconds));
             LegacyGetCertificateResponse last = null;
@@ -2198,9 +2220,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (waitBudgetSeconds <= 0)
             {
                 _logger.LogDebug(
-                    "Issuance wait disabled (budget<=0). " +
+                    "Issuance wait disabled (budget<=0). Phase={Phase}. " +
                     "Order {OrderNumber} will be picked up on the next sync cycle.",
-                    orderNumber);
+                    phase, orderNumber);
                 return null;
             }
             pollIntervalSeconds = Math.Max(1, pollIntervalSeconds);
@@ -2210,41 +2232,51 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 attempt++;
                 ct.ThrowIfCancellationRequested();
+                LegacyGetCertificateResponse current = null;
                 try
                 {
-                    last = await _client.GetCertificateAsync(orderNumber, ct);
+                    current = await _client.GetCertificateAsync(orderNumber, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    // The budget's token fired mid-call — hand back whatever we have.
+                    return last;
                 }
                 catch (Exception ex)
                 {
-                    // Distinguish first-call failure (no result to return, sync must pick up)
-                    // from later-poll failure (we have a prior pending result that the caller
-                    // can use as a fallback). Without this distinction a repeated first-call
-                    // failure would look identical to a working-but-always-pending enroll.
+                    // A transient API failure consumes this attempt, not the whole budget:
+                    // keep polling until the deadline, mirroring the legacy Sectigo pickup
+                    // loop. Aborting here would silently degrade a retries=N configuration
+                    // to a single attempt on the first blip.
                     _logger.LogWarning(ex,
-                        "GetCertificate failed during issuance wait for order {OrderNumber} (attempt {Attempt}). " +
-                        "Returning {Outcome}; sync will pick up the cert later.",
-                        orderNumber, attempt, last == null ? "pending fallback (no prior result)" : "prior pending result");
-                    return last;
+                        "GetCertificate failed during issuance wait for order {OrderNumber} " +
+                        "(attempt {Attempt}, Phase={Phase}). Continuing until the budget expires.",
+                        orderNumber, attempt, phase);
                 }
 
-                int disposition = StatusMapper.ToRequestDisposition(last.Status);
-                if (disposition == (int)EndEntityStatus.GENERATED
-                    || disposition == (int)EndEntityStatus.REVOKED
-                    || disposition == (int)EndEntityStatus.FAILED)
+                if (current != null)
                 {
-                    return last;
+                    last = current;
+                    int disposition = StatusMapper.ToRequestDisposition(last.Status);
+                    if (disposition == (int)EndEntityStatus.GENERATED
+                        || disposition == (int)EndEntityStatus.REVOKED
+                        || disposition == (int)EndEntityStatus.FAILED)
+                    {
+                        return last;
+                    }
                 }
 
                 // Stop when the NEXT poll would land at or past the deadline. This makes a
                 // budget of retries × delay yield exactly `retries` polls (t = 0, delay,
                 // 2×delay, …), matching the documented PickupRetries semantics — checking
                 // the deadline alone after the sleep would sneak in an extra boundary poll.
-                if (DateTime.UtcNow.AddSeconds(pollIntervalSeconds) > deadline)
+                if (DateTime.UtcNow.AddSeconds(pollIntervalSeconds) >= deadline)
                 {
                     _logger.LogInformation(
-                        "Issuance not complete within {Budget}s for order {OrderNumber}. " +
-                        "Returning pending result; sync will pick up the cert later.",
-                        waitBudgetSeconds, orderNumber);
+                        "Issuance not complete within {Budget}s for order {OrderNumber} (Phase={Phase}). " +
+                        "Returning {Outcome}; sync will pick up the cert later.",
+                        waitBudgetSeconds, orderNumber, phase,
+                        last == null ? "pending fallback (no successful poll)" : "last pending result");
                     return last;
                 }
 

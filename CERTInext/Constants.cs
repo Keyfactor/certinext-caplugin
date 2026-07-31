@@ -293,10 +293,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const int DefaultRetries = 5;
             public const int DefaultDelaySeconds = 10;
 
+            // Hard ceiling on the pickup budget (retries × delay), applied regardless of
+            // configuration. Command abandons enrollment calls long before this; anything
+            // larger would only orphan a worker thread generating pointless API traffic.
+            // The documented guidance is to keep retries × delay under ~90 s.
+            public const int MaxBudgetSeconds = 300;
+
             // How long a fetched product catalog (productCode → DV/OV/EV classification) is
             // reused before being refreshed via GetProductDetails. The catalog is effectively
             // static for an account, so this only bounds staleness after a CA-side change.
             public const int ProductTypeCacheMinutes = 60;
+
+            // How long to wait before retrying GetProductDetails after a failed catalog
+            // refresh, so a down catalog endpoint costs at most one failing API call per
+            // window instead of one per enrollment.
+            public const int FailureBackoffMinutes = 5;
         }
 
         public static class Dcv

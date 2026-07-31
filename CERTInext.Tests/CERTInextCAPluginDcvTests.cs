@@ -46,7 +46,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 // behaviour and run fast.  Tests that exercise the new wait paths can opt
                 // in with a positive value (see WaitsForChallenge_ToAppear / WaitsForIssuance).
                 DcvWaitForChallengeSeconds = dcvWaitForChallengeSeconds,
-                DcvWaitForIssuanceSeconds  = dcvWaitForIssuanceSeconds
+                DcvWaitForIssuanceSeconds  = dcvWaitForIssuanceSeconds,
+                // This suite tests DCV behavior, not the synchronous pickup (which has its
+                // own suite, including the DCV interaction cases). Disable pickup so tests
+                // with DcvEnabled=false and pending orders don't spend the default 5×10 s
+                // poll budget retrying strict mocks.
+                PickupRetries              = 0
             };
 
         private static Mock<ICERTInextClient> NewMock() =>

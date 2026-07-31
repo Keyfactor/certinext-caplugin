@@ -5,9 +5,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions
 // and limitations under the License.
 
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 using Keyfactor.AnyGateway.Extensions;
+using Keyfactor.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext
 {
@@ -283,7 +286,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                "OV/EV products never poll: CERTInext issues them asynchronously by design " +
                                "(organization verification takes minutes and may be human-gated), so those " +
                                "orders return pending and are completed by the next synchronization. " +
-                               "Set to 0 to disable the poll entirely. " +
+                               "Set to 0 (or any negative value) to disable the poll entirely. " +
                                $"Can also be set via the {Constants.Config.PickupRetriesEnvVar} environment " +
                                "variable; the env var takes precedence when both are set. Default: 5.",
                     Hidden = false,
@@ -293,7 +296,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.Config.PickupDelaySeconds] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Seconds between synchronous pickup polls inside Enroll() (see " +
-                               "PickupRetries). " +
+                               "PickupRetries). Setting this to 0 (or any negative value) disables the " +
+                               "pickup poll entirely — it does NOT mean back-to-back polling. " +
                                $"Can also be set via the {Constants.Config.PickupDelaySecondsEnvVar} environment " +
                                "variable; the env var takes precedence when both are set. Default: 10.",
                     Hidden = false,
@@ -817,19 +821,54 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("DcvFollowCnameDelegation")]
         public bool DcvFollowCnameDelegation { get; set; } = false;
 
+        private static readonly ILogger EffectiveConfigLogger = LogHandler.GetClassLogger<CERTInextConfig>();
+
+        // Tracks (envVar, rejected value) pairs already warned about so a misconfigured
+        // env var produces one audit-trail warning per distinct value per process, not one
+        // per enrollment/sync pass.
+        private static readonly ConcurrentDictionary<string, byte> WarnedInvalidEnvValues = new();
+
         /// <summary>
         /// Shared resolution for the numeric "GetEffective*" knobs: the environment variable
         /// wins when set and parseable, then the configured field, then the compiled default.
         /// <paramref name="zeroAllowed"/> distinguishes knobs where 0 is a meaningful
         /// "disabled" value from knobs that require a positive value.
+        /// <paramref name="negativeMeansZero"/> makes negative values coerce to 0 rather
+        /// than being rejected — for the pickup knobs, where "-1 to disable" is a common
+        /// operator convention and silently re-enabling the compiled default would be the
+        /// opposite of the operator's intent.
+        /// A set-but-invalid env var is rejected with a Warning (SOX change management /
+        /// SOC2 CC7.2: the override changes runtime control behavior, so silently ignoring
+        /// it would leave the deployed value unexplained in the audit trail).
         /// </summary>
-        private static int GetEffectiveInt(string envVarName, int configured, int fallback, bool zeroAllowed)
+        private static int GetEffectiveInt(string envVarName, int configured, int fallback,
+            bool zeroAllowed, bool negativeMeansZero = false)
         {
             bool Valid(int v) => zeroAllowed ? v >= 0 : v > 0;
+            int Normalize(int v) => negativeMeansZero && v < 0 ? 0 : v;
+
+            configured = Normalize(configured);
+            int effective = Valid(configured) ? configured : fallback;
+
             var env = System.Environment.GetEnvironmentVariable(envVarName);
-            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && Valid(envVal))
-                return envVal;
-            return Valid(configured) ? configured : fallback;
+            if (string.IsNullOrEmpty(env))
+                return effective;
+
+            if (int.TryParse(env, out int envVal))
+            {
+                envVal = Normalize(envVal);
+                if (Valid(envVal))
+                    return envVal;
+            }
+
+            if (WarnedInvalidEnvValues.TryAdd($"{envVarName}={env}", 0))
+            {
+                EffectiveConfigLogger.LogWarning(
+                    "Environment variable {EnvVar} is set to '{Value}', which is not a valid value for this " +
+                    "setting; falling back to the configured/default value {Effective}.",
+                    envVarName, env, effective);
+            }
+            return effective;
         }
 
         /// <summary>
@@ -856,16 +895,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// Returns the effective synchronous-pickup retry count, preferring the env var so
-        /// operators can tune without re-saving the connector. 0 disables the pickup poll.
+        /// operators can tune without re-saving the connector. 0 (or any negative value)
+        /// disables the pickup poll.
         /// </summary>
         public int GetEffectivePickupRetries() =>
-            GetEffectiveInt(Constants.Config.PickupRetriesEnvVar, PickupRetries, Constants.Pickup.DefaultRetries, zeroAllowed: true);
+            GetEffectiveInt(Constants.Config.PickupRetriesEnvVar, PickupRetries, Constants.Pickup.DefaultRetries,
+                zeroAllowed: true, negativeMeansZero: true);
 
         /// <summary>
         /// Returns the effective delay between synchronous-pickup polls, preferring the env
-        /// var. 0 disables the pickup poll.
+        /// var. 0 (or any negative value) disables the pickup poll.
         /// </summary>
         public int GetEffectivePickupDelaySeconds() =>
-            GetEffectiveInt(Constants.Config.PickupDelaySecondsEnvVar, PickupDelaySeconds, Constants.Pickup.DefaultDelaySeconds, zeroAllowed: true);
+            GetEffectiveInt(Constants.Config.PickupDelaySecondsEnvVar, PickupDelaySeconds, Constants.Pickup.DefaultDelaySeconds,
+                zeroAllowed: true, negativeMeansZero: true);
     }
 }

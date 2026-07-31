@@ -39,8 +39,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         private static Mock<ICERTInextClient> NewMock() => new Mock<ICERTInextClient>(MockBehavior.Strict);
 
-        /// <summary>Config with a fast pickup budget so tests don't sit in real delays.</summary>
-        private static CERTInextConfig PickupConfig(int retries = 3, int delaySeconds = 1) =>
+        /// <summary>
+        /// Config with a 1-second poll interval so tests that complete the poll run fast.
+        /// The default retry count is deliberately generous: the poll loop runs against the
+        /// real clock, so a small budget makes tests that expect the poll to *complete*
+        /// flaky under CI load (a slow first poll can exhaust the budget before the second,
+        /// issuing, poll). Tests that specifically exercise budget exhaustion pass a small
+        /// explicit retry count instead.
+        /// </summary>
+        private static CERTInextConfig PickupConfig(int retries = 10, int delaySeconds = 1) =>
             new CERTInextConfig { PickupRetries = retries, PickupDelaySeconds = delaySeconds };
 
         private static List<ProductDetail> SslCatalog() => new List<ProductDetail>
@@ -264,6 +271,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public async Task Pickup_SurvivesTransientFailure_AndReturnsIssuedOnRetry()
+        {
+            var mock = NewMock();
+            SetupPendingEnroll(mock);
+            SetupCatalog(mock);
+            mock.SetupSequence(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("momentary CERTInext 500"))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.CertId2));
+
+            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+
+            var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "a transient API failure must consume one attempt, not the whole budget — " +
+                "the legacy Sectigo pickup loop retried through failures");
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Exactly(2));
+        }
+
+        [Fact]
+        public async Task Pickup_Disabled_WhenRetriesNegative()
+        {
+            // "-1 to disable" is a common operator convention — it must not silently
+            // fall back to the enabled default of 5.
+            var mock = NewMock();
+            SetupPendingEnroll(mock);
+
+            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: -1));
+
+            var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            mock.Verify(c => c.GetProductDetailsAsync(It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+
+        [Fact]
         public async Task Pickup_SoftFallsBackToPending_WhenGetCertificateThrows()
         {
             var mock = NewMock();
@@ -272,7 +318,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ThrowsAsync(new Exception("CERTInext API 500"));
 
-            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig());
+            // Small explicit budget: every poll throws, so this test runs to exhaustion.
+            var plugin = new CERTInextCAPlugin(mock.Object, PickupConfig(retries: 2));
 
             var result = await Enroll(plugin, ProductInfo(Constants.Products.DvSsl, DvCode));
 
@@ -513,8 +560,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Pickup_RenewPath_ClassifiesTheProductCodeActuallyOrdered()
         {
             // CERTInextClient.RenewCertificateAsync places the renewal order with the
-            // connector's DefaultProductCode, not the template's code — the OV/EV gate
-            // must classify what was ordered, or it polls futilely / defers wrongly.
+            // connector's DefaultProductCode (not the template's code) and reports the
+            // ordered code back on the response's ProfileId — the OV/EV gate must classify
+            // that reported code, or it polls futilely / defers wrongly.
             var clientMock = NewMock();
             var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
 
@@ -523,15 +571,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             readerMock.Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.CertId1))
                 .Returns(DateTime.UtcNow.AddDays(30));
 
+            var renewPending = MockCertificateData.PendingEnrollResponse("renewed-03");
+            renewPending.ProfileId = OvCode; // the code the client actually ordered with
             clientMock.Setup(c => c.RenewCertificateAsync(
                     MockCertificateData.CertId1,
                     It.IsAny<RenewCertificateRequest>(),
                     It.IsAny<CancellationToken>()))
-                .ReturnsAsync(MockCertificateData.PendingEnrollResponse("renewed-03"));
+                .ReturnsAsync(renewPending);
             SetupCatalog(clientMock);
 
             var config = PickupConfig();
-            config.DefaultProductCode = OvCode; // what the renewal order is actually placed with
+            config.DefaultProductCode = OvCode; // what RenewCertificateAsync orders with
             var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object, config);
             var productInfo = new EnrollmentProductInfo
             {
