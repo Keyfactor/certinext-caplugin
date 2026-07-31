@@ -74,6 +74,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         }
 
         /// <summary>
+        /// True when a disposition/certificate pair represents a genuinely finished
+        /// issuance outcome — REVOKED, FAILED, or GENERATED with a certificate body
+        /// actually present. A GENERATED disposition with no body (e.g. a transient
+        /// download failure mid-poll) is NOT terminal: treating it as such would hand
+        /// Command a bodyless "issued" record instead of letting the caller keep polling
+        /// or degrade to pending. Shared by every issuance-wait/pickup call site so this
+        /// three-way check can't drift between copies or be fixed in only one of them.
+        /// </summary>
+        public static bool IsTerminalIssuance(int disposition, string certificate) =>
+            disposition == (int)EndEntityStatus.REVOKED
+            || disposition == (int)EndEntityStatus.FAILED
+            || (disposition == (int)EndEntityStatus.GENERATED && !string.IsNullOrWhiteSpace(certificate));
+
+        /// <summary>
         /// Converts a CERTInext <c>certificateStatusId</c> string (as returned by the
         /// API response) to the closest matching <see cref="EndEntityStatus"/> code.
         /// </summary>

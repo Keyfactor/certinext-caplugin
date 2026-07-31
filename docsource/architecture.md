@@ -139,14 +139,24 @@ sequenceDiagram
 
     alt Certificate issued immediately
         Plugin-->>CMD: Certificate ready — PEM returned
-    else Certificate pending approval
-        Plugin-->>CMD: Pending — Command will pick it up<br/>during the next synchronization
+    else Pending, product is DV, and DCV does not own the wait
+        loop Synchronous enrollment wait<br/>(up to EnrollmentWaitSeconds)
+            Plugin->>API: Fetch certificate
+            API-->>Plugin: Issued, or still pending
+        end
+        Plugin-->>CMD: Certificate ready if issued within the budget —<br/>otherwise pending, completed by the next synchronization
+    else Pending and product is OV or EV
+        Plugin-->>CMD: Pending — CERTInext issues OV/EV asynchronously by design<br/>(organization verification); completed by the next synchronization
     else Order rejected by CERTInext
         Plugin-->>CMD: Enrollment failed — see gateway logs
     end
 
     Plugin->>Plugin: Record enrollment outcome in audit log<br/>(order number, serial number, status)
 ```
+
+The synchronous enrollment-wait step mirrors the legacy Sectigo connector's behavior: DV orders that CERTInext issues within the poll budget are returned in the same enrollment call, so automated workflows (e.g. expiration renewal) receive the certificate without waiting for a sync cycle. The product's validation level is resolved from the account's product catalog (cached), falling back to the template product name. OV/EV orders are never polled — their organization-verification step takes minutes and may be human-gated, so the plugin returns pending immediately with a message explaining the deferral.
+
+On gateways with `DcvEnabled` (DCV build flavor), pending **new/reissue** orders skip this enrollment-wait loop entirely — the in-call DCV flow owns those waits, and its post-validation issuance poll is budgeted by `DcvWaitForIssuanceSeconds` instead of `EnrollmentWaitSeconds` (both poll every 5 seconds, the same fixed interval). Renewals never run in-call DCV, so the enrollment-wait loop above applies to them on every flavor, as does the recovery fetch for orders that issued but whose certificate download initially failed.
 
 ### Renewal
 

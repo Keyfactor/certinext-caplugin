@@ -1,3 +1,13 @@
+# 1.2.0
+
+## Features
+- feat(enroll): `Enroll()` now briefly polls for the issued certificate on every enrollment path (new, reissue, renewal; both build flavors), so fast-issuing DV orders return the certificate in the same call instead of waiting for the next sync — restoring the legacy Sectigo connector's pickup behavior. New `EnrollmentWaitSeconds` setting (default 50, 5-second poll interval, hard-capped at 300 s); set to `0` to disable.
+- feat(enroll): OV/EV orders skip the poll and return pending immediately — CERTInext issues them asynchronously by design (organization verification). Validation level is resolved from the account product catalog (cached 60 minutes), falling back to the template product name.
+
+## Bug Fixes
+- fix(enroll): Order and CSR submissions are no longer retried after a transient/network failure. A timeout can land *after* CERTInext already created the order, so the retry was rejected as a duplicate (EMS-947) and orphaned the order; submits now fail closed and reconcile on the next sync.
+- fix(build): The `-p:DcvSupport=false` flavor of `CERTInext.IntegrationTests` now compiles — DCV-only test files are excluded from the no-DCV build.
+
 # 1.1.0
 
 ## Features
