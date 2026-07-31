@@ -84,6 +84,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // to stage TXT records for the same order. The value byte is unused; this is a set.
         private readonly ConcurrentDictionary<string, byte> _dcvInFlight = new();
 
+        // Cached productCode → DV/OV/EV classification built from GetProductDetails, used by
+        // the synchronous pickup gate (TryPickupIssuedCertificateAsync). Refreshed at most
+        // once per Constants.Pickup.ProductTypeCacheMinutes so the catalog is never fetched
+        // per-enrollment; a fetch failure falls back to the stale map (or template-name
+        // classification) rather than failing the enrollment.
+        private readonly SemaphoreSlim _productTypeCacheLock = new(1, 1);
+        private volatile Dictionary<string, ProductValidationType> _productTypeByCode;
+        private DateTime _productTypeCacheExpiresUtc = DateTime.MinValue;
+
 #if SUPPORTS_DCV
         // Issue 0006: resolves CNAME delegation for the DCV challenge hostname when
         // DcvFollowCnameDelegation is enabled. Only ever referenced from PerformDcvIfNeededAsync,
@@ -129,13 +138,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Internal test-injection constructor — pass a mock <see cref="ICERTInextClient"/>
         /// and a mock <see cref="ICertificateDataReader"/> for tests that exercise
         /// RenewOrReissue logic that reads prior certificate data from Command's database.
+        /// An optional <see cref="CERTInextConfig"/> lets those tests also override
+        /// configuration (e.g. shrink the pickup-poll delays).
         /// </summary>
-        internal CERTInextCAPlugin(ICERTInextClient client, ICertificateDataReader certDataReader)
+        internal CERTInextCAPlugin(ICERTInextClient client, ICertificateDataReader certDataReader,
+            CERTInextConfig config = null)
         {
             _client = client;
             _clientWasInjected = true;
             _certificateDataReader = certDataReader;
-            _config = new CERTInextConfig();
+            _config = config ?? new CERTInextConfig();
         }
 
         /// <summary>
@@ -224,6 +236,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             if (!_clientWasInjected)
                 (_client as IDisposable)?.Dispose();
+            // _productTypeCacheLock is deliberately NOT disposed: SemaphoreSlim.Dispose is
+            // not safe concurrently with WaitAsync/Release, and the gateway can recycle the
+            // plugin (config re-save, service stop) while an enrollment's pickup is mid
+            // catalog refresh — disposing here would fault that in-flight enrollment for no
+            // benefit (a SemaphoreSlim whose AvailableWaitHandle is never touched holds no
+            // unmanaged resources).
         }
 
         // ---------------------------------------------------------------------------
@@ -1164,17 +1182,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             // but the cert PEM isn't immediately available.  Without this poll, Enroll
                             // returns a pending result and the cert is picked up on the next sync cycle,
                             // which is undesirable when the whole thing completes in under a minute.
-                            var postDcv = await WaitForIssuanceAfterDcvAsync(orderNumber, dcvCts.Token);
+                            // Fixed 3-second poll interval: the post-DCV issuance step typically
+                            // completes within 5–15s, so a slower cadence would push typical-case
+                            // latency toward the budget ceiling. Decoupled from
+                            // DcvPropagationDelaySeconds (a DNS concern) so admins tuning DNS
+                            // settings don't accidentally make this polling chunky.
+                            var postDcv = await WaitForIssuanceAsync(
+                                orderNumber, _config.GetEffectiveDcvWaitForIssuanceSeconds(), 3, "PostDcv", dcvCts.Token);
+                            // Only a genuine terminal outcome ends the enroll call here. A GENERATED
+                            // result without a PEM (a transient download failure during the wait)
+                            // must fall through to the pending path so a later sync refetches the
+                            // body — never surface a bodyless "issued" result. REVOKED/FAILED carry
+                            // no body and are surfaced as-is.
                             if (postDcv != null)
                             {
-                                return BuildEnrollmentResult(new EnrollCertificateResponse
+                                int postDcvDisposition = StatusMapper.ToRequestDisposition(postDcv.Status);
+                                if (postDcvDisposition == (int)EndEntityStatus.REVOKED
+                                    || postDcvDisposition == (int)EndEntityStatus.FAILED
+                                    || (postDcvDisposition == (int)EndEntityStatus.GENERATED
+                                        && !string.IsNullOrWhiteSpace(postDcv.Certificate)))
                                 {
-                                    Id = postDcv.Id,
-                                    Status = postDcv.Status,
-                                    Certificate = postDcv.Certificate,
-                                    SerialNumber = postDcv.SerialNumber,
-                                    Message = $"Post-DCV status: {postDcv.Status}."
-                                }, ep.AutoApprove);
+                                    return BuildEnrollmentResultFromCertificate(postDcv, orderNumber,
+                                        $"Post-DCV status: {postDcv.Status}.", ep.AutoApprove);
+                                }
                             }
                         }
                     }
@@ -1206,8 +1236,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 #endif
 
+            // Synchronous pickup (both build flavors): poll for the issued certificate so
+            // fast-issuing (DV) orders return GENERATED + PEM in this same call instead of
+            // deferring to the next sync cycle. No-ops for OV/EV, when the in-call DCV flow
+            // owns the wait, or when the result is already terminal.
+            bool dcvOwnsIssuanceWait = false;
+#if SUPPORTS_DCV
+            // When DCV is enabled, the DCV branch above already performed (or deliberately
+            // deferred to the sync-driven DCV path) the issuance wait for this new order.
+            dcvOwnsIssuanceWait = _config.DcvEnabled;
+#endif
+            var newResult = BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+            newResult = await TryPickupIssuedCertificateAsync(
+                newResult, enrollResp.Id, ep, ep.ProductCode, dcvOwnsIssuanceWait);
+
             _logger.MethodExit(LogLevel.Debug);
-            return BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+            return newResult;
         }
 
 #if SUPPORTS_DCV
@@ -1417,6 +1461,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "PriorCARequestID={PriorId}, NewCARequestID={NewId}, Status={Status}",
                     priorCaRequestId, renewResult.CARequestID, renewResult.Status);
 
+                // Synchronous pickup (both build flavors) — expiration-renewal workflows get
+                // the issued cert back in this call when the CA issues fast enough (the
+                // original Sectigo-parity scenario). In-call DCV never runs on this path, so
+                // the pickup is always eligible (on DCV-enabled gateways a renewal that does
+                // need fresh domain validation simply exhausts the bounded budget and falls
+                // back to pending). Classify the product code the renewal order was actually
+                // placed with — the client reports it on the response (renewResp.ProfileId),
+                // which can differ from the template's code because RenewCertificateAsync
+                // orders with the connector's DefaultProductCode. When the response omits it
+                // (order went out with an empty code), the template's code is only a
+                // best-effort guess for the gate.
+                string renewedProductCode = !string.IsNullOrWhiteSpace(renewResp.ProfileId)
+                    ? renewResp.ProfileId
+                    : ep.ProductCode;
+                if (!string.Equals(renewedProductCode, ep.ProductCode, StringComparison.Ordinal))
+                {
+                    _logger.LogWarning(
+                        "Renewal order {OrderNumber} was placed with the connector DefaultProductCode " +
+                        "({OrderedCode}), which differs from this template's product code ({TemplateCode}). " +
+                        "The synchronous-pickup gate classifies the ordered code.",
+                        renewResp.Id, renewedProductCode, ep.ProductCode);
+                }
+                renewResult = await TryPickupIssuedCertificateAsync(
+                    renewResult, renewResp.Id, ep, renewedProductCode, dcvOwnsIssuanceWait: false);
+
                 return renewResult;
             }
             else
@@ -1425,6 +1494,335 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "Certificate '{Id}' is outside the renewal window ({Window} days) — issuing new certificate. Subject={Subject}",
                     priorCaRequestId, ep.RenewalWindowDays, subject);
                 return await EnrollNewAsync(csr, subject, san, ep);
+            }
+        }
+
+        // ---------------------------------------------------------------------------
+        // Synchronous pickup — DCV-independent, both build flavors
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Attempts to complete an enrollment synchronously by polling for the issued
+        /// certificate after the order was submitted, mirroring the legacy Sectigo
+        /// connector's <c>PickUpEnrolledCertificate</c> loop.  Called at the end of every
+        /// enrollment path (New/Reissue and the Renew API path) on both build flavors.
+        ///
+        /// Only DV products are polled: CERTInext issues OV/EV asynchronously by design —
+        /// the mandatory organization-verification step takes minutes and may be human-gated
+        /// (support ticket #162763), so holding a Command worker thread for them cannot
+        /// succeed; those orders return pending immediately with an explanatory message and
+        /// are completed by the next synchronization.  Products whose validation level cannot
+        /// be determined are polled optimistically — the poll is bounded and a wasted wait is
+        /// preferable to silently breaking a fast-issuing product's synchronous return.
+        ///
+        /// Never throws: any failure (catalog lookup, poll, cancellation) degrades to
+        /// returning <paramref name="pendingResult"/> unchanged so the order is picked up by
+        /// the next sync cycle, exactly as before this feature existed.
+        /// </summary>
+        /// <param name="productCode">
+        /// The numeric product code the order was actually placed with.  Callers must pass
+        /// the code that reached the API — for renewals that is the connector's
+        /// <c>DefaultProductCode</c> (see <see cref="RenewOrReissueAsync"/>), which can
+        /// differ from the template's code.
+        /// </param>
+        /// <param name="dcvOwnsIssuanceWait">
+        /// True only on the New/Reissue path of a DCV-enabled gateway, where the in-call DCV
+        /// flow already performed (or deliberately deferred) the issuance wait — a pending
+        /// order there is waiting on domain validation that only the sync-driven DCV path can
+        /// advance, so a second poll cannot win.  The renew path never runs in-call DCV and
+        /// must always be eligible for pickup.
+        /// </param>
+        private async Task<EnrollmentResult> TryPickupIssuedCertificateAsync(
+            EnrollmentResult pendingResult, string orderNumber, EnrollmentParams ep,
+            string productCode, bool dcvOwnsIssuanceWait)
+        {
+            // Invariant enforced on EVERY return that hands back the caller's result (including the
+            // guards below): never hand Command a GENERATED result with no certificate body. An
+            // issued-but-PEM-missing state the poll could not recover — the download kept failing,
+            // pickup is disabled, or there is no order number to poll/refetch with — must degrade to
+            // EXTERNALVALIDATION so a later synchronization refetches the body; otherwise Command
+            // persists a bodyless "issued" record, the exact outcome the pickup exists to prevent.
+            // Poll-success and REVOKED/FAILED returns already carry a body (or legitimately have
+            // none), so they no-op through this. Declared first so no early return can bypass it.
+            EnrollmentResult DegradeBodylessIssuedToPending(EnrollmentResult r)
+            {
+                if (r != null
+                    && r.Status == (int)EndEntityStatus.GENERATED
+                    && string.IsNullOrWhiteSpace(r.Certificate))
+                {
+                    _logger.LogInformation(
+                        "Order {OrderNumber} is issued but its certificate body was not retrievable " +
+                        "in-call; returning pending so a later synchronization imports it.", orderNumber);
+                    r.Status = (int)EndEntityStatus.EXTERNALVALIDATION;
+                    r.StatusMessage =
+                        $"Certificate for order {orderNumber} was issued by CERTInext but its body was " +
+                        "not retrievable within this enrollment call; it will be imported by a later " +
+                        "synchronization.";
+                }
+                return r;
+            }
+
+            // No order number means we cannot poll or refetch — but still enforce the invariant so a
+            // bodyless issued result never escapes (the null case no-ops inside the helper).
+            if (pendingResult == null || string.IsNullOrWhiteSpace(orderNumber))
+                return DegradeBodylessIssuedToPending(pendingResult);
+
+            // Two states can still benefit from a poll: pending approval (the normal case),
+            // and issued-but-PEM-missing (order fulfilled but the post-submit certificate
+            // download failed — one successful GetCertificate fetch completes the result).
+            bool pendingApproval = pendingResult.Status == (int)EndEntityStatus.EXTERNALVALIDATION;
+            bool issuedWithoutPem = pendingResult.Status == (int)EndEntityStatus.GENERATED
+                && string.IsNullOrWhiteSpace(pendingResult.Certificate);
+            if (!pendingApproval && !issuedWithoutPem)
+                return pendingResult;
+
+            // Only the pending-approval state defers to the DCV flow — an issued-but-PEM-missing
+            // order is past validation entirely, so the fetch below is useful regardless of DCV.
+            if (dcvOwnsIssuanceWait && pendingApproval)
+            {
+                // SOC2 CC7.2: Information so the enrollment timeline shows which mechanism
+                // owned the in-call wait (pairs with the "Starting DCV for order" line).
+                _logger.LogInformation(
+                    "Skipping synchronous pickup for order {OrderNumber} — the in-call DCV flow owns this order's issuance wait.",
+                    orderNumber);
+                return pendingResult;
+            }
+
+            int retries = _config.GetEffectivePickupRetries();
+            int delaySeconds = _config.GetEffectivePickupDelaySeconds();
+            if (retries <= 0 || delaySeconds <= 0)
+            {
+                // SOC2 CC7.2 / SOX change management: the effective values may come from env
+                // vars rather than the connector record, so this Information line is the only
+                // production-log evidence distinguishing "pickup disabled by operator" from
+                // "pickup never attempted".
+                _logger.LogInformation(
+                    "Synchronous pickup disabled by configuration (effective PickupRetries={Retries}, " +
+                    "PickupDelaySeconds={Delay}). Order {OrderNumber} will be picked up on the next sync cycle.",
+                    retries, delaySeconds, orderNumber);
+                return DegradeBodylessIssuedToPending(pendingResult);
+            }
+
+            // Compute the budget in long first: both knobs accept arbitrary non-negative ints
+            // from env vars, and an int overflow here would go negative and make the CTS
+            // constructor throw (silently disabling pickup via the catch below). Clamp to the
+            // hard ceiling — Command abandons enrollment calls long before it, so a larger
+            // budget would only orphan a worker thread (docs: keep retries × delay under ~90 s).
+            long configuredBudgetSeconds = (long)retries * delaySeconds;
+            int budgetSeconds = (int)Math.Min(configuredBudgetSeconds, Constants.Pickup.MaxBudgetSeconds);
+            if (configuredBudgetSeconds > Constants.Pickup.MaxBudgetSeconds)
+            {
+                // SOX CC7.3: the clamp is a policy decision — evidence it.
+                _logger.LogWarning(
+                    "Configured pickup budget ({Configured}s = PickupRetries {Retries} × PickupDelaySeconds {Delay}) " +
+                    "exceeds the hard ceiling; clamped to {Max}s for order {OrderNumber}.",
+                    configuredBudgetSeconds, retries, delaySeconds, Constants.Pickup.MaxBudgetSeconds, orderNumber);
+            }
+
+            try
+            {
+                // One ceiling bounds the ENTIRE pickup — catalog classification included — so
+                // a hung catalog endpoint cannot hold a Command worker thread beyond the
+                // configured budget (+ grace for one in-flight request). This is what keeps
+                // the documented "retries × delay = max Command-occupied time" honest.
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(budgetSeconds + 30));
+
+                var validationType = ProductValidationType.Unknown;
+                if (pendingApproval)
+                {
+                    validationType = await ResolveProductValidationTypeAsync(productCode, ep.ProductId, cts.Token);
+                    if (validationType is ProductValidationType.Ov or ProductValidationType.Ev)
+                    {
+                        string typeLabel = validationType == ProductValidationType.Ov ? "OV" : "EV";
+
+                        // SOC2 CC7.2: the decision to defer is policy-relevant — log at
+                        // Information so it survives production log filters.
+                        _logger.LogInformation(
+                            "Synchronous pickup skipped — {Type} products are issued asynchronously by " +
+                            "CERTInext (organization verification). OrderNumber={OrderNumber}, " +
+                            "ProductCode={ProductCode}. The certificate will be imported by a later synchronization.",
+                            typeLabel, orderNumber, productCode);
+
+                        pendingResult.StatusMessage =
+                            $"Certificate request accepted by CERTInext. ID: {orderNumber}. " +
+                            $"{typeLabel} certificates are issued asynchronously by the CA — organization " +
+                            "verification is performed on the CA side and can take minutes to hours, so the " +
+                            "certificate cannot be returned within this enrollment call. It will be imported " +
+                            "automatically by the next CA synchronization once CERTInext completes issuance.";
+                        if (pendingResult.EnrollmentContext != null)
+                        {
+                            pendingResult.EnrollmentContext["certinextOrderNumber"] = orderNumber;
+                            pendingResult.EnrollmentContext["certinextValidationType"] = typeLabel;
+                            pendingResult.EnrollmentContext["certinextAsyncIssuanceByDesign"] = "true";
+                        }
+                        return pendingResult;
+                    }
+                }
+
+                _logger.LogInformation(
+                    "Synchronous pickup poll started. OrderNumber={OrderNumber}, ProductCode={ProductCode}, " +
+                    "ValidationType={ValidationType}, Retries={Retries}, DelaySeconds={Delay}, BudgetSeconds={Budget}",
+                    orderNumber, productCode, validationType, retries, delaySeconds, budgetSeconds);
+
+                var final = await WaitForIssuanceAsync(orderNumber, budgetSeconds, delaySeconds, "Pickup", cts.Token);
+
+                // A GENERATED result is only a completed pickup once the PEM is present.
+                // WaitForIssuanceAsync keeps polling a body-less GENERATED, but the budget can
+                // still expire while the download keeps failing transiently — in that case fall
+                // through to the pending soft-fallback (sync refetches the body later) rather
+                // than surface a bogus "issued, no certificate" result. REVOKED/FAILED are real
+                // terminal outcomes with no body and must still be surfaced.
+                int finalDisposition = final == null
+                    ? (int)EndEntityStatus.EXTERNALVALIDATION
+                    : StatusMapper.ToRequestDisposition(final.Status);
+                if (final != null
+                    && (finalDisposition == (int)EndEntityStatus.REVOKED
+                        || finalDisposition == (int)EndEntityStatus.FAILED
+                        || (finalDisposition == (int)EndEntityStatus.GENERATED
+                            && !string.IsNullOrWhiteSpace(final.Certificate))))
+                {
+                    _logger.LogInformation(
+                        "Synchronous pickup complete. OrderNumber={OrderNumber}, Status={Status}, SerialNumber={Serial}",
+                        orderNumber, final.Status,
+                        string.IsNullOrWhiteSpace(final.SerialNumber) ? "(none)" : final.SerialNumber);
+                    // Neutral wording: this message is surfaced verbatim in the operator-visible
+                    // StatusMessage by BuildEnrollmentResult's FAILED branch, so it must not
+                    // claim "issued" for an order that was rejected during the poll.
+                    return BuildEnrollmentResultFromCertificate(final, orderNumber,
+                        $"Order reached status '{final.Status}' during synchronous pickup.", ep.AutoApprove);
+                }
+
+                // Soft fallback: still pending after the budget. Keep the pending result —
+                // the next sync cycle completes the order — but say what happened so the
+                // operator understands why the cert didn't come back in-call.
+                _logger.LogInformation(
+                    "Synchronous pickup did not complete within {Budget}s for order {OrderNumber}. " +
+                    "Returning pending result; sync will pick up the certificate later.",
+                    budgetSeconds, orderNumber);
+                // No duration claim: the poll may have aborted on its first API failure
+                // rather than waiting the full budget, and for an issued-but-PEM-missing
+                // order the base message already reports successful issuance.
+                pendingResult.StatusMessage =
+                    $"{pendingResult.StatusMessage} The certificate was not retrievable within the " +
+                    "synchronous-pickup budget; it will be imported by a later synchronization.";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Synchronous pickup failed for order {OrderNumber}. Returning pending result; " +
+                    "sync will pick up the certificate later.", orderNumber);
+            }
+
+            return DegradeBodylessIssuedToPending(pendingResult);
+        }
+
+        /// <summary>
+        /// Resolves the validation level (DV/OV/EV) that gates the synchronous pickup poll.
+        /// The account's product catalog (via <c>GetProductDetails</c>, cached — see
+        /// <see cref="RefreshProductTypeCacheAsync"/>) is authoritative because numeric
+        /// product codes differ between CERTInext environments; the Command template's
+        /// product name (e.g. "OV SSL Wildcard") is the fallback when the catalog is
+        /// unavailable or doesn't list the code.  Never throws.
+        /// </summary>
+        private async Task<ProductValidationType> ResolveProductValidationTypeAsync(
+            string productCode, string templateProductName, CancellationToken ct)
+        {
+            if (!string.IsNullOrWhiteSpace(productCode))
+            {
+                // The expiry timestamp — not map nullness — decides whether to hit the API,
+                // so the failure back-off below also protects the never-succeeded case
+                // (map still null): without this, a down catalog endpoint would add one
+                // failing API round-trip to every enrollment.
+                var map = DateTime.UtcNow >= _productTypeCacheExpiresUtc
+                    ? await RefreshProductTypeCacheAsync(ct)
+                    : _productTypeByCode;
+
+                if (map != null && map.TryGetValue(productCode.Trim(), out var fromCatalog)
+                    && fromCatalog != ProductValidationType.Unknown)
+                {
+                    return fromCatalog;
+                }
+            }
+
+            return ProductClassifier.ClassifyName(templateProductName);
+        }
+
+        /// <summary>
+        /// Refreshes the cached productCode → validation-type map from the account's
+        /// catalog.  Serialized so concurrent enrollments trigger at most one
+        /// <c>GetProductDetails</c> call; on failure the retry is backed off (and any
+        /// previous stale map is kept), so a down catalog endpoint costs at most one
+        /// failing API call per back-off window rather than one per enrollment.
+        /// Bounded by <paramref name="ct"/> — the caller's pickup budget — so a hanging
+        /// catalog endpoint cannot hold a Command worker thread past the documented ceiling.
+        /// </summary>
+        private async Task<Dictionary<string, ProductValidationType>> RefreshProductTypeCacheAsync(CancellationToken ct)
+        {
+            await _productTypeCacheLock.WaitAsync(ct);
+            try
+            {
+                // Another caller may have refreshed (or failed and armed the back-off)
+                // while this one waited on the lock. The timestamp alone gates the API
+                // call — a null map inside the back-off window must NOT retry.
+                if (DateTime.UtcNow < _productTypeCacheExpiresUtc)
+                    return _productTypeByCode;
+
+                try
+                {
+                    var products = await _client.GetProductDetailsAsync(ct);
+                    var map = new Dictionary<string, ProductValidationType>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var p in products ?? new List<ProductDetail>())
+                    {
+                        if (string.IsNullOrWhiteSpace(p?.ProductCode))
+                            continue;
+                        var classified = ProductClassifier.ClassifyName(p.ProductName);
+                        map[p.ProductCode.Trim()] = classified;
+                        _logger.LogDebug(
+                            "Catalog product classified for pickup gating. ProductCode={Code}, " +
+                            "ProductTypeId={TypeId}, ProductName={Name}, ValidationType={Type}",
+                            p.ProductCode, p.ProductTypeId, p.ProductName, classified);
+                    }
+
+                    _productTypeByCode = map;
+                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.Pickup.ProductTypeCacheMinutes);
+                    _logger.LogInformation(
+                        "Product-type catalog cached for synchronous-pickup gating. Products={Count}, " +
+                        "CacheMinutes={Minutes}", map.Count, Constants.Pickup.ProductTypeCacheMinutes);
+                    return map;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // The caller's pickup budget expired mid-fetch. The fetch had the full
+                    // budget PLUS the ~30 s grace on the pickup CTS, so a cancellation here means
+                    // the catalog endpoint is structurally slower than any enrollment can wait —
+                    // not a transient blip. Arm the back-off so the NEXT enrollment doesn't spend
+                    // its whole budget on the same doomed fetch; it will classify from the stale
+                    // catalog (or the template product name) until the endpoint recovers. Still
+                    // propagate, because THIS enrollment's budget is already spent — its
+                    // soft-fallback returns the pending result.
+                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.Pickup.FailureBackoffMinutes);
+                    _logger.LogWarning(
+                        "Product catalog fetch for synchronous-pickup gating exceeded the enrollment budget; " +
+                        "catalog refresh backed off for {BackoffMinutes} minutes. Subsequent enrollments will " +
+                        "classify from {Fallback} until it recovers.",
+                        Constants.Pickup.FailureBackoffMinutes,
+                        _productTypeByCode != null ? "the stale cached catalog" : "the template product name");
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Could not refresh the product catalog for synchronous-pickup gating; falling back to " +
+                        "{Fallback}. Retry backed off for {BackoffMinutes} minutes.",
+                        _productTypeByCode != null ? "the stale cached catalog" : "template-name classification",
+                        Constants.Pickup.FailureBackoffMinutes);
+                    _productTypeCacheExpiresUtc = DateTime.UtcNow.AddMinutes(Constants.Pickup.FailureBackoffMinutes);
+                    return _productTypeByCode;
+                }
+            }
+            finally
+            {
+                _productTypeCacheLock.Release();
             }
         }
 
@@ -1861,28 +2259,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// Polls <c>GetCertificateAsync</c> until either (a) the certificate reaches a terminal
-        /// state (issued or rejected) or (b) the configured <c>DcvWaitForIssuanceSeconds</c>
-        /// budget expires.  Returns the final response on success, or <c>null</c> if all polls
+        /// state (issued or rejected) or (b) the <paramref name="waitBudgetSeconds"/> budget
+        /// expires.  Returns the final response on success, or <c>null</c> if all polls
         /// failed (so callers fall back to the pending result they already have).
         ///
-        /// CERTInext's issuance pipeline is asynchronous on their side: after the plugin's
-        /// VerifyDcv triggers and the per-domain DCV is confirmed, the cert generation step
-        /// finishes a few seconds later.  Without this poll the plugin would catch the cert
-        /// in pending state and return it that way, forcing the gateway to wait for the next
-        /// sync cycle.
+        /// CERTInext's issuance pipeline is asynchronous on their side, so a just-submitted
+        /// (or just-DCV-verified) order's certificate typically becomes downloadable a short
+        /// time after the triggering call returns.  Without this poll the plugin would catch
+        /// the cert in pending state and return it that way, forcing the gateway to wait for
+        /// the next sync cycle.  Used by both the post-DCV wait (budget =
+        /// <c>DcvWaitForIssuanceSeconds</c>, 3 s interval) and the general synchronous pickup
+        /// in <see cref="TryPickupIssuedCertificateAsync"/> (budget = <c>PickupRetries ×
+        /// PickupDelaySeconds</c>, <c>PickupDelaySeconds</c> interval).
         /// </summary>
-        private async Task<LegacyGetCertificateResponse> WaitForIssuanceAfterDcvAsync(
-            string orderNumber, CancellationToken ct)
+        private async Task<LegacyGetCertificateResponse> WaitForIssuanceAsync(
+            string orderNumber, int waitBudgetSeconds, int pollIntervalSeconds, string phase, CancellationToken ct)
         {
-            int waitBudgetSeconds = _config.GetEffectiveDcvWaitForIssuanceSeconds();
-
-            // Fixed 3-second poll interval. CERTInext's post-DCV issuance step typically
-            // completes within 5–15s; polling more aggressively would just add API load,
-            // and polling more slowly would push the typical-case latency closer to the
-            // budget ceiling. Decoupled from DcvPropagationDelaySeconds (which is for DNS
-            // propagation, a different concern) so admins tuning DNS settings don't
-            // accidentally make post-DCV polling chunky.
-            int pollIntervalSeconds = 3;
             DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Max(0, waitBudgetSeconds));
             LegacyGetCertificateResponse last = null;
 
@@ -1893,48 +2285,90 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (waitBudgetSeconds <= 0)
             {
                 _logger.LogDebug(
-                    "Post-DCV issuance wait disabled (DcvWaitForIssuanceSeconds<=0). " +
+                    "Issuance wait disabled (budget<=0). Phase={Phase}. " +
                     "Order {OrderNumber} will be picked up on the next sync cycle.",
-                    orderNumber);
+                    phase, orderNumber);
                 return null;
             }
+            // Clamp the interval into [1, budget] so a pathological PickupDelaySeconds override
+            // (e.g. from CERTINEXT_PICKUP_DELAY_SECONDS) can never make Task.Delay outlast the
+            // budget. Correctness here no longer depends on the deadline check happening to run
+            // before the sleep — the wait is bounded by construction.
+            pollIntervalSeconds = Math.Min(Math.Max(1, pollIntervalSeconds), Math.Max(1, waitBudgetSeconds));
+
+            // Deterministic upper bound on the poll count. The documented "retries × delay ⇒
+            // retries polls" contract must hold exactly, not merely emerge from wall-clock
+            // arithmetic — Task.Delay can fire a hair early at the exact budget boundary and the
+            // deadline check below would then admit one extra poll (a real, if rare, off-by-one).
+            // Capping the attempt count removes that race. The wall-clock deadline is retained as
+            // the early-stop when individual polls run long, so a slow endpoint still cannot blow
+            // the time budget (and the CTS remains the hard backstop).
+            int maxPolls = Math.Max(1, waitBudgetSeconds / pollIntervalSeconds);
 
             int attempt = 0;
             while (true)
             {
                 attempt++;
                 ct.ThrowIfCancellationRequested();
+                LegacyGetCertificateResponse current = null;
                 try
                 {
-                    last = await _client.GetCertificateAsync(orderNumber, ct);
+                    current = await _client.GetCertificateAsync(orderNumber, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    // The budget's token fired mid-call — hand back whatever we have.
+                    return last;
                 }
                 catch (Exception ex)
                 {
-                    // Distinguish first-call failure (no result to return, sync must pick up)
-                    // from later-poll failure (we have a prior pending result that the caller
-                    // can use as a fallback). Without this distinction a repeated first-call
-                    // failure would look identical to a working-but-always-pending enroll.
+                    // A transient API failure consumes this attempt, not the whole budget:
+                    // keep polling until the deadline, mirroring the legacy Sectigo pickup
+                    // loop. Aborting here would silently degrade a retries=N configuration
+                    // to a single attempt on the first blip.
                     _logger.LogWarning(ex,
-                        "Post-DCV GetCertificate failed for order {OrderNumber} (attempt {Attempt}). " +
-                        "Returning {Outcome}; sync will pick up the cert later.",
-                        orderNumber, attempt, last == null ? "pending fallback (no prior result)" : "prior pending result");
-                    return last;
+                        "GetCertificate failed during issuance wait for order {OrderNumber} " +
+                        "(attempt {Attempt}, Phase={Phase}). Continuing until the budget expires.",
+                        orderNumber, attempt, phase);
                 }
 
-                int disposition = StatusMapper.ToRequestDisposition(last.Status);
-                if (disposition == (int)EndEntityStatus.GENERATED
-                    || disposition == (int)EndEntityStatus.REVOKED
-                    || disposition == (int)EndEntityStatus.FAILED)
+                if (current != null)
                 {
-                    return last;
+                    last = current;
+                    int disposition = StatusMapper.ToRequestDisposition(last.Status);
+
+                    // GENERATED is only terminal once the PEM is actually in hand.
+                    // GetCertificateAsync maps status from TrackOrder but swallows a
+                    // transient DownloadCertificate failure (logs a warning, returns
+                    // Certificate == null). Treating that as terminal would hand Command a
+                    // "successfully issued" result with no cert body and burn the remaining
+                    // budget that could have recovered the PEM. Keep polling instead — each
+                    // GetCertificateAsync re-attempts the download — mirroring the same
+                    // refetch defense Synchronize() already applies. REVOKED/FAILED are
+                    // genuinely terminal and carry no body, so they short-circuit as before.
+                    bool terminal =
+                        disposition == (int)EndEntityStatus.REVOKED
+                        || disposition == (int)EndEntityStatus.FAILED
+                        || (disposition == (int)EndEntityStatus.GENERATED
+                            && !string.IsNullOrWhiteSpace(last.Certificate));
+                    if (terminal)
+                    {
+                        return last;
+                    }
                 }
 
-                if (waitBudgetSeconds <= 0 || DateTime.UtcNow >= deadline)
+                // Stop when we have used the deterministic poll budget, OR when the NEXT poll
+                // would land at or past the wall-clock deadline. The attempt cap makes a budget
+                // of retries × delay yield at most `retries` polls regardless of timer jitter;
+                // the deadline check stops early when polls themselves run long.
+                if (attempt >= maxPolls
+                    || DateTime.UtcNow.AddSeconds(pollIntervalSeconds) >= deadline)
                 {
                     _logger.LogInformation(
-                        "Post-DCV issuance not complete within {Budget}s for order {OrderNumber}. " +
-                        "Returning pending result; sync will pick up the cert later.",
-                        waitBudgetSeconds, orderNumber);
+                        "Issuance not complete within {Budget}s for order {OrderNumber} (Phase={Phase}). " +
+                        "Returning {Outcome}; sync will pick up the cert later.",
+                        waitBudgetSeconds, orderNumber, phase,
+                        last == null ? "pending fallback (no successful poll)" : "last pending result");
                     return last;
                 }
 
@@ -2025,6 +2459,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// Maps a live <see cref="LegacyGetCertificateResponse"/> (returned by an issuance
+        /// wait) through <see cref="BuildEnrollmentResult"/>.  Shared by the post-DCV wait
+        /// and the synchronous pickup so the field mapping cannot drift between the two
+        /// paths; falls back to <paramref name="orderNumber"/> when the API returned an
+        /// empty Id so the result always carries a usable CARequestID.
+        /// </summary>
+        private EnrollmentResult BuildEnrollmentResultFromCertificate(
+            LegacyGetCertificateResponse cert, string orderNumber, string message, bool autoApprove)
+        {
+            return BuildEnrollmentResult(new EnrollCertificateResponse
+            {
+                Id = string.IsNullOrWhiteSpace(cert.Id) ? orderNumber : cert.Id,
+                Status = cert.Status,
+                Certificate = cert.Certificate,
+                SerialNumber = cert.SerialNumber,
+                Message = message
+            }, autoApprove);
+        }
+
+        /// <summary>
         /// Converts a CERTInext API enrollment/renewal response into the
         /// <see cref="EnrollmentResult"/> expected by the AnyCA gateway.
         /// </summary>
@@ -2040,6 +2494,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 case (int)EndEntityStatus.GENERATED:
                     message = $"Certificate issued successfully. CERTInext ID: {resp.Id}.";
+                    // SOC2 CC7.2 / SOX completeness: certificate issuance is the privileged
+                    // act this plugin performs; record it so an auditor can reconstruct which
+                    // orders received a credential and its serial. Both the immediate-issuance
+                    // and pickup-completed paths funnel through here, so this one line covers
+                    // both. The PEM itself is never logged.
+                    _logger.LogInformation(
+                        "Certificate issued. CERTInextId={Id}, SerialNumber={Serial}, Status={Status}.",
+                        resp.Id, string.IsNullOrWhiteSpace(resp.SerialNumber) ? "(pending download)" : resp.SerialNumber,
+                        resp.Status);
                     break;
 
                 case (int)EndEntityStatus.EXTERNALVALIDATION:

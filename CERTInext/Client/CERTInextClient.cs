@@ -767,6 +767,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Status = MapCertStatusIdToLegacyString(certStatusId),
                 Certificate = pemCert,
                 SerialNumber = serialNumber,
+                // Report the product code this renewal order was actually placed with so
+                // callers (e.g. the synchronous-pickup gate) classify what reached the API
+                // instead of re-deriving this method's selection logic at a distance.
+                ProfileId = orderReq.OrderDetails.ProductCode,
                 Message = trackResp.OrderDetails?.CertificateStatus
             };
 

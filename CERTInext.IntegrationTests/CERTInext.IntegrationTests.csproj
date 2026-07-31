@@ -24,6 +24,10 @@
     <Compile Remove="DcvLifecycleTests.cs" />
     <Compile Remove="CloudflareDomainValidator.cs" />
     <Compile Remove="StubDomainValidator.cs" />
+    <!-- Exercises DcvFollowCnameDelegation (a DCV feature) and references the
+         IntegrationTestData helper defined in DcvLifecycleTests.cs, which is excluded
+         above — so the no-DCV build must exclude this file as well. -->
+    <Compile Remove="CnameResolverLiveDnsTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

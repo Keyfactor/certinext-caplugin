@@ -332,7 +332,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
 
-            var plugin = BuildPlugin(mock.Object);
+            // Pickup disabled: this test verifies the pending-status mapping, not the
+            // synchronous pickup (which has its own suite) — with the default 5×10 s
+            // budget the poll would otherwise spend ~50 s retrying the strict mock.
+            var plugin = new CERTInextCAPlugin(mock.Object, new CERTInextConfig { PickupRetries = 0 });
 
             var result = await plugin.Enroll(
                 csr: MockCertificateData.FakeCsrPem,
