@@ -1,7 +1,7 @@
 # 1.0.1
 
 ## Features
-- feat(enroll): `Enroll()` now performs a synchronous certificate pickup on the new, reissue, and renew paths — after submitting an order it polls `GetCertificate` up to `PickupRetries` times (default 5), `PickupDelay` seconds apart (default 10), after a short initial delay, so an order that issues quickly returns the certificate in the same enrollment call instead of waiting for the next synchronization. This restores parity with the legacy Sectigo connector's `PickUpEnrolledCertificate` behavior (default ceiling ≈ 55 s of Command worker-thread occupancy). If the certificate has not issued within the window, the order is returned pending and imported by a later sync — unchanged from before. Set `PickupRetries` to `0` to disable the wait. Note: CERTInext issues OV/EV certificates asynchronously by design (organization verification, minutes to hours; confirmed by CERTInext support ticket #162763), so those products typically exhaust the window and are still returned pending; DV / already-approved orders return in-call.
+- feat(enroll): `Enroll()` now polls for the issued certificate after submitting an order, so fast-issuing (DV / already-approved) orders return in the same call instead of waiting for the next sync. Tunable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s); ~55s default ceiling. Orders not issued within the window are returned pending and imported by a later sync, as before.
 
 # 1.0.0
 
