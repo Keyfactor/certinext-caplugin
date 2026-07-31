@@ -1,3 +1,11 @@
+# 1.0.1
+
+## Features
+- **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly for the certificate and returns it in the same request when it issues fast (DV and already-approved orders), instead of always waiting for the next synchronization. Two new optional settings control the wait: `PickupRetries` (default 5; set to `0` to disable) and `PickupDelay` (default 10 seconds) — about a 55-second wait by default, with a built-in ceiling so it can't run long enough to time out the enrollment. Orders that don't issue in that window — including OV/EV, which CERTInext validates asynchronously over minutes to hours — return pending and are imported by a later sync, exactly as before. Works with or without DNS-based DCV.
+
+## Bug Fixes
+- **No more duplicate or orphaned orders after a network timeout.** Order and CSR submissions are no longer retried after a network timeout. A timeout can happen *after* the CA has already accepted the request, so the automatic retry was being rejected as a duplicate — failing the enrollment and leaving an orphaned order behind. These requests now run once; if the order was created it is imported by the next synchronization, and duplicate responses are reported with clear, actionable guidance. (Read-only calls are unaffected and still retry.)
+
 # 1.0.0
 
 Initial release of the CERTInext (emSign Hub) AnyCA REST Gateway plugin.

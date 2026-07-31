@@ -31,8 +31,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // Helpers
         // ---------------------------------------------------------------------------
 
+        // Pickup is disabled by default in the broad fixture (PickupRetries=0) — mirroring how
+        // DcvConfig defaults its wait budgets to 0 — so tests that don't care about the
+        // synchronous pickup don't pay its real Task.Delay-based poll. Tests that DO exercise
+        // pickup opt in via BuildPluginWithPickup.
         private static CERTInextCAPlugin BuildPlugin(ICERTInextClient client) =>
-            new CERTInextCAPlugin(client);
+            new CERTInextCAPlugin(client, new CERTInextConfig { PickupRetries = 0 });
+
+        // Pickup-enabled fixture for the synchronous-pickup tests. PickupDelay is clamped to a
+        // 1s floor and the loop adds a fixed 5s initial delay, so these tests are intentionally
+        // a few seconds each.
+        private static CERTInextCAPlugin BuildPluginWithPickup(
+            ICERTInextClient client, int retries, int delaySeconds = 1) =>
+            new CERTInextCAPlugin(client,
+                new CERTInextConfig { PickupRetries = retries, PickupDelayInSeconds = delaySeconds });
 
         private static Mock<ICERTInextClient> NewMock() => new Mock<ICERTInextClient>(MockBehavior.Strict);
 
@@ -343,6 +355,99 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 enrollmentType: EnrollmentType.New);
 
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Synchronous certificate pickup (Sectigo parity)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Pickup_Disabled_WhenPickupRetriesZero_ReturnsPendingWithoutPolling()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 0);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never, "PickupRetries=0 must disable the synchronous pickup poll");
+        }
+
+        [Fact]
+        public async Task Pickup_ReturnsIssuedCert_WhenOrderIssuesDuringPoll()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+            // The order finishes issuing by the time we poll: GetCertificate reports issued + PEM.
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 2);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            result.Certificate.Should().NotBeNullOrEmpty("a synchronously-picked-up cert must carry its PEM");
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.AtLeastOnce);
+        }
+
+        [Fact]
+        public async Task Pickup_SurfacesTerminalStatus_WhenOrderRevokedDuringPoll()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.RevokedCertRecord());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 3);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.REVOKED,
+                "a terminal status observed during pickup is surfaced immediately, not polled to exhaustion");
+        }
+
+        [Fact]
+        public async Task Pickup_ReturnsPending_WhenOrderNeverIssuesWithinBudget()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+            // Every poll still reports pending — the budget is exhausted and Enroll returns the
+            // pending result for a later sync to complete.
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingCertRecord());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 1);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.AtLeastOnce, "an enabled pickup must actually poll before giving up");
         }
 
         [Fact]

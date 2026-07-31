@@ -35,7 +35,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             int propagationDelaySeconds        = 1,
             int timeoutMinutes                 = 1,
             int dcvWaitForChallengeSeconds     = 0,
-            int dcvWaitForIssuanceSeconds      = 0) =>
+            int dcvWaitForIssuanceSeconds      = 0,
+            int pickupRetries                  = 0) =>
             new CERTInextConfig
             {
                 DcvEnabled                 = enabled,
@@ -45,7 +46,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 // behaviour and run fast.  Tests that exercise the new wait paths can opt
                 // in with a positive value (see WaitsForChallenge_ToAppear / WaitsForIssuance).
                 DcvWaitForChallengeSeconds = dcvWaitForChallengeSeconds,
-                DcvWaitForIssuanceSeconds  = dcvWaitForIssuanceSeconds
+                DcvWaitForIssuanceSeconds  = dcvWaitForIssuanceSeconds,
+                // Disable the synchronous pickup poll by default (same reasoning as the wait
+                // budgets above): the DCV path owns issuance for these tests, and a DCV-disabled
+                // or no-factory case that ends on a pending result must not pay the real pickup
+                // Task.Delay loop. The dedicated pickup tests live in CERTInextCAPluginTests.
+                PickupRetries              = pickupRetries
             };
 
         private static Mock<ICERTInextClient> NewMock() =>
@@ -437,17 +443,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 });
 
             var validator = new FakeDomainValidator();
-            // Issuance-wait budget > 0 so a wrong-path entry would manifest as a
-            // GetCertificate call we DON'T expect.
+            // Issuance-wait budget > 0 AND pickup ENABLED (pickupRetries > 0) so a wrong-path
+            // entry would manifest as a GetCertificate call we DON'T expect — this test must
+            // fail if either the DCV issuance-wait guard OR the synchronous-pickup gate
+            // (dcvIssuanceWaitRan) regresses and starts polling a cancelled/rejected order.
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
-                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+                DcvConfig(dcvWaitForIssuanceSeconds: 10, pickupRetries: 5));
 
             await Enroll(plugin);
 
             mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.Never,
-                "Enroll must not enter WaitForIssuanceAfterDcvAsync when the order is " +
-                "cancelled/rejected, even if DCV happens to be in a 'validated' state");
+                "Enroll must not enter WaitForIssuanceAfterDcvAsync OR the synchronous pickup poll " +
+                "when the order is cancelled/rejected, even if DCV happens to be in a 'validated' state");
             validator.StagedRecords.Should().BeEmpty(
                 "DCV staging must not run for a cancelled/rejected order");
         }
