@@ -1,3 +1,8 @@
+# 1.0.1
+
+## Features
+- feat(enroll): `Enroll()` now polls for the issued certificate after submitting an order, so fast-issuing (DV / already-approved) orders return in the same call instead of waiting for the next sync. Tunable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s); ~55s default ceiling. Orders not issued within the window are returned pending and imported by a later sync, as before.
+
 # 1.0.0
 
 Initial release of the CERTInext (emSign Hub) AnyCA REST Gateway plugin.
