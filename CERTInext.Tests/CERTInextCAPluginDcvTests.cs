@@ -305,6 +305,58 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public async Task Dcv_EnrollmentWaitStillRuns_WhenDcvCompletesButIssuanceWaitBudgetIsZero()
+        {
+            // Regression (round 2 of the full review cycle): dcvIssuanceWaitRan must reflect
+            // whether the post-DCV issuance wait genuinely had a positive budget, not merely
+            // whether WaitForIssuanceAsync was invoked. When dcvDone=true but
+            // DcvWaitForIssuanceSeconds<=0, WaitForIssuanceAsync short-circuits to a no-op (no
+            // API call at all) — an operator who disabled the DCV-specific wait while leaving
+            // the general EnrollmentWaitSeconds knob enabled must still get a poll from the
+            // general enrollment-wait gate. Before this fix, dcvIssuanceWaitRan was set true
+            // purely because the method was called, silently skipping both waits.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending" });
+
+            // domainVerification.status = "1" (already validated) → PerformDcvIfNeededAsync
+            // returns dcvDone=true with no per-domain polling needed.
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId       = "1",
+                        CertificateStatusId = "1",
+                        DomainVerification  = new TrackOrderDomainVerification
+                        {
+                            Status = Constants.Dcv.StatusValidated
+                        }
+                    }
+                });
+
+            mock.Setup(c => c.GetProductDetailsAsync(It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("catalog endpoint down"));
+            mock.Setup(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.DcvOrderId));
+
+            var validator = new FakeDomainValidator();
+            // dcvWaitForIssuanceSeconds stays at the DcvConfig default (0, DCV-specific wait
+            // disabled) — but the general enrollment-wait knob is enabled.
+            var config = DcvConfig();
+            config.EnrollmentWaitSeconds = 10;
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator), config);
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "the general enrollment-wait poll must still run when DCV completed in-call but its " +
+                "own issuance-wait budget was disabled");
+            mock.Verify(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
+                Times.AtLeastOnce);
+        }
+
+        [Fact]
         public async Task Dcv_SkipsStaging_AndDoesNotIssuancePoll_WhenAllDomainsAlreadyValidated_AndIssuanceBudgetZero()
         {
             // With DcvWaitForIssuanceSeconds=0 (the test fixture's DcvConfig default), an

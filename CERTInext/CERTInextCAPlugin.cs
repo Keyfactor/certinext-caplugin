@@ -1194,13 +1194,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             // would push typical-case latency toward the budget ceiling. Decoupled
                             // from DcvPropagationDelaySeconds (a DNS concern) so admins tuning DNS
                             // settings don't accidentally make this polling chunky.
+                            int dcvIssuanceBudgetSeconds = _config.GetEffectiveDcvWaitForIssuanceSeconds();
                             postDcv = await WaitForIssuanceAsync(
-                                orderNumber, _config.GetEffectiveDcvWaitForIssuanceSeconds(),
+                                orderNumber, dcvIssuanceBudgetSeconds,
                                 Constants.Polling.CertificatePollIntervalSeconds, "PostDcv", dcvCts.Token);
-                            // A genuine issuance wait ran for this order — the fallback-result
-                            // construction and the enrollment-wait gate below must reflect that,
+                            // A genuine issuance wait ran for this order only if the budget was
+                            // positive — WaitForIssuanceAsync short-circuits to a no-op (returns
+                            // null, no API call) when DcvWaitForIssuanceSeconds<=0, so checking
+                            // "postDcv != null" here would be wrong: a wait that genuinely ran but
+                            // never got a usable response (every poll failed) also returns null,
+                            // and that case DOES count as having run. The fallback-result
+                            // construction and the enrollment-wait gate below must reflect this,
                             // whether or not the outcome turned out to be terminal.
-                            dcvIssuanceWaitRan = true;
+                            dcvIssuanceWaitRan = dcvIssuanceBudgetSeconds > 0;
 
                             // Only a genuine terminal outcome ends the enroll call here. A GENERATED
                             // result without a PEM (a transient download failure during the wait)
@@ -2531,16 +2537,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             switch (status)
             {
                 case (int)EndEntityStatus.GENERATED:
-                    message = $"Certificate issued successfully. CERTInext ID: {resp.Id}.";
-                    // SOC2 CC7.2 / SOX completeness: certificate issuance is the privileged
-                    // act this plugin performs; record it so an auditor can reconstruct which
-                    // orders received a credential and its serial. Both the immediate-issuance
-                    // and pickup-completed paths funnel through here, so this one line covers
-                    // both. The PEM itself is never logged.
-                    _logger.LogInformation(
-                        "Certificate issued. CERTInextId={Id}, SerialNumber={Serial}, Status={Status}.",
-                        resp.Id, string.IsNullOrWhiteSpace(resp.SerialNumber) ? "(pending download)" : resp.SerialNumber,
-                        resp.Status);
+                    // A GENERATED disposition with no certificate body yet (a download that
+                    // hasn't completed, or an in-progress recovery poll) is not a completed
+                    // issuance from Command's perspective — see DegradeBodylessIssuedToPending.
+                    // Logging it as "issued" here would put a misleading timestamp in the audit
+                    // trail ahead of the actual completion (or a walk-back to pending if the
+                    // body never arrives). Only the body-in-hand case gets the SOC2 CC7.2 / SOX
+                    // completeness "issued" audit line; both the immediate-issuance and
+                    // pickup-completed paths funnel through here, so this one line covers both.
+                    // The PEM itself is never logged.
+                    bool hasCertificateBody = !string.IsNullOrWhiteSpace(resp.Certificate);
+                    message = hasCertificateBody
+                        ? $"Certificate issued successfully. CERTInext ID: {resp.Id}."
+                        : $"Order {resp.Id} reached issued status in CERTInext; the certificate body " +
+                          "is not yet available and will be imported by a later synchronization.";
+                    if (hasCertificateBody)
+                    {
+                        _logger.LogInformation(
+                            "Certificate issued. CERTInextId={Id}, SerialNumber={Serial}, Status={Status}.",
+                            resp.Id, string.IsNullOrWhiteSpace(resp.SerialNumber) ? "(pending download)" : resp.SerialNumber,
+                            resp.Status);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Order {Id} reached GENERATED status in CERTInext but the certificate body is " +
+                            "not yet available (Status={Status}).", resp.Id, resp.Status);
+                    }
                     break;
 
                 case (int)EndEntityStatus.EXTERNALVALIDATION:
