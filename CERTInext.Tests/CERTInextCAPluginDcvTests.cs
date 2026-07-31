@@ -357,6 +357,64 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public async Task Dcv_AlreadyInFlight_DuplicateCallDefersWithoutPolling()
+        {
+            // Regression (round 3): when the _dcvInFlight duplicate-guard fires for a
+            // concurrent duplicate Enroll() call, dcvIssuanceWaitRan must also be set so the
+            // deferring call's general enrollment-wait poll doesn't run — otherwise it
+            // contradicts the log line's promise of an immediate pending return and doubles
+            // API traffic against CERTInext for the same order.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending" });
+
+            var firstCallStarted = new TaskCompletionSource<bool>();
+            var releaseFirstCall = new TaskCompletionSource<bool>();
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .Returns(async (string _, CancellationToken ct) =>
+                {
+                    firstCallStarted.TrySetResult(true);
+                    await releaseFirstCall.Task; // hold the _dcvInFlight reservation open
+                    return new TrackOrderResponse
+                    {
+                        OrderDetails = new TrackOrderResponseDetails
+                        {
+                            OrderStatusId       = "1",
+                            CertificateStatusId = "1",
+                            DomainVerification  = null
+                        }
+                    };
+                });
+
+            mock.Setup(c => c.GetProductDetailsAsync(It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("catalog endpoint down"));
+            mock.Setup(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(MockCertificateData.DcvOrderId));
+
+            var validator = new FakeDomainValidator();
+            var config = DcvConfig();
+            config.EnrollmentWaitSeconds = 10;
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator), config);
+
+            var firstEnroll = Enroll(plugin);
+            await firstCallStarted.Task; // first call now holds the _dcvInFlight reservation
+
+            var secondResult = await Enroll(plugin); // duplicate — must see reserved=false and defer
+
+            releaseFirstCall.TrySetResult(true);
+            var firstResult = await firstEnroll;
+
+            secondResult.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "the duplicate call must return the pending result immediately, deferring entirely " +
+                "to the first in-flight caller instead of also polling");
+            firstResult.Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "the original in-flight caller is the one that should actually drive issuance");
+            mock.Verify(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
+                Times.Exactly(1), "only the original in-flight caller may poll — the duplicate must not");
+        }
+
+        [Fact]
         public async Task Dcv_SkipsStaging_AndDoesNotIssuancePoll_WhenAllDomainsAlreadyValidated_AndIssuanceBudgetZero()
         {
             // With DcvWaitForIssuanceSeconds=0 (the test fixture's DcvConfig default), an

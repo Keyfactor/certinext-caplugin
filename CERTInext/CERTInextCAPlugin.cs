@@ -1175,6 +1175,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "DCV is already in flight for order {OrderNumber}; Enroll will skip its own DCV attempt " +
                         "and return the pending enroll response. The other caller will drive issuance.",
                         orderNumber);
+                    // Honor what was just logged: this call defers entirely to the other
+                    // in-flight caller rather than also polling GetCertificate itself, which
+                    // would double API traffic for the same order and contradict the message
+                    // above promising an immediate pending return.
+                    dcvIssuanceWaitRan = true;
                 }
                 else
                 {
@@ -1241,6 +1246,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             "{OrderNumber}; returning the pending result so a later synchronization " +
                             "completes it.",
                             dcvTimeoutMinutes, dcvPhaseInFlight, orderNumber);
+                        // A DcvTimeoutMinutes ceiling (default 10 minutes) firing means the CA
+                        // endpoint was already unresponsive/unhealthy for that entire window —
+                        // stacking a further up-to-(EnrollmentWaitSeconds+30s) GetCertificate poll
+                        // against the same likely-still-unhealthy backend risks pushing the total
+                        // Enroll() call past Command's own enrollment timeout, trading a clean
+                        // pending result for a hung/aborted call. Treat the wait as having "run"
+                        // so the general enrollment-wait gate doesn't pile on.
+                        dcvIssuanceWaitRan = true;
                     }
                     finally
                     {
@@ -1493,11 +1506,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var renewResp = await _client.RenewCertificateAsync(priorCaRequestId, renewReq);
                 var renewResult = BuildEnrollmentResult(renewResp, ep.AutoApprove);
 
-                // SOX: log the renewal outcome so the new certificate ID and status are
-                // independently recorded (the outer Enroll method also logs, but this
-                // ensures the renew path is auditable if the result is further transformed).
+                // SOX: log the CA's immediate response so the new certificate ID and its
+                // as-returned status are independently recorded. This is deliberately the
+                // PRE-WAIT status — the synchronous enrollment-wait poll below can still
+                // transform renewResult (e.g. pending → GENERATED); that outcome gets its own
+                // "Synchronous pickup complete" / exhaustion log line from
+                // TryEnrollmentWaitForCertificateAsync, so the two lines together (correlated
+                // by CARequestID) give the full before/after picture rather than this one line
+                // misrepresenting itself as the final outcome.
                 _logger.LogInformation(
-                    "Renewal via CERTInext renew API complete. " +
+                    "Renewal via CERTInext renew API complete (pre-wait). " +
                     "PriorCARequestID={PriorId}, NewCARequestID={NewId}, Status={Status}",
                     priorCaRequestId, renewResult.CARequestID, renewResult.Status);
 
