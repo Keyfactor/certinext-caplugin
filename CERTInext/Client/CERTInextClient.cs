@@ -216,7 +216,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                resp = await ExecuteWithRetryAsync(req, ct);
+                // idempotent:false — order submission is non-idempotent. A network-level
+                // timeout may occur after CERTInext already created the order, so re-sending the
+                // same requestTxn would be rejected as EMS-947 and orphan the created order.
+                // Rate-limit retries are still handled below (with a fresh txn).
+                resp = await ExecuteWithRetryAsync(req, ct, idempotent: false);
                 sw.Stop();
 
                 Logger.LogInformation(
@@ -230,6 +234,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         (int)resp.StatusCode, _config.AuthMode);
                     throw new Exception(
                         $"Authentication failure during certificate order. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+                }
+
+                // Transient/network failure (5xx or no HTTP status) on a non-idempotent submit:
+                // CERTInext may have already created the order (the response just didn't reach us).
+                // We deliberately did not retry (see idempotent:false above). Fail clearly instead
+                // of deserializing an empty body; if the order was created, the next sync imports it.
+                bool transientFailure = !resp.IsSuccessful
+                    && !((int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500);
+                if (transientFailure)
+                {
+                    Logger.LogWarning(
+                        "PlaceOrder received no usable response (DomainName={Domain}, HttpStatus={Status}, LatencyMs={Latency}). " +
+                        "Not retrying to avoid a duplicate order (EMS-947). If CERTInext created the order it " +
+                        "will be imported by the next synchronization.",
+                        request.OrderDetails?.CertificateInformation?.DomainName, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                    throw new Exception(
+                        "CERTInext did not return a usable response to the order submission. If the order was " +
+                        "created it will be imported by the next synchronization — do not resubmit immediately. " +
+                        "See gateway logs for details.");
                 }
 
                 result = DeserializeOrThrow<GenerateOrderResponse>(resp, "place order");
@@ -257,6 +280,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             throw;
                         }
                         continue; // retry
+                    }
+
+                    // EMS-947 "Duplicate requestTxn": CERTInext already received an order for this
+                    // transaction. With the non-idempotent-retry fix above this should no longer be
+                    // caused by our own retry, but if it still surfaces the order exists on the CA
+                    // side and will be imported by the next sync — say so, not a generic failure.
+                    bool isDuplicateTxn =
+                        string.Equals(result.Meta.ErrorCode, "EMS-947", StringComparison.OrdinalIgnoreCase)
+                        || (result.Meta.ErrorMessage?.IndexOf("Duplicate requestTxn", StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (isDuplicateTxn)
+                    {
+                        // Log the classification decision itself (parity with the transient-failure
+                        // branch above) so an auditor sees the plugin deliberately treated this as a
+                        // benign duplicate rather than a hard failure.
+                        Logger.LogWarning(
+                            "PlaceOrder classified {ErrorCode} as a duplicate transaction (not a hard failure). " +
+                            "DomainName={Domain}, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}. If an order exists " +
+                            "for this transaction it will be imported by the next synchronization.",
+                            result.Meta.ErrorCode, request.OrderDetails?.CertificateInformation?.DomainName, Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                        throw new Exception(
+                            "CERTInext reported a duplicate order transaction (EMS-947). If an order was created " +
+                            "for this transaction it will be imported by the next synchronization — do not resubmit " +
+                            "immediately. See gateway logs for details.");
                     }
 
                     throw new Exception(
@@ -300,7 +346,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await ExecuteWithRetryAsync(req, ct);
+            // idempotent:false — submitting a CSR is non-idempotent; do not resend on a network
+            // timeout (the first attempt may have been received). See PlaceOrderAsync.
+            var resp = await ExecuteWithRetryAsync(req, ct, idempotent: false);
             sw.Stop();
 
             Logger.LogInformation(
@@ -310,6 +358,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (!resp.IsSuccessful)
             {
                 LogApiFailure(Constants.Api.SubmitCsrPath, resp);
+                // Parity with PlaceOrderAsync: a transient/network failure on this non-idempotent
+                // submit was NOT retried, so record that decision (the CSR may already have been
+                // received). 4xx client errors fall through to the generic failure below.
+                bool transientFailure = !((int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500);
+                if (transientFailure)
+                {
+                    Logger.LogWarning(
+                        "SubmitCSR received no usable response (OrderNumber={OrderNumber}, HttpStatus={Status}, " +
+                        "LatencyMs={Latency}); not retrying (non-idempotent). If CERTInext already received the CSR, " +
+                        "do not resubmit immediately.",
+                        request.OrderDetails?.OrderNumber, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                    // Parity with PlaceOrderAsync: carry the actionable guidance into the surfaced
+                    // exception, not only the log line.
+                    throw new Exception(
+                        "CERTInext did not return a usable response to the CSR submission. If the CSR was received " +
+                        "it will take effect — do not resubmit immediately. See gateway logs for details.");
+                }
                 throw new Exception($"CERTInext SubmitCSR failed. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
             }
 
@@ -767,6 +832,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Status = MapCertStatusIdToLegacyString(certStatusId),
                 Certificate = pemCert,
                 SerialNumber = serialNumber,
+                // Report the product code this renewal order was actually placed with so
+                // callers (e.g. the synchronous-pickup gate) classify what reached the API
+                // instead of re-deriving this method's selection logic at a distance.
+                ProfileId = orderReq.OrderDetails.ProductCode,
                 Message = trackResp.OrderDetails?.CertificateStatus
             };
 
@@ -1213,14 +1282,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// attempts, retrying on HTTP 5xx and network-level failures (no status code).
         /// 4xx responses are returned immediately — client errors will not be resolved
         /// by retrying.
+        ///
+        /// When <paramref name="idempotent"/> is <c>false</c> the request is sent exactly
+        /// once and transient failures are NOT retried. This is required for non-idempotent
+        /// order-submission calls: a network-level timeout can occur *after* CERTInext has
+        /// already received and created the order, so re-sending the same body (same
+        /// <c>requestTxn</c>) is rejected as "Duplicate requestTxn" (EMS-947) and orphans the
+        /// order the first attempt actually created.
         /// </summary>
         private async Task<RestResponse> ExecuteWithRetryAsync(
             RestRequest req,
             CancellationToken ct,
-            int maxAttempts = 3)
+            int maxAttempts = 3,
+            bool idempotent = true)
         {
+            int attempts = idempotent ? maxAttempts : 1;
             RestResponse resp = null;
-            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            for (int attempt = 1; attempt <= attempts; attempt++)
             {
                 resp = await _http.ExecuteAsync(req, ct);
 
@@ -1229,11 +1307,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 if (resp.IsSuccessful || isClientError)
                     return resp;
 
-                if (attempt < maxAttempts)
+                if (attempt < attempts)
                 {
                     Logger.LogWarning(
                         "CERTInext API returned {Status} on attempt {Attempt}/{Max} — retrying...",
-                        (int)resp.StatusCode, attempt, maxAttempts);
+                        (int)resp.StatusCode, attempt, attempts);
                 }
             }
 

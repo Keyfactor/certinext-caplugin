@@ -125,7 +125,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     SignerPlace         = "Gateway",
                     SignerIp            = "127.0.0.1",
                     DefaultProductCode  = ProductCode,
-                    PageSize            = 100
+                    PageSize            = 100,
+                    // Disable the synchronous enrollment-wait poll by default: on the sandbox a
+                    // freshly-submitted DV order stays pending (it needs DCV), so the poll would
+                    // burn its full EnrollmentWaitSeconds budget (~50s) on every enroll test
+                    // before returning pending. The wait's own logic is covered by the unit suite;
+                    // a test that specifically exercises live pickup can re-enable it on its own
+                    // config. Mirrors the unit suite's BuildPlugin (PickupRetries/EnrollmentWaitSeconds=0).
+                    EnrollmentWaitSeconds = 0
                 };
 
                 Client = new CERTInextClient(Config);
