@@ -146,7 +146,7 @@ sequenceDiagram
         end
         Plugin-->>CMD: Certificate ready if issued within the budget —<br/>otherwise pending, completed by the next synchronization
     else Pending and product is OV or EV
-        Plugin-->>CMD: Pending — CERTInext issues OV/EV asynchronously by design<br/>(organization verification); completed by the next synchronization
+        Plugin-->>CMD: Pending — CERTInext issues OV/EV asynchronously by design<br/>(organization verification) — completed by the next synchronization
     else Order rejected by CERTInext
         Plugin-->>CMD: Enrollment failed — see gateway logs
     end
