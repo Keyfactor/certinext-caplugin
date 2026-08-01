@@ -143,6 +143,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **IgnoreExpired** - If true, expired certificates will be skipped during synchronization. Default: false.
         * **PageSize** - Number of orders to fetch per page during synchronization. Default: 100, max: 500.
         * **Enabled** - Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true.
+        * **EnrollmentWaitSeconds** - OPTIONAL: Total seconds Enroll() polls CERTInext for the issued certificate after submitting an order for a DV product (polled every 5 seconds), so fast-issuing orders return the certificate synchronously in the same enrollment call. This is approximately the maximum time an enrollment call can occupy a Keyfactor Command worker thread (a small internal grace margin applies) — keep it under ~90 seconds. OV/EV products never poll: CERTInext issues them asynchronously by design (organization verification), so those orders return pending and are completed by the next synchronization. Set to 0 (or any negative value) to disable. Can also be set via the CERTINEXT_ENROLLMENT_WAIT_SECONDS environment variable; the env var takes precedence. Default: 50.
         * **DcvEnabled** - OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false.
         * **DcvTxtRecordTemplate** - OPTIONAL: Format string for the DNS TXT record hostname used during DCV. {0} is replaced with the domain name being validated. Default: _emsign-validation.{0}
         * **DcvPropagationDelaySeconds** - OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: 30.
@@ -260,6 +261,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `IgnoreExpired` | Optional | If `true`, expired certificates are skipped during synchronization and are not imported into Keyfactor Command. Default: `false`. | N/A | `false` |
 | `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500`. Reduce this value if synchronization requests time out. | N/A | `100` |
 | `Enabled` | Optional | Enables or disables the CA connector. Setting this to `false` allows the connector record to be created before all credentials are available, without triggering a live connectivity test. Default: `true`. | N/A | `true` |
+| `EnrollmentWaitSeconds` | Optional | Total seconds `Enroll()` polls CERTInext for the issued certificate after submitting an order for a **DV** product (polled every 5 seconds), so fast-issuing orders return the certificate synchronously in the same enrollment call (matching the legacy Sectigo connector's pickup behavior). This is approximately the maximum time an enrollment call can occupy a Keyfactor Command worker thread (a small internal grace margin applies) — keep it under ~90 seconds. OV/EV products never poll: CERTInext issues them asynchronously by design (organization verification takes minutes and may be human-gated), so those orders return pending and are completed by the next synchronization. Set to `0` (or any negative value) to disable the poll. Can also be set via the `CERTINEXT_ENROLLMENT_WAIT_SECONDS` environment variable; the environment variable takes precedence. Default: `50`. | N/A | `50` |
 | `DcvEnabled` | Optional | When `true`, the gateway performs DNS-based Domain Control Validation (DCV) during enrollment for orders that require it. Requires a DNS provider plugin (e.g. `azure-azuredns-dnsplugin`) to be deployed on the gateway. Default: `false`. | N/A | `false` |
 | `DcvTxtRecordTemplate` | Optional | Format string for the DNS TXT record hostname published during DCV. `{0}` is replaced with the domain being validated. Default: `_emsign-validation.{0}`. | N/A | `_emsign-validation.{0}` |
 | `DcvPropagationDelaySeconds` | Optional | Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: `30`. | N/A | `30` |
@@ -479,14 +481,24 @@ sequenceDiagram
 
     alt Certificate issued immediately
         Plugin-->>CMD: Certificate ready — PEM returned
-    else Certificate pending approval
-        Plugin-->>CMD: Pending — Command will pick it up<br/>during the next synchronization
+    else Pending, product is DV, and DCV does not own the wait
+        loop Synchronous enrollment wait<br/>(up to EnrollmentWaitSeconds)
+            Plugin->>API: Fetch certificate
+            API-->>Plugin: Issued, or still pending
+        end
+        Plugin-->>CMD: Certificate ready if issued within the budget —<br/>otherwise pending, completed by the next synchronization
+    else Pending and product is OV or EV
+        Plugin-->>CMD: Pending — CERTInext issues OV/EV asynchronously by design<br/>(organization verification); completed by the next synchronization
     else Order rejected by CERTInext
         Plugin-->>CMD: Enrollment failed — see gateway logs
     end
 
     Plugin->>Plugin: Record enrollment outcome in audit log<br/>(order number, serial number, status)
 ```
+
+The synchronous enrollment-wait step mirrors the legacy Sectigo connector's behavior: DV orders that CERTInext issues within the poll budget are returned in the same enrollment call, so automated workflows (e.g. expiration renewal) receive the certificate without waiting for a sync cycle. The product's validation level is resolved from the account's product catalog (cached), falling back to the template product name. OV/EV orders are never polled — their organization-verification step takes minutes and may be human-gated, so the plugin returns pending immediately with a message explaining the deferral.
+
+On gateways with `DcvEnabled` (DCV build flavor), pending **new/reissue** orders skip this enrollment-wait loop entirely — the in-call DCV flow owns those waits, and its post-validation issuance poll is budgeted by `DcvWaitForIssuanceSeconds` instead of `EnrollmentWaitSeconds` (both poll every 5 seconds, the same fixed interval). Renewals never run in-call DCV, so the enrollment-wait loop above applies to them on every flavor, as does the recovery fetch for orders that issued but whose certificate download initially failed.
 
 ### Renewal
 

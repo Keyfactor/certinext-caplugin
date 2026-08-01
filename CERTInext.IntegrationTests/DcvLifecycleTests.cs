@@ -119,7 +119,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 PageSize                   = pageSize ?? _fixture.Config.PageSize,
                 DcvEnabled                 = dcvEnabled,
                 DcvPropagationDelaySeconds = propagationDelaySeconds,
-                DcvTimeoutMinutes          = 3
+                DcvTimeoutMinutes          = 3,
+                // Inherit the fixture's disabled general enrollment-wait (0). The DCV path has its
+                // own post-DCV issuance poll (DcvWaitForIssuanceSeconds); stacking the general
+                // 50s enrollment-wait poll on top would only slow the suite without new coverage.
+                EnrollmentWaitSeconds      = _fixture.Config.EnrollmentWaitSeconds
             };
 
             return new CERTInextCAPlugin(_fixture.Client, BuildDnsFactory(), config);

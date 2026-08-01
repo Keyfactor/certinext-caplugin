@@ -111,7 +111,7 @@ Run them with:
 just integration-test
 ```
 
-See `CERTInext.IntegrationTests/INTEGRATION_TESTING.md` for a full description of each test, what it validates, and the expected API state.
+See `CERTInext.IntegrationTests/README.md` for a full description of each test, what it validates, and the expected API state.
 
 ## Product Integration Test Coverage
 

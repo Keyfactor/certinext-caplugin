@@ -190,6 +190,98 @@ account.  These tests do not require any pre-existing account state.
 |------|---------------|
 | `Enroll_Synchronize_Revoke_FullLifecycle` | (1) Generates a fresh RSA-2048 CSR; (2) calls `Enroll` and asserts a non-empty `CARequestID` is returned; (3) runs a full sync and asserts the new order appears by `CARequestID`; (4) attempts revocation — skips gracefully if the order is not yet in an issued/approved state |
 
+### `SmokeTests`
+
+An older, broader smoke-test class that predates the more focused classes above. Its
+`Ping_Succeeds`, `GetProductDetails_ReturnsProducts`, and `ListOrders_ReturnsFirstPage`
+tests cover the same ground as `ConnectivityTests`, `ProductTests`, and `OrderReportTests`
+respectively (calling `ICERTInextClient` directly rather than going through the plugin),
+and `Synchronize_DumpsAllRecords` overlaps with `PluginSmokeTests.Synchronize_ReturnsAtLeastOneRecord`.
+It has not been removed because it still carries two scenarios the newer classes don't
+cover: `TrackOrder_ReturnsDetails` and the per-order sweep in `GetSingleRecord_ForAllOrders_AllSucceed`.
+All tests here are gated by `IntegrationSkip.IfNotConfigured`.
+
+| Test | What it checks |
+|------|---------------|
+| `Ping_Succeeds` | Calls `ICERTInextClient.PingAsync`; asserts no exception (overlaps `ConnectivityTests.Ping_ReturnsSuccess`) |
+| `GetProductDetails_ReturnsProducts` | Calls `ICERTInextClient.GetProductDetailsAsync`; asserts a non-empty product list (overlaps `ProductTests.GetProductDetails_ReturnsProducts`) |
+| `ListOrders_ReturnsFirstPage` | Iterates `ICERTInextClient.ListOrdersAsync(pageSize: 10)`, capped at 10 entries; asserts at least one order is returned (overlaps `OrderReportTests.GetOrderReport_ReturnsOrders`) |
+| `TrackOrder_ReturnsDetails` | Requires `CERTINEXT_ORDER_ID` env var (skips if unset); calls `ICERTInextClient.TrackOrderAsync`; asserts a non-null `OrderDetails` and logs status/DCV fields |
+| `GetSingleRecord_ReturnsRecord` | Requires `CERTINEXT_ORDER_ID` env var (skips if unset); builds a plugin via the `(client, config)` test constructor and calls `GetSingleRecord`; asserts a non-null record |
+| `GetSingleRecord_ForAllOrders_AllSucceed` | Lists every order on the account, then calls `GetSingleRecord` for each; asserts every call succeeds (no per-order failures) regardless of certificate status |
+| `Synchronize_DumpsAllRecords` | Runs a full `plugin.Synchronize`; asserts the account returns at least one record and logs up to 20 of them (overlaps `PluginSmokeTests.Synchronize_ReturnsAtLeastOneRecord`) |
+
+### `DcvLifecycleTests`
+
+End-to-end tests for the DNS DCV enrollment path, run through `CERTInextCAPlugin`
+directly (not the `IAnyCAPlugin` interface). DNS validator selection: when
+`CERTINEXT_CF_API_TOKEN` and `CERTINEXT_CF_ZONE_ID` are set, a real `CloudflareDomainValidator`
+publishes and cleans up an actual TXT record around the enrollment; otherwise a
+`StubDomainValidator` is used and the plugin still runs the full DCV orchestration
+path (Stage → propagation wait → VerifyDcv → Cleanup), but CERTInext's own DCV
+verification is not guaranteed to succeed. `CERTINEXT_DCV_DOMAIN` overrides the
+domain used (default `dcv-test.example.com`). All tests are gated by
+`IntegrationSkip.IfNotConfigured`; several are additionally opt-in or require extra
+environment variables, noted below.
+
+| Test | What it checks |
+|------|---------------|
+| `DcvEnroll_CompletesWithoutThrowing` | Enrolls a DV cert with `DcvEnabled=true` against `CERTINEXT_DCV_DOMAIN`; with real Cloudflare DNS asserts the result is `GENERATED` or `EXTERNALVALIDATION`; with the stub validator only asserts a non-null result (VerifyDcv may legitimately fail) |
+| `EnrollWithoutDcv_DoesNotInvokeDnsProvider` | Enrolls with `DcvEnabled=false`; asserts the plugin still returns a non-null result via the normal (non-DCV) enrollment flow |
+| `EnrollWithDcvOff_OrderAppearsInSync_PluginDidNotInvokeDcv` | Enrolls a fresh random subdomain with `DcvEnabled=false`, then runs `Synchronize`; asserts the order surfaces with `EXTERNALVALIDATION` or `GENERATED` (never `FAILED`) — live verification for GitHub issue #7 that DCV-off does not invoke the DNS provider |
+| `EnrollWithDcvOn_OrderIssuedEndToEnd_AndAppearsInSync` | Enrolls a fresh random subdomain with `DcvEnabled=true`, drives DCV via Cloudflare TXT publish/verify, then syncs; asserts the enrolled order reaches `GENERATED` with a parseable cert PEM, and that `GetSingleRecord` returns the same PEM (regression for issue 0001's cert-body-on-sync fix) |
+| `EnrollWithDcvOn_IssuesPerKeyAlgorithm` (theory, 10 rows — see `KeyAlgorithms`: RSA-2048/3072/4096/6144/8192, ECDSA-P256/P384/P521, Ed25519, Ed448) | Opt-in via `CERTINEXT_ALGO_MATRIX_DCV=1`, requires Cloudflare DCV credentials. For each algorithm, enrolls a fresh scrup.org DV order, drives DCV to issuance, and asserts the issued cert's public key matches the requested algorithm/size. A CA-side rejection at submission, a `FAILED` order, or an order that doesn't reach `GENERATED` within the polling window is reported as an explicit `Skip` carrying the observed reason rather than a hard failure |
+| `GetSingleRecord_DrivesDcvForPendingOrder` | Requires `CERTINEXT_PENDING_ORDER_ID` env var (skips if unset) and Cloudflare DCV credentials (skips if absent). Calls `GetSingleRecord` against a real pending order parked at "Pending System RA"/`dcvStatus=0`; asserts the deferred-DCV retry runs (TXT publish → VerifyDcv → wait → cleanup) and returns `GENERATED` or `EXTERNALVALIDATION` rather than silently no-op'ing |
+| `BulkDvEnrollment_AllOrdersIssue_AndPaginationWorks` | Opt-in via `CERTINEXT_RUN_BULK_TEST=1` (default count 101, overridable via `CERTINEXT_BULK_TEST_COUNT`/`CERTINEXT_BULK_TEST_PARALLEL`), requires Cloudflare DCV credentials. Enrolls the configured count of DV orders concurrently, then repeatedly runs `Synchronize` (PageSize=100) until every order reaches `GENERATED` or the pass budget is exhausted; asserts every enrollment succeeds, every order appears in sync, and sync returns >100 records (proves the `ListCertificatesAsync` paginator crosses the page boundary) |
+| `CompleteAllPendingDvOrders` | Opt-in via `CERTINEXT_COMPLETE_PENDING=1`, requires Cloudflare DCV credentials. Operational cleanup task — enrolls nothing; repeatedly runs `Synchronize` to drive every existing `EXTERNALVALIDATION` order to `GENERATED`, asserting no order remains pending after the pass budget |
+| `FullSync_AllIssuedCerts_CarryParseableCertificateBody` | Runs a full `Synchronize` with `DcvEnabled=false`; asserts the account has at least one `GENERATED` record and every `GENERATED` record carries a parseable certificate PEM body (regression for issue 0001 — the order-report listing carries no body, so the plugin must refetch it) |
+
+### `AlgorithmMatrixTests`
+
+Coverage matrix for the CSR key algorithm/size the plugin submits, since every other
+test in the suite hardcodes an RSA-2048 CSR. Covers 10 algorithm tags (see
+`KeyAlgorithms.All`): `RSA-2048`, `RSA-3072`, `RSA-4096`, `RSA-6144`, `RSA-8192`,
+`ECDSA-P256`, `ECDSA-P384`, `ECDSA-P521`, `Ed25519`, `Ed448`. This class only covers
+CSR validity and CA submission acceptance — the end-to-end "does CERTInext actually
+*issue* this algorithm" matrix (DCV on, real issuance) lives in
+`DcvLifecycleTests.EnrollWithDcvOn_IssuesPerKeyAlgorithm`.
+
+| Test | What it checks |
+|------|---------------|
+| `Csr_RoundTripsKeyAlgorithm` (theory, all 10 algorithm tags) | Fully offline, no API, always runs (not gated by `IntegrationSkip`). Generates a CSR for each algorithm via BouncyCastle, re-parses it, and asserts the request signature verifies and the public key type/size (RSA modulus bits, EC field size, or Ed25519/Ed448 key type) round-trips correctly |
+| `Enroll_AcceptsKeyAlgorithm` (theory, all 10 algorithm tags) | Gated by `IntegrationSkip.IfNotConfigured` and opt-in via `CERTINEXT_ALGO_MATRIX=1` (each run creates a real, non-issued DV order on the sandbox — no DCV is performed, so orders park at `EXTERNALVALIDATION` and are not cleaned up). Submits a real order per algorithm and asserts CERTInext accepts it (returns a `CARequestID`); a CA-side rejection is reported as an explicit `Skip` carrying the classified reason (unsupported key size vs. insufficient credits) rather than a failure |
+
+### `CnameResolverLiveDnsTests`
+
+Live-DNS validation for the production `Dcv.CnameResolver` (issue 0006), exercised
+against real public DNS via `DnsClient.NET` rather than a fake single-hop delegate.
+Deliberately does **not** go through CERTInext order placement — it only stages
+CNAME records in the Cloudflare zone used for DCV tests and resolves them. Neither
+test calls `IntegrationSkip.IfNotConfigured` and neither hits the CERTInext API at
+all; both only require Cloudflare DNS credentials (`Skip.If(!_fixture.IsCloudflareConfigured, ...)`
+— i.e. `CERTINEXT_CF_API_TOKEN`, `CERTINEXT_CF_ZONE_ID`, and `CERTINEXT_DCV_DOMAIN`).
+Because this class depends only on live public DNS, its behavior does not vary with
+CERTInext account state (fresh sandbox vs. account with history).
+
+| Test | What it checks |
+|------|---------------|
+| `ResolveTerminalNameAsync_FollowsRealTwoHopCnameChain` | Creates a two-hop CNAME chain (hopA → hopB → hopC, where hopC is never created and is therefore terminal) in the Cloudflare zone, then asserts `CnameResolver.ResolveTerminalNameAsync` walks the real chain to hopC, retrying up to 8 times (3s apart) to absorb DNS propagation delay |
+| `ResolveTerminalNameAsync_NoCname_ReturnsInputUnchanged` | Resolves the DCV domain apex (which carries ordinary A/AAAA/TXT records, no CNAME); asserts the resolver returns the input name unchanged (terminal-on-first-hop path against real DNS) |
+
+### `IntegrationTestFixtureTests`
+
+Pure unit tests for the `~/.env_certinext` line parser (`IntegrationTestFixture.ParseEnvValue`),
+riding inside the integration test project rather than exercising the CERTInext API.
+None of these tests call `IntegrationSkip.IfNotConfigured` and none use `[SkippableFact]`
+— they are plain xUnit `[Fact]`/`[Theory]` tests that always run, with no credentials
+or account state required.
+
+| Test | What it checks |
+|------|---------------|
+| `ParseEnvValue_HandlesQuotingAndWhitespace` (theory, 11 rows) | Asserts whitespace trimming and single-pair quote stripping (double or single quotes) for plain, padded, quoted, empty-quoted, mismatched-quote, and blank inputs — regression for GitHub issue #8, where a shell-style quoted value was parsed with the quote characters still included |
+| `ParseEnvValue_NullInput_ReturnsEmptyString` | Asserts a `null` input returns `string.Empty` rather than throwing |
+| `ParseEnvValue_DoesNotStripEmbeddedQuotes` | Asserts quotes embedded in the middle of a value (not matching outer wrappers) are left untouched |
+
 ---
 
 ## Expected Outcomes by Account State
@@ -203,6 +295,8 @@ account.  These tests do not require any pre-existing account state.
 | `OrderReportTests` | Skip — "account has no orders yet" |
 | `PluginSmokeTests.Synchronize_ReturnsAtLeastOneRecord` | Skip — "account has no certificate records yet" |
 | `LifecycleTests.Enroll_Synchronize_Revoke_FullLifecycle` | Skip with "Invalid Product Code" if `CERTINEXT_PRODUCT_CODE` is not provisioned for this account; otherwise the enroll and sync steps pass, and the revoke step skips because the DV SSL sandbox order requires domain control verification and RA approval before it reaches an issued/revocable state |
+| `SmokeTests` | `TrackOrder_ReturnsDetails` and `GetSingleRecord_ReturnsRecord` skip unless `CERTINEXT_ORDER_ID` is set; `GetSingleRecord_ForAllOrders_AllSucceed` and `Synchronize_DumpsAllRecords` pass trivially against zero orders |
+| `DcvLifecycleTests` | Core tests (`DcvEnroll_CompletesWithoutThrowing`, `EnrollWithoutDcv_DoesNotInvokeDnsProvider`, the two `EnrollWithDcvO*_...AppearsInSync` tests) run regardless of account history; the opt-in tests (`EnrollWithDcvOn_IssuesPerKeyAlgorithm`, `BulkDvEnrollment_AllOrdersIssue_AndPaginationWorks`, `CompleteAllPendingDvOrders`) are skipped unless explicitly enabled via their env-var flags; `GetSingleRecord_DrivesDcvForPendingOrder` skips unless `CERTINEXT_PENDING_ORDER_ID` is set |
 
 ### Account with history (orders previously placed)
 
@@ -213,6 +307,8 @@ account.  These tests do not require any pre-existing account state.
 | `OrderReportTests` | Pass |
 | `PluginSmokeTests` | Pass |
 | `LifecycleTests` | Pass (all three steps) |
+| `SmokeTests` | Pass (all seven tests, given `CERTINEXT_ORDER_ID` is set for the two order-specific tests) |
+| `DcvLifecycleTests` | Core tests pass; opt-in tests pass when their env-var flags and Cloudflare DCV credentials are set |
 
 ---
 
