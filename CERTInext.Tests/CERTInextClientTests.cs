@@ -322,6 +322,89 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Non-idempotent submit safety — order/CSR submissions are NOT retried on a
+        // transient failure (a timeout may land after the CA already created the order,
+        // so a retry would be rejected as a duplicate and orphan the created order).
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task EnrollCertificateAsync_DoesNotRetryOrderSubmit_OnTransient500()
+        {
+            // Persistent 5xx on the order submit. Unlike the idempotent Ping path (3 attempts),
+            // GenerateOrderSSL is non-idempotent — it must be attempted exactly once.
+            _server
+                .Given(Request.Create().WithPath("/GenerateOrderSSL").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(500)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.ServerErrorJson()));
+
+            var client = BuildClient();
+            var req = new EnrollCertificateRequest { ProfileId = MockCertificateData.ProfileIdTls, Csr = MockCertificateData.FakeCsrPem };
+
+            Func<Task> act = () => client.EnrollCertificateAsync(req);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*did not return a usable response*");
+
+            int orderCallCount = _server.LogEntries.Count(e => e.RequestMessage.Path == "/GenerateOrderSSL");
+            orderCallCount.Should().Be(1,
+                "a non-idempotent order submit must not be retried on a transient failure (avoids EMS-947 duplicate/orphan)");
+        }
+
+        [Fact]
+        public async Task EnrollCertificateAsync_SurfacesDuplicateGuidance_OnEms947()
+        {
+            // 200 OK but meta failure EMS-947 "Duplicate requestTxn" — classified as a benign
+            // duplicate (order exists CA-side, next sync imports it), not a generic hard failure.
+            _server
+                .Given(Request.Create().WithPath("/GenerateOrderSSL").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.ApiFailureJson("EMS-947", "Duplicate requestTxn.")));
+
+            var client = BuildClient();
+            var req = new EnrollCertificateRequest { ProfileId = MockCertificateData.ProfileIdTls, Csr = MockCertificateData.FakeCsrPem };
+
+            Func<Task> act = () => client.EnrollCertificateAsync(req);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*duplicate order transaction*");
+        }
+
+        [Fact]
+        public async Task SubmitCsrAsync_DoesNotRetry_OnTransient500()
+        {
+            _server
+                .Given(Request.Create().WithPath("/SubmitCSR").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(500)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.ServerErrorJson()));
+
+            var client = BuildClient();
+            var req = new SubmitCsrRequest
+            {
+                OrderDetails = new SubmitCsrOrderDetails
+                {
+                    OrderNumber = MockCertificateData.OrderNumber1,
+                    RequestorEmail = "test@example.com",
+                    Csr = MockCertificateData.FakeCsrPem
+                }
+            };
+
+            Func<Task> act = () => client.SubmitCsrAsync(req);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*did not return a usable response*");
+
+            int csrCallCount = _server.LogEntries.Count(e => e.RequestMessage.Path == "/SubmitCSR");
+            csrCallCount.Should().Be(1,
+                "a non-idempotent CSR submit must not be retried on a transient failure");
+        }
+
+        // ---------------------------------------------------------------------------
         // GetCertificateAsync (legacy) — calls POST /TrackOrder then POST /GetCertificate
         // ---------------------------------------------------------------------------
 

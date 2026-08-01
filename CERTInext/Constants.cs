@@ -74,10 +74,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // the TXT record / resolving the DNS provider plugin (issue 0006). Off by default.
             public const string DcvFollowCnameDelegation = "DcvFollowCnameDelegation";
 
+            // Synchronous enrollment-wait poll inside Enroll() — DCV-independent, both build
+            // flavors. After submitting an order for a DV product, Enroll() polls GetCertificate
+            // every Constants.Polling.CertificatePollIntervalSeconds, for up to
+            // EnrollmentWaitSeconds total, so fast-issuing orders return the issued certificate
+            // in the same enrollment call (matching the legacy Sectigo connector's
+            // PickUpEnrolledCertificate behavior). EnrollmentWaitSeconds is the maximum time an
+            // enrollment call can occupy a Command worker thread. OV/EV products skip the poll
+            // entirely — CERTInext issues them asynchronously by design (org verification,
+            // minutes to hours, confirmed by CERTInext support) and no in-call poll can absorb that
+            // within Command's enrollment timeout.
+            public const string EnrollmentWaitSeconds = "EnrollmentWaitSeconds";
+
             // Environment variable that overrides DcvTimeoutMinutes when set.
             public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";
             public const string DcvWaitForChallengeSecondsEnvVar = "CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS";
             public const string DcvWaitForIssuanceSecondsEnvVar = "CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS";
+            public const string EnrollmentWaitSecondsEnvVar = "CERTINEXT_ENROLLMENT_WAIT_SECONDS";
 
             // Auth mode values
             public const string AuthModeAccessKey = "AccessKey"; // default; authKey = SHA256(accessKey+ts+txn)
@@ -270,6 +283,41 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // Default fallback when the CRL reason code has no CERTInext equivalent
             public const int Default = KeyCompromise;
+        }
+
+        public static class EnrollmentWait
+        {
+            // Default mirrors the legacy Sectigo connector's ~50 s pickup ceiling, which is the
+            // behavior customers migrating from Sectigo expect from Enroll(). At the fixed
+            // Polling.CertificatePollIntervalSeconds (5 s), this yields the same 10-poll ceiling
+            // as before this knob collapsed from attempts × interval to a single total — do not
+            // change one without checking the other if preserving that parity still matters.
+            public const int DefaultSeconds = 50;
+
+            // Hard ceiling on the enrollment-wait budget, applied regardless of configuration.
+            // Command abandons enrollment calls long before this; anything larger would only
+            // orphan a worker thread generating pointless API traffic. The documented guidance
+            // is to keep EnrollmentWaitSeconds under ~90 s.
+            public const int MaxBudgetSeconds = 300;
+
+            // How long a fetched product catalog (productCode → DV/OV/EV classification) is
+            // reused before being refreshed via GetProductDetails. The catalog is effectively
+            // static for an account, so this only bounds staleness after a CA-side change.
+            public const int ProductTypeCacheMinutes = 60;
+
+            // How long to wait before retrying GetProductDetails after a failed catalog
+            // refresh, so a down catalog endpoint costs at most one failing API call per
+            // window instead of one per enrollment.
+            public const int FailureBackoffMinutes = 5;
+        }
+
+        public static class Polling
+        {
+            // Shared poll interval for both in-call issuance waits: the synchronous
+            // enrollment-wait poll (TryEnrollmentWaitForCertificateAsync) and the post-DCV
+            // issuance poll (WaitForIssuanceAsync "PostDcv" phase). Not customer-configurable —
+            // only the total wait budget is (EnrollmentWaitSeconds / DcvWaitForIssuanceSeconds).
+            public const int CertificatePollIntervalSeconds = 5;
         }
 
         public static class Dcv
