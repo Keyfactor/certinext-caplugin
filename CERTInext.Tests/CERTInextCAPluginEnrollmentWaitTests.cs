@@ -24,7 +24,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// that runs at the end of every enrollment path on both build flavors:
     /// DV products poll <c>GetCertificate</c> and return GENERATED + PEM when CERTInext
     /// issues within the budget; OV/EV products defer immediately (async by CA design,
-    /// support ticket #162763); exhaustion or any failure soft-falls back to the pending
+    /// per CERTInext support); exhaustion or any failure soft-falls back to the pending
     /// result without throwing. Compiles on both the DCV (3.3.0) and no-DCV (3.2.0) flavors.
     /// </summary>
     public class CERTInextCAPluginEnrollmentWaitTests

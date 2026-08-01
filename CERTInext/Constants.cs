@@ -82,7 +82,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // PickUpEnrolledCertificate behavior). EnrollmentWaitSeconds is the maximum time an
             // enrollment call can occupy a Command worker thread. OV/EV products skip the poll
             // entirely — CERTInext issues them asynchronously by design (org verification,
-            // minutes to hours; support ticket #162763) and no in-call poll can absorb that
+            // minutes to hours, confirmed by CERTInext support) and no in-call poll can absorb that
             // within Command's enrollment timeout.
             public const string EnrollmentWaitSeconds = "EnrollmentWaitSeconds";
 

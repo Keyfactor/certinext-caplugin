@@ -1600,7 +1600,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///
         /// Only DV products are polled: CERTInext issues OV/EV asynchronously by design —
         /// the mandatory organization-verification step takes minutes and may be human-gated
-        /// (support ticket #162763), so holding a Command worker thread for them cannot
+        /// (confirmed by CERTInext support), so holding a Command worker thread for them cannot
         /// succeed; those orders return pending immediately with an explanatory message and
         /// are completed by the next synchronization.  Products whose validation level cannot
         /// be determined are polled optimistically — the poll is bounded and a wasted wait is

@@ -13,7 +13,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
     /// Validation level of a CERTInext SSL product. Drives whether <c>Enroll()</c> performs a
     /// synchronous pickup poll: DV products issue in seconds once accepted, while OV/EV products
     /// go through a mandatory organization-verification step and issue asynchronously — minutes
-    /// to hours, sometimes human-gated (CERTInext support ticket #162763: "there is no setting
+    /// to hours, sometimes human-gated (confirmed by CERTInext support: "there is no setting
     /// on our end that makes this certificate type return instantly in a single call").
     /// </summary>
     internal enum ProductValidationType
