@@ -1016,6 +1016,91 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
+        /// Regression: the FQDN validation regex used ^...$ , and in .NET's default (non-Multiline)
+        /// mode $ matches immediately before a single trailing '\n', not only at the true end of the
+        /// string. A domain value ending in '\n' therefore passed as "valid" and reached several log
+        /// sinks unsanitized further down this same method — a CWE-117 log-injection route into the
+        /// DCV audit trail, reachable via any order visible through Synchronize/GetSingleRecord (not
+        /// just ones this plugin's own Enroll call placed, since TrackOrder's domainVerification keys
+        /// for an externally-created order are never trimmed by this plugin). The regex now anchors
+        /// with \A/\z, which are absolute string-start/end regardless of trailing newlines.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_DomainWithTrailingNewline_IsRejectedAsInvalid_AndValidDomainStillStaged()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            const string good  = MockCertificateData.DcvDomain;
+            const string bad   = "evil.example.com\n";
+
+            var mock = NewMock();
+
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+
+            mock.SetupSequence(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, good, bad))
+                .ReturnsAsync(MockCertificateData.DcvVerifiedTrackResponse(order, good));
+
+            // MockBehavior.Strict: an unexpected GetDcv call for `bad` fails the test on its own —
+            // if the regex fix regressed, this domain would reach GetDcv instead of being rejected
+            // by the FQDN check before the staging loop even starts.
+            mock.Setup(c => c.GetDcvAsync(order, good, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse(MockCertificateData.DcvToken));
+            mock.Setup(c => c.VerifyDcvAsync(order, good, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(order));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, good);
+            validator.StagedRecords.Should().ContainSingle(
+                "the valid domain must still be staged even though a co-tenant domain carries a " +
+                "trailing newline")
+                .Which.Should().Be((expectedHostname, MockCertificateData.DcvToken));
+
+            mock.Verify(c => c.GetDcvAsync(order, bad, It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never, "a domain with a trailing newline must never be sent to GetDcv");
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+        }
+
+        /// <summary>
+        /// Regression: the generic per-domain catch blocks around GetDcvAsync and StageValidation
+        /// used to catch OperationCanceledException along with genuine GetDcv/DNS-provider failures,
+        /// logging and skipping the domain as an ordinary per-domain failure. A cancellation (the
+        /// shared DcvTimeoutMinutes-bound token expiring mid-loop) is not that — it must propagate to
+        /// the outer catch instead, which is the only place that logs it correctly and is the
+        /// intended timeout-handling path documented at the top of this method's DCV timeout setup.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_CancellationDuringGetDcv_PropagatesRatherThanBeingSkippedAsPerDomainFailure()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending_dcv" });
+
+            mock.Setup(c => c.TrackOrderAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvPendingTrackResponse());
+
+            mock.Setup(c => c.GetDcvAsync(MockCertificateData.DcvOrderId, MockCertificateData.DcvDomain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new OperationCanceledException("DCV timeout budget exceeded"));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            Func<Task> act = () => Enroll(plugin);
+
+            // Must propagate as a cancellation, not be swallowed and reported as "GetDcv failed" in
+            // the skipped-domains summary while Enroll completes normally.
+            await act.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        /// <summary>
         /// A pending domain that resolves no DNS provider (an IP-literal SAN passes the FQDN regex
         /// but no zone can match it) must likewise be skipped rather than failing the whole order.
         /// </summary>

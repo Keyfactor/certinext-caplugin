@@ -312,6 +312,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
+        /// Regression: the CSR-fallback trigger used to be "the gateway dictionary computed to zero
+        /// added entries", which cannot distinguish "Command never populated SAN data" (the case the
+        /// fallback exists for) from "Command's enrollment pattern ran and deliberately computed
+        /// zero SANs for this request" (an explicit policy decision this plugin must respect). A
+        /// non-null dictionary whose only key maps to an empty array is the latter — the fallback
+        /// must not engage, even though it computes to the same "0 SANs added" outcome as a null
+        /// dictionary would.
+        /// </summary>
+        [Fact]
+        public async Task CsrSans_AreIgnored_WhenGatewaySuppliesNonNullDictWithOnlyEmptyValues()
+        {
+            var plugin = BuildPlugin();
+
+            await plugin.Enroll(
+                csr: GenerateCsrPem("host.example.com", "host.example.com", "csronly.example.com"),
+                subject: "CN=host.example.com",
+                san: new Dictionary<string, string[]>
+                {
+                    // Non-null dictionary, but the key maps to no values — computes to zero added
+                    // SANs, same as san == null would, but it must NOT be treated the same way.
+                    ["dnsname"] = Array.Empty<string>()
+                },
+                productInfo: MakeProductInfo(),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            AdditionalDomains(CapturedCertificateInformation()).Should().BeNull(
+                "a non-null gateway SAN dictionary that computes to zero entries must be respected " +
+                "as Command's own decision, not treated as 'Command supplied nothing' and " +
+                "backfilled from the CSR");
+        }
+
+        /// <summary>
         /// The CN is already submitted as domainName; repeating it in additionalDomains is
         /// suppressed. CERTInext collapses it anyway (measured), so this keeps the body matching
         /// what we log rather than relying on undocumented CA-side behaviour.

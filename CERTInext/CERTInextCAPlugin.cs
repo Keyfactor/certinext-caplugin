@@ -247,14 +247,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "ApiKeyPresent={ApiKeyPresent}, UsernamePresent={UsernamePresent}, " +
                 "PasswordPresent={PasswordPresent}, OAuth2ClientIdPresent={OAuth2ClientIdPresent}, " +
                 "OAuth2ClientSecretPresent={OAuth2ClientSecretPresent}, OAuth2TokenUrlPresent={OAuth2TokenUrlPresent}, " +
-                "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, " +
+                "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, SubmitNonDnsSans={SubmitNonDnsSans}, " +
                 "DcvEnabled={DcvEnabled}, DcvTxtRecordTemplate={DcvTxtRecordTemplate}, " +
                 "DomainValidatorFactoryInjected={FactoryInjected}",
                 _config.ApiUrl, _config.AuthMode, _config.Enabled,
                 hasApiKey, hasUsername,
                 hasPassword, hasClientId,
                 hasClientSecret, hasTokenUrl,
-                _config.PageSize, _config.IgnoreExpired,
+                _config.PageSize, _config.IgnoreExpired, _config.SubmitNonDnsSans,
                 _config.DcvEnabled, _config.DcvTxtRecordTemplate,
                 _domainValidatorFactory != null);
 
@@ -1631,10 +1631,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 string domain = entry.Key;
 
-                // Allow standard FQDN characters plus wildcard prefix (*.example.com)
+                // Allow standard FQDN characters plus wildcard prefix (*.example.com).
+                //
+                // \A/\z, not ^/$: in .NET's default (non-Multiline) mode, $ matches immediately
+                // before a single trailing '\n', not only at the true end of the string — so
+                // "evil.com\n" passes a ^...$ version of this regex. \A and \z are absolute
+                // start/end-of-string anchors regardless of RegexOptions, so a value with any
+                // trailing control character is correctly rejected here rather than reaching the
+                // unsanitized-looking-safe domain this validation exists to guarantee.
                 bool valid = !string.IsNullOrWhiteSpace(domain)
                     && System.Text.RegularExpressions.Regex.IsMatch(
-                        domain, @"^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$");
+                        domain, @"\A(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?\z");
 
                 if (valid)
                     validPendingDomains.Add(entry);
@@ -1691,13 +1698,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         await validator.CleanupValidation(hostname, ct);
                         _logger.LogInformation(
                             "DNS TXT record cleaned up after an early exit from DCV staging. " +
-                            "Domain={Domain}, Hostname={Hostname}", domain, hostname);
+                            "Domain={Domain}, Hostname={Hostname}",
+                            LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
                     }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex,
                             "Failed to clean up DNS TXT record after an early exit from DCV staging. " +
-                            "Domain={Domain}, Hostname={Hostname}. May require manual removal.", domain, hostname);
+                            "Domain={Domain}, Hostname={Hostname}. May require manual removal.",
+                            LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
                     }
                 }
             }
@@ -1742,6 +1751,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             orderNumber, LogSanitizer.Strip(domain), ex.Message);
                         deferToNextSyncCycle = true;
                         break;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The shared, DcvTimeoutMinutes-bound cancellation firing mid-loop. This is
+                        // NOT a per-domain CA/DNS-provider failure — it must not be caught by the
+                        // generic clause below, which would mislabel it as "GetDcv failed" for
+                        // whichever domain happened to be in flight and send an operator chasing the
+                        // wrong cause. Propagate to the outer catch, which logs and cleans up.
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -1789,12 +1807,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                     _logger.LogInformation(
                         "Staging DNS TXT record for DCV. OrderNumber={OrderNumber}, Domain={Domain}, Hostname={Hostname}",
-                        orderNumber, domain, hostname);
+                        orderNumber, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
 
                     DomainValidationResult stageResult;
                     try
                     {
                         stageResult = await validator.StageValidation(hostname, token, ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Same reasoning as the GetDcv cancellation catch above: not a per-domain
+                        // failure, must reach the outer catch rather than the generic clause below.
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -1819,10 +1843,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     stagedValidations.Add((domain, hostname, validator));
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 // Nothing in the loop above throws for a per-domain reason any more — this is the
-                // safety net for a genuinely unexpected failure (cancellation, a bug).
+                // safety net for a genuinely unexpected failure: cancellation (the shared
+                // DcvTimeoutMinutes-bound token expiring mid-loop — explicitly re-thrown past the
+                // per-domain catches above rather than mislabeled as a per-domain failure) or a bug.
+                // Log before rethrowing: neither caller (EnrollNewAsync's try/finally, or Enroll
+                // itself) adds a catch, so without a log line here an unanticipated failure on the
+                // synchronous Enroll-time DCV path would leave no plugin-emitted record at all
+                // identifying the order or cause — only whatever the gateway host's own unhandled-
+                // exception logging happens to capture.
+                _logger.LogError(ex,
+                    "Unexpected failure during DCV staging for order {OrderNumber}; cleaning up any " +
+                    "already-staged TXT records before this propagates.", orderNumber);
                 await CleanupPartialStagingAsync();
                 throw;
             }
@@ -1860,7 +1894,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 foreach (var (domain, hostname, _) in stagedValidations)
                 {
                     _logger.LogInformation(
-                        "Triggering CERTInext DCV verification. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        "Triggering CERTInext DCV verification. OrderNumber={OrderNumber}, Domain={Domain}",
+                        orderNumber, LogSanitizer.Strip(domain));
                     await _client.VerifyDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
                 }
 
@@ -1878,12 +1913,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     {
                         await validator.CleanupValidation(hostname, ct);
                         _logger.LogInformation(
-                            "DNS TXT record cleaned up. Domain={Domain}, Hostname={Hostname}", domain, hostname);
+                            "DNS TXT record cleaned up. Domain={Domain}, Hostname={Hostname}",
+                            LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
                     }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex,
-                            "Failed to clean up DNS TXT record. Domain={Domain}, Hostname={Hostname}", domain, hostname);
+                            "Failed to clean up DNS TXT record. Domain={Domain}, Hostname={Hostname}",
+                            LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
                     }
                 }
             }
@@ -2012,7 +2049,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "DCV verification poll exceeded its internal deadline ({Minutes}min). " +
                         "OrderNumber={OrderNumber}, StillPendingDomains=[{Pending}].  " +
                         "Exiting and leaving TXT records for the caller's finally block to clean up.",
-                        _config.GetEffectiveDcvTimeoutMinutes(), orderNumber, string.Join(",", pending));
+                        _config.GetEffectiveDcvTimeoutMinutes(), orderNumber,
+                        LogSanitizer.Strip(string.Join(",", pending)));
                     return;
                 }
 
@@ -2045,12 +2083,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                     if (string.Equals(detail.DcvStatus, Constants.Dcv.StatusValidated, StringComparison.Ordinal))
                     {
-                        _logger.LogInformation("DCV verified by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        _logger.LogInformation("DCV verified by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}",
+                            orderNumber, LogSanitizer.Strip(domain));
                         pending.Remove(domain);
                     }
                     else if (string.Equals(detail.DcvStatus, Constants.Dcv.StatusRejected, StringComparison.Ordinal))
                     {
-                        _logger.LogWarning("DCV rejected by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        _logger.LogWarning("DCV rejected by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}",
+                            orderNumber, LogSanitizer.Strip(domain));
                         pending.Remove(domain);
                     }
                 }
@@ -2344,7 +2384,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// CSR — typically generated by the subscriber's own tooling, not by Command — can
         /// legitimately carry more names than that policy allows. Unioning them in would
         /// re-introduce a name the policy excluded. The CSR is only consulted when the dictionary
-        /// is empty, which is the one case where there is no policy-derived set to defer to.
+        /// argument is <c>null</c> — not merely empty or all-empty-arrays. A non-null dictionary,
+        /// even one that computes to zero names, means Command's enrollment pattern ran and
+        /// deliberately produced no SANs for this request; only its literal absence means no
+        /// policy-derived set exists to defer to.
         ///
         /// The CSR still matters even though CERTInext ignores its subjectAltName extension
         /// outright — measured on the US sandbox in <c>SanSubmissionProbeTests</c>: a CSR
@@ -2399,10 +2442,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             int fromGateway = result.Count;
 
-            // CSR fallback — only when the gateway supplied nothing. Non-throwing: a malformed
-            // or unparseable CSR yields an empty list, and this whole block is then a no-op.
+            // CSR fallback — only when the gateway dictionary is itself absent (san == null), NOT
+            // merely "computed to zero SAN entries" (fromGateway == 0). Those are different things:
+            // a non-null dictionary — even an empty one, or one whose keys all map to empty arrays
+            // — means Command's enrollment pattern ran and deliberately produced no SANs for this
+            // request, which the CSR fallback must respect rather than override. san == null means
+            // Command never populated SAN data for this enrollment path at all, which is the one
+            // case this fallback exists for. Checking fromGateway instead of san itself would let an
+            // enrollment pattern that explicitly computes zero SANs still have CSR-derived names
+            // spliced back in — reopening the policy-reintroduction risk the fallback-over-union
+            // redesign exists to close.
             var skippedCsrTags = new List<int>();
-            if (fromGateway == 0)
+            if (san == null)
             {
                 var csrSans = ExtractSanEntriesFromCsr(csr, out skippedCsrTags);
                 foreach (var csrSan in csrSans)
