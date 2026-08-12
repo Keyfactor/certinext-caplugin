@@ -631,6 +631,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("csr")]
         public string Csr { get; set; }
 
+        /// <summary>
+        /// Distinguished name of the certificate being renewed. Supplies the renewal order's
+        /// primary domain via its CN — without it the renewal falls back to the prior order's
+        /// requestor name, which is not a domain at all.
+        /// </summary>
+        [JsonPropertyName("subject")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Subject { get; set; }
+
+        /// <summary>
+        /// SANs to carry onto the renewal order. Renewals previously submitted none, so a
+        /// renewed UCC certificate came back holding only its primary domain.
+        /// </summary>
+        [JsonPropertyName("sans")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public System.Collections.Generic.List<SanEntry> Sans { get; set; }
+
         [JsonPropertyName("validityDays")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public int? ValidityDays { get; set; }
