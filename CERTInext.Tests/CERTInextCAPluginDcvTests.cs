@@ -1204,6 +1204,79 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             public string GetValidationType() => "dns-01";
         }
 
+        /// <summary>Records the CancellationToken it was actually called with, for each method.</summary>
+        private sealed class TokenCapturingDomainValidator : IDomainValidator
+        {
+            public List<(string key, string value)> StagedRecords { get; } = new();
+            public List<CancellationToken> CleanupTokens { get; } = new();
+
+            public void Initialize(IDomainValidatorConfigProvider configProvider) { }
+
+            public Task<DomainValidationResult> StageValidation(string key, string value, CancellationToken cancellationToken)
+            {
+                StagedRecords.Add((key, value));
+                return Task.FromResult(new DomainValidationResult { Success = true });
+            }
+
+            public Task<DomainValidationResult> CleanupValidation(string key, CancellationToken cancellationToken)
+            {
+                CleanupTokens.Add(cancellationToken);
+                return Task.FromResult(new DomainValidationResult { Success = true });
+            }
+
+            public Task ValidateConfiguration(Dictionary<string, object> configuration) => Task.CompletedTask;
+            public Dictionary<string, PropertyConfigInfo> GetDomainValidatorAnnotations() => new();
+            public string GetValidationType() => "dns-01";
+        }
+
+        /// <summary>
+        /// Regression: the compensating cleanup call after an early exit from staging (chiefly the
+        /// shared DcvTimeoutMinutes-bound token firing mid-loop, which is what this scenario
+        /// simulates via a domain whose GetDcv call raises OperationCanceledException) must not reuse
+        /// the same token the operation was cancelled by — CleanupValidation must receive
+        /// CancellationToken.None, not the ambient `ct`. A cooperative IDomainValidator that forwards
+        /// its token into its own HTTP calls (the reference CloudflareDomainValidator in this repo
+        /// does exactly that) would otherwise throw immediately on an already-cancelled token and
+        /// never even attempt the delete, silently leaving the TXT record published.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_CleanupAfterCancellation_UsesCancellationTokenNone_NotTheAmbientToken()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            const string good  = "a.example.com";
+            const string bad   = "b.example.com";
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+
+            mock.Setup(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, good, bad));
+
+            mock.Setup(c => c.GetDcvAsync(order, good, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-a"));
+            // Domain 'good' is processed first (Dictionary enumeration order matches insertion order
+            // in practice for the small dictionaries this test builds); 'bad' then throws, driving the
+            // outer catch's cleanup of the already-staged 'good' entry.
+            mock.Setup(c => c.GetDcvAsync(order, bad, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new OperationCanceledException("DCV timeout budget exceeded"));
+
+            var validator = new TokenCapturingDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            Func<Task> act = () => Enroll(plugin);
+            await act.Should().ThrowAsync<OperationCanceledException>();
+
+            validator.StagedRecords.Should().ContainSingle(
+                "'good' must have staged before 'bad' threw, for this test to exercise cleanup at all");
+            validator.CleanupTokens.Should().ContainSingle(
+                "the staged entry must go through the cancellation cleanup path exactly once")
+                .Which.Should().Be(CancellationToken.None,
+                    "cleanup is a best-effort compensating action and must run with its own token, " +
+                    "not the token that was just cancelled");
+        }
+
         /// <summary>
         /// Regression: a StageValidation failure on one domain of a multi-domain order must not
         /// leave the TXT records already published for the earlier domains orphaned. Before the

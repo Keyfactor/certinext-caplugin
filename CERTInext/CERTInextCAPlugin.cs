@@ -1096,7 +1096,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Csr = csr,
                 ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                 Subject = subject,
-                Sans = BuildSanList(san, csr),
+                Sans = BuildSanList(san, csr, subject),
                 RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                 RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
                 KeyType = string.IsNullOrWhiteSpace(ep.KeyType) ? null : ep.KeyType,
@@ -1317,7 +1317,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     // set as a new enrollment — otherwise a renewed UCC certificate comes back
                     // holding only its primary domain.
                     Subject = subject,
-                    Sans = BuildSanList(san, csr),
+                    Sans = BuildSanList(san, csr, subject),
                     ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                     RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                     RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
@@ -1711,7 +1711,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var (domain, hostname, validator) = entry;
                 try
                 {
-                    await validator.CleanupValidation(hostname, ct);
+                    // CancellationToken.None, not `ct`: this is a best-effort compensating action —
+                    // removing a TXT record we already published — and it must run regardless of
+                    // WHY we are cleaning up, including the case where `ct` itself is the reason.
+                    // The dominant real trigger for this exact call site is the shared
+                    // DcvTimeoutMinutes-bound token firing mid-loop (see the outer catch's comment
+                    // below), which means `ct` is guaranteed already cancelled here. A cooperative
+                    // IDomainValidator that forwards its token into its own HTTP calls — the
+                    // reference CloudflareDomainValidator in this repo does exactly that — would
+                    // throw immediately on an already-cancelled token and never even attempt the
+                    // delete, silently leaving the record published with only a Warning logged.
+                    await validator.CleanupValidation(hostname, CancellationToken.None);
                     _logger.LogInformation(
                         "DNS TXT record cleaned up{Context}. Domain={Domain}, Hostname={Hostname}",
                         context, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
@@ -2405,7 +2415,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// with no <c>additionalDomains</c> at all. The certificate came back holding only
         /// the CN, which reads as the CA stripping SANs supplied on the CSR.
         /// </summary>
-        private List<SanEntry> BuildSanList(Dictionary<string, string[]> san, string csr)
+        private List<SanEntry> BuildSanList(Dictionary<string, string[]> san, string csr, string subject)
         {
             var result = new List<SanEntry>();
             // Type+value identity, so the same name requested as two different SAN types is
@@ -2471,14 +2481,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "{Count} SAN(s) in the CSR use a type that cannot be represented as a domain name " +
                     "and were not submitted (ASN.1 GeneralName tag(s): {Tags}). CERTInext's " +
                     "additionalDomains field carries domain names only, so these cannot appear on the " +
-                    "issued certificate. Remove them from the CSR if they are required.",
-                    skippedCsrTags.Count, string.Join(", ", skippedCsrTags));
+                    "issued certificate. Remove them from the CSR if they are required. Subject={Subject}",
+                    skippedCsrTags.Count, string.Join(", ", skippedCsrTags), subject);
             }
 
             if (result.Count == 0)
             {
                 _logger.LogDebug(
-                    "No SANs supplied by the gateway and none found in the CSR — submitting the order with domainName only.");
+                    "No SANs supplied by the gateway and none found in the CSR — submitting the order " +
+                    "with domainName only. Subject={Subject}", subject);
                 return null;
             }
 
@@ -2514,8 +2525,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "{Count} requested SAN(s) are not DNS names and are being DROPPED because " +
                     "SubmitNonDnsSans is false: {Sans}. The order will issue, but the certificate will " +
                     "NOT contain these names. Set SubmitNonDnsSans back to true to submit them and have " +
-                    "CERTInext surface the problem instead.",
-                    nonDns.Count, LogSanitizer.Strip(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))));
+                    "CERTInext surface the problem instead. Subject={Subject}",
+                    nonDns.Count, LogSanitizer.Strip(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))),
+                    subject);
 
                 result = result
                     .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
@@ -2531,9 +2543,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int fromCsrKept = result.Count(s => fromCsrKeys.Contains($"{s.Type}|{s.Value}"));
             _logger.LogInformation(
                 "Resolved {Total} SAN(s) for submission. FromGatewayRequest={FromGateway}, " +
-                "AddedFromCsrFallback={FromCsr}, Sans={Sans}",
+                "AddedFromCsrFallback={FromCsr}, Sans={Sans}, Subject={Subject}",
                 result.Count, fromGateway, fromCsrKept,
-                LogSanitizer.Strip(string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}"))));
+                LogSanitizer.Strip(string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}"))), subject);
 
             if (fromCsrKept > 0)
             {
@@ -2543,8 +2555,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogWarning(
                     "Command supplied no SAN data for this enrollment; {Count} SAN(s) present in the CSR " +
                     "have been added to the order instead. Review the enrollment pattern / template SAN " +
-                    "configuration.",
-                    fromCsrKept);
+                    "configuration. Subject={Subject}",
+                    fromCsrKept, subject);
             }
 
             if (nonDns.Count > 0)
@@ -2558,8 +2570,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "accepted verbatim and parked pending. They are submitted rather than dropped on " +
                     "purpose: a visible failure is preferable to a certificate issued without names the " +
                     "subscriber requested. Remove them from the CSR or the enrollment pattern if the " +
-                    "order should proceed.",
-                    nonDns.Count, LogSanitizer.Strip(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))));
+                    "order should proceed. Subject={Subject}",
+                    nonDns.Count, LogSanitizer.Strip(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))),
+                    subject);
             }
 
             return result;
