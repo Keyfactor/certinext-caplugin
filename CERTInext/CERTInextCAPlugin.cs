@@ -2199,11 +2199,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// reaches the order.
         ///
         /// Parsing the CSR here is not redundant with sending the CSR to CERTInext.
-        /// CERTInext ignores the CSR's subjectAltName extension outright — measured in
-        /// <c>SanSubmissionProbeTests</c>: a CSR carrying two DNS names, submitted with
-        /// <c>additionalDomains</c> omitted, produced an order with only the CN registered.
-        /// Re-submitting the CSR's names through <c>additionalDomains</c> is the only way a
-        /// SAN that exists solely in the CSR reaches the issued certificate.
+        /// CERTInext ignores the CSR's subjectAltName extension outright — measured on the
+        /// US sandbox in <c>SanSubmissionProbeTests</c>: a CSR carrying two DNS names,
+        /// submitted with <c>additionalDomains</c> omitted, produced an order with only the
+        /// CN registered. Production behaves the same way: the customer report that prompted
+        /// this fix was a production UCC order whose CSR carried the SANs and whose issued
+        /// certificate held only the CN. Re-submitting the CSR's names through
+        /// <c>additionalDomains</c> is the only way a SAN that exists solely in the CSR
+        /// reaches the issued certificate.
         ///
         /// History (UCC SANs silently dropped): the gateway keys this dictionary
         /// <c>dnsname</c>, not <c>dns</c>. <see cref="MapSanType"/> did not recognize
@@ -2281,22 +2284,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // them would issue a certificate silently missing names the subscriber asked for,
             // which is the worse failure.
             //
-            // Measured behaviour (SanSubmissionProbeTests, product 844, 2026-08-12): CERTInext
-            // does NOT reject these at order placement. It accepts the order and registers the
-            // value verbatim as an order domain — an email address, an IP literal and a URI all
-            // came back as domainVerification keys. The order then cannot pass domain validation,
-            // so it parks pending instead of failing fast. Say that plainly, because "the
-            // enrollment did not error but the order will never issue" is the confusing case.
+            // Measured on the US SANDBOX only (SanSubmissionProbeTests, product 844,
+            // 2026-08-12): CERTInext did NOT reject these at order placement. It accepted the
+            // order and registered the value verbatim as an order domain — an email address, an
+            // IP literal and a URI all came back as domainVerification keys. The order then
+            // cannot pass domain validation, so it parks pending instead of failing fast.
+            //
+            // Production is UNVERIFIED for this case and may reject the order outright instead.
+            // The warning below therefore describes the sandbox outcome as the expected one
+            // without promising it: either way the operator is told which SANs are the problem,
+            // which is the part that matters for diagnosis.
             var nonDns = result.Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)).ToList();
             if (nonDns.Count > 0)
             {
                 _logger.LogWarning(
                     "{Count} requested SAN(s) are not DNS names: {Sans}. CERTInext's additionalDomains " +
-                    "field takes domain names, and it accepts these verbatim rather than rejecting them — " +
-                    "the order will be created but is not expected to pass domain validation, so it will " +
-                    "sit pending rather than issue. They are submitted rather than dropped on purpose: a " +
-                    "visibly stuck order is preferable to a certificate issued without names the subscriber " +
-                    "requested. Remove them from the CSR or the enrollment pattern if the order should proceed.",
+                    "field takes domain names, so this order will either be rejected outright or be " +
+                    "created and then fail domain validation and sit pending — on the US sandbox it was " +
+                    "accepted verbatim and parked pending. They are submitted rather than dropped on " +
+                    "purpose: a visible failure is preferable to a certificate issued without names the " +
+                    "subscriber requested. Remove them from the CSR or the enrollment pattern if the " +
+                    "order should proceed.",
                     nonDns.Count, string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}")));
             }
 
