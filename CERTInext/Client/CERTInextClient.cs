@@ -186,9 +186,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (request.Meta == null)
                 request.Meta = await BuildMetaAsync(ct);
 
+            // The domain set is logged here, at the wire, not just where Command hands it to us.
+            // A UCC order that silently lost its SANs upstream of this point is otherwise
+            // indistinguishable in the gateway log from one the CA stripped — reconciling the
+            // enrollment-start "SANs=" line against this one localizes the loss immediately.
+            var certInfo = request.OrderDetails?.CertificateInformation;
             Logger.LogInformation(
-                "Submitting order to CERTInext. ProductCode={ProductCode}",
-                request.OrderDetails?.ProductCode);
+                "Submitting order to CERTInext. ProductCode={ProductCode}, DomainName={DomainName}, " +
+                "AdditionalDomainCount={AdditionalDomainCount}, AdditionalDomains={AdditionalDomains}",
+                request.OrderDetails?.ProductCode,
+                certInfo?.DomainName,
+                certInfo?.AdditionalDomains?.Count ?? 0,
+                certInfo?.AdditionalDomains != null && certInfo.AdditionalDomains.Count > 0
+                    ? string.Join("; ", certInfo.AdditionalDomains)
+                    : "(none)");
 
             GenerateOrderResponse result = null;
             RestResponse resp = null;
@@ -775,6 +786,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 throw new KeyNotFoundException($"Cannot renew: prior order '{certificateId}' was not found in CERTInext.");
             }
 
+            // Primary domain for the renewal order. Prefer the CN of the subject Command gave
+            // us; the prior order's requestorName is only a last resort and is not a domain —
+            // it is retained solely so an old caller that sets no Subject behaves as before.
+            string renewalDomainName =
+                ExtractCnFromSubject(request.Subject)
+                ?? priorTrack.OrderDetails?.RequestorInformation?.RequestorName
+                ?? "unknown";
+
+            if (ExtractCnFromSubject(request.Subject) == null)
+            {
+                Logger.LogWarning(
+                    "Renewal of order {PriorId} has no usable CN in its subject; falling back to " +
+                    "DomainName='{DomainName}' from the prior order. Verify the renewed certificate's " +
+                    "primary domain.",
+                    certificateId, renewalDomainName);
+            }
+
             // We don't have the product code from TrackOrder — build an order using
             // the config defaults and the CSR from the renewal request.
             var orderReq = new GenerateOrderSslRequest
@@ -794,7 +822,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     SubscriptionDetails = new SubscriptionDetails { Validity = "1" },
                     CertificateInformation = new CertificateInformation
                     {
-                        DomainName = priorTrack.OrderDetails?.RequestorInformation?.RequestorName ?? "unknown"
+                        DomainName = renewalDomainName,
+                        AdditionalDomains = BuildAdditionalDomains(request.Sans, renewalDomainName)
                     },
                     Csr = request.Csr,
                     AgreementDetails = BuildDefaultAgreementDetails()
@@ -1398,6 +1427,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string requestorIsd   = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
             string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
 
+            // Hoisted: additionalDomains is de-duplicated against the primary domain, so both
+            // fields have to be built from the same value.
+            string domainName = ExtractCnFromSubject(request.Subject) ?? "unknown";
+
             return new GenerateOrderSslRequest
             {
                 // Meta will be set by PlaceOrderAsync
@@ -1443,8 +1476,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     },
                     CertificateInformation = new CertificateInformation
                     {
-                        DomainName = ExtractCnFromSubject(request.Subject) ?? "unknown",
-                        AdditionalDomains = BuildAdditionalDomains(request.Sans),
+                        DomainName = domainName,
+                        AdditionalDomains = BuildAdditionalDomains(request.Sans, domainName),
                         AutoSecureWww = string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0" : _config.AutoSecureWww
                     },
 
@@ -1506,16 +1539,56 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return null;
         }
 
-        private static List<string> BuildAdditionalDomains(System.Collections.Generic.List<SanEntry> sans)
+        /// <summary>
+        /// Projects the resolved SAN list onto <c>certificateInformation.additionalDomains</c>.
+        ///
+        /// Every requested SAN is submitted regardless of type. Filtering to DNS-only (the
+        /// original behaviour) issued certificates quietly missing names the subscriber had
+        /// requested, which is the worse failure; the caller warns about the non-DNS entries
+        /// before we get here.
+        ///
+        /// <paramref name="domainName"/> is the value already going out as the order's primary
+        /// domain, and Command normally includes the CN in the SAN set as well. CERTInext was
+        /// measured to collapse that repetition itself (SanSubmissionProbeTests: CN submitted
+        /// twice came back registered once), so excluding it here is defence in depth rather
+        /// than a correctness requirement — it keeps the submitted body matching what we log
+        /// and avoids depending on undocumented CA-side de-duplication.
+        /// </summary>
+        private List<string> BuildAdditionalDomains(
+            System.Collections.Generic.List<SanEntry> sans,
+            string domainName)
         {
             if (sans == null || sans.Count == 0) return null;
+
             var domains = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            bool haveDomainName = !string.IsNullOrWhiteSpace(domainName);
+            if (haveDomainName)
+                seen.Add(domainName.Trim());
+
+            int duplicates = 0;
             foreach (var san in sans)
             {
-                if (string.Equals(san.Type, "dns", StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrWhiteSpace(san.Value))
-                    domains.Add(san.Value);
+                if (san == null || string.IsNullOrWhiteSpace(san.Value)) continue;
+
+                string value = san.Value.Trim();
+                if (!seen.Add(value))
+                {
+                    duplicates++;
+                    continue;
+                }
+                domains.Add(value);
             }
+
+            if (duplicates > 0)
+            {
+                Logger.LogDebug(
+                    "Collapsed {Count} duplicate SAN value(s) out of additionalDomains " +
+                    "(already submitted as domainName '{DomainName}', or repeated in the SAN set).",
+                    duplicates, domainName);
+            }
+
             return domains.Count > 0 ? domains : null;
         }
 

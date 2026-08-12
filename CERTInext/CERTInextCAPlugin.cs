@@ -1096,7 +1096,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Csr = csr,
                 ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                 Subject = subject,
-                Sans = BuildSanList(san),
+                Sans = BuildSanList(san, csr),
                 RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                 RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
                 KeyType = string.IsNullOrWhiteSpace(ep.KeyType) ? null : ep.KeyType,
@@ -1313,6 +1313,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var renewReq = new RenewCertificateRequest
                 {
                     Csr = csr,
+                    // Renewals go out as a fresh CERTInext order, so they need the same domain
+                    // set as a new enrollment — otherwise a renewed UCC certificate comes back
+                    // holding only its primary domain.
+                    Subject = subject,
+                    Sans = BuildSanList(san, csr),
                     ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                     RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                     RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
@@ -2183,43 +2188,239 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Converts the multi-valued SAN dictionary from the AnyCA gateway into the
-        /// <see cref="SanEntry"/> list expected by the CERTInext API.
+        /// Builds the <see cref="SanEntry"/> list submitted to CERTInext, from the union of
+        /// two sources: the multi-valued SAN dictionary the AnyCA gateway hands us, and the
+        /// subjectAltName extension carried inside the CSR itself.
+        ///
+        /// Both sources are needed. The gateway dictionary is authoritative when Command
+        /// populates it, but not every enrollment path does — and the CSR is the only place
+        /// the requested names are guaranteed to appear, because the client built it. Union
+        /// + de-duplicate rather than preferring one, so a name requested in either place
+        /// reaches the order.
+        ///
+        /// Parsing the CSR here is not redundant with sending the CSR to CERTInext.
+        /// CERTInext ignores the CSR's subjectAltName extension outright — measured in
+        /// <c>SanSubmissionProbeTests</c>: a CSR carrying two DNS names, submitted with
+        /// <c>additionalDomains</c> omitted, produced an order with only the CN registered.
+        /// Re-submitting the CSR's names through <c>additionalDomains</c> is the only way a
+        /// SAN that exists solely in the CSR reaches the issued certificate.
+        ///
+        /// History (UCC SANs silently dropped): the gateway keys this dictionary
+        /// <c>dnsname</c>, not <c>dns</c>. <see cref="MapSanType"/> did not recognize
+        /// <c>dnsname</c>, so every DNS SAN was typed <c>"dnsname"</c>, filtered out by the
+        /// DNS-only test in <c>BuildAdditionalDomains</c>, and the order went to CERTInext
+        /// with no <c>additionalDomains</c> at all. The certificate came back holding only
+        /// the CN, which reads as the CA stripping SANs supplied on the CSR.
         /// </summary>
-        private static List<SanEntry> BuildSanList(Dictionary<string, string[]> san)
+        private List<SanEntry> BuildSanList(Dictionary<string, string[]> san, string csr)
         {
-            if (san == null || san.Count == 0)
-                return null;
-
             var result = new List<SanEntry>();
+            // Type+value identity, so the same name requested as two different SAN types is
+            // preserved while an exact repeat across the two sources collapses.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            // AnyCA passes SANs keyed by type name (e.g. "Dns", "Ip", "Email", "Uri")
-            foreach (var kvp in san)
+            void Add(string type, string value)
             {
-                string sanType = MapSanType(kvp.Key);
-                if (kvp.Value == null) continue;
+                if (string.IsNullOrWhiteSpace(value)) return;
+                string trimmed = value.Trim();
+                if (!seen.Add($"{type}|{trimmed}")) return;
+                result.Add(new SanEntry { Type = type, Value = trimmed });
+            }
 
-                foreach (string value in kvp.Value)
+            // AnyCA passes SANs keyed by type name — the real gateway uses "dnsname",
+            // "rfc822name", "ipaddress"; MapSanType normalizes the spelling variants.
+            if (san != null)
+            {
+                foreach (var kvp in san)
                 {
-                    if (!string.IsNullOrWhiteSpace(value))
-                        result.Add(new SanEntry { Type = sanType, Value = value.Trim() });
+                    string sanType = MapSanType(kvp.Key);
+                    if (kvp.Value == null) continue;
+
+                    foreach (string value in kvp.Value)
+                        Add(sanType, value);
                 }
             }
 
-            return result.Count > 0 ? result : null;
+            int fromGateway = result.Count;
+
+            // Union in whatever the CSR asked for. Non-throwing: a malformed or unparseable
+            // CSR yields an empty list and leaves the gateway-supplied set untouched.
+            foreach (var csrSan in ExtractSanEntriesFromCsr(csr))
+                Add(csrSan.Type, csrSan.Value);
+
+            int fromCsrOnly = result.Count - fromGateway;
+
+            if (result.Count == 0)
+            {
+                _logger.LogDebug(
+                    "No SANs supplied by the gateway and none found in the CSR — submitting the order with domainName only.");
+                return null;
+            }
+
+            // The blind spot that hid the original defect was that nothing logged what we
+            // resolved. Log the full resolved set and its provenance at Information.
+            _logger.LogInformation(
+                "Resolved {Total} SAN(s) for submission. FromGatewayRequest={FromGateway}, " +
+                "AddedFromCsr={FromCsr}, Sans={Sans}",
+                result.Count, fromGateway, fromCsrOnly,
+                string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}")));
+
+            if (fromCsrOnly > 0)
+            {
+                // Worth a Warning, not Debug: it means Command did not hand us names the
+                // client actually requested, which is a gateway/template wiring smell even
+                // though we recover from it here.
+                _logger.LogWarning(
+                    "{Count} SAN(s) were present in the CSR but absent from the SAN data supplied by Command; " +
+                    "they have been added to the order. Review the enrollment pattern / template SAN configuration.",
+                    fromCsrOnly);
+            }
+
+            // CERTInext's certificateInformation.additionalDomains is a domain-name field, and
+            // non-DNS SANs are submitted into it deliberately rather than discarded: dropping
+            // them would issue a certificate silently missing names the subscriber asked for,
+            // which is the worse failure.
+            //
+            // Measured behaviour (SanSubmissionProbeTests, product 844, 2026-08-12): CERTInext
+            // does NOT reject these at order placement. It accepts the order and registers the
+            // value verbatim as an order domain — an email address, an IP literal and a URI all
+            // came back as domainVerification keys. The order then cannot pass domain validation,
+            // so it parks pending instead of failing fast. Say that plainly, because "the
+            // enrollment did not error but the order will never issue" is the confusing case.
+            var nonDns = result.Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (nonDns.Count > 0)
+            {
+                _logger.LogWarning(
+                    "{Count} requested SAN(s) are not DNS names: {Sans}. CERTInext's additionalDomains " +
+                    "field takes domain names, and it accepts these verbatim rather than rejecting them — " +
+                    "the order will be created but is not expected to pass domain validation, so it will " +
+                    "sit pending rather than issue. They are submitted rather than dropped on purpose: a " +
+                    "visibly stuck order is preferable to a certificate issued without names the subscriber " +
+                    "requested. Remove them from the CSR or the enrollment pattern if the order should proceed.",
+                    nonDns.Count, string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}")));
+            }
+
+            return result;
         }
 
         private static string MapSanType(string anyCAType)
         {
             switch (anyCAType?.ToLowerInvariant())
             {
-                case "dns": return "dns";
+                // "dnsname" is what the AnyCA REST Gateway actually sends; "dns"/"dnsnames"
+                // are kept for callers and older hosts that use the shorter spelling.
+                case "dns":
+                case "dnsname":
+                case "dnsnames": return "dns";
                 case "ip":
-                case "ipaddress": return "ip";
+                case "ipaddress":
+                case "ipaddresses": return "ip";
                 case "email":
-                case "rfc822": return "email";
-                case "uri": return "uri";
+                case "rfc822":
+                case "rfc822name": return "email";
+                case "uri":
+                case "uniformresourceidentifier": return "uri";
                 default: return anyCAType?.ToLowerInvariant() ?? "dns";
+            }
+        }
+
+        /// <summary>
+        /// Extracts the subjectAltName entries from a PEM-encoded PKCS#10 CSR.
+        ///
+        /// Implemented with BouncyCastle (per the project's crypto policy: all certificate
+        /// and key handling goes through BouncyCastle, never BCL System.Security.Cryptography).
+        /// Never throws — an absent, truncated, or otherwise unparseable CSR returns an empty
+        /// list so enrollment continues on the gateway-supplied SAN data alone.
+        /// </summary>
+        private static List<SanEntry> ExtractSanEntriesFromCsr(string csrPem)
+        {
+            var result = new List<SanEntry>();
+            if (string.IsNullOrWhiteSpace(csrPem))
+                return result;
+
+            try
+            {
+                string b64 = csrPem
+                    .Replace("-----BEGIN CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("-----END CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("-----BEGIN NEW CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("-----END NEW CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("\r", string.Empty)
+                    .Replace("\n", string.Empty)
+                    .Trim();
+
+                if (string.IsNullOrWhiteSpace(b64))
+                    return result;
+
+                var csr = new Org.BouncyCastle.Pkcs.Pkcs10CertificationRequest(Convert.FromBase64String(b64));
+
+                // SANs live in the PKCS#9 extensionRequest attribute, not the CSR body.
+                var extensions = csr.GetRequestedExtensions();
+                var sanExtension = extensions?.GetExtension(
+                    Org.BouncyCastle.Asn1.X509.X509Extensions.SubjectAlternativeName);
+                if (sanExtension == null)
+                    return result;
+
+                var names = Org.BouncyCastle.Asn1.X509.GeneralNames.GetInstance(sanExtension.GetParsedValue());
+                foreach (var generalName in names.GetNames())
+                {
+                    string value = GeneralNameToValue(generalName);
+                    if (!string.IsNullOrWhiteSpace(value))
+                        result.Add(new SanEntry { Type = SanTypeFromGeneralNameTag(generalName.TagNo), Value = value });
+                }
+            }
+            catch (Exception ex)
+            {
+                // Enrollment must not fail because we could not read the CSR's SANs — the
+                // gateway-supplied set still applies, and CERTInext validates the CSR itself.
+                // Debug so an operator diagnosing a missing SAN can see the parse was skipped.
+                LogHandler.GetClassLogger(typeof(CERTInextCAPlugin))
+                    .LogDebug(ex, "ExtractSanEntriesFromCsr suppressed CSR parse failure");
+            }
+
+            return result;
+        }
+
+        /// <summary>Maps an ASN.1 GeneralName tag to the SAN type string used by this plugin.</summary>
+        private static string SanTypeFromGeneralNameTag(int tagNo)
+        {
+            switch (tagNo)
+            {
+                case Org.BouncyCastle.Asn1.X509.GeneralName.DnsName: return "dns";
+                case Org.BouncyCastle.Asn1.X509.GeneralName.Rfc822Name: return "email";
+                case Org.BouncyCastle.Asn1.X509.GeneralName.UniformResourceIdentifier: return "uri";
+                case Org.BouncyCastle.Asn1.X509.GeneralName.IPAddress: return "ip";
+                case Org.BouncyCastle.Asn1.X509.GeneralName.DirectoryName: return "directoryname";
+                case Org.BouncyCastle.Asn1.X509.GeneralName.RegisteredID: return "registeredid";
+                case Org.BouncyCastle.Asn1.X509.GeneralName.OtherName: return "othername";
+                default: return $"generalname-{tagNo}";
+            }
+        }
+
+        /// <summary>
+        /// Renders a GeneralName's value as the text CERTInext would need to see. Returns null
+        /// for a name whose value cannot be rendered meaningfully, so it is skipped rather than
+        /// submitted as ASN.1 debris.
+        /// </summary>
+        private static string GeneralNameToValue(Org.BouncyCastle.Asn1.X509.GeneralName generalName)
+        {
+            switch (generalName.TagNo)
+            {
+                case Org.BouncyCastle.Asn1.X509.GeneralName.DnsName:
+                case Org.BouncyCastle.Asn1.X509.GeneralName.Rfc822Name:
+                case Org.BouncyCastle.Asn1.X509.GeneralName.UniformResourceIdentifier:
+                    return Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+
+                case Org.BouncyCastle.Asn1.X509.GeneralName.IPAddress:
+                    // Octet string → dotted-quad / RFC 5952 text, so what we submit and log is
+                    // the address the subscriber asked for rather than its hex encoding.
+                    byte[] octets = Org.BouncyCastle.Asn1.Asn1OctetString.GetInstance(generalName.Name).GetOctets();
+                    return octets.Length == 4 || octets.Length == 16
+                        ? new System.Net.IPAddress(octets).ToString()
+                        : null;
+
+                default:
+                    return generalName.Name?.ToString();
             }
         }
 
