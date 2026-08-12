@@ -20,6 +20,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string AuthMode = "AuthMode";
             public const string Enabled = "Enabled";
             public const string IgnoreExpired = "IgnoreExpired";
+            public const string SubmitNonDnsSans = "SubmitNonDnsSans";
             public const string PageSize = "PageSize";
 
             // Synchronous certificate pickup (parity with the legacy Sectigo connector).

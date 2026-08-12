@@ -824,5 +824,158 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Verify(c => c.GetCertificateAsync(MockCertificateData.DcvOrderId, It.IsAny<CancellationToken>()),
                 Times.AtLeast(2), "plugin should have polled at least twice for issuance");
         }
+
+        // ---------------------------------------------------------------------------
+        // Undrainable pending domains must not strand the valid ones on the same order
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Builds a TrackOrder response whose domainVerification block lists several pending
+        /// domains, so tests can mix validatable and unvalidatable keys on one order.
+        /// </summary>
+        private static TrackOrderResponse DcvPendingTrackResponseMultiDomain(
+            string orderNumber, params string[] domains)
+        {
+            var detail = System.Text.Json.JsonSerializer.SerializeToElement(new DomainVerificationDetail
+            {
+                DcvMethod = Constants.Dcv.MethodDnsTxt,
+                DcvStatus = Constants.Dcv.StatusPending,
+                Status    = "1"
+            });
+
+            var raw = new Dictionary<string, System.Text.Json.JsonElement>();
+            foreach (string d in domains)
+                raw[d] = detail;
+
+            return new TrackOrderResponse
+            {
+                OrderDetails = new TrackOrderResponseDetails
+                {
+                    OrderStatusId       = "1",
+                    CertificateStatusId = "1",
+                    DomainVerification  = new TrackOrderDomainVerification
+                    {
+                        Status           = Constants.Dcv.StatusPending,
+                        RawDomainEntries = raw
+                    }
+                }
+            };
+        }
+
+        /// <summary>
+        /// A non-FQDN pending domain must be skipped, not thrown on.
+        ///
+        /// Regression: non-DNS SANs are now submitted to CERTInext, which registers them verbatim
+        /// as order domains, so an email/URI SAN turns up as a domainVerification key that fails the
+        /// FQDN check. That check used to throw for the whole order — escaping Enroll (which has no
+        /// catch) after the order was already placed, so the enrollment failed with an orphaned
+        /// order and no TXT record was staged for the *valid* domains beside it. Every sync retry
+        /// re-threw and TryRunDcvDuringSyncAsync swallowed it, so the order could never progress.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_NonFqdnPendingDomain_IsSkipped_AndValidDomainStillStaged()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            const string good  = MockCertificateData.DcvDomain;
+            const string bad   = "admin@example.com";   // what an rfc822 SAN comes back as
+
+            var mock = NewMock();
+
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+
+            mock.SetupSequence(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, good, bad))
+                .ReturnsAsync(MockCertificateData.DcvVerifiedTrackResponse(order, good));
+
+            // Only the valid domain should ever reach GetDcv/VerifyDcv. MockBehavior.Strict means
+            // an unexpected call for `bad` fails the test on its own.
+            mock.Setup(c => c.GetDcvAsync(order, good, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse(MockCertificateData.DcvToken));
+            mock.Setup(c => c.VerifyDcvAsync(order, good, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(order));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            // Must not throw — that is the regression.
+            var result = await Enroll(plugin);
+
+            string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, good);
+            validator.StagedRecords.Should().ContainSingle(
+                "the valid DNS domain must still be staged even though a co-tenant domain is unusable")
+                .Which.Should().Be((expectedHostname, MockCertificateData.DcvToken));
+
+            mock.Verify(c => c.GetDcvAsync(order, bad, It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never, "a non-FQDN domain must never be sent to GetDcv");
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+        }
+
+        /// <summary>
+        /// A pending domain that resolves no DNS provider (an IP-literal SAN passes the FQDN regex
+        /// but no zone can match it) must likewise be skipped rather than failing the whole order.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_DomainWithNoResolvableValidator_IsSkipped_AndValidDomainStillStaged()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            const string good  = MockCertificateData.DcvDomain;
+            const string ip    = "192.0.2.10";   // what an iPAddress SAN comes back as
+
+            var mock = NewMock();
+
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+
+            mock.SetupSequence(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, good, ip))
+                .ReturnsAsync(MockCertificateData.DcvVerifiedTrackResponse(order, good));
+
+            // The IP literal clears the FQDN filter, so GetDcv IS called for it; the dead end is
+            // that no validator resolves. Stub it so reaching that point is legitimate.
+            mock.Setup(c => c.GetDcvAsync(order, It.IsAny<string>(), Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse(MockCertificateData.DcvToken));
+            mock.Setup(c => c.VerifyDcvAsync(order, good, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(order));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(
+                mock.Object,
+                new SelectiveDomainValidatorFactory(validator, resolvableDomain: good),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, good);
+            validator.StagedRecords.Should().ContainSingle(
+                "only the domain with a resolvable provider should be staged, and it must still be staged")
+                .Which.Should().Be((expectedHostname, MockCertificateData.DcvToken));
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+        }
+
+        /// <summary>Factory that resolves a validator for exactly one domain and null for all others.</summary>
+        private sealed class SelectiveDomainValidatorFactory : IDomainValidatorFactory
+        {
+            private readonly IDomainValidator _validator;
+            private readonly string _resolvableDomain;
+
+            public SelectiveDomainValidatorFactory(IDomainValidator validator, string resolvableDomain)
+            {
+                _validator = validator;
+                _resolvableDomain = resolvableDomain;
+            }
+
+            public IDomainValidator ResolveDomainValidator(string domain, string validationType) =>
+                string.Equals(domain, _resolvableDomain, StringComparison.OrdinalIgnoreCase) ? _validator : null;
+
+            public IDomainValidator PrimaryValidator => _validator;
+        }
     }
 }

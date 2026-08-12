@@ -195,10 +195,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 "Submitting order to CERTInext. ProductCode={ProductCode}, DomainName={DomainName}, " +
                 "AdditionalDomainCount={AdditionalDomainCount}, AdditionalDomains={AdditionalDomains}",
                 request.OrderDetails?.ProductCode,
-                certInfo?.DomainName,
+                SanitizeForLog(certInfo?.DomainName),
                 certInfo?.AdditionalDomains?.Count ?? 0,
                 certInfo?.AdditionalDomains != null && certInfo.AdditionalDomains.Count > 0
-                    ? string.Join("; ", certInfo.AdditionalDomains)
+                    ? SanitizeForLog(string.Join("; ", certInfo.AdditionalDomains))
                     : "(none)");
 
             GenerateOrderResponse result = null;
@@ -789,12 +789,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // Primary domain for the renewal order. Prefer the CN of the subject Command gave
             // us; the prior order's requestorName is only a last resort and is not a domain —
             // it is retained solely so an old caller that sets no Subject behaves as before.
+            // Hoisted: the same parse drives both the domain and the "did we get a CN?" warning,
+            // mirroring BuildOrderRequestFromLegacyEnrollRequest.
+            string subjectCn = ExtractCnFromSubject(request.Subject);
+
             string renewalDomainName =
-                ExtractCnFromSubject(request.Subject)
+                subjectCn
                 ?? priorTrack.OrderDetails?.RequestorInformation?.RequestorName
                 ?? "unknown";
 
-            if (ExtractCnFromSubject(request.Subject) == null)
+            if (subjectCn == null)
             {
                 Logger.LogWarning(
                     "Renewal of order {PriorId} has no usable CN in its subject; falling back to " +
@@ -1763,6 +1767,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 "Authorization: ***REDACTED***");
 
             return body;
+        }
+
+        /// <summary>
+        /// Strips CR, LF, and tab from a value before it is interpolated into a log message.
+        ///
+        /// Domain values logged at the wire originate from the requester (Command's SAN dictionary
+        /// or the CSR). Structured message templates stop format-string abuse but not embedded
+        /// newlines, and NLog's text layout does not escape them, so an unsanitized value could
+        /// forge additional well-formed-looking records (CWE-117) in the very log line added to make
+        /// the submitted domain set auditable. The plugin sanitizes its own SAN log sinks the same
+        /// way; this covers the order-submission sink.
+        /// </summary>
+        private static string SanitizeForLog(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            return value
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n")
+                .Replace("\t", "\\t");
         }
 
         /// <summary>

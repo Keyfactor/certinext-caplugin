@@ -1607,26 +1607,53 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // SOX CC6.1: validate domain names before passing them to the DNS provider plugin
             // or the CERTInext API.  A malformed domain (empty, whitespace, or containing
             // characters outside the FQDN alphabet) could cause log injection or unexpected
-            // DNS plugin behaviour.  Invalid entries are rejected loudly rather than silently
-            // skipped so the condition is visible in the audit trail.
-            foreach (var (domain, _) in pendingDomains)
+            // DNS plugin behaviour.  Invalid entries are rejected loudly — LogError, so the
+            // condition is visible in the audit trail — but they are EXCLUDED rather than
+            // thrown on.
+            //
+            // Throwing here would fail the whole order: the exception escapes Enroll (which has
+            // no catch) after the order was already placed at the CA, so the enrollment reports
+            // failure with an orphaned order, and no TXT record is staged for the *valid* domains
+            // on the same order. Worse, it is unrecoverable — every later Synchronize /
+            // GetSingleRecord retry re-enters here, hits the same undrainable domain, and
+            // TryRunDcvDuringSyncAsync swallows the exception and returns false, so the order sits
+            // at EXTERNALVALIDATION forever.
+            //
+            // This is reachable in normal operation now that non-DNS SANs are submitted to
+            // CERTInext (see BuildSanList): the CA registers an email/URI SAN verbatim as an order
+            // domain, and that key is not an FQDN. One such SAN must not strand the DNS names
+            // alongside it. Same principle the EMS-956 branch below states explicitly: do not throw
+            // out of DCV for a condition that leaves the order legitimately pending.
+            var invalidDomains = new List<string>();
+            var validPendingDomains = new List<KeyValuePair<string, DomainVerificationDetail>>();
+
+            foreach (var entry in pendingDomains)
             {
-                if (string.IsNullOrWhiteSpace(domain))
-                    throw new InvalidOperationException(
-                        $"TrackOrder returned a blank domain key in domainVerification for order '{orderNumber}'. " +
-                        "Cannot proceed with DCV.");
+                string domain = entry.Key;
 
                 // Allow standard FQDN characters plus wildcard prefix (*.example.com)
-                if (!System.Text.RegularExpressions.Regex.IsMatch(domain, @"^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$"))
-                {
-                    _logger.LogError(
-                        "DCV domain name failed validation and will not be processed. OrderNumber={OrderNumber}, Domain={Domain}",
-                        orderNumber, domain);
-                    throw new InvalidOperationException(
-                        $"TrackOrder returned an invalid domain name '{domain}' in domainVerification for order '{orderNumber}'. " +
-                        "Domain names must conform to FQDN syntax.");
-                }
+                bool valid = !string.IsNullOrWhiteSpace(domain)
+                    && System.Text.RegularExpressions.Regex.IsMatch(
+                        domain, @"^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$");
+
+                if (valid)
+                    validPendingDomains.Add(entry);
+                else
+                    invalidDomains.Add(string.IsNullOrWhiteSpace(domain) ? "(blank)" : domain);
             }
+
+            if (invalidDomains.Count > 0)
+            {
+                _logger.LogError(
+                    "{Count} domain(s) on order {OrderNumber} are not valid FQDNs and cannot be DNS-01 validated: " +
+                    "[{Domains}]. They are skipped so the remaining {ValidCount} domain(s) can still be validated. " +
+                    "This order cannot be issued by CERTInext until these are removed — they usually come from a " +
+                    "non-DNS SAN (IP address, email, URI) that was requested on the enrollment.",
+                    invalidDomains.Count, orderNumber, SanitizeForLog(string.Join(", ", invalidDomains)),
+                    validPendingDomains.Count);
+            }
+
+            pendingDomains = validPendingDomains;
 
             if (pendingDomains.Count == 0)
                 return false;
@@ -1636,6 +1663,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 orderNumber, string.Join(", ", pendingDomains.Select(x => x.Key)));
 
             var stagedValidations = new List<(string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator)>();
+
+            // Domains for which no DNS provider plugin resolved. Used after the staging loop to tell
+            // "this one name is unvalidatable" (skip, keep going) apart from "no DNS provider is
+            // deployed at all" (a gateway misconfiguration that must still fail loudly).
+            var unresolvedDomains = new List<string>();
 
             // Stage DNS TXT records for all pending domains
             foreach (var (domain, _) in pendingDomains)
@@ -1679,9 +1711,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
                 if (validator == null)
-                    throw new InvalidOperationException(
-                        $"No DNS provider plugin is configured for domain '{domain}'. " +
-                        "Ensure the appropriate DNS provider plugin is deployed and configured on the gateway.");
+                {
+                    // Two different conditions land here, and they want different handling:
+                    //
+                    //  * This *particular* name is unvalidatable while others on the order are fine —
+                    //    an IP-literal SAN is the canonical case (it satisfies the FQDN regex above,
+                    //    but no DNS zone can ever match it). Skip it, so its co-tenant domains still
+                    //    get staged. Throwing would fail the whole Enroll after the order was already
+                    //    placed and leave the order permanently unable to progress.
+                    //
+                    //  * No DNS provider is deployed/configured at all — a real gateway
+                    //    misconfiguration. That is still raised, after the loop, when nothing on the
+                    //    order staged (see below), preserving the loud operator-facing failure.
+                    //
+                    // Trade-off accepted: an order whose *only* pending domain is unresolvable still
+                    // throws. In practice the order's primary domain (the CN) is always a pending
+                    // domain too, so this is the misconfiguration case rather than the bad-SAN case.
+                    _logger.LogError(
+                        "No DNS provider plugin resolved for domain '{Domain}' on order {OrderNumber}. " +
+                        "If this is a real domain, ensure the appropriate DNS provider plugin is deployed and " +
+                        "configured on the gateway; if it came from a non-DNS SAN (e.g. an IP address), remove " +
+                        "it from the request.",
+                        SanitizeForLog(domain), orderNumber);
+                    unresolvedDomains.Add(domain);
+                    continue;
+                }
 
                 _logger.LogInformation(
                     "Staging DNS TXT record for DCV. OrderNumber={OrderNumber}, Domain={Domain}, Hostname={Hostname}",
@@ -1694,6 +1748,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 stagedValidations.Add((domain, hostname, validator));
             }
+
+            // Nothing staged and every pending domain failed provider resolution => no DNS provider
+            // plugin is usable on this gateway at all. That is a deployment misconfiguration, not bad
+            // request data, so it still fails loudly rather than silently parking the order.
+            if (stagedValidations.Count == 0 && unresolvedDomains.Count == pendingDomains.Count && unresolvedDomains.Count > 0)
+                throw new InvalidOperationException(
+                    $"No DNS provider plugin is configured for domain '{unresolvedDomains[0]}'. " +
+                    "Ensure the appropriate DNS provider plugin is deployed and configured on the gateway.");
 
             if (stagedValidations.Count == 0)
                 return false;
@@ -2248,10 +2310,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // Union in whatever the CSR asked for. Non-throwing: a malformed or unparseable
             // CSR yields an empty list and leaves the gateway-supplied set untouched.
-            foreach (var csrSan in ExtractSanEntriesFromCsr(csr))
+            var csrSans = ExtractSanEntriesFromCsr(csr, out List<int> skippedCsrTags);
+            foreach (var csrSan in csrSans)
                 Add(csrSan.Type, csrSan.Value);
 
             int fromCsrOnly = result.Count - fromGateway;
+
+            if (skippedCsrTags.Count > 0)
+            {
+                // GeneralName types with no domain-name rendering (otherName — e.g. a UPN from a
+                // Windows-generated CSR — directoryName, x400Address, ediPartyName, registeredID).
+                // They cannot be expressed in additionalDomains, so they are not forwarded. Warn
+                // rather than drop silently: the operator needs to know the CSR asked for something
+                // the certificate will not carry.
+                _logger.LogWarning(
+                    "{Count} SAN(s) in the CSR use a type that cannot be represented as a domain name " +
+                    "and were not submitted (ASN.1 GeneralName tag(s): {Tags}). CERTInext's " +
+                    "additionalDomains field carries domain names only, so these cannot appear on the " +
+                    "issued certificate. Remove them from the CSR if they are required.",
+                    skippedCsrTags.Count, string.Join(", ", skippedCsrTags));
+            }
 
             if (result.Count == 0)
             {
@@ -2266,7 +2344,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "Resolved {Total} SAN(s) for submission. FromGatewayRequest={FromGateway}, " +
                 "AddedFromCsr={FromCsr}, Sans={Sans}",
                 result.Count, fromGateway, fromCsrOnly,
-                string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}")));
+                SanitizeForLog(string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}"))));
 
             if (fromCsrOnly > 0)
             {
@@ -2295,6 +2373,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // without promising it: either way the operator is told which SANs are the problem,
             // which is the part that matters for diagnosis.
             var nonDns = result.Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)).ToList();
+
+            // Escape hatch (SubmitNonDnsSans, default true). On a host that was previously issuing
+            // certificates for requests carrying an IP or email SAN, the default behaviour flips
+            // those enrollments from "issues, silently missing the name" to "parks pending", and an
+            // operator needs a way back that isn't a plugin downgrade. Off => pre-1.0.1 behaviour.
+            if (nonDns.Count > 0 && !_config.SubmitNonDnsSans)
+            {
+                _logger.LogWarning(
+                    "{Count} requested SAN(s) are not DNS names and are being DROPPED because " +
+                    "SubmitNonDnsSans is false: {Sans}. The order will issue, but the certificate will " +
+                    "NOT contain these names. Set SubmitNonDnsSans back to true to submit them and have " +
+                    "CERTInext surface the problem instead.",
+                    nonDns.Count, SanitizeForLog(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))));
+
+                result = result
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                return result.Count > 0 ? result : null;
+            }
+
             if (nonDns.Count > 0)
             {
                 _logger.LogWarning(
@@ -2305,7 +2404,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "purpose: a visible failure is preferable to a certificate issued without names the " +
                     "subscriber requested. Remove them from the CSR or the enrollment pattern if the " +
                     "order should proceed.",
-                    nonDns.Count, string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}")));
+                    nonDns.Count, SanitizeForLog(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))));
             }
 
             return result;
@@ -2340,9 +2439,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Never throws — an absent, truncated, or otherwise unparseable CSR returns an empty
         /// list so enrollment continues on the gateway-supplied SAN data alone.
         /// </summary>
-        private static List<SanEntry> ExtractSanEntriesFromCsr(string csrPem)
+        /// <param name="csrPem">PEM-encoded PKCS#10 request, or null/garbage.</param>
+        /// <param name="skippedTagNumbers">
+        /// ASN.1 GeneralName tag numbers present in the CSR that have no domain-name rendering and
+        /// were therefore not returned (otherName, directoryName, x400Address, ediPartyName,
+        /// registeredID, and any malformed IPAddress). Reported so the caller can warn instead of
+        /// dropping them silently.
+        /// </param>
+        private static List<SanEntry> ExtractSanEntriesFromCsr(string csrPem, out List<int> skippedTagNumbers)
         {
             var result = new List<SanEntry>();
+            skippedTagNumbers = new List<int>();
             if (string.IsNullOrWhiteSpace(csrPem))
                 return result;
 
@@ -2375,6 +2482,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     string value = GeneralNameToValue(generalName);
                     if (!string.IsNullOrWhiteSpace(value))
                         result.Add(new SanEntry { Type = SanTypeFromGeneralNameTag(generalName.TagNo), Value = value });
+                    else
+                        skippedTagNumbers.Add(generalName.TagNo);
                 }
             }
             catch (Exception ex)
@@ -2428,8 +2537,41 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         : null;
 
                 default:
-                    return generalName.Name?.ToString();
+                    // otherName, directoryName, x400Address, ediPartyName, registeredID.
+                    //
+                    // Deliberately null, not Name.ToString(). BouncyCastle renders these as an
+                    // ASN.1 dump — a UPN otherName from a Windows-generated CSR stringifies to
+                    // "[1.3.6.1.4.1.311.20.2.3, [CONTEXT 0]svc@corp.example.com]" and a
+                    // directoryName to "CN=host.example.com,O=Acme". Submitting that as an entry in
+                    // additionalDomains is not "forwarding the name the subscriber asked for" — it
+                    // is putting ASN.1 debris in a domain-name field, which cannot become a
+                    // certificate SAN under any circumstances and only breaks the order. That is
+                    // different from a well-formed non-DNS SAN (IP/email/URI), which we do submit
+                    // on purpose so nothing the subscriber requested is dropped silently.
+                    //
+                    // Skipped is not silent: BuildSanList warns with the tag numbers so the
+                    // operator can see a SAN was present and not forwarded.
+                    return null;
             }
+        }
+
+        /// <summary>
+        /// Strips CR, LF, and tab from a value before it is interpolated into a log message.
+        ///
+        /// SAN values reach the log from the CSR and from Command's SAN dictionary, i.e. from the
+        /// requester. Structured message templates stop format-string abuse but not embedded
+        /// newlines, and NLog's text layout does not escape them — so an unsanitized value can
+        /// forge additional, well-formed-looking records in the gateway log (CWE-117). That matters
+        /// here specifically because these log lines exist to make the submitted SAN set auditable;
+        /// a forged line could assert a different SAN set than the one actually sent.
+        /// </summary>
+        private static string SanitizeForLog(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            return value
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n")
+                .Replace("\t", "\\t");
         }
 
         private static string GetStringValue(

@@ -8,6 +8,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -139,6 +140,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // -----------------------------------------------------------------------
         // CSR generation (BouncyCastle — project crypto policy)
         // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// Builds a real PKCS#10 CSR for <paramref name="cn"/> carrying arbitrary
+        /// <paramref name="names"/> in its subjectAltName extension — used to exercise
+        /// GeneralName types that have no domain-name rendering.
+        /// </summary>
+        private static string GenerateCsrPemWithGeneralNames(string cn, params GeneralName[] names)
+        {
+            var keyGen = new RsaKeyPairGenerator();
+            keyGen.Init(new KeyGenerationParameters(new SecureRandom(), 2048));
+            AsymmetricCipherKeyPair kp = keyGen.GenerateKeyPair();
+
+            var extGen = new X509ExtensionsGenerator();
+            extGen.AddExtension(X509Extensions.SubjectAlternativeName, critical: false,
+                extValue: new GeneralNames(names));
+
+            var attributes = new DerSet(new AttributePkcs(
+                PkcsObjectIdentifiers.Pkcs9AtExtensionRequest,
+                new DerSet(extGen.Generate())));
+
+            var csr = new Pkcs10CertificationRequest(
+                "SHA256withRSA", new X509Name($"CN={cn}"), kp.Public, attributes, kp.Private);
+
+            return "-----BEGIN CERTIFICATE REQUEST-----\n"
+                 + Convert.ToBase64String(csr.GetEncoded(), Base64FormattingOptions.InsertLineBreaks)
+                 + "\n-----END CERTIFICATE REQUEST-----";
+        }
 
         /// <summary>
         /// Builds a real PKCS#10 CSR for <paramref name="cn"/>, optionally carrying a
@@ -376,6 +404,155 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 enrollmentType: EnrollmentType.New);
 
             AdditionalDomains(CapturedCertificateInformation()).Should().BeNull();
+        }
+
+        // =======================================================================
+        // GeneralName types with no domain-name rendering
+        // =======================================================================
+
+        /// <summary>
+        /// A UPN otherName and a directoryName must NOT be submitted.
+        ///
+        /// Regression: GeneralNameToValue's default branch returned BouncyCastle's ASN.1
+        /// stringification, so a Windows-generated CSR carrying a UPN otherName put
+        /// "[1.3.6.1.4.1.311.20.2.3, [CONTEXT 0]svc@corp.example.com]" into additionalDomains as if
+        /// it were a domain name — breaking orders that previously succeeded, and contradicting the
+        /// method's own doc comment. These types cannot become a certificate SAN via a domain-name
+        /// field at all, which is why they are skipped (with a Warning) rather than submitted the way
+        /// well-formed IP/email/URI SANs are.
+        /// </summary>
+        [Fact]
+        public async Task CsrOtherNameAndDirectoryName_AreNotSubmittedAsDomains()
+        {
+            // UPN otherName, as emitted by Windows/AD certificate tooling.
+            var upn = new GeneralName(GeneralName.OtherName, new DerSequence(
+                new DerObjectIdentifier("1.3.6.1.4.1.311.20.2.3"),
+                new DerTaggedObject(true, 0, new DerUtf8String("svc@corp.example.com"))));
+
+            var directoryName = new GeneralName(
+                GeneralName.DirectoryName, new X509Name("CN=host.example.com,O=Acme"));
+
+            var plugin = BuildPlugin();
+
+            await plugin.Enroll(
+                csr: GenerateCsrPemWithGeneralNames(
+                    "host.example.com",
+                    new GeneralName(GeneralName.DnsName, "alt.example.com"),
+                    upn,
+                    directoryName),
+                subject: "CN=host.example.com",
+                san: null,
+                productInfo: MakeProductInfo(),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            var domains = AdditionalDomains(CapturedCertificateInformation());
+
+            domains.Should().BeEquivalentTo(new[] { "alt.example.com" },
+                "only the renderable DNS name may be submitted");
+            domains.Should().NotContain(d => d.Contains("1.3.6.1.4.1.311.20.2.3"),
+                "an otherName must never be submitted as an ASN.1 dump");
+            domains.Should().NotContain(d => d.Contains("CONTEXT"),
+                "BouncyCastle ASN.1 debris must never reach the wire");
+            domains.Should().NotContain(d => d.StartsWith("CN=", StringComparison.OrdinalIgnoreCase),
+                "a directoryName must never be submitted as a domain");
+        }
+
+        // =======================================================================
+        // Log-injection hardening (CWE-117)
+        // =======================================================================
+
+        /// <summary>
+        /// SAN values reach the log from the CSR and from Command's SAN dictionary — i.e. from the
+        /// requester. Structured message templates stop format-string abuse but not embedded
+        /// newlines, so a value carrying CRLF could forge audit records in the very log lines added
+        /// to make the submitted SAN set auditable. Pins the scrub on the private helper directly,
+        /// following ExtractSerialFromPemTests' pattern.
+        /// </summary>
+        [Theory]
+        [InlineData("evil.example.com\r\nINFO forged record", "evil.example.com\\r\\nINFO forged record")]
+        [InlineData("a\nb", "a\\nb")]
+        [InlineData("a\tb", "a\\tb")]
+        [InlineData("plain.example.com", "plain.example.com")]
+        [InlineData("", "")]
+        [InlineData(null, null)]
+        public void SanitizeForLog_NeutralizesControlCharacters(string input, string expected)
+        {
+            var method = typeof(CERTInextCAPlugin)
+                .GetMethod("SanitizeForLog", BindingFlags.NonPublic | BindingFlags.Static);
+            method.Should().NotBeNull("log sinks depend on this scrub existing");
+
+            var actual = (string)method!.Invoke(null, new object[] { input });
+
+            actual.Should().Be(expected);
+        }
+
+        /// <summary>
+        /// A CRLF-bearing SAN must not break enrollment, and the value is still submitted verbatim —
+        /// the scrub is a logging concern and deliberately does not mutate the payload sent to the CA.
+        /// </summary>
+        [Fact]
+        public async Task SanValueWithCrLf_DoesNotBreakEnrollment()
+        {
+            var plugin = BuildPlugin();
+
+            await plugin.Enroll(
+                csr: GenerateCsrPem("host.example.com"),
+                subject: "CN=host.example.com",
+                san: new Dictionary<string, string[]>
+                {
+                    ["dnsname"] = new[] { "alt.example.com\r\nforged log line" }
+                },
+                productInfo: MakeProductInfo(),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            AdditionalDomains(CapturedCertificateInformation())
+                .Should().ContainSingle().Which.Should().Contain("alt.example.com");
+        }
+
+        // =======================================================================
+        // SubmitNonDnsSans escape hatch
+        // =======================================================================
+
+        /// <summary>
+        /// Submitting non-DNS SANs flips affected enrollments from "issues, silently missing the
+        /// name" to "parks pending". SubmitNonDnsSans=false restores the pre-1.0.1 behaviour so an
+        /// upgraded host has a way back that isn't a plugin downgrade.
+        /// </summary>
+        [Fact]
+        public async Task SubmitNonDnsSansFalse_SubmitsDnsNamesOnly()
+        {
+            var plugin = new CERTInextCAPlugin(
+                BuildRealClient(),
+                new CERTInextConfig { PickupRetries = 0, SubmitNonDnsSans = false });
+
+            await plugin.Enroll(
+                csr: GenerateCsrPem("host.example.com"),
+                subject: "CN=host.example.com",
+                san: new Dictionary<string, string[]>
+                {
+                    ["dnsname"]    = new[] { "alt.example.com" },
+                    ["ipaddress"]  = new[] { "192.0.2.10" },
+                    ["rfc822name"] = new[] { "admin@example.com" }
+                },
+                productInfo: MakeProductInfo(),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            AdditionalDomains(CapturedCertificateInformation())
+                .Should().BeEquivalentTo(new[] { "alt.example.com" },
+                    "with the switch off, only DNS names are submitted");
+        }
+
+        /// <summary>
+        /// The switch defaults to true, so the documented default behaviour is pinned independently
+        /// of any test that sets it explicitly.
+        /// </summary>
+        [Fact]
+        public void SubmitNonDnsSans_DefaultsToTrue()
+        {
+            new CERTInextConfig().SubmitNonDnsSans.Should().BeTrue();
         }
 
         // =======================================================================
