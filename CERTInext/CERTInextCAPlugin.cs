@@ -1696,8 +1696,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // record" means.
             async Task CleanupPartialStagingAsync()
             {
-                foreach (var entry in stagedValidations)
-                    await CleanupOneStagedValidationAsync(entry, " after an early exit from DCV staging");
+                // Concurrent, not sequential: each cleanup call already has its own independent
+                // CleanupValidationTimeoutSeconds bound (see CleanupOneStagedValidationAsync), but
+                // running them one after another meant that bound was per-call, not in aggregate — a
+                // UCC order with N staged domains could hold the calling request open for up to
+                // N × CleanupValidationTimeoutSeconds if the DNS provider was merely slow (not even
+                // hung) on every delete, which can exceed DcvTimeoutMinutes itself and defeats the
+                // "entire DCV flow is hard-timeout-bounded" guarantee for exactly the multi-SAN case
+                // this diff exists to support. Running them concurrently bounds the wall-clock time
+                // for the whole batch to the slowest single call, regardless of domain count — these
+                // are independent per-domain operations (different hostnames/records) with no shared
+                // mutable state, so there is nothing for concurrent execution to race on.
+                await Task.WhenAll(stagedValidations.Select(entry =>
+                    CleanupOneStagedValidationAsync(entry, " after an early exit from DCV staging")));
             }
 
             // Shared by CleanupPartialStagingAsync above and the try/finally's own cleanup loop
@@ -1942,9 +1953,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             finally
             {
-                // Always clean up staged DNS records — even on failure
-                foreach (var entry in stagedValidations)
-                    await CleanupOneStagedValidationAsync(entry, "");
+                // Always clean up staged DNS records — even on failure. Concurrent, not sequential
+                // — see CleanupPartialStagingAsync's comment above for why: sequential cleanup made
+                // the aggregate wall-clock time for this block scale with the number of staged SAN
+                // domains, unbounded relative to DcvTimeoutMinutes, on this ordinary success path too.
+                await Task.WhenAll(stagedValidations.Select(entry =>
+                    CleanupOneStagedValidationAsync(entry, "")));
             }
 
             return true;

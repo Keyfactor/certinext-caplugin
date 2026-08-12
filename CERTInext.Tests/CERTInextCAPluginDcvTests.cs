@@ -941,7 +941,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // scenario that must prove "a provider IS deployed" rather than "nothing is deployed".
             var plugin = BuildPlugin(
                 mock.Object,
-                new SelectiveDomainValidatorFactory(validator, resolvableDomain: cn),
+                new FakeDomainValidatorFactory(validator, resolvableDomain: cn),
                 DcvConfig());
 
             Func<Task> act = () => Enroll(plugin);
@@ -1126,7 +1126,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var validator = new FakeDomainValidator();
             var plugin = BuildPlugin(
                 mock.Object,
-                new SelectiveDomainValidatorFactory(validator, resolvableDomain: good),
+                new FakeDomainValidatorFactory(validator, resolvableDomain: good),
                 DcvConfig(dcvWaitForIssuanceSeconds: 10));
 
             var result = await Enroll(plugin);
@@ -1136,90 +1136,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 "only the domain with a resolvable provider should be staged, and it must still be staged")
                 .Which.Should().Be((expectedHostname, MockCertificateData.DcvToken));
             result.Status.Should().Be((int)EndEntityStatus.GENERATED);
-        }
-
-        /// <summary>Factory that resolves a validator for exactly one domain and null for all others.</summary>
-        private sealed class SelectiveDomainValidatorFactory : IDomainValidatorFactory
-        {
-            private readonly IDomainValidator _validator;
-            private readonly string _resolvableDomain;
-
-            public SelectiveDomainValidatorFactory(IDomainValidator validator, string resolvableDomain)
-            {
-                _validator = validator;
-                _resolvableDomain = resolvableDomain;
-            }
-
-            public IDomainValidator ResolveDomainValidator(string domain, string validationType) =>
-                string.Equals(domain, _resolvableDomain, StringComparison.OrdinalIgnoreCase) ? _validator : null;
-
-            public IDomainValidator PrimaryValidator => _validator;
-        }
-
-        /// <summary>
-        /// Like <see cref="FakeDomainValidator"/>, but StageValidation fails only for hostnames
-        /// matching <see cref="_failingHostnameSubstring"/> — needed to prove that a failure on one
-        /// domain of a multi-domain order still cleans up what was already staged for the others.
-        /// </summary>
-        private sealed class PartiallyFailingDomainValidator : IDomainValidator
-        {
-            private readonly string _failingHostnameSubstring;
-
-            public PartiallyFailingDomainValidator(string failingHostnameSubstring) =>
-                _failingHostnameSubstring = failingHostnameSubstring;
-
-            public List<(string key, string value)> StagedRecords { get; } = new();
-            public List<string> CleanedUpKeys { get; } = new();
-
-            public void Initialize(IDomainValidatorConfigProvider configProvider) { }
-
-            public Task<DomainValidationResult> StageValidation(string key, string value, CancellationToken cancellationToken)
-            {
-                bool shouldFail = key.Contains(_failingHostnameSubstring, StringComparison.OrdinalIgnoreCase);
-                if (!shouldFail)
-                    StagedRecords.Add((key, value));
-
-                return Task.FromResult(new DomainValidationResult
-                {
-                    Success      = !shouldFail,
-                    ErrorMessage = shouldFail ? "Stage failed (test stub, selective)" : null
-                });
-            }
-
-            public Task<DomainValidationResult> CleanupValidation(string key, CancellationToken cancellationToken)
-            {
-                CleanedUpKeys.Add(key);
-                return Task.FromResult(new DomainValidationResult { Success = true });
-            }
-
-            public Task ValidateConfiguration(Dictionary<string, object> configuration) => Task.CompletedTask;
-            public Dictionary<string, PropertyConfigInfo> GetDomainValidatorAnnotations() => new();
-            public string GetValidationType() => "dns-01";
-        }
-
-        /// <summary>Records the CancellationToken it was actually called with, for each method.</summary>
-        private sealed class TokenCapturingDomainValidator : IDomainValidator
-        {
-            public List<(string key, string value)> StagedRecords { get; } = new();
-            public List<CancellationToken> CleanupTokens { get; } = new();
-
-            public void Initialize(IDomainValidatorConfigProvider configProvider) { }
-
-            public Task<DomainValidationResult> StageValidation(string key, string value, CancellationToken cancellationToken)
-            {
-                StagedRecords.Add((key, value));
-                return Task.FromResult(new DomainValidationResult { Success = true });
-            }
-
-            public Task<DomainValidationResult> CleanupValidation(string key, CancellationToken cancellationToken)
-            {
-                CleanupTokens.Add(cancellationToken);
-                return Task.FromResult(new DomainValidationResult { Success = true });
-            }
-
-            public Task ValidateConfiguration(Dictionary<string, object> configuration) => Task.CompletedTask;
-            public Dictionary<string, PropertyConfigInfo> GetDomainValidatorAnnotations() => new();
-            public string GetValidationType() => "dns-01";
         }
 
         /// <summary>
@@ -1258,7 +1174,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetDcvAsync(order, bad, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
                 .ThrowsAsync(new OperationCanceledException("DCV timeout budget exceeded"));
 
-            var validator = new TokenCapturingDomainValidator();
+            var validator = new FakeDomainValidator();
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
 
             Func<Task> act = () => Enroll(plugin);
@@ -1275,6 +1191,80 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             cleanupToken.CanBeCanceled.Should().BeTrue(
                 "the cleanup call must still be bounded by its own timeout, not unbounded " +
                 "(CancellationToken.None) — a hanging DNS-provider call must not block forever");
+        }
+
+        /// <summary>
+        /// Regression: the routine, always-runs finally-block cleanup used to iterate staged domains
+        /// sequentially. Each cleanup call already has its own independent
+        /// CleanupValidationTimeoutSeconds bound, but running them one after another meant that
+        /// bound was per-call, not in aggregate — a UCC order with N staged domains could hold the
+        /// calling request open for up to N x the per-call ceiling if the DNS provider was merely
+        /// slow (not even hung) on every delete, which can exceed DcvTimeoutMinutes itself for a
+        /// realistic multi-SAN count. Proven here by timing: three domains each with an artificial
+        /// cleanup delay must complete in close to ONE delay's worth of wall time, not three.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_CleanupOfMultipleDomains_RunsConcurrently_NotSequentially()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            string[] domains = { "a.example.com", "b.example.com", "c.example.com" };
+            var cleanupDelay = TimeSpan.FromMilliseconds(800);
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+
+            var verifiedDetail = DcvDetail(Constants.Dcv.StatusValidated);
+            var verifiedRaw = new Dictionary<string, System.Text.Json.JsonElement>();
+            foreach (string d in domains) verifiedRaw[d] = verifiedDetail;
+
+            mock.SetupSequence(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, domains))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId       = "1",
+                        CertificateStatusId = "1",
+                        DomainVerification  = new TrackOrderDomainVerification
+                        {
+                            Status           = Constants.Dcv.StatusValidated,
+                            RawDomainEntries = verifiedRaw
+                        }
+                    }
+                });
+
+            foreach (string d in domains)
+            {
+                mock.Setup(c => c.GetDcvAsync(order, d, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                    .ReturnsAsync(MockCertificateData.DcvTokenResponse($"token-{d}"));
+                mock.Setup(c => c.VerifyDcvAsync(order, d, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                    .Returns(Task.CompletedTask);
+            }
+            mock.Setup(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(order));
+
+            var validator = new FakeDomainValidator { CleanupDelay = cleanupDelay };
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            await Enroll(plugin);
+            sw.Stop();
+
+            validator.CleanedUpKeys.Should().HaveCount(3, "all three staged domains must be cleaned up");
+
+            // This flow carries ~2s of fixed overhead unrelated to cleanup (DcvPropagationDelaySeconds
+            // and WaitForDcvVerificationAsync's poll interval both floor at 1s each — DcvConfig's
+            // propagationDelaySeconds default is deliberately 1, since 0 falls back to a 30s default
+            // in PerformDcvIfNeededAsync, not "no delay"). An 800ms-per-domain cleanup delay makes the
+            // concurrent-vs-sequential gap (≈800ms vs ≈2400ms of cleanup time) large relative to that
+            // fixed cost and to CI jitter. 4000ms sits well above "fixed overhead + one 800ms delay"
+            // and well below "fixed overhead + three 800ms delays run one after another".
+            sw.ElapsedMilliseconds.Should().BeLessThan(4000,
+                "cleanup for independent domains must run concurrently, not sequentially — " +
+                "3 domains x 800ms sequential would add roughly 3x this call's actual cleanup time");
         }
 
         /// <summary>
@@ -1314,7 +1304,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.IssuedCertRecord(order));
 
-            var validator = new PartiallyFailingDomainValidator(failingHostnameSubstring: bad);
+            var validator = new FakeDomainValidator
+            {
+                ShouldFail = key => key.Contains(bad, StringComparison.OrdinalIgnoreCase)
+            };
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
                 DcvConfig(dcvWaitForIssuanceSeconds: 10));
 
