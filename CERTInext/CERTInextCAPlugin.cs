@@ -1711,17 +1711,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var (domain, hostname, validator) = entry;
                 try
                 {
-                    // CancellationToken.None, not `ct`: this is a best-effort compensating action —
-                    // removing a TXT record we already published — and it must run regardless of
-                    // WHY we are cleaning up, including the case where `ct` itself is the reason.
-                    // The dominant real trigger for this exact call site is the shared
-                    // DcvTimeoutMinutes-bound token firing mid-loop (see the outer catch's comment
-                    // below), which means `ct` is guaranteed already cancelled here. A cooperative
-                    // IDomainValidator that forwards its token into its own HTTP calls — the
-                    // reference CloudflareDomainValidator in this repo does exactly that — would
+                    // A fresh, independently-bounded token — deliberately neither `ct` nor
+                    // CancellationToken.None.
+                    //
+                    // Not `ct`: this is a best-effort compensating action — removing a TXT record we
+                    // already published — and it must run regardless of WHY we are cleaning up,
+                    // including the case where `ct` itself is the reason (the dominant real trigger
+                    // for the early-exit call site is the shared DcvTimeoutMinutes-bound token firing
+                    // mid-loop, which means `ct` is guaranteed already cancelled there). A
+                    // cooperative IDomainValidator that forwards its token into its own HTTP calls —
+                    // the reference CloudflareDomainValidator in this repo does exactly that — would
                     // throw immediately on an already-cancelled token and never even attempt the
                     // delete, silently leaving the record published with only a Warning logged.
-                    await validator.CleanupValidation(hostname, CancellationToken.None);
+                    //
+                    // Not CancellationToken.None either: this method's own SOX CC7.3 guarantee is
+                    // that the whole DCV flow is hard-timeout-bounded so a stuck DNS provider cannot
+                    // hold a gateway worker thread indefinitely. That bound has to come from
+                    // somewhere for THIS call too — including the routine, always-runs finally-block
+                    // cleanup on the ordinary successful-DCV path, which was never cancellation-
+                    // related to begin with and would otherwise hang forever on a DNS provider
+                    // plugin whose underlying network call stalls.
+                    using var cleanupCts = new CancellationTokenSource(
+                        TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
+                    await validator.CleanupValidation(hostname, cleanupCts.Token);
                     _logger.LogInformation(
                         "DNS TXT record cleaned up{Context}. Domain={Domain}, Hostname={Hostname}",
                         context, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
@@ -2482,14 +2494,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "and were not submitted (ASN.1 GeneralName tag(s): {Tags}). CERTInext's " +
                     "additionalDomains field carries domain names only, so these cannot appear on the " +
                     "issued certificate. Remove them from the CSR if they are required. Subject={Subject}",
-                    skippedCsrTags.Count, string.Join(", ", skippedCsrTags), subject);
+                    skippedCsrTags.Count, string.Join(", ", skippedCsrTags), LogSanitizer.Strip(subject));
             }
 
             if (result.Count == 0)
             {
                 _logger.LogDebug(
                     "No SANs supplied by the gateway and none found in the CSR — submitting the order " +
-                    "with domainName only. Subject={Subject}", subject);
+                    "with domainName only. Subject={Subject}", LogSanitizer.Strip(subject));
                 return null;
             }
 
@@ -2527,7 +2539,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "NOT contain these names. Set SubmitNonDnsSans back to true to submit them and have " +
                     "CERTInext surface the problem instead. Subject={Subject}",
                     nonDns.Count, LogSanitizer.Strip(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))),
-                    subject);
+                    LogSanitizer.Strip(subject));
 
                 result = result
                     .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
@@ -2545,7 +2557,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "Resolved {Total} SAN(s) for submission. FromGatewayRequest={FromGateway}, " +
                 "AddedFromCsrFallback={FromCsr}, Sans={Sans}, Subject={Subject}",
                 result.Count, fromGateway, fromCsrKept,
-                LogSanitizer.Strip(string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}"))), subject);
+                LogSanitizer.Strip(string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}"))),
+                LogSanitizer.Strip(subject));
 
             if (fromCsrKept > 0)
             {
@@ -2556,7 +2569,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "Command supplied no SAN data for this enrollment; {Count} SAN(s) present in the CSR " +
                     "have been added to the order instead. Review the enrollment pattern / template SAN " +
                     "configuration. Subject={Subject}",
-                    fromCsrKept, subject);
+                    fromCsrKept, LogSanitizer.Strip(subject));
             }
 
             if (nonDns.Count > 0)
@@ -2572,7 +2585,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "subscriber requested. Remove them from the CSR or the enrollment pattern if the " +
                     "order should proceed. Subject={Subject}",
                     nonDns.Count, LogSanitizer.Strip(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))),
-                    subject);
+                    LogSanitizer.Strip(subject));
             }
 
             return result;

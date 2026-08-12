@@ -841,6 +841,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // Undrainable pending domains must not strand the valid ones on the same order
         // ---------------------------------------------------------------------------
 
+        /// <summary>Builds a DomainVerificationDetail JsonElement for the given dcvStatus.</summary>
+        private static System.Text.Json.JsonElement DcvDetail(string dcvStatus) =>
+            System.Text.Json.JsonSerializer.SerializeToElement(new DomainVerificationDetail
+            {
+                DcvMethod = Constants.Dcv.MethodDnsTxt,
+                DcvStatus = dcvStatus,
+                Status    = "1"
+            });
+
         /// <summary>
         /// Builds a TrackOrder response whose domainVerification block lists several pending
         /// domains, so tests can mix validatable and unvalidatable keys on one order.
@@ -848,13 +857,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private static TrackOrderResponse DcvPendingTrackResponseMultiDomain(
             string orderNumber, params string[] domains)
         {
-            var detail = System.Text.Json.JsonSerializer.SerializeToElement(new DomainVerificationDetail
-            {
-                DcvMethod = Constants.Dcv.MethodDnsTxt,
-                DcvStatus = Constants.Dcv.StatusPending,
-                Status    = "1"
-            });
-
+            var detail = DcvDetail(Constants.Dcv.StatusPending);
             var raw = new Dictionary<string, System.Text.Json.JsonElement>();
             foreach (string d in domains)
                 raw[d] = detail;
@@ -883,18 +886,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private static TrackOrderResponse DcvMixedStatusTrackResponse(
             string validatedDomain, string pendingDomain)
         {
-            var validated = System.Text.Json.JsonSerializer.SerializeToElement(new DomainVerificationDetail
-            {
-                DcvMethod = Constants.Dcv.MethodDnsTxt,
-                DcvStatus = Constants.Dcv.StatusValidated,
-                Status    = "1"
-            });
-            var pending = System.Text.Json.JsonSerializer.SerializeToElement(new DomainVerificationDetail
-            {
-                DcvMethod = Constants.Dcv.MethodDnsTxt,
-                DcvStatus = Constants.Dcv.StatusPending,
-                Status    = "1"
-            });
+            var validated = DcvDetail(Constants.Dcv.StatusValidated);
+            var pending = DcvDetail(Constants.Dcv.StatusPending);
 
             return new TrackOrderResponse
             {
@@ -1233,14 +1226,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         /// Regression: the compensating cleanup call after an early exit from staging (chiefly the
         /// shared DcvTimeoutMinutes-bound token firing mid-loop, which is what this scenario
         /// simulates via a domain whose GetDcv call raises OperationCanceledException) must not reuse
-        /// the same token the operation was cancelled by — CleanupValidation must receive
-        /// CancellationToken.None, not the ambient `ct`. A cooperative IDomainValidator that forwards
+        /// the same token the operation was cancelled by. A cooperative IDomainValidator that forwards
         /// its token into its own HTTP calls (the reference CloudflareDomainValidator in this repo
         /// does exactly that) would otherwise throw immediately on an already-cancelled token and
         /// never even attempt the delete, silently leaving the TXT record published.
+        ///
+        /// CancellationToken.None would fix that but removes the cleanup call's timeout bound
+        /// entirely — a second, adversarially-found regression on top of the first — so the correct
+        /// fix is a fresh token with its OWN short timeout: not cancelled going in, but still bounded.
         /// </summary>
         [Fact]
-        public async Task Dcv_CleanupAfterCancellation_UsesCancellationTokenNone_NotTheAmbientToken()
+        public async Task Dcv_CleanupAfterCancellation_UsesAFreshBoundedToken_NotTheAmbientToken()
         {
             const string order = MockCertificateData.DcvOrderId;
             const string good  = "a.example.com";
@@ -1270,11 +1266,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             validator.StagedRecords.Should().ContainSingle(
                 "'good' must have staged before 'bad' threw, for this test to exercise cleanup at all");
-            validator.CleanupTokens.Should().ContainSingle(
-                "the staged entry must go through the cancellation cleanup path exactly once")
-                .Which.Should().Be(CancellationToken.None,
-                    "cleanup is a best-effort compensating action and must run with its own token, " +
-                    "not the token that was just cancelled");
+            var cleanupToken = validator.CleanupTokens.Should().ContainSingle(
+                "the staged entry must go through the cancellation cleanup path exactly once").Subject;
+
+            cleanupToken.IsCancellationRequested.Should().BeFalse(
+                "cleanup is a best-effort compensating action and must run with its own token, " +
+                "not the already-cancelled ambient one");
+            cleanupToken.CanBeCanceled.Should().BeTrue(
+                "the cleanup call must still be bounded by its own timeout, not unbounded " +
+                "(CancellationToken.None) — a hanging DNS-provider call must not block forever");
         }
 
         /// <summary>

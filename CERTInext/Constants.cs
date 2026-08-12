@@ -324,6 +324,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Override via the DcvTxtRecordTemplate connector config field.
             public const string DefaultTxtRecordTemplate = "_emsign-validation.{0}";
 
+            // Independent bound for a single CleanupValidation (TXT-record removal) call. This is
+            // deliberately its own fixed ceiling, not a fraction of DcvTimeoutMinutes and not the
+            // ambient DCV-flow cancellation token: cleanup is a best-effort compensating action that
+            // must get a real chance to run even when the operation it's cleaning up after was
+            // itself cancelled (the ambient token would already be cancelled at that point), but it
+            // still must not be allowed to hang the calling gateway request forever if a DNS
+            // provider plugin's underlying network call stalls. 60s comfortably covers a single
+            // DELETE-shaped call under normal conditions (the reference CloudflareDomainValidator's
+            // HttpClient default alone is 100s) without risking an indefinite hang.
+            public const int CleanupValidationTimeoutSeconds = 60;
+
             // Defaults for the DCV-during-sync bounds (issue 0002).
             public const int DefaultSyncMaxOrderAgeHours = 24;
             public const int DefaultSyncMaxPerPass = 50;
