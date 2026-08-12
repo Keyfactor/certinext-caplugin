@@ -259,7 +259,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         "PlaceOrder received no usable response (DomainName={Domain}, HttpStatus={Status}, LatencyMs={Latency}). " +
                         "Not retrying to avoid a duplicate order (EMS-947). If CERTInext created the order it " +
                         "will be imported by the next synchronization.",
-                        request.OrderDetails?.CertificateInformation?.DomainName, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                        LogSanitizer.Strip(request.OrderDetails?.CertificateInformation?.DomainName),
+                        (int)resp.StatusCode, sw.ElapsedMilliseconds);
                     throw new Exception(
                         "CERTInext did not return a usable response to the order submission. If the order was " +
                         "created it will be imported by the next synchronization — do not resubmit immediately. " +
@@ -309,7 +310,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             "PlaceOrder classified {ErrorCode} as a duplicate transaction (not a hard failure). " +
                             "DomainName={Domain}, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}. If an order exists " +
                             "for this transaction it will be imported by the next synchronization.",
-                            result.Meta.ErrorCode, request.OrderDetails?.CertificateInformation?.DomainName, Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                            result.Meta.ErrorCode,
+                            LogSanitizer.Strip(request.OrderDetails?.CertificateInformation?.DomainName),
+                            Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds);
                         throw new Exception(
                             "CERTInext reported a duplicate order transaction (EMS-947). If an order was created " +
                             "for this transaction it will be imported by the next synchronization — do not resubmit " +
@@ -1330,6 +1333,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             for (int attempt = 1; attempt <= attempts; attempt++)
             {
                 resp = await _http.ExecuteAsync(req, ct);
+
+                // This client is built with ThrowOnAnyError=false (see the constructor), so a
+                // cancelled ct does not surface as OperationCanceledException from ExecuteAsync —
+                // RestSharp catches HttpClient.SendAsync's cancellation internally and returns a
+                // non-throwing, unsuccessful RestResponse instead. Left unchecked, that response
+                // reaches DeserializeOrThrow and becomes a plain Exception indistinguishable from a
+                // genuine API failure — which is exactly how a caller such as
+                // PerformDcvIfNeededAsync's shared DCV-timeout cancellation was still landing in a
+                // generic "GetDcv failed" per-domain catch instead of the cancellation-specific one,
+                // even after that method was hardened to re-throw a real OperationCanceledException
+                // past its per-domain catches. Surface the true cancellation here, at the one place
+                // in the client that actually holds `ct`, before any retry or error-wrapping logic
+                // sees the response.
+                ct.ThrowIfCancellationRequested();
 
                 // Success or 4xx client error — return immediately
                 bool isClientError = (int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500;

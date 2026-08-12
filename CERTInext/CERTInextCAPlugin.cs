@@ -1689,25 +1689,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // them. Kept even though every per-domain failure below is now skip-and-continue rather
             // than throw: it is the safety net for a genuinely unexpected exception (cancellation, a
             // bug, a validator implementation that throws instead of returning a failure result).
+            //
+            // Shares its per-entry cleanup logic with the try/finally's own cleanup loop further
+            // down via CleanupOneStagedValidation — the two call sites differ only in when they run
+            // (an early exit here vs. always-run-at-the-end there), not in what "clean up one TXT
+            // record" means.
             async Task CleanupPartialStagingAsync()
             {
-                foreach (var (domain, hostname, validator) in stagedValidations)
+                foreach (var entry in stagedValidations)
+                    await CleanupOneStagedValidationAsync(entry, " after an early exit from DCV staging");
+            }
+
+            // Shared by CleanupPartialStagingAsync above and the try/finally's own cleanup loop
+            // below — both mean "remove one already-published TXT record", just at different times
+            // (an early exit vs. always-run-at-the-end). `context` distinguishes the two in the log
+            // text without duplicating the try/catch/log structure itself.
+            async Task CleanupOneStagedValidationAsync(
+                (string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator) entry,
+                string context)
+            {
+                var (domain, hostname, validator) = entry;
+                try
                 {
-                    try
-                    {
-                        await validator.CleanupValidation(hostname, ct);
-                        _logger.LogInformation(
-                            "DNS TXT record cleaned up after an early exit from DCV staging. " +
-                            "Domain={Domain}, Hostname={Hostname}",
-                            LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex,
-                            "Failed to clean up DNS TXT record after an early exit from DCV staging. " +
-                            "Domain={Domain}, Hostname={Hostname}. May require manual removal.",
-                            LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
-                    }
+                    await validator.CleanupValidation(hostname, ct);
+                    _logger.LogInformation(
+                        "DNS TXT record cleaned up{Context}. Domain={Domain}, Hostname={Hostname}",
+                        context, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Failed to clean up DNS TXT record{Context}. Domain={Domain}, Hostname={Hostname}. " +
+                        "May require manual removal.",
+                        context, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
                 }
             }
 
@@ -1907,22 +1921,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             finally
             {
                 // Always clean up staged DNS records — even on failure
-                foreach (var (domain, hostname, validator) in stagedValidations)
-                {
-                    try
-                    {
-                        await validator.CleanupValidation(hostname, ct);
-                        _logger.LogInformation(
-                            "DNS TXT record cleaned up. Domain={Domain}, Hostname={Hostname}",
-                            LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex,
-                            "Failed to clean up DNS TXT record. Domain={Domain}, Hostname={Hostname}",
-                            LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
-                    }
-                }
+                foreach (var entry in stagedValidations)
+                    await CleanupOneStagedValidationAsync(entry, "");
             }
 
             return true;
