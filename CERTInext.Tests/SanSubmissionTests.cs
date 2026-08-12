@@ -152,40 +152,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             keyGen.Init(new KeyGenerationParameters(new SecureRandom(), 2048));
             AsymmetricCipherKeyPair kp = keyGen.GenerateKeyPair();
 
-            var extGen = new X509ExtensionsGenerator();
-            extGen.AddExtension(X509Extensions.SubjectAlternativeName, critical: false,
-                extValue: new GeneralNames(names));
-
-            var attributes = new DerSet(new AttributePkcs(
-                PkcsObjectIdentifiers.Pkcs9AtExtensionRequest,
-                new DerSet(extGen.Generate())));
-
-            var csr = new Pkcs10CertificationRequest(
-                "SHA256withRSA", new X509Name($"CN={cn}"), kp.Public, attributes, kp.Private);
-
-            return "-----BEGIN CERTIFICATE REQUEST-----\n"
-                 + Convert.ToBase64String(csr.GetEncoded(), Base64FormattingOptions.InsertLineBreaks)
-                 + "\n-----END CERTIFICATE REQUEST-----";
-        }
-
-        /// <summary>
-        /// Builds a real PKCS#10 CSR for <paramref name="cn"/>, optionally carrying a
-        /// subjectAltName extension holding <paramref name="dnsSans"/>.
-        /// </summary>
-        private static string GenerateCsrPem(string cn, params string[] dnsSans)
-        {
-            var keyGen = new RsaKeyPairGenerator();
-            keyGen.Init(new KeyGenerationParameters(new SecureRandom(), 2048));
-            AsymmetricCipherKeyPair kp = keyGen.GenerateKeyPair();
-
             Asn1Set attributes = null;
-            if (dnsSans != null && dnsSans.Length > 0)
+            if (names != null && names.Length > 0)
             {
-                var names = new GeneralNames(
-                    dnsSans.Select(d => new GeneralName(GeneralName.DnsName, d)).ToArray());
-
                 var extGen = new X509ExtensionsGenerator();
-                extGen.AddExtension(X509Extensions.SubjectAlternativeName, critical: false, extValue: names);
+                extGen.AddExtension(X509Extensions.SubjectAlternativeName, critical: false,
+                    extValue: new GeneralNames(names));
 
                 attributes = new DerSet(new AttributePkcs(
                     PkcsObjectIdentifiers.Pkcs9AtExtensionRequest,
@@ -199,6 +171,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                  + Convert.ToBase64String(csr.GetEncoded(), Base64FormattingOptions.InsertLineBreaks)
                  + "\n-----END CERTIFICATE REQUEST-----";
         }
+
+        /// <summary>
+        /// Builds a real PKCS#10 CSR for <paramref name="cn"/>, optionally carrying a
+        /// subjectAltName extension holding <paramref name="dnsSans"/>.
+        /// </summary>
+        private static string GenerateCsrPem(string cn, params string[] dnsSans) =>
+            GenerateCsrPemWithGeneralNames(
+                cn, (dnsSans ?? Array.Empty<string>()).Select(d => new GeneralName(GeneralName.DnsName, d)).ToArray());
 
         // =======================================================================
         // End-to-end: Command's SAN dictionary → the JSON on the wire
@@ -397,6 +377,43 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             AdditionalDomains(CapturedCertificateInformation())
                 .Should().BeEquivalentTo(new[] { "alt.example.com", "192.0.2.10", "admin@example.com" });
+        }
+
+        /// <summary>
+        /// Regression for a stale-count bug in BuildSanList's own audit log: with a mixed
+        /// DNS/non-DNS gateway SAN dictionary and SubmitNonDnsSans=false, the "Resolved N SAN(s)"
+        /// log line reported the pre-filter gateway count (3) alongside the post-filter total (1) —
+        /// an arithmetic impossibility ("Resolved 1 ... FromGatewayRequest=3"). There is no log-
+        /// capture seam in this codebase (ILogger comes from a fixed LogHandler.GetClassLogger()
+        /// field, not an injectable dependency), so this pins the payload-level data the log line is
+        /// computed from instead: with the non-DNS entries filtered out, exactly the one DNS name
+        /// must reach additionalDomains — proving the surviving gateway-sourced count is 1, not the
+        /// pre-filter 3 the stale log line used to claim.
+        /// </summary>
+        [Fact]
+        public async Task MixedGatewaySans_SubmitNonDnsSansFalse_OnlyDnsNameSurvivesFiltering()
+        {
+            var plugin = new CERTInextCAPlugin(
+                BuildRealClient(),
+                new CERTInextConfig { PickupRetries = 0, SubmitNonDnsSans = false });
+
+            await plugin.Enroll(
+                csr: GenerateCsrPem("host.example.com"),
+                subject: "CN=host.example.com",
+                san: new Dictionary<string, string[]>
+                {
+                    ["dnsname"]    = new[] { "alt.example.com" },
+                    ["ipaddress"]  = new[] { "192.0.2.10" },
+                    ["rfc822name"] = new[] { "admin@example.com" }
+                },
+                productInfo: MakeProductInfo(),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            AdditionalDomains(CapturedCertificateInformation())
+                .Should().BeEquivalentTo(new[] { "alt.example.com" },
+                    "only the DNS entry should survive the SubmitNonDnsSans=false filter, out of " +
+                    "3 the gateway supplied");
         }
 
         /// <summary>

@@ -2462,18 +2462,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
             }
 
-            int fromGateway = result.Count;
-
             // CSR fallback — only when the gateway dictionary is itself absent (san == null), NOT
-            // merely "computed to zero SAN entries" (fromGateway == 0). Those are different things:
+            // merely "computed to zero SAN entries" (i.e. result.Count == 0 at this point). Those
+            // are different things:
             // a non-null dictionary — even an empty one, or one whose keys all map to empty arrays
             // — means Command's enrollment pattern ran and deliberately produced no SANs for this
             // request, which the CSR fallback must respect rather than override. san == null means
             // Command never populated SAN data for this enrollment path at all, which is the one
-            // case this fallback exists for. Checking fromGateway instead of san itself would let an
-            // enrollment pattern that explicitly computes zero SANs still have CSR-derived names
-            // spliced back in — reopening the policy-reintroduction risk the fallback-over-union
-            // redesign exists to close.
+            // case this fallback exists for. Checking "computed to zero" instead of "san is null"
+            // would let an enrollment pattern that explicitly computes zero SANs still have
+            // CSR-derived names spliced back in — reopening the policy-reintroduction risk the
+            // fallback-over-union redesign exists to close.
             var skippedCsrTags = new List<int>();
             if (san == null)
             {
@@ -2553,10 +2552,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // The blind spot that hid the original defect was that nothing logged what we
             // resolved. Log the final, post-filter resolved set and its provenance at Information.
             int fromCsrKept = result.Count(s => fromCsrKeys.Contains($"{s.Type}|{s.Value}"));
+            // Post-filter, not the pre-filter `fromGateway` snapshot: gateway- and CSR-sourced
+            // entries are mutually exclusive by construction (the CSR fallback only ever runs when
+            // the gateway supplied nothing at all), so whatever's left in `result` and isn't
+            // fromCsrKept must be gateway-sourced. Using the pre-filter count here reproduced the
+            // exact self-contradicting-audit-trail bug this method was already restructured once to
+            // fix — with SubmitNonDnsSans=false this line could read e.g. "Resolved 1 SAN(s) ...
+            // FromGatewayRequest=3", an arithmetic impossibility for anyone reconciling counts.
+            int fromGatewayKept = result.Count - fromCsrKept;
             _logger.LogInformation(
                 "Resolved {Total} SAN(s) for submission. FromGatewayRequest={FromGateway}, " +
                 "AddedFromCsrFallback={FromCsr}, Sans={Sans}, Subject={Subject}",
-                result.Count, fromGateway, fromCsrKept,
+                result.Count, fromGatewayKept, fromCsrKept,
                 LogSanitizer.Strip(string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}"))),
                 LogSanitizer.Strip(subject));
 

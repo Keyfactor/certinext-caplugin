@@ -1330,6 +1330,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             int attempts = idempotent ? maxAttempts : 1;
             RestResponse resp = null;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             for (int attempt = 1; attempt <= attempts; attempt++)
             {
                 resp = await _http.ExecuteAsync(req, ct);
@@ -1346,6 +1347,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 // past its per-domain catches. Surface the true cancellation here, at the one place
                 // in the client that actually holds `ct`, before any retry or error-wrapping logic
                 // sees the response.
+                //
+                // Throwing here means every caller's own per-call audit line (Method/Path/HttpStatus/
+                // LatencyMs, logged after ExecuteWithRetryAsync returns) never executes for the
+                // cancelled call — that specific attempt would otherwise vanish from the audit trail
+                // entirely, leaving only a coarser, order-level "unexpected failure" log with no
+                // domain/endpoint/status/latency. Log that record here instead, at the one place that
+                // reliably sees every cancellation regardless of which of ExecuteWithRetryAsync's ~10
+                // callers is in flight.
+                if (ct.IsCancellationRequested)
+                {
+                    Logger.LogWarning(
+                        "CERTInext API call cancelled: Method={Method}, Path={Path}, HttpStatus={Status}, " +
+                        "ResponseStatus={ResponseStatus}, LatencyMs={Latency}, Attempt={Attempt}/{Max}.",
+                        req.Method, req.Resource, (int)resp.StatusCode, resp.ResponseStatus,
+                        sw.ElapsedMilliseconds, attempt, attempts);
+                }
                 ct.ThrowIfCancellationRequested();
 
                 // Success or 4xx client error — return immediately
