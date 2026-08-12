@@ -1649,7 +1649,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "[{Domains}]. They are skipped so the remaining {ValidCount} domain(s) can still be validated. " +
                     "This order cannot be issued by CERTInext until these are removed — they usually come from a " +
                     "non-DNS SAN (IP address, email, URI) that was requested on the enrollment.",
-                    invalidDomains.Count, orderNumber, SanitizeForLog(string.Join(", ", invalidDomains)),
+                    invalidDomains.Count, orderNumber, LogSanitizer.Strip(string.Join(", ", invalidDomains)),
                     validPendingDomains.Count);
             }
 
@@ -1669,93 +1669,151 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // deployed at all" (a gateway misconfiguration that must still fail loudly).
             var unresolvedDomains = new List<string>();
 
-            // Stage DNS TXT records for all pending domains
-            foreach (var (domain, _) in pendingDomains)
+            // Set instead of an immediate `return false` inside the loop below, so a not-yet-ready
+            // domain that is deferred mid-loop still goes through the same cleanup as every other
+            // exit path — see the try/catch around the loop.
+            bool deferToNextSyncCycle = false;
+
+            // Removes whatever TXT records were already published before an early exit from the
+            // staging loop (an exception, or a not-yet-ready deferral). Nothing else in this method
+            // cleans up mid-loop: the try/finally further down only runs once every pending domain
+            // has been staged, so without this, a later domain's failure orphans every TXT record
+            // already published for the earlier domains in the *same* order — permanently, since
+            // nothing else in the codebase calls CleanupValidation for them.
+            async Task CleanupPartialStagingAsync()
             {
-                GetDcvResponse dcvResp;
-                try
+                foreach (var (domain, hostname, validator) in stagedValidations)
                 {
-                    dcvResp = await _client.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
+                    try
+                    {
+                        await validator.CleanupValidation(hostname, ct);
+                        _logger.LogInformation(
+                            "DNS TXT record cleaned up after a later domain on the same order could not be " +
+                            "staged. Domain={Domain}, Hostname={Hostname}", domain, hostname);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Failed to clean up DNS TXT record after a partial staging failure. " +
+                            "Domain={Domain}, Hostname={Hostname}. May require manual removal.", domain, hostname);
+                    }
                 }
-                catch (Exception ex) when (IsDcvNotYetReady(ex))
-                {
-                    // CERTInext occasionally exposes the DCV slot in TrackOrder (so
-                    // domainVerification is populated and dcvStatus="0") before the GetDcv
-                    // endpoint will accept calls for that order — observed as EMS-956
-                    // "Invalid Request for this API" for several hours after enrollment.
-                    // Treat this as "DCV not ready yet": skip the DCV ceremony for now and
-                    // let the sync-driven retry pick it up on a later cycle. We must NOT
-                    // throw, because that would fail the entire Enroll call and prevent the
-                    // gateway from recording the pending order at all.
-                    _logger.LogInformation(
-                        "GetDcv not yet accepting calls for order {OrderNumber} domain {Domain} ({Error}). " +
-                        "Deferring DCV to the next sync cycle.",
-                        orderNumber, domain, ex.Message);
-                    return false;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "GetDcv failed for order {OrderNumber} domain {Domain}", orderNumber, domain);
-                    throw;
-                }
-
-                string token = dcvResp.DcvDetails?.Token;
-                if (string.IsNullOrWhiteSpace(token))
-                    throw new InvalidOperationException(
-                        $"GetDcv returned no token for order '{orderNumber}' domain '{domain}'.");
-
-                string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
-                    ? Constants.Dcv.DefaultTxtRecordTemplate
-                    : _config.DcvTxtRecordTemplate;
-                string hostname = string.Format(template, domain);
-
-                var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
-                if (validator == null)
-                {
-                    // Two different conditions land here, and they want different handling:
-                    //
-                    //  * This *particular* name is unvalidatable while others on the order are fine —
-                    //    an IP-literal SAN is the canonical case (it satisfies the FQDN regex above,
-                    //    but no DNS zone can ever match it). Skip it, so its co-tenant domains still
-                    //    get staged. Throwing would fail the whole Enroll after the order was already
-                    //    placed and leave the order permanently unable to progress.
-                    //
-                    //  * No DNS provider is deployed/configured at all — a real gateway
-                    //    misconfiguration. That is still raised, after the loop, when nothing on the
-                    //    order staged (see below), preserving the loud operator-facing failure.
-                    //
-                    // Trade-off accepted: an order whose *only* pending domain is unresolvable still
-                    // throws. In practice the order's primary domain (the CN) is always a pending
-                    // domain too, so this is the misconfiguration case rather than the bad-SAN case.
-                    _logger.LogError(
-                        "No DNS provider plugin resolved for domain '{Domain}' on order {OrderNumber}. " +
-                        "If this is a real domain, ensure the appropriate DNS provider plugin is deployed and " +
-                        "configured on the gateway; if it came from a non-DNS SAN (e.g. an IP address), remove " +
-                        "it from the request.",
-                        SanitizeForLog(domain), orderNumber);
-                    unresolvedDomains.Add(domain);
-                    continue;
-                }
-
-                _logger.LogInformation(
-                    "Staging DNS TXT record for DCV. OrderNumber={OrderNumber}, Domain={Domain}, Hostname={Hostname}",
-                    orderNumber, domain, hostname);
-
-                var stageResult = await validator.StageValidation(hostname, token, ct);
-                if (!stageResult.Success)
-                    throw new InvalidOperationException(
-                        $"Failed to stage DNS validation for '{domain}': {stageResult.ErrorMessage}");
-
-                stagedValidations.Add((domain, hostname, validator));
             }
 
-            // Nothing staged and every pending domain failed provider resolution => no DNS provider
-            // plugin is usable on this gateway at all. That is a deployment misconfiguration, not bad
-            // request data, so it still fails loudly rather than silently parking the order.
-            if (stagedValidations.Count == 0 && unresolvedDomains.Count == pendingDomains.Count && unresolvedDomains.Count > 0)
+            try
+            {
+                // Stage DNS TXT records for all pending domains
+                foreach (var (domain, _) in pendingDomains)
+                {
+                    GetDcvResponse dcvResp;
+                    try
+                    {
+                        dcvResp = await _client.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
+                    }
+                    catch (Exception ex) when (IsDcvNotYetReady(ex))
+                    {
+                        // CERTInext occasionally exposes the DCV slot in TrackOrder (so
+                        // domainVerification is populated and dcvStatus="0") before the GetDcv
+                        // endpoint will accept calls for that order — observed as EMS-956
+                        // "Invalid Request for this API" for several hours after enrollment.
+                        // Treat this as "DCV not ready yet": skip the DCV ceremony for now and
+                        // let the sync-driven retry pick it up on a later cycle. We must NOT
+                        // throw, because that would fail the entire Enroll call and prevent the
+                        // gateway from recording the pending order at all.
+                        _logger.LogInformation(
+                            "GetDcv not yet accepting calls for order {OrderNumber} domain {Domain} ({Error}). " +
+                            "Deferring DCV to the next sync cycle.",
+                            orderNumber, domain, ex.Message);
+                        deferToNextSyncCycle = true;
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "GetDcv failed for order {OrderNumber} domain {Domain}", orderNumber, domain);
+                        throw;
+                    }
+
+                    string token = dcvResp.DcvDetails?.Token;
+                    if (string.IsNullOrWhiteSpace(token))
+                        throw new InvalidOperationException(
+                            $"GetDcv returned no token for order '{orderNumber}' domain '{domain}'.");
+
+                    string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
+                        ? Constants.Dcv.DefaultTxtRecordTemplate
+                        : _config.DcvTxtRecordTemplate;
+                    string hostname = string.Format(template, domain);
+
+                    var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
+                    if (validator == null)
+                    {
+                        // Two different conditions land here, and they want different handling:
+                        //
+                        //  * This *particular* name is unvalidatable while others on the order are fine —
+                        //    an IP-literal SAN is the canonical case (it satisfies the FQDN regex above,
+                        //    but no DNS zone can ever match it). Skip it, so its co-tenant domains still
+                        //    get staged. Throwing would fail the whole Enroll after the order was already
+                        //    placed and leave the order permanently unable to progress.
+                        //
+                        //  * No DNS provider is deployed/configured at all — a real gateway
+                        //    misconfiguration. That is still raised, after the loop, when nothing on the
+                        //    order staged and no domain anywhere on the order resolves a provider (see
+                        //    below), preserving the loud operator-facing failure.
+                        _logger.LogError(
+                            "No DNS provider plugin resolved for domain '{Domain}' on order {OrderNumber}. " +
+                            "If this is a real domain, ensure the appropriate DNS provider plugin is deployed and " +
+                            "configured on the gateway; if it came from a non-DNS SAN (e.g. an IP address), remove " +
+                            "it from the request.",
+                            LogSanitizer.Strip(domain), orderNumber);
+                        unresolvedDomains.Add(domain);
+                        continue;
+                    }
+
+                    _logger.LogInformation(
+                        "Staging DNS TXT record for DCV. OrderNumber={OrderNumber}, Domain={Domain}, Hostname={Hostname}",
+                        orderNumber, domain, hostname);
+
+                    var stageResult = await validator.StageValidation(hostname, token, ct);
+                    if (!stageResult.Success)
+                        throw new InvalidOperationException(
+                            $"Failed to stage DNS validation for '{domain}': {stageResult.ErrorMessage}");
+
+                    stagedValidations.Add((domain, hostname, validator));
+                }
+            }
+            catch
+            {
+                await CleanupPartialStagingAsync();
+                throw;
+            }
+
+            if (deferToNextSyncCycle)
+            {
+                await CleanupPartialStagingAsync();
+                return false;
+            }
+
+            // Nothing staged, at least one pending domain failed provider resolution, and — this is
+            // the part that must hold across the WHOLE order, not just the still-pending domains —
+            // no domain anywhere on the order, pending or already validated, resolves a provider
+            // either. That combination means this gateway has no usable DNS provider deployed at
+            // all: a real deployment always has at least one legitimate domain somewhere on the
+            // order. That is a misconfiguration, not bad request data, so it still fails loudly
+            // instead of silently parking the order.
+            //
+            // Checking only pendingDomains here was the bug: CERTInext can cache a prior DCV
+            // validation for a parent domain (see the aggregate/per-domain check earlier in this
+            // method), which removes the CN from pendingDomains even though it resolves a provider
+            // just fine. A prior version of this check assumed the CN is always pending, which this
+            // method's own cached-validation branch above proves false — so it threw on an ordinary
+            // non-DNS SAN sharing an order with an already-validated domain, reopening the exact
+            // orphaned-order failure this whole restructuring exists to prevent.
+            if (stagedValidations.Count == 0 && unresolvedDomains.Count > 0
+                && !allDomainEntries.Keys.Any(d => DomainValidatorFactory.ResolveDomainValidator(d, "dns-01") != null))
+            {
                 throw new InvalidOperationException(
                     $"No DNS provider plugin is configured for domain '{unresolvedDomains[0]}'. " +
                     "Ensure the appropriate DNS provider plugin is deployed and configured on the gateway.");
+            }
 
             if (stagedValidations.Count == 0)
                 return false;
@@ -2344,7 +2402,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "Resolved {Total} SAN(s) for submission. FromGatewayRequest={FromGateway}, " +
                 "AddedFromCsr={FromCsr}, Sans={Sans}",
                 result.Count, fromGateway, fromCsrOnly,
-                SanitizeForLog(string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}"))));
+                LogSanitizer.Strip(string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}"))));
 
             if (fromCsrOnly > 0)
             {
@@ -2374,28 +2432,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // which is the part that matters for diagnosis.
             var nonDns = result.Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)).ToList();
 
-            // Escape hatch (SubmitNonDnsSans, default true). On a host that was previously issuing
-            // certificates for requests carrying an IP or email SAN, the default behaviour flips
-            // those enrollments from "issues, silently missing the name" to "parks pending", and an
-            // operator needs a way back that isn't a plugin downgrade. Off => pre-1.0.1 behaviour.
-            if (nonDns.Count > 0 && !_config.SubmitNonDnsSans)
-            {
-                _logger.LogWarning(
-                    "{Count} requested SAN(s) are not DNS names and are being DROPPED because " +
-                    "SubmitNonDnsSans is false: {Sans}. The order will issue, but the certificate will " +
-                    "NOT contain these names. Set SubmitNonDnsSans back to true to submit them and have " +
-                    "CERTInext surface the problem instead.",
-                    nonDns.Count, SanitizeForLog(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))));
-
-                result = result
-                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-
-                return result.Count > 0 ? result : null;
-            }
-
             if (nonDns.Count > 0)
             {
+                string nonDnsRendered = LogSanitizer.Strip(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}")));
+
+                // Escape hatch (SubmitNonDnsSans, default true). On a host that was previously
+                // issuing certificates for requests carrying an IP or email SAN, the default
+                // behaviour flips those enrollments from "issues, silently missing the name" to
+                // "parks pending", and an operator needs a way back that isn't a plugin downgrade.
+                // Off => pre-1.0.1 behaviour: drop them and issue.
+                if (!_config.SubmitNonDnsSans)
+                {
+                    _logger.LogWarning(
+                        "{Count} requested SAN(s) are not DNS names and are being DROPPED because " +
+                        "SubmitNonDnsSans is false: {Sans}. The order will issue, but the certificate will " +
+                        "NOT contain these names. Set SubmitNonDnsSans back to true to submit them and have " +
+                        "CERTInext surface the problem instead.",
+                        nonDns.Count, nonDnsRendered);
+
+                    result = result
+                        .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+
+                    return result.Count > 0 ? result : null;
+                }
+
                 _logger.LogWarning(
                     "{Count} requested SAN(s) are not DNS names: {Sans}. CERTInext's additionalDomains " +
                     "field takes domain names, so this order will either be rejected outright or be " +
@@ -2404,7 +2465,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "purpose: a visible failure is preferable to a certificate issued without names the " +
                     "subscriber requested. Remove them from the CSR or the enrollment pattern if the " +
                     "order should proceed.",
-                    nonDns.Count, SanitizeForLog(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))));
+                    nonDns.Count, nonDnsRendered);
             }
 
             return result;
@@ -2479,9 +2540,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var names = Org.BouncyCastle.Asn1.X509.GeneralNames.GetInstance(sanExtension.GetParsedValue());
                 foreach (var generalName in names.GetNames())
                 {
-                    string value = GeneralNameToValue(generalName);
-                    if (!string.IsNullOrWhiteSpace(value))
-                        result.Add(new SanEntry { Type = SanTypeFromGeneralNameTag(generalName.TagNo), Value = value });
+                    var entry = GeneralNameToSanEntry(generalName);
+                    if (entry != null)
+                        result.Add(entry);
                     else
                         skippedTagNumbers.Add(generalName.TagNo);
                 }
@@ -2498,43 +2559,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             return result;
         }
 
-        /// <summary>Maps an ASN.1 GeneralName tag to the SAN type string used by this plugin.</summary>
-        private static string SanTypeFromGeneralNameTag(int tagNo)
-        {
-            switch (tagNo)
-            {
-                case Org.BouncyCastle.Asn1.X509.GeneralName.DnsName: return "dns";
-                case Org.BouncyCastle.Asn1.X509.GeneralName.Rfc822Name: return "email";
-                case Org.BouncyCastle.Asn1.X509.GeneralName.UniformResourceIdentifier: return "uri";
-                case Org.BouncyCastle.Asn1.X509.GeneralName.IPAddress: return "ip";
-                case Org.BouncyCastle.Asn1.X509.GeneralName.DirectoryName: return "directoryname";
-                case Org.BouncyCastle.Asn1.X509.GeneralName.RegisteredID: return "registeredid";
-                case Org.BouncyCastle.Asn1.X509.GeneralName.OtherName: return "othername";
-                default: return $"generalname-{tagNo}";
-            }
-        }
-
         /// <summary>
-        /// Renders a GeneralName's value as the text CERTInext would need to see. Returns null
-        /// for a name whose value cannot be rendered meaningfully, so it is skipped rather than
-        /// submitted as ASN.1 debris.
+        /// Maps a GeneralName to the <see cref="SanEntry"/> this plugin would submit for it, or null
+        /// for a name whose value cannot be rendered meaningfully — skipped rather than submitted as
+        /// ASN.1 debris. One switch, not two: a separate tag→type mapping alongside this one used to
+        /// assign a type string ("directoryname", "registeredid", ...) to tags that always return a
+        /// null value here anyway, so those branches were dead — the type never reached a caller
+        /// with no value to pair it with.
         /// </summary>
-        private static string GeneralNameToValue(Org.BouncyCastle.Asn1.X509.GeneralName generalName)
+        private static SanEntry GeneralNameToSanEntry(Org.BouncyCastle.Asn1.X509.GeneralName generalName)
         {
+            string type;
+            string value;
+
             switch (generalName.TagNo)
             {
                 case Org.BouncyCastle.Asn1.X509.GeneralName.DnsName:
+                    type = "dns";
+                    value = Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    break;
+
                 case Org.BouncyCastle.Asn1.X509.GeneralName.Rfc822Name:
+                    type = "email";
+                    value = Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    break;
+
                 case Org.BouncyCastle.Asn1.X509.GeneralName.UniformResourceIdentifier:
-                    return Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    type = "uri";
+                    value = Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    break;
 
                 case Org.BouncyCastle.Asn1.X509.GeneralName.IPAddress:
+                    type = "ip";
                     // Octet string → dotted-quad / RFC 5952 text, so what we submit and log is
                     // the address the subscriber asked for rather than its hex encoding.
                     byte[] octets = Org.BouncyCastle.Asn1.Asn1OctetString.GetInstance(generalName.Name).GetOctets();
-                    return octets.Length == 4 || octets.Length == 16
+                    value = octets.Length == 4 || octets.Length == 16
                         ? new System.Net.IPAddress(octets).ToString()
                         : null;
+                    break;
 
                 default:
                     // otherName, directoryName, x400Address, ediPartyName, registeredID.
@@ -2551,27 +2614,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     //
                     // Skipped is not silent: BuildSanList warns with the tag numbers so the
                     // operator can see a SAN was present and not forwarded.
-                    return null;
+                    type = null;
+                    value = null;
+                    break;
             }
-        }
 
-        /// <summary>
-        /// Strips CR, LF, and tab from a value before it is interpolated into a log message.
-        ///
-        /// SAN values reach the log from the CSR and from Command's SAN dictionary, i.e. from the
-        /// requester. Structured message templates stop format-string abuse but not embedded
-        /// newlines, and NLog's text layout does not escape them — so an unsanitized value can
-        /// forge additional, well-formed-looking records in the gateway log (CWE-117). That matters
-        /// here specifically because these log lines exist to make the submitted SAN set auditable;
-        /// a forged line could assert a different SAN set than the one actually sent.
-        /// </summary>
-        private static string SanitizeForLog(string value)
-        {
-            if (string.IsNullOrEmpty(value)) return value;
-            return value
-                .Replace("\r", "\\r")
-                .Replace("\n", "\\n")
-                .Replace("\t", "\\t");
+            return string.IsNullOrWhiteSpace(value) ? null : new SanEntry { Type = type, Value = value };
         }
 
         private static string GetStringValue(

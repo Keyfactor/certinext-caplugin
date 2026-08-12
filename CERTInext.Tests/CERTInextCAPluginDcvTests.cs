@@ -863,6 +863,94 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
+        /// Builds a TrackOrder response with one already-validated domain (dcvStatus=1) and one
+        /// still-pending, unresolvable domain (dcvStatus=0) — the shape CERTInext produces when it
+        /// has cached a prior DCV validation for the CN while a non-DNS SAN on the same order is
+        /// still outstanding.
+        /// </summary>
+        private static TrackOrderResponse DcvMixedStatusTrackResponse(
+            string validatedDomain, string pendingDomain)
+        {
+            var validated = System.Text.Json.JsonSerializer.SerializeToElement(new DomainVerificationDetail
+            {
+                DcvMethod = Constants.Dcv.MethodDnsTxt,
+                DcvStatus = Constants.Dcv.StatusValidated,
+                Status    = "1"
+            });
+            var pending = System.Text.Json.JsonSerializer.SerializeToElement(new DomainVerificationDetail
+            {
+                DcvMethod = Constants.Dcv.MethodDnsTxt,
+                DcvStatus = Constants.Dcv.StatusPending,
+                Status    = "1"
+            });
+
+            return new TrackOrderResponse
+            {
+                OrderDetails = new TrackOrderResponseDetails
+                {
+                    OrderStatusId       = "1",
+                    CertificateStatusId = "1",
+                    DomainVerification  = new TrackOrderDomainVerification
+                    {
+                        // Aggregate stays pending because one domain still is — this must not take
+                        // the early "already validated" return at the top of the method.
+                        Status           = Constants.Dcv.StatusPending,
+                        RawDomainEntries = new Dictionary<string, System.Text.Json.JsonElement>
+                        {
+                            [validatedDomain] = validated,
+                            [pendingDomain]    = pending
+                        }
+                    }
+                }
+            };
+        }
+
+        /// <summary>
+        /// Regression for the false invariant behind the round-1 fix's own misconfiguration check:
+        /// "the CN is always a pending domain too" is untrue whenever CERTInext has cached a prior
+        /// DCV validation for it (a case this same file's cached-validation branch documents), so a
+        /// non-DNS SAN sharing the order with an already-validated CN must not throw — it must defer
+        /// to the next sync cycle exactly like the single-domain case does.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_CachedCnPlusUnresolvableSan_DefersWithoutThrowing()
+        {
+            const string order   = MockCertificateData.DcvOrderId;
+            const string cn      = MockCertificateData.DcvDomain;
+            const string ip      = "192.0.2.10";
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending" });
+
+            mock.Setup(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvMixedStatusTrackResponse(validatedDomain: cn, pendingDomain: ip));
+
+            // The IP clears the FQDN regex and reaches GetDcv, per the sandbox-measured shape.
+            mock.Setup(c => c.GetDcvAsync(order, ip, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse(MockCertificateData.DcvToken));
+
+            var validator = new FakeDomainValidator();
+            // Resolves for the CN (a real, working DNS provider) but not for the IP literal — the
+            // scenario that must prove "a provider IS deployed" rather than "nothing is deployed".
+            var plugin = BuildPlugin(
+                mock.Object,
+                new SelectiveDomainValidatorFactory(validator, resolvableDomain: cn),
+                DcvConfig());
+
+            Func<Task> act = () => Enroll(plugin);
+
+            await act.Should().NotThrowAsync(
+                "an unresolvable non-DNS SAN must defer the order to the next sync cycle, not fail " +
+                "the enrollment — the CN having cached DCV proves a provider is deployed and working, " +
+                "so this is not the 'nothing is deployed' misconfiguration case");
+
+            validator.StagedRecords.Should().BeEmpty(
+                "the only pending domain is unresolvable, so nothing should have been staged");
+        }
+
+        /// <summary>
         /// A non-FQDN pending domain must be skipped, not thrown on.
         ///
         /// Regression: non-DNS SANs are now submitted to CERTInext, which registers them verbatim
@@ -976,6 +1064,93 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 string.Equals(domain, _resolvableDomain, StringComparison.OrdinalIgnoreCase) ? _validator : null;
 
             public IDomainValidator PrimaryValidator => _validator;
+        }
+
+        /// <summary>
+        /// Like <see cref="FakeDomainValidator"/>, but StageValidation fails only for hostnames
+        /// matching <see cref="_failingHostnameSubstring"/> — needed to prove that a failure on one
+        /// domain of a multi-domain order still cleans up what was already staged for the others.
+        /// </summary>
+        private sealed class PartiallyFailingDomainValidator : IDomainValidator
+        {
+            private readonly string _failingHostnameSubstring;
+
+            public PartiallyFailingDomainValidator(string failingHostnameSubstring) =>
+                _failingHostnameSubstring = failingHostnameSubstring;
+
+            public List<(string key, string value)> StagedRecords { get; } = new();
+            public List<string> CleanedUpKeys { get; } = new();
+
+            public void Initialize(IDomainValidatorConfigProvider configProvider) { }
+
+            public Task<DomainValidationResult> StageValidation(string key, string value, CancellationToken cancellationToken)
+            {
+                bool shouldFail = key.Contains(_failingHostnameSubstring, StringComparison.OrdinalIgnoreCase);
+                if (!shouldFail)
+                    StagedRecords.Add((key, value));
+
+                return Task.FromResult(new DomainValidationResult
+                {
+                    Success      = !shouldFail,
+                    ErrorMessage = shouldFail ? "Stage failed (test stub, selective)" : null
+                });
+            }
+
+            public Task<DomainValidationResult> CleanupValidation(string key, CancellationToken cancellationToken)
+            {
+                CleanedUpKeys.Add(key);
+                return Task.FromResult(new DomainValidationResult { Success = true });
+            }
+
+            public Task ValidateConfiguration(Dictionary<string, object> configuration) => Task.CompletedTask;
+            public Dictionary<string, PropertyConfigInfo> GetDomainValidatorAnnotations() => new();
+            public string GetValidationType() => "dns-01";
+        }
+
+        /// <summary>
+        /// Regression: a StageValidation failure on one domain of a multi-domain order must not
+        /// leave the TXT records already published for the earlier domains orphaned. Before the
+        /// fix, the staging loop's throw sites were outside the try/finally that owns cleanup, so
+        /// this was reachable only by accident (pre-fix, a UCC order's SANs never reached CERTInext
+        /// at all, so an order rarely had more than one pending domain to stage). Submitting every
+        /// requested SAN makes multi-domain staging the normal case, so this must hold now.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_StageFailureOnSecondDomain_CleansUpFirstDomainsTxtRecord()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            const string good  = "a.example.com";
+            const string bad   = "b.example.com";
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+
+            mock.Setup(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, good, bad));
+
+            mock.Setup(c => c.GetDcvAsync(order, good, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-a"));
+            mock.Setup(c => c.GetDcvAsync(order, bad, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-b"));
+
+            var validator = new PartiallyFailingDomainValidator(failingHostnameSubstring: bad);
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            Func<Task> act = () => Enroll(plugin);
+
+            await act.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("*Failed to stage DNS validation*");
+
+            string goodHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, good);
+            validator.StagedRecords.Should().ContainSingle(
+                "only the domain staged before the failure should have a recorded StageValidation call")
+                .Which.key.Should().Be(goodHostname);
+            validator.CleanedUpKeys.Should().Contain(goodHostname,
+                "the TXT record already published for the domain that succeeded must be removed " +
+                "when a later domain in the same order fails to stage — otherwise it is orphaned in " +
+                "the customer's DNS zone with nothing else in the codebase to ever clean it up");
         }
     }
 }

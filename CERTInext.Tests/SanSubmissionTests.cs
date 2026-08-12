@@ -466,8 +466,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         /// SAN values reach the log from the CSR and from Command's SAN dictionary — i.e. from the
         /// requester. Structured message templates stop format-string abuse but not embedded
         /// newlines, so a value carrying CRLF could forge audit records in the very log lines added
-        /// to make the submitted SAN set auditable. Pins the scrub on the private helper directly,
-        /// following ExtractSerialFromPemTests' pattern.
+        /// to make the submitted SAN set auditable. LogSanitizer is internal (not private) and
+        /// shared between the plugin and the client, so this is a direct call, not reflection.
         /// </summary>
         [Theory]
         [InlineData("evil.example.com\r\nINFO forged record", "evil.example.com\\r\\nINFO forged record")]
@@ -478,11 +478,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(null, null)]
         public void SanitizeForLog_NeutralizesControlCharacters(string input, string expected)
         {
-            var method = typeof(CERTInextCAPlugin)
-                .GetMethod("SanitizeForLog", BindingFlags.NonPublic | BindingFlags.Static);
-            method.Should().NotBeNull("log sinks depend on this scrub existing");
-
-            var actual = (string)method!.Invoke(null, new object[] { input });
+            var actual = Keyfactor.Extensions.CAPlugin.CERTInext.Models.LogSanitizer.Strip(input);
 
             actual.Should().Be(expected);
         }

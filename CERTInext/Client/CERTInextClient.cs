@@ -195,10 +195,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 "Submitting order to CERTInext. ProductCode={ProductCode}, DomainName={DomainName}, " +
                 "AdditionalDomainCount={AdditionalDomainCount}, AdditionalDomains={AdditionalDomains}",
                 request.OrderDetails?.ProductCode,
-                SanitizeForLog(certInfo?.DomainName),
+                LogSanitizer.Strip(certInfo?.DomainName),
                 certInfo?.AdditionalDomains?.Count ?? 0,
                 certInfo?.AdditionalDomains != null && certInfo.AdditionalDomains.Count > 0
-                    ? SanitizeForLog(string.Join("; ", certInfo.AdditionalDomains))
+                    ? LogSanitizer.Strip(string.Join("; ", certInfo.AdditionalDomains))
                     : "(none)");
 
             GenerateOrderResponse result = null;
@@ -1591,7 +1591,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Logger.LogDebug(
                     "Collapsed {Count} duplicate SAN value(s) out of additionalDomains " +
                     "(already submitted as domainName '{DomainName}', or repeated in the SAN set).",
-                    duplicates, domainName);
+                    duplicates, LogSanitizer.Strip(domainName));
             }
 
             return domains.Count > 0 ? domains : null;
@@ -1767,25 +1767,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 "Authorization: ***REDACTED***");
 
             return body;
-        }
-
-        /// <summary>
-        /// Strips CR, LF, and tab from a value before it is interpolated into a log message.
-        ///
-        /// Domain values logged at the wire originate from the requester (Command's SAN dictionary
-        /// or the CSR). Structured message templates stop format-string abuse but not embedded
-        /// newlines, and NLog's text layout does not escape them, so an unsanitized value could
-        /// forge additional well-formed-looking records (CWE-117) in the very log line added to make
-        /// the submitted domain set auditable. The plugin sanitizes its own SAN log sinks the same
-        /// way; this covers the order-submission sink.
-        /// </summary>
-        private static string SanitizeForLog(string value)
-        {
-            if (string.IsNullOrEmpty(value)) return value;
-            return value
-                .Replace("\r", "\\r")
-                .Replace("\n", "\\n")
-                .Replace("\t", "\\t");
         }
 
         /// <summary>
