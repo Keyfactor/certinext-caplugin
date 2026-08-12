@@ -19,8 +19,16 @@
 // and issuance to complete.
 //
 // ---------------------------------------------------------------------------------------
-// MEASURED RESULTS — sandbox-us, account 4951571271, product 844 (OV SSL UCC), 2026-08-12.
-// (Product 840 / DV UCC is not enabled on that account: "Invalid Product Code".)
+// MEASURED RESULTS — SANDBOX ONLY: sandbox-us, account 4951571271, product 844 (OV SSL UCC),
+// 2026-08-12. (Product 840 / DV UCC is not enabled on that account: "Invalid Product Code".)
+//
+// These are sandbox observations. Re-run against production before treating B or C as
+// settled there — point ~/.env_certinext at the production account and set
+// CERTINEXT_SAN_PROBE_PRODUCTS to a UCC code that account can actually order (product
+// numbering is per-account; the codes in Constants.Products are defaults, not guarantees).
+// Finding A and the CSR-SAN result below are separately corroborated by production: the
+// customer report that prompted this work was a production UCC order whose CSR carried the
+// SANs and whose issued certificate held only the CN.
 //
 //   A. CONFIRMED. additionalDomains is what puts extra names on the order. Submitting
 //      CN + extra1.<cn> registered BOTH domains.

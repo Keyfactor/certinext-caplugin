@@ -1487,11 +1487,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// before we get here.
         ///
         /// <paramref name="domainName"/> is the value already going out as the order's primary
-        /// domain, and Command normally includes the CN in the SAN set as well. CERTInext was
-        /// measured to collapse that repetition itself (SanSubmissionProbeTests: CN submitted
-        /// twice came back registered once), so excluding it here is defence in depth rather
-        /// than a correctness requirement — it keeps the submitted body matching what we log
-        /// and avoids depending on undocumented CA-side de-duplication.
+        /// domain, and Command normally includes the CN in the SAN set as well. On the US
+        /// sandbox CERTInext was measured to collapse that repetition itself
+        /// (SanSubmissionProbeTests: CN submitted twice came back registered once), but that is
+        /// undocumented and unverified against production — which is exactly why we exclude it
+        /// here rather than relying on CA-side de-duplication. It also keeps the submitted body
+        /// matching what we log.
         /// </summary>
         private List<string> BuildAdditionalDomains(
             System.Collections.Generic.List<SanEntry> sans,
