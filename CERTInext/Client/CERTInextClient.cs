@@ -804,7 +804,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     "Renewal of order {PriorId} has no usable CN in its subject; falling back to " +
                     "DomainName='{DomainName}' from the prior order. Verify the renewed certificate's " +
                     "primary domain.",
-                    certificateId, renewalDomainName);
+                    certificateId, LogSanitizer.Strip(renewalDomainName));
             }
 
             // We don't have the product code from TrackOrder — build an order using
