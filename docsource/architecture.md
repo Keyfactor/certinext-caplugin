@@ -113,6 +113,8 @@ sequenceDiagram
 
 **Expired certificates:** The `IgnoreExpired` connector setting controls whether expired certificates are included in synchronization. When enabled, expired certificates are silently skipped and will not appear in the Keyfactor Command inventory.
 
+**DCV-during-sync:** on a DCV-enabled build, each sync pass also drives DNS-01 validation forward for pending DV orders that are still waiting on it, bounded by `DcvSyncMaxOrderAgeHours` (skip orders older than this) and `DcvSyncMaxPerPass` (cap how many are attempted per pass), so a large backlog of stalled pending orders can't slow down every sync.
+
 ---
 
 ## Certificate Enrollment
@@ -134,13 +136,27 @@ sequenceDiagram
     Plugin->>API: Place certificate order\n(CSR, domain, organization details,\nsubscriber agreement, requestor info)
     API-->>Plugin: Order accepted — order number assigned
 
+    opt DNS-01 DCV build, DCV enabled, and this order requires it
+        Plugin->>Plugin: Publish DNS TXT challenge\nvia the configured DNS provider plugin
+        Plugin->>API: Ask CERTInext to verify the record
+        API-->>Plugin: Domain validated (or still pending —\nfalls through to the pending path below)
+    end
+
     Plugin->>API: Check order status
     API-->>Plugin: Order status and certificate details
 
     alt Certificate issued immediately
         Plugin-->>CMD: Certificate ready — PEM returned
-    else Certificate pending approval
-        Plugin-->>CMD: Pending — Command will pick it up\nduring the next synchronization
+    else Certificate pending or not yet downloadable
+        loop Certificate-pickup retries\n(bounded, ~55s by default — PickupRetries/PickupDelay)
+            Plugin->>API: Poll for the certificate
+            API-->>Plugin: Status and certificate, if ready
+        end
+        alt Certificate became available during pickup
+            Plugin-->>CMD: Certificate ready — PEM returned
+        else Still not available
+            Plugin-->>CMD: Pending — Command will pick it up\nduring the next synchronization
+        end
     else Order rejected by CERTInext
         Plugin-->>CMD: Enrollment failed — see gateway logs
     end
@@ -148,11 +164,17 @@ sequenceDiagram
     Plugin->>Plugin: Record enrollment outcome in audit log\n(order number, serial number, status)
 ```
 
+**DCV:** on a DCV-enabled build, DNS-01 validation runs inline for DV orders that require it, bounded by `DcvTimeoutMinutes`. When DCV isn't enabled, isn't built into this host, or the order doesn't require it, this step is skipped entirely and the order proceeds straight to the pending/pickup path like any other asynchronously-issued order.
+
+**Synchronous certificate pickup:** if the certificate isn't available immediately (a fresh order, or DCV that just validated but hasn't finished generating the PEM), `Enroll()` polls CERTInext a bounded number of times (`PickupRetries` × `PickupDelay`, capped at a 180s ceiling) before giving up and returning pending. This lets a fast-issuing certificate (DV, or an already-approved order) come back in the same enrollment call instead of always waiting for the next sync. OV/EV orders validate asynchronously over minutes to hours and typically exhaust this window regardless.
+
 ### Renewal
 
 When Command initiates a renewal, the plugin checks whether the existing certificate is within the configured renewal window. If it is, the prior order record is used as context for the new request. If it is outside the window (or the prior certificate cannot be located), the plugin falls back to issuing a new certificate.
 
 > **Note:** CERTInext does not have a dedicated certificate renewal endpoint. Both renewal and reissuance paths submit a new `GenerateOrderSSL` order. The distinction affects how Keyfactor Command tracks the certificate record, not what is sent to CERTInext.
+
+> **Note:** If the prior-order lookup itself throws (rather than cleanly returning "not found" — e.g. a transient database error), the plugin falls back to issuing a new certificate rather than failing the enrollment.
 
 ```mermaid
 flowchart TD
