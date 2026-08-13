@@ -1,3 +1,17 @@
+# 1.0.1
+
+## Features
+- **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly and returns the certificate in the same request when it issues fast, instead of always waiting for the next sync. Configurable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s). Orders that don't issue in time (e.g. OV/EV) return pending and are picked up by the next sync, as before.
+
+## Bug Fixes
+- **UCC certificates no longer come back with only the common name.** The gateway sends SANs under the key `dnsname`, which the plugin didn't recognize, so orders went out with an empty domain list. SANs are now read from every key the gateway sends, plus from the CSR itself.
+- **Renewals no longer lose their SANs.** Renewals were submitted with no additional domains and the wrong primary domain; both now come from the certificate being renewed.
+- **Enrollment no longer fails on an order CERTInext auto-approves before it finishes issuing.** The plugin used to report these as issued with no certificate attached, which the gateway rejected. It now returns pending and picks up the certificate once CERTInext finishes issuing it.
+
+## Upgrade Notes
+- **Non-DNS SANs (IP, email, URI) are now submitted instead of silently dropped.** CERTInext can't validate them, so such an order won't issue until the SAN is removed. Set `SubmitNonDnsSans` to `false` to restore the old drop-silently behavior.
+- **No more duplicate or orphaned orders after a network timeout.** Order/CSR submissions no longer auto-retry after a timeout, since the CA may have already created the order. If it was created, the next sync imports it.
+
 # 1.0.0
 
 Initial release of the CERTInext (emSign Hub) AnyCA REST Gateway plugin.
