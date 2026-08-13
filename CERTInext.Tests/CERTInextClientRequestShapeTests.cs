@@ -288,5 +288,59 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             CapturedOrderBody().GetProperty("subscriptionDetails")
                 .GetProperty("validity").GetString().Should().Be("2");
         }
+
+        // -----------------------------------------------------------------------
+        // RenewCertificateAsync — productCode resolution (issue #26 / local issues/0012)
+        // Renewals go out as a fresh GenerateOrderSSL order; the product code must
+        // come from the template (RenewCertificateRequest.ProfileId) when supplied,
+        // falling back to the connector's DefaultProductCode only when it is not.
+        // -----------------------------------------------------------------------
+
+        [Fact]
+        public async Task RenewCertificateAsync_ProfileIdSet_UsesTemplateProductCode()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.DefaultProductCode = "connector-default-code";
+
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                ProfileId = "template-product-code",
+                ValidityDays = 365,
+                Comment = "Renewal test"
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            CapturedOrderBody().GetProperty("productCode").GetString()
+                .Should().Be("template-product-code",
+                    "the template's own product code must win over the connector default");
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task RenewCertificateAsync_ProfileIdBlank_FallsBackToConnectorDefault(string blankProfileId)
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.DefaultProductCode = "connector-default-code";
+
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                ProfileId = blankProfileId,
+                ValidityDays = 365,
+                Comment = "Renewal test"
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            CapturedOrderBody().GetProperty("productCode").GetString()
+                .Should().Be("connector-default-code",
+                    "a blank ProfileId must fall back to the connector's DefaultProductCode, not an empty string");
+        }
     }
 }

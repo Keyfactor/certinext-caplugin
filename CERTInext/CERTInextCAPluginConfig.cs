@@ -444,8 +444,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.AutoApprove] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: If true, the gateway will attempt automatic approval of certificates " +
-                               "that are returned in a pending-approval state. Default: false.",
+                    Comments = "Currently has no effect — reserved for future use. The plugin does not call " +
+                               "any approval endpoint against CERTInext regardless of this setting.",
                     Hidden = false,
                     DefaultValue = false,
                     Type = "Boolean"

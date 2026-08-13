@@ -810,14 +810,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     certificateId, LogSanitizer.Strip(renewalDomainName));
             }
 
-            // We don't have the product code from TrackOrder — build an order using
-            // the config defaults and the CSR from the renewal request.
+            // Prefer the template's own product code (threaded through via request.ProfileId);
+            // only fall back to the connector-level default when the caller didn't supply one.
+            // EnrollmentParams.ProductCode never returns null (it returns string.Empty when it
+            // can't resolve a code), so this must be a blank check, not a null-coalesce — a
+            // null-coalesce here would make the DefaultProductCode fallback unreachable, the
+            // same dead-fallback bug that made DefaultProductCode a no-op for new enrollments.
             var orderReq = new GenerateOrderSslRequest
             {
                 Meta = await BuildMetaAsync(ct),
                 OrderDetails = new SslOrderDetails
                 {
-                    ProductCode = _config.DefaultProductCode ?? string.Empty,
+                    ProductCode = string.IsNullOrWhiteSpace(request.ProfileId)
+                        ? (_config.DefaultProductCode ?? string.Empty)
+                        : request.ProfileId,
                     SaveAndHold = "0",
                     RequestorInformation = new RequestorInformation
                     {
