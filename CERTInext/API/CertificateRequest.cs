@@ -632,6 +632,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         public string Subject { get; set; }
 
         /// <summary>
+        /// Template/enrollment product code to submit the renewal order under. Without it, the
+        /// renewal falls back to the connector-level default product code, which is often unset —
+        /// leaving renewals to go out under an empty product code regardless of the template used.
+        /// </summary>
+        [JsonPropertyName("profileId")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string ProfileId { get; set; }
+
+        /// <summary>
         /// SANs to carry onto the renewal order. Renewals previously submitted none, so a
         /// renewed UCC certificate came back holding only its primary domain.
         /// </summary>

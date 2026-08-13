@@ -240,6 +240,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             bool hasClientId    = !string.IsNullOrWhiteSpace(_config.OAuth2ClientId);
             bool hasClientSecret= !string.IsNullOrWhiteSpace(_config.OAuth2ClientSecret);
             bool hasTokenUrl    = !string.IsNullOrWhiteSpace(_config.OAuth2TokenUrl);
+            bool hasOrganizationNumber = !string.IsNullOrWhiteSpace(_config.OrganizationNumber);
+            bool hasDefaultProductCode = !string.IsNullOrWhiteSpace(_config.DefaultProductCode);
+            bool hasGroupNumber        = !string.IsNullOrWhiteSpace(_config.GroupNumber);
 
             _logger.LogInformation(
                 "CERTInext plugin initialized. " +
@@ -247,6 +250,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "ApiKeyPresent={ApiKeyPresent}, UsernamePresent={UsernamePresent}, " +
                 "PasswordPresent={PasswordPresent}, OAuth2ClientIdPresent={OAuth2ClientIdPresent}, " +
                 "OAuth2ClientSecretPresent={OAuth2ClientSecretPresent}, OAuth2TokenUrlPresent={OAuth2TokenUrlPresent}, " +
+                "OrganizationNumberPresent={OrganizationNumberPresent}, DefaultProductCodePresent={DefaultProductCodePresent}, " +
+                "GroupNumberPresent={GroupNumberPresent}, " +
                 "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, SubmitNonDnsSans={SubmitNonDnsSans}, " +
                 "DcvEnabled={DcvEnabled}, DcvTxtRecordTemplate={DcvTxtRecordTemplate}, " +
                 "DomainValidatorFactoryInjected={FactoryInjected}",
@@ -254,6 +259,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 hasApiKey, hasUsername,
                 hasPassword, hasClientId,
                 hasClientSecret, hasTokenUrl,
+                hasOrganizationNumber, hasDefaultProductCode,
+                hasGroupNumber,
                 _config.PageSize, _config.IgnoreExpired, _config.SubmitNonDnsSans,
                 _config.DcvEnabled, _config.DcvTxtRecordTemplate,
                 _domainValidatorFactory != null);
@@ -1320,6 +1327,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     // holding only its primary domain.
                     Subject = subject,
                     Sans = BuildSanList(san, csr, subject),
+                    ProfileId = ep.ProductCode,
                     ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                     RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                     RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
