@@ -256,6 +256,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = false,
                     Type = "Boolean"
                 },
+                [Constants.Config.SubmitNonDnsSans] = new PropertyConfigInfo
+                {
+                    Comments = "If true (default), SANs that are not DNS names (IP address, email, URI) are " +
+                               "submitted to CERTInext in additionalDomains along with the DNS names. CERTInext " +
+                               "registers them verbatim as order domains and they cannot pass domain validation, " +
+                               "so such an order will not issue until they are removed — but nothing the " +
+                               "subscriber requested is dropped silently. Set to false to submit DNS names only, " +
+                               "which restores the pre-1.0.1 behaviour: the order issues, but the certificate " +
+                               "will not contain the non-DNS names. Default: true.",
+                    Hidden = false,
+                    DefaultValue = true,
+                    Type = "Boolean"
+                },
                 [Constants.Config.PageSize] = new PropertyConfigInfo
                 {
                     Comments = "Number of orders to fetch per page during synchronization. " +
@@ -271,6 +284,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = true,
                     Type = "Boolean"
+                },
+                [Constants.Config.PickupRetries] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Number of times Enroll() will poll CERTInext to download the certificate after a " +
+                               "successful order submission. If the certificate has not issued within this window it is " +
+                               "picked up during the next synchronization instead. Set to 0 to disable the wait. " +
+                               $"Default: {Constants.Pickup.DefaultRetries}. NOTE: CERTInext issues OV/EV certificates " +
+                               "asynchronously (organization verification, minutes to hours), so those typically exhaust " +
+                               "the wait and are returned pending regardless of this value.",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultRetries,
+                    Type = "Number"
+                },
+                [Constants.Config.PickupDelay] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Number of seconds between certificate-pickup retries. PickupRetries times this " +
+                               "delay (plus a short initial delay) is the maximum time an enrollment call occupies a Command " +
+                               "worker thread. If the duration is too long the request may time out, so target a total well " +
+                               $"under ~90s. As a safety backstop the plugin additionally caps the effective total at " +
+                               $"{Constants.Pickup.MaxTotalWaitSeconds}s regardless of how PickupRetries/PickupDelay are set, " +
+                               $"reducing the retry count to fit. Default: {Constants.Pickup.DefaultDelaySeconds} " +
+                               $"(with default retries this yields a ~{Constants.Pickup.InitialDelaySeconds + Constants.Pickup.DefaultRetries * Constants.Pickup.DefaultDelaySeconds}s ceiling).",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultDelaySeconds,
+                    Type = "Number"
                 },
                 [Constants.Config.DcvEnabled] = new PropertyConfigInfo
                 {
@@ -666,6 +704,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("IgnoreExpired")]
         public bool IgnoreExpired { get; set; } = false;
 
+        /// <summary>
+        /// Whether non-DNS SANs (IP address, email, URI) are submitted to CERTInext.
+        ///
+        /// Defaults to <c>true</c>: nothing the subscriber requested is dropped silently. CERTInext
+        /// registers such values verbatim as order domains, and they cannot pass domain validation,
+        /// so the order will not issue until they are removed — a visible failure, deliberately
+        /// preferred over a certificate quietly missing requested names.
+        ///
+        /// Set to <c>false</c> to submit DNS names only, restoring the pre-1.0.1 behaviour where the
+        /// order issues but the non-DNS names are absent from the certificate. This exists as an
+        /// upgrade escape hatch: on a host that was issuing certificates for requests carrying an IP
+        /// or email SAN, the default flips those enrollments from "issues (incomplete)" to "parks
+        /// pending", and an operator needs a way back that does not involve downgrading the plugin.
+        /// </summary>
+        [JsonPropertyName("SubmitNonDnsSans")]
+        public bool SubmitNonDnsSans { get; set; } = true;
+
         [JsonPropertyName("PageSize")]
         public int PageSize { get; set; } = Constants.Api.DefaultPageSize;
 
@@ -695,6 +750,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Seconds to wait after publishing the DNS TXT record before calling VerifyDcv.
         /// Default: 30.
         /// </summary>
+        /// <summary>
+        /// Number of GetCertificate poll attempts inside <c>Enroll()</c> after an order is
+        /// submitted, before falling back to a pending result (picked up by the next sync).
+        /// Mirrors the legacy Sectigo connector's <c>PickupRetries</c>. Set to 0 to disable.
+        /// Default: 5.
+        /// </summary>
+        [JsonPropertyName("PickupRetries")]
+        public int PickupRetries { get; set; } = Constants.Pickup.DefaultRetries;
+
+        /// <summary>
+        /// Seconds between certificate-pickup retries. <c>PickupRetries * PickupDelay</c> (plus a
+        /// short initial delay) bounds the time an enrollment call occupies a Command worker
+        /// thread. Mirrors the legacy Sectigo connector's <c>PickupDelay</c>. Default: 10.
+        /// </summary>
+        [JsonPropertyName("PickupDelay")]
+        public int PickupDelayInSeconds { get; set; } = Constants.Pickup.DefaultDelaySeconds;
+
         [JsonPropertyName("DcvPropagationDelaySeconds")]
         public int DcvPropagationDelaySeconds { get; set; } = 30;
 
@@ -782,5 +854,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return envVal;
             return DcvWaitForIssuanceSeconds >= 0 ? DcvWaitForIssuanceSeconds : 60;
         }
+
+        /// <summary>
+        /// Effective number of certificate-pickup retries, clamped to
+        /// [0, <see cref="Constants.Pickup.MaxRetries"/>]. 0 disables the synchronous pickup.
+        /// </summary>
+        public int GetEffectivePickupRetries()
+            => System.Math.Max(0, System.Math.Min(PickupRetries, Constants.Pickup.MaxRetries));
+
+        /// <summary>
+        /// Effective seconds between pickup retries, clamped to
+        /// [1, <see cref="Constants.Pickup.MaxDelaySeconds"/>]. A non-positive configured value
+        /// falls back to the default rather than producing a tight busy-loop.
+        /// </summary>
+        public int GetEffectivePickupDelaySeconds()
+            => System.Math.Max(1, System.Math.Min(
+                PickupDelayInSeconds > 0 ? PickupDelayInSeconds : Constants.Pickup.DefaultDelaySeconds,
+                Constants.Pickup.MaxDelaySeconds));
     }
 }
