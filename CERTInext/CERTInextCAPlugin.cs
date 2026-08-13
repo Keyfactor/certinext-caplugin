@@ -2333,6 +2333,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 throw new Exception("CERTInext returned a null enrollment response.");
 
             int status = StatusMapper.ToRequestDisposition(resp.Status);
+
+            // CertiNext's "auto-approved"/"downloadable" statuses can arrive before the
+            // certificate bytes are actually generated — GetCertificate right after order
+            // placement then fails, leaving resp.Certificate null while resp.Status still
+            // says issued. Never hand Command a GENERATED result with no PEM (it crashes
+            // CertificateConverterFactory.FromPEM downstream); demote to pending instead,
+            // matching the same invariant PickUpEnrolledCertificateAsync already enforces.
+            if (status == (int)EndEntityStatus.GENERATED && string.IsNullOrWhiteSpace(resp.Certificate))
+                status = (int)EndEntityStatus.EXTERNALVALIDATION;
+
             string message;
 
             switch (status)
