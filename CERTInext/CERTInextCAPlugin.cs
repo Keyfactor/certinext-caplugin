@@ -576,15 +576,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
                 "ProfileId={ProfileId}, SANs={SANs}, " +
                 "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
-                enrollmentType, requestFormat, subject,
-                ep.ProfileId, sanSummary,
+                enrollmentType, requestFormat, LogSanitizer.Strip(subject),
+                ep.ProfileId, LogSanitizer.Strip(sanSummary),
                 ep.RequesterName, ep.RequesterEmail);
 
             if (string.IsNullOrWhiteSpace(ep.ProfileId))
             {
                 _logger.LogError(
                     "Enrollment rejected — ProfileId parameter is missing. Subject={Subject}, EnrollmentType={EnrollmentType}",
-                    subject, enrollmentType);
+                    LogSanitizer.Strip(subject), enrollmentType);
                 throw new Exception($"Template parameter '{Constants.EnrollmentParam.ProfileId}' is required.");
             }
 
@@ -605,7 +605,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 default:
                     _logger.LogError(
                         "Enrollment rejected — unsupported enrollment type. EnrollmentType={EnrollmentType}, Subject={Subject}",
-                        enrollmentType, subject);
+                        enrollmentType, LogSanitizer.Strip(subject));
                     throw new NotSupportedException($"Enrollment type '{enrollmentType}' is not supported.");
             }
 
@@ -617,7 +617,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "SerialNumber={SerialNumber}, Subject={Subject}, ProfileId={ProfileId}",
                 enrollmentType, result.CARequestID, result.Status,
                 result.Certificate != null ? ExtractSerialFromPem(result.Certificate) : "(pending)",
-                subject, ep.ProfileId);
+                LogSanitizer.Strip(subject), ep.ProfileId);
             _logger.MethodExit(LogLevel.Debug);
             return result;
         }
@@ -727,7 +727,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogWarning(
                     "Revocation skipped — certificate is already revoked. " +
                     "CARequestID={Id}, HexSerialNumber={Serial}, Subject={Subject}",
-                    caRequestID, hexSerialNumber, current.Subject);
+                    caRequestID, hexSerialNumber, LogSanitizer.Strip(current.Subject));
                 return (int)EndEntityStatus.REVOKED;
             }
 
@@ -756,7 +756,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "Revocation complete. " +
                 "CARequestID={Id}, HexSerialNumber={Serial}, Subject={Subject}, " +
                 "ReasonCode={ReasonCode}, ReasonString={ReasonString}",
-                caRequestID, hexSerialNumber, current.Subject,
+                caRequestID, hexSerialNumber, LogSanitizer.Strip(current.Subject),
                 revocationReason, reasonString);
             _logger.MethodExit(LogLevel.Debug);
             return (int)EndEntityStatus.REVOKED;
@@ -937,7 +937,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 status = StatusMapper.ToRequestDisposition(current.Status);
                                 _logger.LogDebug(
                                     "Sync: refetched order Id={Id} — status={Status}, certBytes={Bytes}, subject={Subject}.",
-                                    current.Id, status, current.Certificate?.Length ?? 0, current.Subject);
+                                    current.Id, status, current.Certificate?.Length ?? 0,
+                                    LogSanitizer.Strip(current.Subject));
                             }
                             catch (Exception fetchEx)
                             {
@@ -970,7 +971,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         }
                         _logger.LogDebug(
                             "Sync emit: CARequestID={Id}, Status={Status}, CertBytes={CertBytes}, Subject={Subject}",
-                            record.CARequestID, record.Status, record.Certificate?.Length ?? 0, current.Subject);
+                            record.CARequestID, record.Status, record.Certificate?.Length ?? 0,
+                            LogSanitizer.Strip(current.Subject));
 
                         blockingBuffer.Add(record, cancelToken);
                         synced++;
@@ -1229,7 +1231,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation(
                 "Renewal/reissue probe — read PriorCertSN from EnrollmentProductInfo. " +
                 "Subject={Subject}, PriorCertSN={PriorCertSN}, RenewalWindowDays={WindowDays}",
-                subject, string.IsNullOrWhiteSpace(priorCertSn) ? "(none)" : priorCertSn,
+                LogSanitizer.Strip(subject), string.IsNullOrWhiteSpace(priorCertSn) ? "(none)" : priorCertSn,
                 ep.RenewalWindowDays);
 
             if (string.IsNullOrWhiteSpace(priorCertSn))
@@ -1238,7 +1240,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // production log filters and are available for anomaly detection.
                 _logger.LogInformation(
                     "Renewal/reissue has no PriorCertSN — treating as new enrollment. Subject={Subject}",
-                    subject);
+                    LogSanitizer.Strip(subject));
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
 
@@ -1259,7 +1261,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 _logger.LogInformation(
                     "CARequestID for serial '{SN}' is empty — falling back to new enrollment. Subject={Subject}",
-                    priorCertSn, subject);
+                    priorCertSn, LogSanitizer.Strip(subject));
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
 
@@ -1308,7 +1310,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogInformation(
                     "Renewal via CERTInext renew API started. " +
                     "PriorCARequestID={PriorId}, Subject={Subject}, ProfileId={ProfileId}",
-                    priorCaRequestId, subject, ep.ProfileId);
+                    priorCaRequestId, LogSanitizer.Strip(subject), ep.ProfileId);
 
                 var renewReq = new RenewCertificateRequest
                 {
@@ -1345,7 +1347,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 _logger.LogInformation(
                     "Certificate '{Id}' is outside the renewal window ({Window} days) — issuing new certificate. Subject={Subject}",
-                    priorCaRequestId, ep.RenewalWindowDays, subject);
+                    priorCaRequestId, ep.RenewalWindowDays, LogSanitizer.Strip(subject));
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
         }
@@ -2462,6 +2464,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 if (fromCsr) fromCsrKeys.Add(key);
             }
 
+            string FormatSans(IEnumerable<SanEntry> sans) =>
+                LogSanitizer.Strip(string.Join("; ", sans.Select(s => $"{s.Type}:{s.Value}")));
+
             // AnyCA passes SANs keyed by type name — the real gateway uses "dnsname",
             // "rfc822name", "ipaddress"; MapSanType normalizes the spelling variants.
             if (san != null)
@@ -2551,8 +2556,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "SubmitNonDnsSans is false: {Sans}. The order will issue, but the certificate will " +
                     "NOT contain these names. Set SubmitNonDnsSans back to true to submit them and have " +
                     "CERTInext surface the problem instead. Subject={Subject}",
-                    nonDns.Count, LogSanitizer.Strip(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))),
-                    LogSanitizer.Strip(subject));
+                    nonDns.Count, FormatSans(nonDns), LogSanitizer.Strip(subject));
 
                 result = result
                     .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
@@ -2577,8 +2581,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation(
                 "Resolved {Total} SAN(s) for submission. FromGatewayRequest={FromGateway}, " +
                 "AddedFromCsrFallback={FromCsr}, Sans={Sans}, Subject={Subject}",
-                result.Count, fromGatewayKept, fromCsrKept,
-                LogSanitizer.Strip(string.Join("; ", result.Select(s => $"{s.Type}:{s.Value}"))),
+                result.Count, fromGatewayKept, fromCsrKept, FormatSans(result),
                 LogSanitizer.Strip(subject));
 
             if (fromCsrKept > 0)
@@ -2605,8 +2608,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "purpose: a visible failure is preferable to a certificate issued without names the " +
                     "subscriber requested. Remove them from the CSR or the enrollment pattern if the " +
                     "order should proceed. Subject={Subject}",
-                    nonDns.Count, LogSanitizer.Strip(string.Join("; ", nonDns.Select(s => $"{s.Type}:{s.Value}"))),
-                    LogSanitizer.Strip(subject));
+                    nonDns.Count, FormatSans(nonDns), LogSanitizer.Strip(subject));
             }
 
             return result;

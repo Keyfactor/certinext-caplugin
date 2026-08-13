@@ -1335,18 +1335,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 resp = await _http.ExecuteAsync(req, ct);
 
-                // This client is built with ThrowOnAnyError=false (see the constructor), so a
-                // cancelled ct does not surface as OperationCanceledException from ExecuteAsync —
-                // RestSharp catches HttpClient.SendAsync's cancellation internally and returns a
-                // non-throwing, unsuccessful RestResponse instead. Left unchecked, that response
-                // reaches DeserializeOrThrow and becomes a plain Exception indistinguishable from a
-                // genuine API failure — which is exactly how a caller such as
-                // PerformDcvIfNeededAsync's shared DCV-timeout cancellation was still landing in a
-                // generic "GetDcv failed" per-domain catch instead of the cancellation-specific one,
-                // even after that method was hardened to re-throw a real OperationCanceledException
-                // past its per-domain catches. Surface the true cancellation here, at the one place
-                // in the client that actually holds `ct`, before any retry or error-wrapping logic
-                // sees the response.
+                // Success or 4xx client error — return immediately, checked BEFORE the
+                // cancellation check below. `_http.ExecuteAsync` already ran to completion by the
+                // time control reaches this line; whether `ct` has *since* flipped to cancelled is
+                // a separate, unsynchronized fact (a check-after-await race, not a fabricated one —
+                // a CancellationTokenSource(TimeSpan) callback and this awaited Task's completion
+                // are not mutually exclusive events). A deadline (the shared DcvTimeoutMinutes
+                // budget) firing at essentially the same instant a call genuinely succeeded must not
+                // discard that success: for VerifyDcv specifically, discarding it here would abort
+                // PerformDcvIfNeededAsync's loop before WaitForDcvVerificationAsync ever ran, and
+                // its finally block would delete the just-staged TXT record even though CERTInext
+                // had genuinely received the verify trigger — turning a real CA-side success into a
+                // self-inflicted DCV failure.
+                bool isClientError = (int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500;
+                if (resp.IsSuccessful || isClientError)
+                    return resp;
+
+                // Only for a call that did NOT succeed: this client is built with
+                // ThrowOnAnyError=false (see the constructor), so a cancelled ct does not surface as
+                // OperationCanceledException from ExecuteAsync — RestSharp catches
+                // HttpClient.SendAsync's cancellation internally and returns a non-throwing,
+                // unsuccessful RestResponse instead. Left unchecked, that response reaches
+                // DeserializeOrThrow and becomes a plain Exception indistinguishable from a genuine
+                // API failure — which is exactly how a caller such as PerformDcvIfNeededAsync's
+                // shared DCV-timeout cancellation was still landing in a generic "GetDcv failed"
+                // per-domain catch instead of the cancellation-specific one, even after that method
+                // was hardened to re-throw a real OperationCanceledException past its per-domain
+                // catches. Surface the true cancellation here, at the one place in the client that
+                // actually holds `ct`, before any retry or error-wrapping logic sees the response.
                 //
                 // Throwing here means every caller's own per-call audit line (Method/Path/HttpStatus/
                 // LatencyMs, logged after ExecuteWithRetryAsync returns) never executes for the
@@ -1364,11 +1380,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         sw.ElapsedMilliseconds, attempt, attempts);
                 }
                 ct.ThrowIfCancellationRequested();
-
-                // Success or 4xx client error — return immediately
-                bool isClientError = (int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500;
-                if (resp.IsSuccessful || isClientError)
-                    return resp;
 
                 if (attempt < attempts)
                 {
