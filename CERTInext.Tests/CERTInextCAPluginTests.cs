@@ -357,6 +357,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
         }
 
+        [Fact]
+        public async Task Enroll_New_ReturnsPendingStatus_WhenCaReportsIssuedButBodyMissing()
+        {
+            // CERTInext can report an "issued"/auto-approved certificateStatusId before the
+            // certificate bytes actually exist — the immediate GetCertificate download fails
+            // and the legacy client returns Status="issued" with Certificate=null. Reporting
+            // GENERATED with no PEM crashes the gateway framework's PEM parser downstream, so
+            // the plugin must demote this to pending rather than trust the raw status string.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.AutoApprovedNoBodyEnrollResponse());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 0);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem,
+                subject: "CN=test.example.com",
+                san: null,
+                productInfo: MakeProductInfo(),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            result.Certificate.Should().BeNullOrEmpty();
+        }
+
         // ---------------------------------------------------------------------------
         // Synchronous certificate pickup (Sectigo parity)
         // ---------------------------------------------------------------------------

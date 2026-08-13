@@ -256,6 +256,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = false,
                     Type = "Boolean"
                 },
+                [Constants.Config.SubmitNonDnsSans] = new PropertyConfigInfo
+                {
+                    Comments = "If true (default), SANs that are not DNS names (IP address, email, URI) are " +
+                               "submitted to CERTInext in additionalDomains along with the DNS names. CERTInext " +
+                               "registers them verbatim as order domains and they cannot pass domain validation, " +
+                               "so such an order will not issue until they are removed — but nothing the " +
+                               "subscriber requested is dropped silently. Set to false to submit DNS names only, " +
+                               "which restores the pre-1.0.1 behaviour: the order issues, but the certificate " +
+                               "will not contain the non-DNS names. Default: true.",
+                    Hidden = false,
+                    DefaultValue = true,
+                    Type = "Boolean"
+                },
                 [Constants.Config.PageSize] = new PropertyConfigInfo
                 {
                     Comments = "Number of orders to fetch per page during synchronization. " +
@@ -690,6 +703,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         [JsonPropertyName("IgnoreExpired")]
         public bool IgnoreExpired { get; set; } = false;
+
+        /// <summary>
+        /// Whether non-DNS SANs (IP address, email, URI) are submitted to CERTInext.
+        ///
+        /// Defaults to <c>true</c>: nothing the subscriber requested is dropped silently. CERTInext
+        /// registers such values verbatim as order domains, and they cannot pass domain validation,
+        /// so the order will not issue until they are removed — a visible failure, deliberately
+        /// preferred over a certificate quietly missing requested names.
+        ///
+        /// Set to <c>false</c> to submit DNS names only, restoring the pre-1.0.1 behaviour where the
+        /// order issues but the non-DNS names are absent from the certificate. This exists as an
+        /// upgrade escape hatch: on a host that was issuing certificates for requests carrying an IP
+        /// or email SAN, the default flips those enrollments from "issues (incomplete)" to "parks
+        /// pending", and an operator needs a way back that does not involve downgrading the plugin.
+        /// </summary>
+        [JsonPropertyName("SubmitNonDnsSans")]
+        public bool SubmitNonDnsSans { get; set; } = true;
 
         [JsonPropertyName("PageSize")]
         public int PageSize { get; set; } = Constants.Api.DefaultPageSize;

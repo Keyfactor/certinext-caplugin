@@ -1,10 +1,16 @@
 # 1.0.1
 
 ## Features
-- **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly for the certificate and returns it in the same request when it issues fast (DV and already-approved orders), instead of always waiting for the next synchronization. Two new optional settings control the wait: `PickupRetries` (default 5; set to `0` to disable) and `PickupDelay` (default 10 seconds) — about a 55-second wait by default, with a built-in ceiling so it can't run long enough to time out the enrollment. Orders that don't issue in that window — including OV/EV, which CERTInext validates asynchronously over minutes to hours — return pending and are imported by a later sync, exactly as before. Works with or without DNS-based DCV.
+- **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly and returns the certificate in the same request when it issues fast, instead of always waiting for the next sync. Configurable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s). Orders that don't issue in time (e.g. OV/EV) return pending and are picked up by the next sync, as before.
 
 ## Bug Fixes
-- **No more duplicate or orphaned orders after a network timeout.** Order and CSR submissions are no longer retried after a network timeout. A timeout can happen *after* the CA has already accepted the request, so the automatic retry was being rejected as a duplicate — failing the enrollment and leaving an orphaned order behind. These requests now run once; if the order was created it is imported by the next synchronization, and duplicate responses are reported with clear, actionable guidance. (Read-only calls are unaffected and still retry.)
+- **UCC certificates no longer come back with only the common name.** The gateway sends SANs under the key `dnsname`, which the plugin didn't recognize, so orders went out with an empty domain list. SANs are now read from every key the gateway sends, plus from the CSR itself.
+- **Renewals no longer lose their SANs.** Renewals were submitted with no additional domains and the wrong primary domain; both now come from the certificate being renewed.
+- **Enrollment no longer fails on an order CERTInext auto-approves before it finishes issuing.** The plugin used to report these as issued with no certificate attached, which the gateway rejected. It now returns pending and picks up the certificate once CERTInext finishes issuing it.
+
+## Upgrade Notes
+- **Non-DNS SANs (IP, email, URI) are now submitted instead of silently dropped.** CERTInext can't validate them, so such an order won't issue until the SAN is removed. Set `SubmitNonDnsSans` to `false` to restore the old drop-silently behavior.
+- **No more duplicate or orphaned orders after a network timeout.** Order/CSR submissions no longer auto-retry after a timeout, since the CA may have already created the order. If it was created, the next sync imports it.
 
 # 1.0.0
 

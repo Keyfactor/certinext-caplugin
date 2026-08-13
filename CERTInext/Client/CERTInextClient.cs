@@ -186,9 +186,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (request.Meta == null)
                 request.Meta = await BuildMetaAsync(ct);
 
+            // The domain set is logged here, at the wire, not just where Command hands it to us.
+            // A UCC order that silently lost its SANs upstream of this point is otherwise
+            // indistinguishable in the gateway log from one the CA stripped — reconciling the
+            // enrollment-start "SANs=" line against this one localizes the loss immediately.
+            var certInfo = request.OrderDetails?.CertificateInformation;
             Logger.LogInformation(
-                "Submitting order to CERTInext. ProductCode={ProductCode}",
-                request.OrderDetails?.ProductCode);
+                "Submitting order to CERTInext. ProductCode={ProductCode}, DomainName={DomainName}, " +
+                "AdditionalDomainCount={AdditionalDomainCount}, AdditionalDomains={AdditionalDomains}",
+                request.OrderDetails?.ProductCode,
+                LogSanitizer.Strip(certInfo?.DomainName),
+                certInfo?.AdditionalDomains?.Count ?? 0,
+                certInfo?.AdditionalDomains != null && certInfo.AdditionalDomains.Count > 0
+                    ? LogSanitizer.Strip(string.Join("; ", certInfo.AdditionalDomains))
+                    : "(none)");
 
             GenerateOrderResponse result = null;
             RestResponse resp = null;
@@ -248,7 +259,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         "PlaceOrder received no usable response (DomainName={Domain}, HttpStatus={Status}, LatencyMs={Latency}). " +
                         "Not retrying to avoid a duplicate order (EMS-947). If CERTInext created the order it " +
                         "will be imported by the next synchronization.",
-                        request.OrderDetails?.CertificateInformation?.DomainName, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                        LogSanitizer.Strip(request.OrderDetails?.CertificateInformation?.DomainName),
+                        (int)resp.StatusCode, sw.ElapsedMilliseconds);
                     throw new Exception(
                         "CERTInext did not return a usable response to the order submission. If the order was " +
                         "created it will be imported by the next synchronization — do not resubmit immediately. " +
@@ -298,7 +310,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             "PlaceOrder classified {ErrorCode} as a duplicate transaction (not a hard failure). " +
                             "DomainName={Domain}, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}. If an order exists " +
                             "for this transaction it will be imported by the next synchronization.",
-                            result.Meta.ErrorCode, request.OrderDetails?.CertificateInformation?.DomainName, Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                            result.Meta.ErrorCode,
+                            LogSanitizer.Strip(request.OrderDetails?.CertificateInformation?.DomainName),
+                            Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds);
                         throw new Exception(
                             "CERTInext reported a duplicate order transaction (EMS-947). If an order was created " +
                             "for this transaction it will be imported by the next synchronization — do not resubmit " +
@@ -775,6 +789,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 throw new KeyNotFoundException($"Cannot renew: prior order '{certificateId}' was not found in CERTInext.");
             }
 
+            // Primary domain for the renewal order. Prefer the CN of the subject Command gave
+            // us; the prior order's requestorName is only a last resort and is not a domain —
+            // it is retained solely so an old caller that sets no Subject behaves as before.
+            // Hoisted: the same parse drives both the domain and the "did we get a CN?" warning,
+            // mirroring BuildOrderRequestFromLegacyEnrollRequest.
+            string subjectCn = ExtractCnFromSubject(request.Subject);
+
+            string renewalDomainName =
+                subjectCn
+                ?? priorTrack.OrderDetails?.RequestorInformation?.RequestorName
+                ?? "unknown";
+
+            if (subjectCn == null)
+            {
+                Logger.LogWarning(
+                    "Renewal of order {PriorId} has no usable CN in its subject; falling back to " +
+                    "DomainName='{DomainName}' from the prior order. Verify the renewed certificate's " +
+                    "primary domain.",
+                    certificateId, LogSanitizer.Strip(renewalDomainName));
+            }
+
             // We don't have the product code from TrackOrder — build an order using
             // the config defaults and the CSR from the renewal request.
             var orderReq = new GenerateOrderSslRequest
@@ -794,7 +829,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     SubscriptionDetails = new SubscriptionDetails { Validity = "1" },
                     CertificateInformation = new CertificateInformation
                     {
-                        DomainName = priorTrack.OrderDetails?.RequestorInformation?.RequestorName ?? "unknown"
+                        DomainName = renewalDomainName,
+                        AdditionalDomains = BuildAdditionalDomains(request.Sans, renewalDomainName)
                     },
                     Csr = request.Csr,
                     AgreementDetails = BuildDefaultAgreementDetails()
@@ -1294,14 +1330,56 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             int attempts = idempotent ? maxAttempts : 1;
             RestResponse resp = null;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             for (int attempt = 1; attempt <= attempts; attempt++)
             {
                 resp = await _http.ExecuteAsync(req, ct);
 
-                // Success or 4xx client error — return immediately
+                // Success or 4xx client error — return immediately, checked BEFORE the
+                // cancellation check below. `_http.ExecuteAsync` already ran to completion by the
+                // time control reaches this line; whether `ct` has *since* flipped to cancelled is
+                // a separate, unsynchronized fact (a check-after-await race, not a fabricated one —
+                // a CancellationTokenSource(TimeSpan) callback and this awaited Task's completion
+                // are not mutually exclusive events). A deadline (the shared DcvTimeoutMinutes
+                // budget) firing at essentially the same instant a call genuinely succeeded must not
+                // discard that success: for VerifyDcv specifically, discarding it here would abort
+                // PerformDcvIfNeededAsync's loop before WaitForDcvVerificationAsync ever ran, and
+                // its finally block would delete the just-staged TXT record even though CERTInext
+                // had genuinely received the verify trigger — turning a real CA-side success into a
+                // self-inflicted DCV failure.
                 bool isClientError = (int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500;
                 if (resp.IsSuccessful || isClientError)
                     return resp;
+
+                // Only for a call that did NOT succeed: this client is built with
+                // ThrowOnAnyError=false (see the constructor), so a cancelled ct does not surface as
+                // OperationCanceledException from ExecuteAsync — RestSharp catches
+                // HttpClient.SendAsync's cancellation internally and returns a non-throwing,
+                // unsuccessful RestResponse instead. Left unchecked, that response reaches
+                // DeserializeOrThrow and becomes a plain Exception indistinguishable from a genuine
+                // API failure — which is exactly how a caller such as PerformDcvIfNeededAsync's
+                // shared DCV-timeout cancellation was still landing in a generic "GetDcv failed"
+                // per-domain catch instead of the cancellation-specific one, even after that method
+                // was hardened to re-throw a real OperationCanceledException past its per-domain
+                // catches. Surface the true cancellation here, at the one place in the client that
+                // actually holds `ct`, before any retry or error-wrapping logic sees the response.
+                //
+                // Throwing here means every caller's own per-call audit line (Method/Path/HttpStatus/
+                // LatencyMs, logged after ExecuteWithRetryAsync returns) never executes for the
+                // cancelled call — that specific attempt would otherwise vanish from the audit trail
+                // entirely, leaving only a coarser, order-level "unexpected failure" log with no
+                // domain/endpoint/status/latency. Log that record here instead, at the one place that
+                // reliably sees every cancellation regardless of which of ExecuteWithRetryAsync's ~10
+                // callers is in flight.
+                if (ct.IsCancellationRequested)
+                {
+                    Logger.LogWarning(
+                        "CERTInext API call cancelled: Method={Method}, Path={Path}, HttpStatus={Status}, " +
+                        "ResponseStatus={ResponseStatus}, LatencyMs={Latency}, Attempt={Attempt}/{Max}.",
+                        req.Method, req.Resource, (int)resp.StatusCode, resp.ResponseStatus,
+                        sw.ElapsedMilliseconds, attempt, attempts);
+                }
+                ct.ThrowIfCancellationRequested();
 
                 if (attempt < attempts)
                 {
@@ -1398,6 +1476,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string requestorIsd   = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
             string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
 
+            // Hoisted: additionalDomains is de-duplicated against the primary domain, so both
+            // fields have to be built from the same value.
+            string domainName = ExtractCnFromSubject(request.Subject) ?? "unknown";
+
             return new GenerateOrderSslRequest
             {
                 // Meta will be set by PlaceOrderAsync
@@ -1443,8 +1525,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     },
                     CertificateInformation = new CertificateInformation
                     {
-                        DomainName = ExtractCnFromSubject(request.Subject) ?? "unknown",
-                        AdditionalDomains = BuildAdditionalDomains(request.Sans),
+                        DomainName = domainName,
+                        AdditionalDomains = BuildAdditionalDomains(request.Sans, domainName),
                         AutoSecureWww = string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0" : _config.AutoSecureWww
                     },
 
@@ -1506,16 +1588,57 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return null;
         }
 
-        private static List<string> BuildAdditionalDomains(System.Collections.Generic.List<SanEntry> sans)
+        /// <summary>
+        /// Projects the resolved SAN list onto <c>certificateInformation.additionalDomains</c>.
+        ///
+        /// Every requested SAN is submitted regardless of type. Filtering to DNS-only (the
+        /// original behaviour) issued certificates quietly missing names the subscriber had
+        /// requested, which is the worse failure; the caller warns about the non-DNS entries
+        /// before we get here.
+        ///
+        /// <paramref name="domainName"/> is the value already going out as the order's primary
+        /// domain, and Command normally includes the CN in the SAN set as well. On the US
+        /// sandbox CERTInext was measured to collapse that repetition itself
+        /// (SanSubmissionProbeTests: CN submitted twice came back registered once), but that is
+        /// undocumented and unverified against production — which is exactly why we exclude it
+        /// here rather than relying on CA-side de-duplication. It also keeps the submitted body
+        /// matching what we log.
+        /// </summary>
+        private List<string> BuildAdditionalDomains(
+            System.Collections.Generic.List<SanEntry> sans,
+            string domainName)
         {
             if (sans == null || sans.Count == 0) return null;
+
             var domains = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            bool haveDomainName = !string.IsNullOrWhiteSpace(domainName);
+            if (haveDomainName)
+                seen.Add(domainName.Trim());
+
+            int duplicates = 0;
             foreach (var san in sans)
             {
-                if (string.Equals(san.Type, "dns", StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrWhiteSpace(san.Value))
-                    domains.Add(san.Value);
+                if (san == null || string.IsNullOrWhiteSpace(san.Value)) continue;
+
+                string value = san.Value.Trim();
+                if (!seen.Add(value))
+                {
+                    duplicates++;
+                    continue;
+                }
+                domains.Add(value);
             }
+
+            if (duplicates > 0)
+            {
+                Logger.LogDebug(
+                    "Collapsed {Count} duplicate SAN value(s) out of additionalDomains " +
+                    "(already submitted as domainName '{DomainName}', or repeated in the SAN set).",
+                    duplicates, LogSanitizer.Strip(domainName));
+            }
+
             return domains.Count > 0 ? domains : null;
         }
 
