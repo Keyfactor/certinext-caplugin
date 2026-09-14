@@ -570,6 +570,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("csr")]
         public string Csr { get; set; }
 
+        [JsonPropertyName("validityYears")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? ValidityYears { get; set; }
+
         [JsonPropertyName("validityDays")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public int? ValidityDays { get; set; }
@@ -647,6 +651,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("sans")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public System.Collections.Generic.List<SanEntry> Sans { get; set; }
+
+        [JsonPropertyName("validityYears")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? ValidityYears { get; set; }
 
         [JsonPropertyName("validityDays")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

@@ -1103,6 +1103,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 ProfileId = ep.ProfileId,
                 Csr = csr,
+                ValidityYears = ep.ValidityYears > 0 ? ep.ValidityYears : (int?)null,
                 ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                 Subject = subject,
                 Sans = BuildSanList(san, csr, subject),
@@ -1328,6 +1329,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Subject = subject,
                     Sans = BuildSanList(san, csr, subject),
                     ProfileId = ep.ProductCode,
+                    ValidityYears = ep.ValidityYears > 0 ? ep.ValidityYears : (int?)null,
                     ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                     RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                     RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,

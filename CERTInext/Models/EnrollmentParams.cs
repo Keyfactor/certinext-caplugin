@@ -52,6 +52,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <summary>Alias for ProductCode — kept for backward compat.</summary>
         public string ProfileId => ProductCode;
 
+        /// <summary>Requested subscription validity in years (1, 2, or 3). Takes precedence over ValidityDays.</summary>
+        public int ValidityYears => GetInt(Constants.EnrollmentParam.ValidityYears, 0);
+
         /// <summary>Requested validity in days; 0 means "use profile default".</summary>
         public int ValidityDays => GetInt(Constants.EnrollmentParam.ValidityDays, 0);
 

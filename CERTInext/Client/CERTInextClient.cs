@@ -1474,12 +1474,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private GenerateOrderSslRequest BuildOrderRequestFromLegacyEnrollRequest(EnrollCertificateRequest request)
         {
-            // Map ValidityDays → CERTInext's year-based validity. Default 1.
-            string validityYears = request.ValidityDays.HasValue
-                ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
-                : (string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears)
-                    ? "1"
-                    : _config.SubscriptionValidityYears);
+            // ValidityYears takes precedence; ValidityDays is converted to years as a fallback.
+            string validityYears = request.ValidityYears.HasValue
+                ? request.ValidityYears.Value.ToString()
+                : request.ValidityDays.HasValue
+                    ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
+                    : (string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears)
+                        ? "1"
+                        : _config.SubscriptionValidityYears);
 
             string requestorName  = request.RequesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
             string requestorEmail = request.RequesterEmail ?? _config.RequestorEmail ?? string.Empty;
