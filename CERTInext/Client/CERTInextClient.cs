@@ -224,7 +224,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     request.Meta = await BuildMetaAsync(ct);
 
                 var req = new RestRequest(Constants.Api.GenerateOrderSslPath, Method.Post);
-                req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
+                string jsonBody = JsonSerializer.Serialize(request, GetJsonOptions());
+                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}", jsonBody);
+                req.AddJsonBody(jsonBody);
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 // idempotent:false — order submission is non-idempotent. A network-level
@@ -433,6 +435,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
 
             var result = DeserializeOrThrow<TrackOrderResponse>(resp, $"track order {orderNumber}");
+            Logger.LogTrace("TrackOrderAsync response payload (Order={OrderNumber}): {Payload}",
+                orderNumber, resp.Content);
 
             // A meta status of "0" with errorCode EMS-913 or similar means the order was not found
             if (result.Meta != null && !result.Meta.IsSuccess)
