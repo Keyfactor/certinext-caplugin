@@ -240,6 +240,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             bool hasClientId    = !string.IsNullOrWhiteSpace(_config.OAuth2ClientId);
             bool hasClientSecret= !string.IsNullOrWhiteSpace(_config.OAuth2ClientSecret);
             bool hasTokenUrl    = !string.IsNullOrWhiteSpace(_config.OAuth2TokenUrl);
+            bool hasOrganizationNumber = !string.IsNullOrWhiteSpace(_config.OrganizationNumber);
+            bool hasDefaultProductCode = !string.IsNullOrWhiteSpace(_config.DefaultProductCode);
+            bool hasGroupNumber        = !string.IsNullOrWhiteSpace(_config.GroupNumber);
 
             _logger.LogInformation(
                 "CERTInext plugin initialized. " +
@@ -247,14 +250,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "ApiKeyPresent={ApiKeyPresent}, UsernamePresent={UsernamePresent}, " +
                 "PasswordPresent={PasswordPresent}, OAuth2ClientIdPresent={OAuth2ClientIdPresent}, " +
                 "OAuth2ClientSecretPresent={OAuth2ClientSecretPresent}, OAuth2TokenUrlPresent={OAuth2TokenUrlPresent}, " +
-                "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, " +
+                "OrganizationNumberPresent={OrganizationNumberPresent}, DefaultProductCodePresent={DefaultProductCodePresent}, " +
+                "GroupNumberPresent={GroupNumberPresent}, " +
+                "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, SubmitNonDnsSans={SubmitNonDnsSans}, " +
                 "DcvEnabled={DcvEnabled}, DcvTxtRecordTemplate={DcvTxtRecordTemplate}, " +
                 "DomainValidatorFactoryInjected={FactoryInjected}",
                 _config.ApiUrl, _config.AuthMode, _config.Enabled,
                 hasApiKey, hasUsername,
                 hasPassword, hasClientId,
                 hasClientSecret, hasTokenUrl,
-                _config.PageSize, _config.IgnoreExpired,
+                hasOrganizationNumber, hasDefaultProductCode,
+                hasGroupNumber,
+                _config.PageSize, _config.IgnoreExpired, _config.SubmitNonDnsSans,
                 _config.DcvEnabled, _config.DcvTxtRecordTemplate,
                 _domainValidatorFactory != null);
 
@@ -573,18 +580,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             _logger.LogInformation(
                 "Enrollment attempt started. " +
-                "EnrollmentType={EnrollmentType}, Subject={Subject}, " +
+                "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
                 "ProfileId={ProfileId}, SANs={SANs}, " +
                 "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
-                enrollmentType, subject,
-                ep.ProfileId, sanSummary,
+                enrollmentType, requestFormat, LogSanitizer.Strip(subject),
+                ep.ProfileId, LogSanitizer.Strip(sanSummary),
                 ep.RequesterName, ep.RequesterEmail);
 
             if (string.IsNullOrWhiteSpace(ep.ProfileId))
             {
                 _logger.LogError(
                     "Enrollment rejected — ProfileId parameter is missing. Subject={Subject}, EnrollmentType={EnrollmentType}",
-                    subject, enrollmentType);
+                    LogSanitizer.Strip(subject), enrollmentType);
                 throw new Exception($"Template parameter '{Constants.EnrollmentParam.ProfileId}' is required.");
             }
 
@@ -605,7 +612,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 default:
                     _logger.LogError(
                         "Enrollment rejected — unsupported enrollment type. EnrollmentType={EnrollmentType}, Subject={Subject}",
-                        enrollmentType, subject);
+                        enrollmentType, LogSanitizer.Strip(subject));
                     throw new NotSupportedException($"Enrollment type '{enrollmentType}' is not supported.");
             }
 
@@ -617,7 +624,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "SerialNumber={SerialNumber}, Subject={Subject}, ProfileId={ProfileId}",
                 enrollmentType, result.CARequestID, result.Status,
                 result.Certificate != null ? ExtractSerialFromPem(result.Certificate) : "(pending)",
-                subject, ep.ProfileId);
+                LogSanitizer.Strip(subject), ep.ProfileId);
             _logger.MethodExit(LogLevel.Debug);
             return result;
         }
@@ -727,7 +734,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogWarning(
                     "Revocation skipped — certificate is already revoked. " +
                     "CARequestID={Id}, HexSerialNumber={Serial}, Subject={Subject}",
-                    caRequestID, hexSerialNumber, current.Subject);
+                    caRequestID, hexSerialNumber, LogSanitizer.Strip(current.Subject));
                 return (int)EndEntityStatus.REVOKED;
             }
 
@@ -756,7 +763,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "Revocation complete. " +
                 "CARequestID={Id}, HexSerialNumber={Serial}, Subject={Subject}, " +
                 "ReasonCode={ReasonCode}, ReasonString={ReasonString}",
-                caRequestID, hexSerialNumber, current.Subject,
+                caRequestID, hexSerialNumber, LogSanitizer.Strip(current.Subject),
                 revocationReason, reasonString);
             _logger.MethodExit(LogLevel.Debug);
             return (int)EndEntityStatus.REVOKED;
@@ -937,7 +944,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 status = StatusMapper.ToRequestDisposition(current.Status);
                                 _logger.LogDebug(
                                     "Sync: refetched order Id={Id} — status={Status}, certBytes={Bytes}, subject={Subject}.",
-                                    current.Id, status, current.Certificate?.Length ?? 0, current.Subject);
+                                    current.Id, status, current.Certificate?.Length ?? 0,
+                                    LogSanitizer.Strip(current.Subject));
                             }
                             catch (Exception fetchEx)
                             {
@@ -970,7 +978,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         }
                         _logger.LogDebug(
                             "Sync emit: CARequestID={Id}, Status={Status}, CertBytes={CertBytes}, Subject={Subject}",
-                            record.CARequestID, record.Status, record.Certificate?.Length ?? 0, current.Subject);
+                            record.CARequestID, record.Status, record.Certificate?.Length ?? 0,
+                            LogSanitizer.Strip(current.Subject));
 
                         blockingBuffer.Add(record, cancelToken);
                         synced++;
@@ -1096,7 +1105,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Csr = csr,
                 ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                 Subject = subject,
-                Sans = BuildSanList(san),
+                Sans = BuildSanList(san, csr, subject),
                 RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                 RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
                 KeyType = string.IsNullOrWhiteSpace(ep.KeyType) ? null : ep.KeyType,
@@ -1105,12 +1114,38 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var enrollResp = await _client.EnrollCertificateAsync(enrollReq);
 
+            // Whether the DCV block below took ownership of the in-call issuance wait for this
+            // order. Declared outside the #if so both build flavors compile the pickup gate the
+            // same way (it simply stays false on the no-DCV build). When true, the synchronous
+            // pickup poll is skipped: on the DCV build the DCV path already owns the issuance
+            // decision — it either ran WaitForIssuanceAfterDcvAsync itself, deferred to another
+            // in-flight caller, or determined the order is terminal / not yet validated — so a
+            // second stacked poll would either double the wait or burn the budget polling an
+            // order that can never issue in-call (regression guard: a cancelled/rejected order
+            // must not be re-polled here after DCV already short-circuited it).
+            bool dcvIssuanceWaitRan = false;
+
 #if SUPPORTS_DCV
             // DCV: run domain validation if enabled, the factory was injected, and the
             // order was accepted (not immediately failed).
             string orderNumber = enrollResp.Id;
             if (_domainValidatorFactory != null && _config.DcvEnabled && !string.IsNullOrEmpty(orderNumber))
             {
+                // DCV owns the in-call issuance wait for this order from here on: every exit from
+                // this block (duplicate in-flight, DCV-validated + issuance poll, terminal order,
+                // or challenge-not-yet-exposed) is a decision the pickup poll must not second-guess.
+                // Set before any await so it holds on every path out of the block.
+                //
+                // This is intentionally coarse — keyed on "the DCV subsystem engaged for this order",
+                // not on "a DCV wait is actively running". The one case it over-defers is an order
+                // whose pending domains are all assigned to a non-DNS-01 method (HTTP/email): DCV does
+                // no work, yet pickup is skipped. That is an accepted trade: this plugin only drives
+                // DNS-01, so such orders depend on out-of-band validation and would not issue within
+                // the ~55s pickup window anyway — the next sync completes them. Distinguishing that
+                // sub-case from the terminal/cancelled case (which MUST skip pickup) would require a
+                // richer PerformDcvIfNeededAsync result and risk re-opening the terminal-order regression.
+                dcvIssuanceWaitRan = true;
+
                 // SOX CC7.3: bound the entire DCV flow with a hard timeout so a stuck
                 // DNS provider or extreme propagation delay cannot hold a gateway worker
                 // thread indefinitely.  Configurable via DcvTimeoutMinutes (config or
@@ -1170,8 +1205,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 #endif
 
+            // Synchronous certificate pickup (Sectigo-parity): poll for the issued certificate so
+            // a fast-issuing order returns GENERATED + PEM in this same call. No-op for the
+            // already-issued/failed case and for OV/EV orders that CERTInext issues asynchronously
+            // — those fall back to the pending result and are imported by the next sync.
+            var newResult = BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+            newResult = await PickUpEnrolledCertificateAsync(newResult, enrollResp.Id, dcvIssuanceWaitRan);
+
             _logger.MethodExit(LogLevel.Debug);
-            return BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+            return newResult;
         }
 
         /// <summary>
@@ -1196,7 +1238,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation(
                 "Renewal/reissue probe — read PriorCertSN from EnrollmentProductInfo. " +
                 "Subject={Subject}, PriorCertSN={PriorCertSN}, RenewalWindowDays={WindowDays}",
-                subject, string.IsNullOrWhiteSpace(priorCertSn) ? "(none)" : priorCertSn,
+                LogSanitizer.Strip(subject), string.IsNullOrWhiteSpace(priorCertSn) ? "(none)" : priorCertSn,
                 ep.RenewalWindowDays);
 
             if (string.IsNullOrWhiteSpace(priorCertSn))
@@ -1205,7 +1247,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // production log filters and are available for anomaly detection.
                 _logger.LogInformation(
                     "Renewal/reissue has no PriorCertSN — treating as new enrollment. Subject={Subject}",
-                    subject);
+                    LogSanitizer.Strip(subject));
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
 
@@ -1226,7 +1268,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 _logger.LogInformation(
                     "CARequestID for serial '{SN}' is empty — falling back to new enrollment. Subject={Subject}",
-                    priorCertSn, subject);
+                    priorCertSn, LogSanitizer.Strip(subject));
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
 
@@ -1275,11 +1317,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogInformation(
                     "Renewal via CERTInext renew API started. " +
                     "PriorCARequestID={PriorId}, Subject={Subject}, ProfileId={ProfileId}",
-                    priorCaRequestId, subject, ep.ProfileId);
+                    priorCaRequestId, LogSanitizer.Strip(subject), ep.ProfileId);
 
                 var renewReq = new RenewCertificateRequest
                 {
                     Csr = csr,
+                    // Renewals go out as a fresh CERTInext order, so they need the same domain
+                    // set as a new enrollment — otherwise a renewed UCC certificate comes back
+                    // holding only its primary domain.
+                    Subject = subject,
+                    Sans = BuildSanList(san, csr, subject),
+                    ProfileId = ep.ProductCode,
                     ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                     RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                     RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
@@ -1297,13 +1345,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "PriorCARequestID={PriorId}, NewCARequestID={NewId}, Status={Status}",
                     priorCaRequestId, renewResult.CARequestID, renewResult.Status);
 
+                // Synchronous certificate pickup (Sectigo-parity), same as the new-enrollment path.
+                // The renew path never runs an in-call DCV issuance wait, so pickup always applies.
+                renewResult = await PickUpEnrolledCertificateAsync(renewResult, renewResp.Id, dcvIssuanceWaitRan: false);
+
                 return renewResult;
             }
             else
             {
                 _logger.LogInformation(
                     "Certificate '{Id}' is outside the renewal window ({Window} days) — issuing new certificate. Subject={Subject}",
-                    priorCaRequestId, ep.RenewalWindowDays, subject);
+                    priorCaRequestId, ep.RenewalWindowDays, LogSanitizer.Strip(subject));
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
         }
@@ -1565,26 +1617,60 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // SOX CC6.1: validate domain names before passing them to the DNS provider plugin
             // or the CERTInext API.  A malformed domain (empty, whitespace, or containing
             // characters outside the FQDN alphabet) could cause log injection or unexpected
-            // DNS plugin behaviour.  Invalid entries are rejected loudly rather than silently
-            // skipped so the condition is visible in the audit trail.
-            foreach (var (domain, _) in pendingDomains)
-            {
-                if (string.IsNullOrWhiteSpace(domain))
-                    throw new InvalidOperationException(
-                        $"TrackOrder returned a blank domain key in domainVerification for order '{orderNumber}'. " +
-                        "Cannot proceed with DCV.");
+            // DNS plugin behaviour.  Invalid entries are rejected loudly — LogError, so the
+            // condition is visible in the audit trail — but they are EXCLUDED rather than
+            // thrown on.
+            //
+            // Throwing here would fail the whole order: the exception escapes Enroll (which has
+            // no catch) after the order was already placed at the CA, so the enrollment reports
+            // failure with an orphaned order, and no TXT record is staged for the *valid* domains
+            // on the same order. Worse, it is unrecoverable — every later Synchronize /
+            // GetSingleRecord retry re-enters here, hits the same undrainable domain, and
+            // TryRunDcvDuringSyncAsync swallows the exception and returns false, so the order sits
+            // at EXTERNALVALIDATION forever.
+            //
+            // This is reachable in normal operation now that non-DNS SANs are submitted to
+            // CERTInext (see BuildSanList): the CA registers an email/URI SAN verbatim as an order
+            // domain, and that key is not an FQDN. One such SAN must not strand the DNS names
+            // alongside it. Same principle the EMS-956 branch below states explicitly: do not throw
+            // out of DCV for a condition that leaves the order legitimately pending.
+            var invalidDomains = new List<string>();
+            var validPendingDomains = new List<KeyValuePair<string, DomainVerificationDetail>>();
 
-                // Allow standard FQDN characters plus wildcard prefix (*.example.com)
-                if (!System.Text.RegularExpressions.Regex.IsMatch(domain, @"^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$"))
-                {
-                    _logger.LogError(
-                        "DCV domain name failed validation and will not be processed. OrderNumber={OrderNumber}, Domain={Domain}",
-                        orderNumber, domain);
-                    throw new InvalidOperationException(
-                        $"TrackOrder returned an invalid domain name '{domain}' in domainVerification for order '{orderNumber}'. " +
-                        "Domain names must conform to FQDN syntax.");
-                }
+            foreach (var entry in pendingDomains)
+            {
+                string domain = entry.Key;
+
+                // Allow standard FQDN characters plus wildcard prefix (*.example.com).
+                //
+                // \A/\z, not ^/$: in .NET's default (non-Multiline) mode, $ matches immediately
+                // before a single trailing '\n', not only at the true end of the string — so
+                // "evil.com\n" passes a ^...$ version of this regex. \A and \z are absolute
+                // start/end-of-string anchors regardless of RegexOptions, so a value with any
+                // trailing control character is correctly rejected here rather than reaching the
+                // unsanitized-looking-safe domain this validation exists to guarantee.
+                bool valid = !string.IsNullOrWhiteSpace(domain)
+                    && System.Text.RegularExpressions.Regex.IsMatch(
+                        domain, @"\A(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?\z");
+
+                if (valid)
+                    validPendingDomains.Add(entry);
+                else
+                    invalidDomains.Add(string.IsNullOrWhiteSpace(domain) ? "(blank)" : domain);
             }
+
+            if (invalidDomains.Count > 0)
+            {
+                _logger.LogError(
+                    "{Count} domain(s) on order {OrderNumber} are not valid FQDNs and cannot be DNS-01 validated: " +
+                    "[{Domains}]. They are skipped so the remaining {ValidCount} domain(s) can still be validated. " +
+                    "This order cannot be issued by CERTInext until these are removed — they usually come from a " +
+                    "non-DNS SAN (IP address, email, URI) that was requested on the enrollment.",
+                    invalidDomains.Count, orderNumber, LogSanitizer.Strip(string.Join(", ", invalidDomains)),
+                    validPendingDomains.Count);
+            }
+
+            pendingDomains = validPendingDomains;
 
             if (pendingDomains.Count == 0)
                 return false;
@@ -1595,62 +1681,256 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var stagedValidations = new List<(string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator)>();
 
-            // Stage DNS TXT records for all pending domains
-            foreach (var (domain, _) in pendingDomains)
+            // Domains this pass could not stage, with why — purely for the summary LogError after
+            // the loop. Every failure mode below is loud (its own LogError, sanitized) before being
+            // skipped, so nothing here is silent; this list just avoids repeating that detail twice.
+            var skippedDomains = new List<(string domain, string reason)>();
+
+            // Set instead of an immediate `return false` inside the loop below, so a not-yet-ready
+            // deferral goes through the same cleanup as every other exit path — see the try/catch
+            // around the loop.
+            bool deferToNextSyncCycle = false;
+
+            // Removes whatever TXT records were already published before an early exit from the
+            // staging loop. Nothing else in this method cleans up mid-loop: the try/finally further
+            // down only runs once every pending domain has been staged, so without this, an early
+            // exit orphans every TXT record already published for the earlier domains in the *same*
+            // order — permanently, since nothing else in the codebase calls CleanupValidation for
+            // them. Kept even though every per-domain failure below is now skip-and-continue rather
+            // than throw: it is the safety net for a genuinely unexpected exception (cancellation, a
+            // bug, a validator implementation that throws instead of returning a failure result).
+            //
+            // Shares its per-entry cleanup logic with the try/finally's own cleanup loop further
+            // down via CleanupOneStagedValidation — the two call sites differ only in when they run
+            // (an early exit here vs. always-run-at-the-end there), not in what "clean up one TXT
+            // record" means.
+            async Task CleanupPartialStagingAsync()
             {
-                GetDcvResponse dcvResp;
+                // Concurrent, not sequential: each cleanup call already has its own independent
+                // CleanupValidationTimeoutSeconds bound (see CleanupOneStagedValidationAsync), but
+                // running them one after another meant that bound was per-call, not in aggregate — a
+                // UCC order with N staged domains could hold the calling request open for up to
+                // N × CleanupValidationTimeoutSeconds if the DNS provider was merely slow (not even
+                // hung) on every delete, which can exceed DcvTimeoutMinutes itself and defeats the
+                // "entire DCV flow is hard-timeout-bounded" guarantee for exactly the multi-SAN case
+                // this diff exists to support. Running them concurrently bounds the wall-clock time
+                // for the whole batch to the slowest single call, regardless of domain count — these
+                // are independent per-domain operations (different hostnames/records) with no shared
+                // mutable state, so there is nothing for concurrent execution to race on.
+                await Task.WhenAll(stagedValidations.Select(entry =>
+                    CleanupOneStagedValidationAsync(entry, " after an early exit from DCV staging")));
+            }
+
+            // Shared by CleanupPartialStagingAsync above and the try/finally's own cleanup loop
+            // below — both mean "remove one already-published TXT record", just at different times
+            // (an early exit vs. always-run-at-the-end). `context` distinguishes the two in the log
+            // text without duplicating the try/catch/log structure itself.
+            async Task CleanupOneStagedValidationAsync(
+                (string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator) entry,
+                string context)
+            {
+                var (domain, hostname, validator) = entry;
                 try
                 {
-                    dcvResp = await _client.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
-                }
-                catch (Exception ex) when (IsDcvNotYetReady(ex))
-                {
-                    // CERTInext occasionally exposes the DCV slot in TrackOrder (so
-                    // domainVerification is populated and dcvStatus="0") before the GetDcv
-                    // endpoint will accept calls for that order — observed as EMS-956
-                    // "Invalid Request for this API" for several hours after enrollment.
-                    // Treat this as "DCV not ready yet": skip the DCV ceremony for now and
-                    // let the sync-driven retry pick it up on a later cycle. We must NOT
-                    // throw, because that would fail the entire Enroll call and prevent the
-                    // gateway from recording the pending order at all.
+                    // A fresh, independently-bounded token — deliberately neither `ct` nor
+                    // CancellationToken.None.
+                    //
+                    // Not `ct`: this is a best-effort compensating action — removing a TXT record we
+                    // already published — and it must run regardless of WHY we are cleaning up,
+                    // including the case where `ct` itself is the reason (the dominant real trigger
+                    // for the early-exit call site is the shared DcvTimeoutMinutes-bound token firing
+                    // mid-loop, which means `ct` is guaranteed already cancelled there). A
+                    // cooperative IDomainValidator that forwards its token into its own HTTP calls —
+                    // the reference CloudflareDomainValidator in this repo does exactly that — would
+                    // throw immediately on an already-cancelled token and never even attempt the
+                    // delete, silently leaving the record published with only a Warning logged.
+                    //
+                    // Not CancellationToken.None either: this method's own SOX CC7.3 guarantee is
+                    // that the whole DCV flow is hard-timeout-bounded so a stuck DNS provider cannot
+                    // hold a gateway worker thread indefinitely. That bound has to come from
+                    // somewhere for THIS call too — including the routine, always-runs finally-block
+                    // cleanup on the ordinary successful-DCV path, which was never cancellation-
+                    // related to begin with and would otherwise hang forever on a DNS provider
+                    // plugin whose underlying network call stalls.
+                    using var cleanupCts = new CancellationTokenSource(
+                        TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
+                    await validator.CleanupValidation(hostname, cleanupCts.Token);
                     _logger.LogInformation(
-                        "GetDcv not yet accepting calls for order {OrderNumber} domain {Domain} ({Error}). " +
-                        "Deferring DCV to the next sync cycle.",
-                        orderNumber, domain, ex.Message);
-                    return false;
+                        "DNS TXT record cleaned up{Context}. Domain={Domain}, Hostname={Hostname}",
+                        context, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "GetDcv failed for order {OrderNumber} domain {Domain}", orderNumber, domain);
-                    throw;
+                    _logger.LogWarning(ex,
+                        "Failed to clean up DNS TXT record{Context}. Domain={Domain}, Hostname={Hostname}. " +
+                        "May require manual removal.",
+                        context, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
                 }
+            }
 
-                string token = dcvResp.DcvDetails?.Token;
-                if (string.IsNullOrWhiteSpace(token))
-                    throw new InvalidOperationException(
-                        $"GetDcv returned no token for order '{orderNumber}' domain '{domain}'.");
+            try
+            {
+                // Stage DNS TXT records for all pending domains. Every failure below is scoped to
+                // the one domain that hit it — logged loudly (LogError, so the audit trail carries
+                // the reason before the domain is dropped) and skipped, never thrown. A throw here
+                // would abort the WHOLE order after Enroll already placed it at the CA — Enroll has
+                // no catch around this call, so the exception would escape as a failed enrollment
+                // with an orphaned CERTInext order, and TryRunDcvDuringSyncAsync would swallow the
+                // same exception on every later sync retry, leaving the order stuck at
+                // EXTERNALVALIDATION forever. That is worse than parking the order pending with a
+                // clear log entry, for EVERY failure shape here — not just the ones distinguishable
+                // as "bad input" — because nothing downstream ever gets to see or act on the
+                // exception anyway. This directly caused three real regressions across the first two
+                // rounds of fixing this file: a GetDcv error or an empty token for a non-DNS SAN
+                // (submitted on purpose — see BuildSanList) aborted co-tenant DNS domains on the same
+                // order; a StageValidation failure on domain N+1 orphaned domain N's TXT record; and
+                // a misconfiguration-detection throw fired on an ordinary non-DNS Subject CN, which
+                // no setting could prevent since SubmitNonDnsSans only filters the SAN list, not the
+                // subject. There is no longer a "this must still throw" case in this loop at all.
+                foreach (var (domain, _) in pendingDomains)
+                {
+                    GetDcvResponse dcvResp;
+                    try
+                    {
+                        dcvResp = await _client.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
+                    }
+                    catch (Exception ex) when (IsDcvNotYetReady(ex))
+                    {
+                        // CERTInext occasionally exposes the DCV slot in TrackOrder (so
+                        // domainVerification is populated and dcvStatus="0") before the GetDcv
+                        // endpoint will accept calls for that order — observed as EMS-956
+                        // "Invalid Request for this API" for several hours after enrollment. This is
+                        // an order-readiness condition, not a per-domain one, so unlike every other
+                        // case in this loop it defers the whole pass rather than skipping one domain.
+                        _logger.LogInformation(
+                            "GetDcv not yet accepting calls for order {OrderNumber} domain {Domain} ({Error}). " +
+                            "Deferring DCV to the next sync cycle.",
+                            orderNumber, LogSanitizer.Strip(domain), ex.Message);
+                        deferToNextSyncCycle = true;
+                        break;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The shared, DcvTimeoutMinutes-bound cancellation firing mid-loop. This is
+                        // NOT a per-domain CA/DNS-provider failure — it must not be caught by the
+                        // generic clause below, which would mislabel it as "GetDcv failed" for
+                        // whichever domain happened to be in flight and send an operator chasing the
+                        // wrong cause. Propagate to the outer catch, which logs and cleans up.
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        // Any other GetDcv failure — genuinely unmeasured against the live API for a
+                        // non-DNS order-domain, which is exactly why this must not be allowed to fail
+                        // the whole order on a guess. Skip just this domain.
+                        _logger.LogError(ex,
+                            "GetDcv failed for order {OrderNumber} domain {Domain}; skipping this domain so the " +
+                            "rest of the order can still be validated.", orderNumber, LogSanitizer.Strip(domain));
+                        skippedDomains.Add((domain, "GetDcv failed"));
+                        continue;
+                    }
 
-                string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
-                    ? Constants.Dcv.DefaultTxtRecordTemplate
-                    : _config.DcvTxtRecordTemplate;
-                string hostname = string.Format(template, domain);
+                    string token = dcvResp.DcvDetails?.Token;
+                    if (string.IsNullOrWhiteSpace(token))
+                    {
+                        _logger.LogError(
+                            "GetDcv returned no token for order {OrderNumber} domain {Domain}; skipping this " +
+                            "domain so the rest of the order can still be validated.",
+                            orderNumber, LogSanitizer.Strip(domain));
+                        skippedDomains.Add((domain, "no DCV token returned"));
+                        continue;
+                    }
 
-                var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
-                if (validator == null)
-                    throw new InvalidOperationException(
-                        $"No DNS provider plugin is configured for domain '{domain}'. " +
-                        "Ensure the appropriate DNS provider plugin is deployed and configured on the gateway.");
+                    string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
+                        ? Constants.Dcv.DefaultTxtRecordTemplate
+                        : _config.DcvTxtRecordTemplate;
+                    string hostname = string.Format(template, domain);
 
-                _logger.LogInformation(
-                    "Staging DNS TXT record for DCV. OrderNumber={OrderNumber}, Domain={Domain}, Hostname={Hostname}",
-                    orderNumber, domain, hostname);
+                    var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
+                    if (validator == null)
+                    {
+                        // The canonical case: an IP-literal SAN (or a non-DNS Subject CN) satisfies
+                        // the FQDN regex above but no DNS zone can ever match it.
+                        _logger.LogError(
+                            "No DNS provider plugin resolved for domain '{Domain}' on order {OrderNumber}; " +
+                            "skipping this domain so the rest of the order can still be validated. If this is " +
+                            "a real domain, ensure the appropriate DNS provider plugin is deployed and " +
+                            "configured on the gateway; if it came from a non-DNS SAN (e.g. an IP address) or a " +
+                            "non-DNS Subject CN, remove it from the request.",
+                            LogSanitizer.Strip(domain), orderNumber);
+                        skippedDomains.Add((domain, "no DNS provider resolved"));
+                        continue;
+                    }
 
-                var stageResult = await validator.StageValidation(hostname, token, ct);
-                if (!stageResult.Success)
-                    throw new InvalidOperationException(
-                        $"Failed to stage DNS validation for '{domain}': {stageResult.ErrorMessage}");
+                    _logger.LogInformation(
+                        "Staging DNS TXT record for DCV. OrderNumber={OrderNumber}, Domain={Domain}, Hostname={Hostname}",
+                        orderNumber, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
 
-                stagedValidations.Add((domain, hostname, validator));
+                    DomainValidationResult stageResult;
+                    try
+                    {
+                        stageResult = await validator.StageValidation(hostname, token, ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Same reasoning as the GetDcv cancellation catch above: not a per-domain
+                        // failure, must reach the outer catch rather than the generic clause below.
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "DNS provider plugin threw while staging '{Domain}' for order {OrderNumber}; " +
+                            "skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(domain), orderNumber);
+                        skippedDomains.Add((domain, "DNS provider plugin threw"));
+                        continue;
+                    }
+
+                    if (!stageResult.Success)
+                    {
+                        _logger.LogError(
+                            "Failed to stage DNS validation for '{Domain}' on order {OrderNumber}: {Error}. " +
+                            "Skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(domain), orderNumber, LogSanitizer.Strip(stageResult.ErrorMessage));
+                        skippedDomains.Add((domain, $"stage failed: {stageResult.ErrorMessage}"));
+                        continue;
+                    }
+
+                    stagedValidations.Add((domain, hostname, validator));
+                }
+            }
+            catch (Exception ex)
+            {
+                // Nothing in the loop above throws for a per-domain reason any more — this is the
+                // safety net for a genuinely unexpected failure: cancellation (the shared
+                // DcvTimeoutMinutes-bound token expiring mid-loop — explicitly re-thrown past the
+                // per-domain catches above rather than mislabeled as a per-domain failure) or a bug.
+                // Log before rethrowing: neither caller (EnrollNewAsync's try/finally, or Enroll
+                // itself) adds a catch, so without a log line here an unanticipated failure on the
+                // synchronous Enroll-time DCV path would leave no plugin-emitted record at all
+                // identifying the order or cause — only whatever the gateway host's own unhandled-
+                // exception logging happens to capture.
+                _logger.LogError(ex,
+                    "Unexpected failure during DCV staging for order {OrderNumber}; cleaning up any " +
+                    "already-staged TXT records before this propagates.", orderNumber);
+                await CleanupPartialStagingAsync();
+                throw;
+            }
+
+            if (deferToNextSyncCycle)
+            {
+                await CleanupPartialStagingAsync();
+                return false;
+            }
+
+            if (skippedDomains.Count > 0)
+            {
+                _logger.LogError(
+                    "{Count} domain(s) on order {OrderNumber} could not be staged for DCV and were skipped: " +
+                    "[{Domains}]. This order cannot be issued by CERTInext until they are resolved.",
+                    skippedDomains.Count, orderNumber,
+                    LogSanitizer.Strip(string.Join(", ", skippedDomains.Select(d => $"{d.domain} ({d.reason})"))));
             }
 
             if (stagedValidations.Count == 0)
@@ -1671,7 +1951,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 foreach (var (domain, hostname, _) in stagedValidations)
                 {
                     _logger.LogInformation(
-                        "Triggering CERTInext DCV verification. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        "Triggering CERTInext DCV verification. OrderNumber={OrderNumber}, Domain={Domain}",
+                        orderNumber, LogSanitizer.Strip(domain));
                     await _client.VerifyDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
                 }
 
@@ -1682,21 +1963,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             finally
             {
-                // Always clean up staged DNS records — even on failure
-                foreach (var (domain, hostname, validator) in stagedValidations)
-                {
-                    try
-                    {
-                        await validator.CleanupValidation(hostname, ct);
-                        _logger.LogInformation(
-                            "DNS TXT record cleaned up. Domain={Domain}, Hostname={Hostname}", domain, hostname);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex,
-                            "Failed to clean up DNS TXT record. Domain={Domain}, Hostname={Hostname}", domain, hostname);
-                    }
-                }
+                // Always clean up staged DNS records — even on failure. Concurrent, not sequential
+                // — see CleanupPartialStagingAsync's comment above for why: sequential cleanup made
+                // the aggregate wall-clock time for this block scale with the number of staged SAN
+                // domains, unbounded relative to DcvTimeoutMinutes, on this ordinary success path too.
+                await Task.WhenAll(stagedValidations.Select(entry =>
+                    CleanupOneStagedValidationAsync(entry, "")));
             }
 
             return true;
@@ -1823,7 +2095,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "DCV verification poll exceeded its internal deadline ({Minutes}min). " +
                         "OrderNumber={OrderNumber}, StillPendingDomains=[{Pending}].  " +
                         "Exiting and leaving TXT records for the caller's finally block to clean up.",
-                        _config.GetEffectiveDcvTimeoutMinutes(), orderNumber, string.Join(",", pending));
+                        _config.GetEffectiveDcvTimeoutMinutes(), orderNumber,
+                        LogSanitizer.Strip(string.Join(",", pending)));
                     return;
                 }
 
@@ -1856,16 +2129,206 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                     if (string.Equals(detail.DcvStatus, Constants.Dcv.StatusValidated, StringComparison.Ordinal))
                     {
-                        _logger.LogInformation("DCV verified by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        _logger.LogInformation("DCV verified by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}",
+                            orderNumber, LogSanitizer.Strip(domain));
                         pending.Remove(domain);
                     }
                     else if (string.Equals(detail.DcvStatus, Constants.Dcv.StatusRejected, StringComparison.Ordinal))
                     {
-                        _logger.LogWarning("DCV rejected by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        _logger.LogWarning("DCV rejected by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}",
+                            orderNumber, LogSanitizer.Strip(domain));
                         pending.Remove(domain);
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Synchronous certificate pickup — parity with the legacy Sectigo connector's
+        /// <c>PickUpEnrolledCertificate</c>. After an order is submitted, polls
+        /// <c>GetCertificate</c> up to <c>PickupRetries</c> times, <c>PickupDelay</c> seconds
+        /// apart (after a fixed initial delay), so an order that issues quickly is returned
+        /// GENERATED + PEM in the same enrollment call instead of waiting for the next
+        /// synchronization. If the certificate has not issued within the budget, the original
+        /// pending result is returned unchanged and the order is imported by a later sync —
+        /// behaviour identical to before this feature.
+        ///
+        /// Applies to ALL products. CERTInext issues OV/EV asynchronously (organization
+        /// verification, minutes to hours; confirmed by CERTInext support ticket #162763), so
+        /// those typically exhaust the budget and fall back to pending; only DV / already-approved
+        /// orders return in-call. Never throws — any polling error degrades to the pending result.
+        /// </summary>
+        private async Task<EnrollmentResult> PickUpEnrolledCertificateAsync(
+            EnrollmentResult pendingResult, string orderNumber, bool dcvIssuanceWaitRan)
+        {
+            // The DCV path already owns the in-call issuance wait for this order — running a second
+            // stacked poll here would double the wait budget (when DCV ran WaitForIssuanceAfterDcvAsync)
+            // or waste it polling an order DCV already found terminal / not-yet-validated. Defer to
+            // the pending result; a later sync completes it.
+            if (dcvIssuanceWaitRan)
+                return pendingResult;
+
+            // Only a still-pending (external-validation) result can benefit from a pickup poll.
+            // An already issued/failed/revoked result is returned as-is.
+            if (pendingResult == null
+                || pendingResult.Status != (int)EndEntityStatus.EXTERNALVALIDATION)
+                return pendingResult;
+
+            // A pending result with no order number cannot be polled — surface the anomaly rather
+            // than silently returning, so an un-pollable pending state leaves an audit trace.
+            if (string.IsNullOrWhiteSpace(orderNumber))
+            {
+                _logger.LogWarning(
+                    "Synchronous pickup skipped: a pending enrollment was returned with no order " +
+                    "number to poll. The certificate can only be reconciled by a later synchronization.");
+                return pendingResult;
+            }
+
+            int retries = _config.GetEffectivePickupRetries();
+            if (retries <= 0)
+            {
+                _logger.LogInformation(
+                    "Synchronous certificate pickup disabled (PickupRetries<=0). Order {OrderNumber} " +
+                    "will be picked up on the next synchronization.", orderNumber);
+                return pendingResult;
+            }
+
+            int delaySeconds = _config.GetEffectivePickupDelaySeconds();
+
+            // Hard ceiling on total in-call occupancy. PickupRetries and PickupDelay are each clamped
+            // independently, but their product can still reach ~30 min at the extremes — enough to push
+            // Enroll() past Command's own enrollment timeout. If the configured budget would exceed the
+            // ceiling, cap the retry count to fit; the remainder is imported by the next synchronization.
+            int maxPollRetries = Math.Max(1,
+                (Constants.Pickup.MaxTotalWaitSeconds - Constants.Pickup.InitialDelaySeconds) / delaySeconds);
+            if (retries > maxPollRetries)
+            {
+                _logger.LogInformation(
+                    "Configured pickup budget (PickupRetries={Configured}, PickupDelaySeconds={Delay}) exceeds the " +
+                    "{MaxTotal}s in-call ceiling; capping to {Capped} attempts. The certificate will be imported by " +
+                    "the next synchronization if it has not issued by then.",
+                    retries, delaySeconds, Constants.Pickup.MaxTotalWaitSeconds, maxPollRetries);
+                retries = maxPollRetries;
+            }
+
+            _logger.LogInformation(
+                "Starting synchronous certificate pickup. OrderNumber={OrderNumber}, PickupRetries={Retries}, " +
+                "PickupDelaySeconds={Delay} (max ~{Max}s including a {Initial}s initial delay).",
+                orderNumber, retries, delaySeconds,
+                Constants.Pickup.InitialDelaySeconds + retries * delaySeconds, Constants.Pickup.InitialDelaySeconds);
+
+            int pollErrors = 0;
+            try
+            {
+                // Small static delay before the first poll — mirrors the Sectigo connector's
+                // attempt to let a fast order finish issuing before we start polling at all.
+                await Task.Delay(TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds));
+
+                for (int attempt = 1; attempt <= retries; attempt++)
+                {
+                    try
+                    {
+                        var cert = await _client.GetCertificateAsync(orderNumber);
+                        int disposition = StatusMapper.ToRequestDisposition(cert.Status);
+
+                        // SOC2 CC7.3: record each poll's observed disposition so the issuance
+                        // timeline is reconstructable (how many polls ran, what each returned).
+                        _logger.LogDebug(
+                            "Pickup poll observed status. OrderNumber={OrderNumber}, Attempt={Attempt}/{Retries}, " +
+                            "MappedDisposition={Disposition}, Status='{Status}', BodyPresent={HasBody}.",
+                            orderNumber, attempt, retries, disposition, cert.Status,
+                            !string.IsNullOrWhiteSpace(cert.Certificate));
+
+                        // Issued: only surface GENERATED when the PEM is actually present — never
+                        // hand Command a body-less "issued" record. A body-less issued state keeps
+                        // polling until the body appears or the budget runs out.
+                        if (disposition == (int)EndEntityStatus.GENERATED
+                            && !string.IsNullOrWhiteSpace(cert.Certificate))
+                        {
+                            _logger.LogInformation(
+                                "Synchronous pickup complete. OrderNumber={OrderNumber}, SerialNumber={Serial}, " +
+                                "Attempt={Attempt}/{Retries}.",
+                                orderNumber,
+                                string.IsNullOrWhiteSpace(cert.SerialNumber) ? "(none)" : cert.SerialNumber,
+                                attempt, retries);
+                            return new EnrollmentResult
+                            {
+                                CARequestID = string.IsNullOrWhiteSpace(cert.Id) ? orderNumber : cert.Id,
+                                Certificate = cert.Certificate,
+                                Status = (int)EndEntityStatus.GENERATED,
+                                StatusMessage = $"Certificate issued successfully. CERTInext ID: {orderNumber}."
+                            };
+                        }
+
+                        // Terminal non-issued outcomes carry no body and are surfaced immediately.
+                        if (disposition == (int)EndEntityStatus.REVOKED
+                            || disposition == (int)EndEntityStatus.FAILED)
+                        {
+                            // SOX/SOC2 CC7.2: an issuance FAILURE must cross the error threshold that
+                            // SIEM issuance-failure rules key on (parity with BuildEnrollmentResult's
+                            // enroll-time FAILED handling); a REVOKED terminal state is a warning.
+                            if (disposition == (int)EndEntityStatus.FAILED)
+                                _logger.LogError(
+                                    "Order {OrderNumber} reached terminal FAILED status '{Status}' during " +
+                                    "synchronous pickup (attempt {Attempt}/{Retries}).",
+                                    orderNumber, cert.Status, attempt, retries);
+                            else
+                                _logger.LogWarning(
+                                    "Order {OrderNumber} was REVOKED ('{Status}') during synchronous pickup " +
+                                    "(attempt {Attempt}/{Retries}).",
+                                    orderNumber, cert.Status, attempt, retries);
+                            return new EnrollmentResult
+                            {
+                                CARequestID = string.IsNullOrWhiteSpace(cert.Id) ? orderNumber : cert.Id,
+                                Certificate = cert.Certificate,
+                                Status = disposition,
+                                StatusMessage = $"Order {orderNumber} reached status '{cert.Status}' during enrollment pickup."
+                            };
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // A transient fetch failure consumes an attempt rather than aborting the
+                        // wait; if it never recovers the pending result is returned below.
+                        pollErrors++;
+                        _logger.LogWarning(ex,
+                            "Pickup GetCertificate failed for order {OrderNumber} (attempt {Attempt}/{Retries}).",
+                            orderNumber, attempt, retries);
+                    }
+
+                    // Delay after every attempt (including the last), matching the Sectigo
+                    // connector's pickup cadence so the max-occupancy ceiling is identical.
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+                }
+
+                // SOC1 accuracy: don't attribute non-completion to "OV/EV async by design" when the
+                // real cause was every poll erroring (e.g. a CA-side TrackOrder outage). Distinguish
+                // the two so the log reflects what actually happened.
+                if (pollErrors == retries)
+                    _logger.LogWarning(
+                        "Synchronous pickup exhausted {Retries} attempts for order {OrderNumber} — ALL polls " +
+                        "errored (see preceding warnings). Returning pending result; the next synchronization " +
+                        "will re-attempt retrieval.",
+                        retries, orderNumber);
+                else
+                    _logger.LogInformation(
+                        "Synchronous pickup did not complete within {Retries} attempts for order {OrderNumber} " +
+                        "({Errors} poll error(s); remainder still pending). Returning pending result; the " +
+                        "certificate will be imported by the next synchronization. CERTInext issues OV/EV " +
+                        "asynchronously by design (support ticket #162763).",
+                        retries, orderNumber, pollErrors);
+                pendingResult.StatusMessage =
+                    $"{pendingResult.StatusMessage} The certificate was not issued within the enrollment-pickup " +
+                    "window; it will be imported by a later synchronization.";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Synchronous pickup failed for order {OrderNumber}. Returning pending result; " +
+                    "sync will pick up the certificate later.", orderNumber);
+            }
+
+            return pendingResult;
         }
 
         /// <summary>
@@ -1878,6 +2341,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 throw new Exception("CERTInext returned a null enrollment response.");
 
             int status = StatusMapper.ToRequestDisposition(resp.Status);
+
+            // CertiNext's "auto-approved"/"downloadable" statuses can arrive before the
+            // certificate bytes are actually generated — GetCertificate right after order
+            // placement then fails, leaving resp.Certificate null while resp.Status still
+            // says issued. Never hand Command a GENERATED result with no PEM (it crashes
+            // CertificateConverterFactory.FromPEM downstream); demote to pending instead,
+            // matching the same invariant PickUpEnrolledCertificateAsync already enforces.
+            if (status == (int)EndEntityStatus.GENERATED && string.IsNullOrWhiteSpace(resp.Certificate))
+                status = (int)EndEntityStatus.EXTERNALVALIDATION;
+
             string message;
 
             switch (status)
@@ -1958,44 +2431,356 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Converts the multi-valued SAN dictionary from the AnyCA gateway into the
-        /// <see cref="SanEntry"/> list expected by the CERTInext API.
+        /// Builds the <see cref="SanEntry"/> list submitted to CERTInext: the multi-valued SAN
+        /// dictionary the AnyCA gateway hands us, falling back to the subjectAltName extension
+        /// carried inside the CSR itself only when the gateway supplies nothing at all.
+        ///
+        /// Fallback, not union, deliberately: Command's SAN dictionary is the channel through
+        /// which an enrollment pattern's SAN policy is expressed for this request, and a signed
+        /// CSR — typically generated by the subscriber's own tooling, not by Command — can
+        /// legitimately carry more names than that policy allows. Unioning them in would
+        /// re-introduce a name the policy excluded. The CSR is only consulted when the dictionary
+        /// argument is <c>null</c> — not merely empty or all-empty-arrays. A non-null dictionary,
+        /// even one that computes to zero names, means Command's enrollment pattern ran and
+        /// deliberately produced no SANs for this request; only its literal absence means no
+        /// policy-derived set exists to defer to.
+        ///
+        /// The CSR still matters even though CERTInext ignores its subjectAltName extension
+        /// outright — measured on the US sandbox in <c>SanSubmissionProbeTests</c>: a CSR
+        /// carrying two DNS names, submitted with <c>additionalDomains</c> omitted, produced an
+        /// order with only the CN registered. Production behaves the same way: the customer
+        /// report that prompted this fix was a production UCC order whose CSR carried the SANs
+        /// and whose issued certificate held only the CN. So on whichever path populates the
+        /// gateway dictionary — or, in the fallback case, the CSR — this method is the only way
+        /// those names reach <c>additionalDomains</c> and therefore the certificate.
+        ///
+        /// History (UCC SANs silently dropped): the gateway keys this dictionary
+        /// <c>dnsname</c>, not <c>dns</c>. <see cref="MapSanType"/> did not recognize
+        /// <c>dnsname</c>, so every DNS SAN was typed <c>"dnsname"</c>, filtered out by the
+        /// DNS-only test in <c>BuildAdditionalDomains</c>, and the order went to CERTInext
+        /// with no <c>additionalDomains</c> at all. The certificate came back holding only
+        /// the CN, which reads as the CA stripping SANs supplied on the CSR.
         /// </summary>
-        private static List<SanEntry> BuildSanList(Dictionary<string, string[]> san)
+        private List<SanEntry> BuildSanList(Dictionary<string, string[]> san, string csr, string subject)
         {
-            if (san == null || san.Count == 0)
-                return null;
-
             var result = new List<SanEntry>();
+            // Type+value identity, so the same name requested as two different SAN types is
+            // preserved while an exact repeat across the two sources collapses.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // "type|value" keys of entries that came from the CSR fallback, not the gateway
+            // dictionary — used only to word the provenance log accurately once the final,
+            // possibly-filtered result is known (see below).
+            var fromCsrKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            // AnyCA passes SANs keyed by type name (e.g. "Dns", "Ip", "Email", "Uri")
-            foreach (var kvp in san)
+            void Add(string type, string value, bool fromCsr = false)
             {
-                string sanType = MapSanType(kvp.Key);
-                if (kvp.Value == null) continue;
+                if (string.IsNullOrWhiteSpace(value)) return;
+                string trimmed = value.Trim();
+                string key = $"{type}|{trimmed}";
+                if (!seen.Add(key)) return;
+                result.Add(new SanEntry { Type = type, Value = trimmed });
+                if (fromCsr) fromCsrKeys.Add(key);
+            }
 
-                foreach (string value in kvp.Value)
+            string FormatSans(IEnumerable<SanEntry> sans) =>
+                LogSanitizer.Strip(string.Join("; ", sans.Select(s => $"{s.Type}:{s.Value}")));
+
+            // AnyCA passes SANs keyed by type name — the real gateway uses "dnsname",
+            // "rfc822name", "ipaddress"; MapSanType normalizes the spelling variants.
+            if (san != null)
+            {
+                foreach (var kvp in san)
                 {
-                    if (!string.IsNullOrWhiteSpace(value))
-                        result.Add(new SanEntry { Type = sanType, Value = value.Trim() });
+                    string sanType = MapSanType(kvp.Key);
+                    if (kvp.Value == null) continue;
+
+                    foreach (string value in kvp.Value)
+                        Add(sanType, value);
                 }
             }
 
-            return result.Count > 0 ? result : null;
+            // CSR fallback — only when the gateway dictionary is itself absent (san == null), NOT
+            // merely "computed to zero SAN entries" (i.e. result.Count == 0 at this point). Those
+            // are different things:
+            // a non-null dictionary — even an empty one, or one whose keys all map to empty arrays
+            // — means Command's enrollment pattern ran and deliberately produced no SANs for this
+            // request, which the CSR fallback must respect rather than override. san == null means
+            // Command never populated SAN data for this enrollment path at all, which is the one
+            // case this fallback exists for. Checking "computed to zero" instead of "san is null"
+            // would let an enrollment pattern that explicitly computes zero SANs still have
+            // CSR-derived names spliced back in — reopening the policy-reintroduction risk the
+            // fallback-over-union redesign exists to close.
+            var skippedCsrTags = new List<int>();
+            if (san == null)
+            {
+                var csrSans = ExtractSanEntriesFromCsr(csr, out skippedCsrTags);
+                foreach (var csrSan in csrSans)
+                    Add(csrSan.Type, csrSan.Value, fromCsr: true);
+            }
+
+            if (skippedCsrTags.Count > 0)
+            {
+                // GeneralName types with no domain-name rendering (otherName — e.g. a UPN from a
+                // Windows-generated CSR — directoryName, x400Address, ediPartyName, registeredID).
+                // They cannot be expressed in additionalDomains, so they are not forwarded. Warn
+                // rather than drop silently: the operator needs to know the CSR asked for something
+                // the certificate will not carry.
+                _logger.LogWarning(
+                    "{Count} SAN(s) in the CSR use a type that cannot be represented as a domain name " +
+                    "and were not submitted (ASN.1 GeneralName tag(s): {Tags}). CERTInext's " +
+                    "additionalDomains field carries domain names only, so these cannot appear on the " +
+                    "issued certificate. Remove them from the CSR if they are required. Subject={Subject}",
+                    skippedCsrTags.Count, string.Join(", ", skippedCsrTags), LogSanitizer.Strip(subject));
+            }
+
+            if (result.Count == 0)
+            {
+                _logger.LogDebug(
+                    "No SANs supplied by the gateway and none found in the CSR — submitting the order " +
+                    "with domainName only. Subject={Subject}", LogSanitizer.Strip(subject));
+                return null;
+            }
+
+            // CERTInext's certificateInformation.additionalDomains is a domain-name field, and
+            // non-DNS SANs are submitted into it deliberately rather than discarded: dropping
+            // them would issue a certificate silently missing names the subscriber asked for,
+            // which is the worse failure.
+            //
+            // Measured on the US SANDBOX only (SanSubmissionProbeTests, product 844,
+            // 2026-08-12): CERTInext did NOT reject these at order placement. It accepted the
+            // order and registered the value verbatim as an order domain — an email address, an
+            // IP literal and a URI all came back as domainVerification keys. The order then
+            // cannot pass domain validation, so it parks pending instead of failing fast.
+            //
+            // Production is UNVERIFIED for this case and may reject the order outright instead.
+            // The warning below therefore describes the sandbox outcome as the expected one
+            // without promising it: either way the operator is told which SANs are the problem,
+            // which is the part that matters for diagnosis.
+            //
+            // This filtering runs BEFORE any of the logging below, and all of that logging is
+            // computed from `result` as it stands afterward — not from the pre-filter set. A
+            // prior version of this method logged "resolved" and "added to the order" against the
+            // pre-filter set and only THEN applied this filter, so with SubmitNonDnsSans=false the
+            // audit trail could claim a SAN was added when it had in fact just been dropped two
+            // lines later — a self-contradicting record for the same enrollment. The fix is
+            // ordering, not new logic: decide what is actually being submitted first, describe
+            // that.
+            var nonDns = result.Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (nonDns.Count > 0 && !_config.SubmitNonDnsSans)
+            {
+                _logger.LogWarning(
+                    "{Count} requested SAN(s) are not DNS names and are being DROPPED because " +
+                    "SubmitNonDnsSans is false: {Sans}. The order will issue, but the certificate will " +
+                    "NOT contain these names. Set SubmitNonDnsSans back to true to submit them and have " +
+                    "CERTInext surface the problem instead. Subject={Subject}",
+                    nonDns.Count, FormatSans(nonDns), LogSanitizer.Strip(subject));
+
+                result = result
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                nonDns = new List<SanEntry>();
+
+                if (result.Count == 0)
+                    return null;
+            }
+
+            // The blind spot that hid the original defect was that nothing logged what we
+            // resolved. Log the final, post-filter resolved set and its provenance at Information.
+            int fromCsrKept = result.Count(s => fromCsrKeys.Contains($"{s.Type}|{s.Value}"));
+            // Post-filter, not the pre-filter `fromGateway` snapshot: gateway- and CSR-sourced
+            // entries are mutually exclusive by construction (the CSR fallback only ever runs when
+            // the gateway supplied nothing at all), so whatever's left in `result` and isn't
+            // fromCsrKept must be gateway-sourced. Using the pre-filter count here reproduced the
+            // exact self-contradicting-audit-trail bug this method was already restructured once to
+            // fix — with SubmitNonDnsSans=false this line could read e.g. "Resolved 1 SAN(s) ...
+            // FromGatewayRequest=3", an arithmetic impossibility for anyone reconciling counts.
+            int fromGatewayKept = result.Count - fromCsrKept;
+            _logger.LogInformation(
+                "Resolved {Total} SAN(s) for submission. FromGatewayRequest={FromGateway}, " +
+                "AddedFromCsrFallback={FromCsr}, Sans={Sans}, Subject={Subject}",
+                result.Count, fromGatewayKept, fromCsrKept, FormatSans(result),
+                LogSanitizer.Strip(subject));
+
+            if (fromCsrKept > 0)
+            {
+                // Worth a Warning, not Debug: it means Command handed us no SAN data at all for
+                // this enrollment, which is a gateway/template wiring smell even though the CSR
+                // fallback recovers it here.
+                _logger.LogWarning(
+                    "Command supplied no SAN data for this enrollment; {Count} SAN(s) present in the CSR " +
+                    "have been added to the order instead. Review the enrollment pattern / template SAN " +
+                    "configuration. Subject={Subject}",
+                    fromCsrKept, LogSanitizer.Strip(subject));
+            }
+
+            if (nonDns.Count > 0)
+            {
+                // Reaching this line means SubmitNonDnsSans is true (the false case already
+                // returned above), so these are being submitted, not dropped.
+                _logger.LogWarning(
+                    "{Count} requested SAN(s) are not DNS names: {Sans}. CERTInext's additionalDomains " +
+                    "field takes domain names, so this order will either be rejected outright or be " +
+                    "created and then fail domain validation and sit pending — on the US sandbox it was " +
+                    "accepted verbatim and parked pending. They are submitted rather than dropped on " +
+                    "purpose: a visible failure is preferable to a certificate issued without names the " +
+                    "subscriber requested. Remove them from the CSR or the enrollment pattern if the " +
+                    "order should proceed. Subject={Subject}",
+                    nonDns.Count, FormatSans(nonDns), LogSanitizer.Strip(subject));
+            }
+
+            return result;
         }
 
         private static string MapSanType(string anyCAType)
         {
             switch (anyCAType?.ToLowerInvariant())
             {
-                case "dns": return "dns";
+                // "dnsname" is what the AnyCA REST Gateway actually sends; "dns"/"dnsnames"
+                // are kept for callers and older hosts that use the shorter spelling.
+                case "dns":
+                case "dnsname":
+                case "dnsnames": return "dns";
                 case "ip":
-                case "ipaddress": return "ip";
+                case "ipaddress":
+                case "ipaddresses": return "ip";
                 case "email":
-                case "rfc822": return "email";
-                case "uri": return "uri";
+                case "rfc822":
+                case "rfc822name": return "email";
+                case "uri":
+                case "uniformresourceidentifier": return "uri";
                 default: return anyCAType?.ToLowerInvariant() ?? "dns";
             }
+        }
+
+        /// <summary>
+        /// Extracts the subjectAltName entries from a PEM-encoded PKCS#10 CSR.
+        ///
+        /// Implemented with BouncyCastle (per the project's crypto policy: all certificate
+        /// and key handling goes through BouncyCastle, never BCL System.Security.Cryptography).
+        /// Never throws — an absent, truncated, or otherwise unparseable CSR returns an empty
+        /// list so enrollment continues on the gateway-supplied SAN data alone.
+        /// </summary>
+        /// <param name="csrPem">PEM-encoded PKCS#10 request, or null/garbage.</param>
+        /// <param name="skippedTagNumbers">
+        /// ASN.1 GeneralName tag numbers present in the CSR that have no domain-name rendering and
+        /// were therefore not returned (otherName, directoryName, x400Address, ediPartyName,
+        /// registeredID, and any malformed IPAddress). Reported so the caller can warn instead of
+        /// dropping them silently.
+        /// </param>
+        private static List<SanEntry> ExtractSanEntriesFromCsr(string csrPem, out List<int> skippedTagNumbers)
+        {
+            var result = new List<SanEntry>();
+            skippedTagNumbers = new List<int>();
+            if (string.IsNullOrWhiteSpace(csrPem))
+                return result;
+
+            try
+            {
+                string b64 = csrPem
+                    .Replace("-----BEGIN CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("-----END CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("-----BEGIN NEW CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("-----END NEW CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("\r", string.Empty)
+                    .Replace("\n", string.Empty)
+                    .Trim();
+
+                if (string.IsNullOrWhiteSpace(b64))
+                    return result;
+
+                var csr = new Org.BouncyCastle.Pkcs.Pkcs10CertificationRequest(Convert.FromBase64String(b64));
+
+                // SANs live in the PKCS#9 extensionRequest attribute, not the CSR body.
+                var extensions = csr.GetRequestedExtensions();
+                var sanExtension = extensions?.GetExtension(
+                    Org.BouncyCastle.Asn1.X509.X509Extensions.SubjectAlternativeName);
+                if (sanExtension == null)
+                    return result;
+
+                var names = Org.BouncyCastle.Asn1.X509.GeneralNames.GetInstance(sanExtension.GetParsedValue());
+                foreach (var generalName in names.GetNames())
+                {
+                    var entry = GeneralNameToSanEntry(generalName);
+                    if (entry != null)
+                        result.Add(entry);
+                    else
+                        skippedTagNumbers.Add(generalName.TagNo);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Enrollment must not fail because we could not read the CSR's SANs — the
+                // gateway-supplied set still applies, and CERTInext validates the CSR itself.
+                // Debug so an operator diagnosing a missing SAN can see the parse was skipped.
+                LogHandler.GetClassLogger(typeof(CERTInextCAPlugin))
+                    .LogDebug(ex, "ExtractSanEntriesFromCsr suppressed CSR parse failure");
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Maps a GeneralName to the <see cref="SanEntry"/> this plugin would submit for it, or null
+        /// for a name whose value cannot be rendered meaningfully — skipped rather than submitted as
+        /// ASN.1 debris. One switch, not two: a separate tag→type mapping alongside this one used to
+        /// assign a type string ("directoryname", "registeredid", ...) to tags that always return a
+        /// null value here anyway, so those branches were dead — the type never reached a caller
+        /// with no value to pair it with.
+        /// </summary>
+        private static SanEntry GeneralNameToSanEntry(Org.BouncyCastle.Asn1.X509.GeneralName generalName)
+        {
+            string type;
+            string value;
+
+            switch (generalName.TagNo)
+            {
+                case Org.BouncyCastle.Asn1.X509.GeneralName.DnsName:
+                    type = "dns";
+                    value = Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    break;
+
+                case Org.BouncyCastle.Asn1.X509.GeneralName.Rfc822Name:
+                    type = "email";
+                    value = Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    break;
+
+                case Org.BouncyCastle.Asn1.X509.GeneralName.UniformResourceIdentifier:
+                    type = "uri";
+                    value = Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    break;
+
+                case Org.BouncyCastle.Asn1.X509.GeneralName.IPAddress:
+                    type = "ip";
+                    // Octet string → dotted-quad / RFC 5952 text, so what we submit and log is
+                    // the address the subscriber asked for rather than its hex encoding.
+                    byte[] octets = Org.BouncyCastle.Asn1.Asn1OctetString.GetInstance(generalName.Name).GetOctets();
+                    value = octets.Length == 4 || octets.Length == 16
+                        ? new System.Net.IPAddress(octets).ToString()
+                        : null;
+                    break;
+
+                default:
+                    // otherName, directoryName, x400Address, ediPartyName, registeredID.
+                    //
+                    // Deliberately null, not Name.ToString(). BouncyCastle renders these as an
+                    // ASN.1 dump — a UPN otherName from a Windows-generated CSR stringifies to
+                    // "[1.3.6.1.4.1.311.20.2.3, [CONTEXT 0]svc@corp.example.com]" and a
+                    // directoryName to "CN=host.example.com,O=Acme". Submitting that as an entry in
+                    // additionalDomains is not "forwarding the name the subscriber asked for" — it
+                    // is putting ASN.1 debris in a domain-name field, which cannot become a
+                    // certificate SAN under any circumstances and only breaks the order. That is
+                    // different from a well-formed non-DNS SAN (IP/email/URI), which we do submit
+                    // on purpose so nothing the subscriber requested is dropped silently.
+                    //
+                    // Skipped is not silent: BuildSanList warns with the tag numbers so the
+                    // operator can see a SAN was present and not forwarded.
+                    type = null;
+                    value = null;
+                    break;
+            }
+
+            return string.IsNullOrWhiteSpace(value) ? null : new SanEntry { Type = type, Value = value };
         }
 
         private static string GetStringValue(

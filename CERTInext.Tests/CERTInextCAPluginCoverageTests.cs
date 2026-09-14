@@ -260,6 +260,60 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // A1d-2: renewal within window carries the template's product code onto the
+        // RenewCertificateRequest, not just the connector-level DefaultProductCode.
+        // Regression for issue #26 / local issues/0012.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task RenewOrReissue_CallsRenewApi_UsesTemplateProductCode()
+        {
+            var clientMock = NewMock();
+            var readerMock = NewReaderMock();
+
+            // Expiry is 30 days in the future, renewal window is 90 days → within window
+            DateTime expiry = DateTime.UtcNow.AddDays(30);
+
+            readerMock
+                .Setup(r => r.GetRequestIDBySerialNumber(It.IsAny<string>()))
+                .ReturnsAsync(MockCertificateData.CertId1);
+
+            readerMock
+                .Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.CertId1))
+                .Returns(expiry);
+
+            clientMock
+                .Setup(c => c.RenewCertificateAsync(
+                    MockCertificateData.CertId1,
+                    It.Is<RenewCertificateRequest>(r => r.ProfileId == MockCertificateData.ProfileIdClient),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse("cert-renewed-002"));
+
+            var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object);
+
+            // ProfileId is a non-default value distinct from the connector's DefaultProductCode.
+            var productInfo = MakeProductInfo(profileId: MockCertificateData.ProfileIdClient, extras: new Dictionary<string, string>
+            {
+                ["PriorCertSN"] = "AABBCCDDEEFF",
+                ["RenewalWindowDays"] = "90"
+            });
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem,
+                subject: "CN=test.example.com",
+                san: null,
+                productInfo: productInfo,
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.RenewOrReissue);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            clientMock.Verify(c => c.RenewCertificateAsync(
+                MockCertificateData.CertId1,
+                It.Is<RenewCertificateRequest>(r => r.ProfileId == MockCertificateData.ProfileIdClient),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        // ---------------------------------------------------------------------------
         // A1e: PriorCertSN present, cert already expired → new enroll
         // Semantics: useRenewalApi = expiry > now && expiry <= now + window.
         // A cert that has already expired (expiry in the past) does NOT satisfy the
