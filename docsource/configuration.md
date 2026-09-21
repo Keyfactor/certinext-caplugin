@@ -125,8 +125,21 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `IgnoreExpired` | Optional | If `true`, expired certificates are skipped during synchronization and are not imported into Keyfactor Command. Default: `false`. | N/A | `false` |
 | `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500`. Reduce this value if synchronization requests time out. | N/A | `100` |
 | `Enabled` | Optional | Enables or disables the CA connector. Setting this to `false` allows the connector record to be created before all credentials are available, without triggering a live connectivity test. Default: `true`. | N/A | `true` |
-| `PickupRetries` | Optional | Number of times `Enroll` polls CERTInext for the certificate after a successful order submission, before returning pending and leaving pickup to the next sync. Set to `0` to disable the wait. OV/EV orders validate asynchronously (minutes to hours) and typically exhaust this wait regardless of the value. Default: `5`. | N/A | `5` |
-| `PickupDelay` | Optional | Seconds between certificate-pickup retries. `PickupRetries × PickupDelay` (plus a short initial delay) bounds how long an enrollment call occupies a Command worker thread — capped at a 180s ceiling regardless of how the two are set (aim for well under ~90s in practice, so the call doesn't run long enough to trip Command's own timeout). Default: `10` (a ~55s ceiling with default `PickupRetries`). | N/A | `10` |
+| `PickupRetries` | Optional | Number of times `Enroll` polls CERTInext for the certificate after a successful order submission, before returning pending and leaving pickup to the next sync. Set to `0` to disable the wait entirely. OV/EV orders validate asynchronously (minutes to hours) and typically exhaust this wait regardless of the value. Default: `5`. | N/A | `5` |
+| `PickupDelay` | Optional | Seconds between certificate-pickup retries. The total pickup budget is a fixed 5-second initial delay + (`PickupRetries` × `PickupDelay`), hard-capped at 180 seconds regardless of how the two values are set. Aim for well under ~90s total so the call doesn't run long enough to trip Command's own enrollment timeout. Default: `10` (a ~55s ceiling with default `PickupRetries`). | N/A | `10` |
+
+> **Pickup timing detail:** after a successful order placement, the plugin waits a fixed 5-second initial delay before the first poll attempt, then polls CERTInext every `PickupDelay` seconds up to `PickupRetries` times. Each poll calls `GetCertificate` to check whether the certificate has been issued. The total time budget is: **5s + (PickupRetries × PickupDelay) + API round-trip time per poll (~1s each)**. With defaults this is approximately 5 + (5 × 10) + 5 = **~60 seconds**.
+>
+> **Tuning for faster pickup:** if the CERTInext API typically issues certificates within a few seconds of order placement (as observed with DV and auto-approved orders), you can reduce per-enrollment wait time by lowering `PickupDelay` and raising `PickupRetries` to compensate — this polls more frequently without changing the total budget. For example:
+>
+> | Configuration | PickupRetries | PickupDelay | Total budget | Poll cadence |
+> |---------------|:---:|:---:|---|---|
+> | Default | `5` | `10` | ~55s | Every 10s |
+> | Faster polling | `10` | `5` | ~55s | Every 5s |
+> | Aggressive | `50` | `1` | ~55s | Every 1s |
+> | Minimal wait | `0` | — | 0s | No polling; defers to sync |
+>
+> The 5-second initial delay before the first poll is not configurable. The 180-second hard ceiling applies regardless of configuration.
 | `DcvEnabled` | Optional | When `true`, the gateway performs DNS-based Domain Control Validation (DCV) during enrollment for orders that require it. Requires a DNS provider plugin (e.g. `azure-azuredns-dnsplugin`) to be deployed on the gateway. Default: `false`. | N/A | `false` |
 | `DcvTxtRecordTemplate` | Optional | Format string for the DNS TXT record hostname published during DCV. `{0}` is replaced with the domain being validated. Default: `_emsign-validation.{0}`. | N/A | `_emsign-validation.{0}` |
 | `DcvPropagationDelaySeconds` | Optional | Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Applies only to the `Enroll()`-time DCV path — DCV driven during sync uses its own fixed 3-second delay. Default: `30`. | N/A | `30` |
@@ -293,5 +306,61 @@ When an enrollment request arrives, the numeric CERTInext product code is resolv
 3. Default production code looked up from the selected product name (e.g. **DV SSL** → `838`).
 
 If none of these yield a code, enrollment fails with a validation error.
+
+## V2 API (Preview)
+
+The plugin includes an opt-in CERTInext V2 REST API code path that uses modern OAuth2 `client_credentials` authentication and a new order-centric resource model. V2 is disabled by default; V1 remains the active path unless `UseV2Api` is explicitly set to `true`.
+
+> **Synchronization note:** The V2 `/reports/orders` endpoint is not yet available (returns HTTP 501). When `UseV2Api` is `true`, synchronization continues to use the V1 `GetOrderReport` endpoint. V1 credentials (`ApiUrl`, `ApiKey`, `AccountNumber`) must remain configured even when V2 is enabled.
+
+### V2 CA Connector Fields
+
+| Field | Required / Optional | Description | Example |
+|---|---|---|---|
+| `UseV2Api` | Optional | Enable the V2 API code path for enrollment, revocation, and status checks. V1 is used for synchronization regardless. Default: `false`. | `false` |
+| `ApiUrlV2` | Conditional | Base URL for the CERTInext V2 REST API (no trailing path suffix). Required when `UseV2Api` is `true`. | `https://sandbox-us-api.certinext.io` |
+| `ClientId` | Conditional | OAuth2 client ID for V2 authentication. Required when `UseV2Api` is `true`. | `keyfactor-gateway` |
+| `ClientSecret` | Conditional | OAuth2 client secret for V2 authentication. This field is masked in the UI. Required when `UseV2Api` is `true`. | *(generated, masked in UI)* |
+
+#### V2 OAuth2 Setup
+
+1. Log in to the CERTInext portal for your environment.
+2. Navigate to **Integrations → APIs**.
+3. Click **+ Create API Credentials** and select **Auth Type**: `OAuth2 (V2)`.
+4. Note the **Client ID** and **Client Secret**. Enter them in `ClientId` and `ClientSecret`.
+5. Set `UseV2Api` to `true` and enter the V2 base URL in `ApiUrlV2`.
+6. Leave all V1 fields (`ApiUrl`, `ApiKey`, `AccountNumber`) configured — they are still used for synchronization.
+
+#### V2 Token Caching
+
+The plugin obtains a V2 bearer token via the standard OAuth2 `client_credentials` grant (`grant_type=client_credentials`, form-encoded) against `{ApiUrlV2}/oauth/token`. Tokens are cached in memory and reused until 60 seconds before expiry (minimum 30-second cache). Token refresh is thread-safe.
+
+### V2 Certificate Template Fields
+
+When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
+
+| Parameter | Required / Optional | Type | Description | Example / Default |
+|---|---|---|---|---|
+| `ProductFamily` | Optional | String | CERTInext V2 product family. Accepted values: `ssl`, `private-pki`, `signature`. Default: `ssl`. | `ssl` |
+| `ProductVariant` | Optional | String | Product variant within the family (e.g. `dv`, `ov`, `ev`). Default: `dv`. | `dv` |
+
+`ProductCode` continues to carry the numeric product code and is sent in the `X-Product-Code` header on V2 order placement.
+
+### V2 Order Lifecycle
+
+V2 orders are identified by an opaque string ID prefixed with `ord_` (e.g. `ord_a1b2c3d4`). This ID is returned by the V2 order placement endpoint and stored as the `CARequestID`. It is stable for the lifetime of the order and is used for all subsequent tracking, certificate download, and revocation calls.
+
+V2 status strings map to Keyfactor enrollment statuses as follows:
+
+| V2 Status | Keyfactor Status | Notes |
+|---|---|---|
+| `issued` | Issued | Certificate is immediately downloaded and returned to Command. |
+| `pending-dcv` | Pending External Validation | Order is awaiting domain control validation. |
+| `pending-csr` | Pending External Validation | Order is awaiting CSR submission or processing. |
+| `pending-agreement` | Pending External Validation | Order requires subscriber agreement acceptance. |
+| `revoked` | Revoked | Order has been revoked. |
+| `cancelled` | Failed | Order was cancelled; a new enrollment is required. |
+
+Because V2 has no distinct renewal endpoint, all three enrollment types (New, Reissue, RenewOrReissue) place a fresh V2 order.
 
 {% include 'architecture.md' %}

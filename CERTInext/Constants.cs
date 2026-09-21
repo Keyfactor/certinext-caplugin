@@ -122,6 +122,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SignerIp = "SignerIp";
             public const string DomainName = "DomainName";      // primary domain for SSL/TLS orders
             public const string KeyType = "KeyType";
+
+            // V2 API enrollment parameters
+            public const string ProductFamily = "ProductFamily";  // V2: "ssl", "private-pki", or "signature"
+            public const string ProductVariant = "ProductVariant"; // V2: "dv", "ov", or "ev"
         }
 
         public static class Products
@@ -345,6 +349,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // A few seconds is enough for the staged TXT to be visible to CERTInext's resolver;
             // if a verify lands too early, the order simply stays pending and is retried next pass.
             public const int SyncPropagationDelaySeconds = 3;
+        }
+
+        /// <summary>
+        /// V2 REST API constants — all paths, status strings, and family slugs for the
+        /// <c>/api/certinext/v2/</c> surface. Auth is OAuth2 client_credentials; every
+        /// unsafe call requires an <c>Idempotency-Key</c> header.
+        /// </summary>
+        public static class ApiV2
+        {
+            // Auth / connectivity
+            public const string TokenPath         = "/oauth/token";
+            public const string AuthMePath        = "/api/certinext/v2/auth/me";
+
+            // Product-family resource paths (appended to base URL)
+            public const string SslCertificatesPath        = "/api/certinext/v2/ssl-certificates";
+            public const string PrivatePkiCertificatesPath = "/api/certinext/v2/private-pki-certificates";
+            public const string SignatureCertificatesPath  = "/api/certinext/v2/signature-certificates";
+
+            // Order status strings (V2 REST — NOT numeric IDs)
+            public const string StatusPendingDcv       = "pending-dcv";
+            public const string StatusPendingCsr       = "pending-csr";
+            public const string StatusPendingAgreement = "pending-agreement";
+            public const string StatusIssued           = "issued";
+            public const string StatusCancelled        = "cancelled";
+            public const string StatusRevoked          = "revoked";
+
+            // Product-family slugs (used as URL path segments)
+            public const string FamilySsl        = "ssl-certificates";
+            public const string FamilyPrivatePki = "private-pki-certificates";
+            public const string FamilySignature  = "signature-certificates";
+        }
+
+        // V2 config key constants (added here alongside existing Config constants)
+        public static class ConfigV2
+        {
+            public const string UseV2Api      = "UseV2Api";
+            public const string ApiUrlV2      = "ApiUrlV2";
+            public const string ClientId      = "ClientId";
+            public const string ClientSecret  = "ClientSecret";
         }
 
         // Legacy string revocation reasons — retained so StatusMapper still compiles.

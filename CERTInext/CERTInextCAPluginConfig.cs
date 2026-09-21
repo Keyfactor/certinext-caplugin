@@ -396,6 +396,47 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = Constants.Dcv.DefaultSyncMaxPerPass,
                     Type = "Number"
+                },
+
+                // -----------------------------------------------------------------------
+                // V2 API settings — only required when UseV2Api = true
+                // -----------------------------------------------------------------------
+
+                [Constants.ConfigV2.UseV2Api] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: When true, the plugin routes Enroll / GetSingleRecord / Revoke through the " +
+                               "CERTInext V2 REST API (/api/certinext/v2/). Requires ApiUrlV2, ClientId, and ClientSecret. " +
+                               "Synchronize continues to use the V1 GetOrderReport until the V2 reports endpoint ships. " +
+                               "Default: false (V1 API).",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
+                },
+                [Constants.ConfigV2.ApiUrlV2] = new PropertyConfigInfo
+                {
+                    Comments = "REQUIRED when UseV2Api is true: CERTInext V2 API base URL " +
+                               "(e.g. https://sandbox-us-api.certinext.io). No trailing slash or path suffix. " +
+                               "V2 is hosted on a different endpoint than V1; both must be configured separately.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.ConfigV2.ClientId] = new PropertyConfigInfo
+                {
+                    Comments = "REQUIRED when UseV2Api is true: OAuth2 client ID for V2 API authentication. " +
+                               "Provisioned separately from V1 AccessKey credentials — obtain from the CERTInext " +
+                               "portal under Integration → REST APIs → OAuth2.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.ConfigV2.ClientSecret] = new PropertyConfigInfo
+                {
+                    Comments = "REQUIRED when UseV2Api is true: OAuth2 client secret for V2 API authentication. " +
+                               "Stored as a secret — never transmitted outside the gateway's encrypted config store.",
+                    Hidden = true,
+                    DefaultValue = string.Empty,
+                    Type = "String"
                 }
             };
         }
@@ -513,6 +554,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                "Falls back to the connector-level SignerIp if omitted.",
                     Hidden = false,
                     DefaultValue = string.Empty,
+                    Type = "String"
+                },
+
+                // -----------------------------------------------------------------------
+                // V2 API enrollment parameters (only used when UseV2Api = true)
+                // -----------------------------------------------------------------------
+
+                [Constants.EnrollmentParam.ProductFamily] = new PropertyConfigInfo
+                {
+                    Comments = "V2 API ONLY: Product family for this template. " +
+                               "Accepted values: 'ssl' (default), 'private-pki', 'signature'. " +
+                               "Maps to the corresponding V2 resource path (/api/certinext/v2/{family}-certificates/).",
+                    Hidden = false,
+                    DefaultValue = "ssl",
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.ProductVariant] = new PropertyConfigInfo
+                {
+                    Comments = "V2 API ONLY: Product variant sent in the V2 order body. " +
+                               "Accepted values: 'dv' (default), 'ov', 'ev'. " +
+                               "Must match the variant associated with the configured product code.",
+                    Hidden = false,
+                    DefaultValue = "dv",
                     Type = "String"
                 }
             };
@@ -817,6 +881,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         [JsonPropertyName("DcvSyncMaxPerPass")]
         public int DcvSyncMaxPerPass { get; set; } = Constants.Dcv.DefaultSyncMaxPerPass;
+
+        // -----------------------------------------------------------------------
+        // V2 API settings
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// When true, Enroll / GetSingleRecord / Revoke use the CERTInext V2 REST API.
+        /// Synchronize continues to use the V1 GetOrderReport endpoint.
+        /// Default: false.
+        /// </summary>
+        [JsonPropertyName("UseV2Api")]
+        public bool UseV2Api { get; set; } = false;
+
+        /// <summary>
+        /// Base URL for the V2 API (e.g. https://sandbox-us-api.certinext.io).
+        /// Required when UseV2Api is true. No trailing slash or path suffix.
+        /// </summary>
+        [JsonPropertyName("ApiUrlV2")]
+        public string ApiUrlV2 { get; set; } = string.Empty;
+
+        /// <summary>
+        /// OAuth2 client ID for V2 API authentication.
+        /// Required when UseV2Api is true. Separate from the V1 AccessKey credential.
+        /// </summary>
+        [JsonPropertyName("ClientId")]
+        public string ClientId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// OAuth2 client secret for V2 API authentication.
+        /// Required when UseV2Api is true. NEVER logged or transmitted in plaintext.
+        /// </summary>
+        [JsonPropertyName("ClientSecret")]
+        public string ClientSecret { get; set; } = string.Empty;
 
         /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the

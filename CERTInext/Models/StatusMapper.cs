@@ -191,6 +191,43 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
             }
         }
 
+        // -----------------------------------------------------------------------
+        // V2 API status mapping
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// Maps a V2 REST API order status string to the Keyfactor
+        /// <see cref="EndEntityStatus"/> integer code expected by the gateway.
+        /// </summary>
+        /// <param name="v2Status">Status string from the V2 order response.</param>
+        public static int V2StatusToRequestDisposition(string v2Status) =>
+            v2Status?.ToLowerInvariant() switch
+            {
+                Constants.ApiV2.StatusIssued           => (int)EndEntityStatus.GENERATED,
+                Constants.ApiV2.StatusPendingDcv       => (int)EndEntityStatus.EXTERNALVALIDATION,
+                Constants.ApiV2.StatusPendingCsr       => (int)EndEntityStatus.EXTERNALVALIDATION,
+                Constants.ApiV2.StatusPendingAgreement => (int)EndEntityStatus.EXTERNALVALIDATION,
+                Constants.ApiV2.StatusRevoked          => (int)EndEntityStatus.REVOKED,
+                Constants.ApiV2.StatusCancelled        => (int)EndEntityStatus.FAILED,
+                _                                      => (int)EndEntityStatus.FAILED
+            };
+
+        /// <summary>
+        /// Converts an RFC 5280 CRL reason code to the V2 API revocation reason string.
+        /// Codes without a direct V2 equivalent are mapped to "unspecified".
+        /// </summary>
+        /// <param name="crlReason">RFC 5280 CRL reason code from the gateway.</param>
+        public static string ToV2RevocationReason(uint crlReason) =>
+            crlReason switch
+            {
+                1 => Constants.RevocationReason.KeyCompromise,        // RFC: keyCompromise
+                3 => Constants.RevocationReason.AffiliationChanged,   // RFC: affiliationChanged
+                4 => Constants.RevocationReason.Superseded,           // RFC: superseded
+                5 => Constants.RevocationReason.CessationOfOperation, // RFC: cessationOfOperation
+                9 => Constants.RevocationReason.PrivilegeWithdrawn,   // RFC: privilegeWithdrawn
+                _ => Constants.RevocationReason.Unspecified
+            };
+
         /// <summary>
         /// Converts a CERTInext <c>revokeReasonId</c> integer back to the RFC 5280 CRL
         /// reason code for storage in the Keyfactor Command database.

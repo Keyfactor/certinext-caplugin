@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.Logging;
 using Microsoft.Extensions.Logging;
@@ -41,10 +42,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         private readonly CERTInextConfig _config;
         private readonly RestClient _http;
 
-        // OAuth2 token cache — refreshed when expired
+        // OAuth2 token cache — refreshed when expired (V1)
         private string _cachedToken;
         private DateTime _tokenExpiry = DateTime.MinValue;
         private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
+
+        // V2 API HTTP client and token cache
+        private readonly RestClient _httpV2;
+        private string _v2Token;
+        private DateTime _v2TokenExpiry = DateTime.MinValue;
+        private readonly SemaphoreSlim _v2TokenLock = new SemaphoreSlim(1, 1);
 
         // ---------------------------------------------------------------------------
         // Construction
@@ -67,6 +74,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             };
 
             _http = new RestClient(options);
+
+            // V2 client — only constructed when V2 is enabled and ApiUrlV2 is set.
+            // No authenticator: tokens are injected per-request via BuildV2RequestAsync.
+            if (config.UseV2Api && !string.IsNullOrWhiteSpace(config.ApiUrlV2))
+            {
+                var v2Options = new RestClientOptions(config.ApiUrlV2.TrimEnd('/'))
+                {
+                    ThrowOnAnyError = false,
+                    Timeout = TimeSpan.FromSeconds(120)
+                };
+                _httpV2 = new RestClient(v2Options);
+            }
         }
 
         // ---------------------------------------------------------------------------
@@ -77,6 +96,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             _http?.Dispose();
             _tokenLock?.Dispose();
+            _httpV2?.Dispose();
+            _v2TokenLock?.Dispose();
         }
 
         // ---------------------------------------------------------------------------
@@ -1254,6 +1275,373 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <summary>
         /// Returns a valid OAuth2 access token, refreshing it if expired. Thread-safe.
         /// </summary>
+        // ---------------------------------------------------------------------------
+        // ICERTInextClient — V2 REST API methods
+        // ---------------------------------------------------------------------------
+
+        /// <inheritdoc/>
+        public async Task<V2AuthMeResponse> GetAuthMeV2Async(CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            var req = await BuildV2RequestAsync(Constants.ApiV2.AuthMePath, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            ThrowOnV2Failure(resp, "auth/me");
+            var result = DeserializeV2OrThrow<V2AuthMeResponse>(resp, "auth/me");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task PingV2Async(CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var me = await GetAuthMeV2Async(ct);
+            Logger.LogInformation(
+                "CERTInext V2 ping successful. AccountNumber={AccountNumber}, AuthType={AuthType}",
+                me.AccountNumber, me.AuthType);
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2CreateOrderResponse> PlaceOrderV2Async(
+            string productFamilySlug,
+            string productCode,
+            V2CreateSslOrderRequest request,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string idempotencyKey = Guid.NewGuid().ToString();
+            string path = $"{Constants.ApiV2.SslCertificatesPath.Replace("ssl-certificates", productFamilySlug)}";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
+            req.AddHeader("X-Product-Code", productCode ?? string.Empty);
+            string json = JsonSerializer.Serialize(request, GetJsonOptions());
+            Logger.LogTrace("PlaceOrderV2Async request payload: {Payload}", json);
+            req.AddJsonBody(json);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            sw.Stop();
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
+                path, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+            Logger.LogTrace("PlaceOrderV2Async response: {Body}", resp.Content);
+            ThrowOnV2Failure(resp, "V2 place order");
+            var result = DeserializeV2OrThrow<V2CreateOrderResponse>(resp, "V2 place order");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task SubmitCsrV2Async(
+            string productFamilySlug,
+            string orderId,
+            string csrPem,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/csr";
+            var req = await BuildV2RequestAsync(path, Method.Put, ct);
+            var body = new V2SubmitCsrRequest { Csr = csrPem };
+            req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            ThrowOnV2Failure(resp, "V2 submit CSR");
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2OrderStatusResponse> TrackOrderV2Async(
+            string productFamilySlug,
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = BuildV2OrderPath(productFamilySlug, orderId);
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            if (resp.StatusCode == HttpStatusCode.NotFound)
+            {
+                Logger.MethodExit(LogLevel.Trace);
+                throw new KeyNotFoundException($"V2 order '{orderId}' not found in family '{productFamilySlug}'.");
+            }
+            ThrowOnV2Failure(resp, "V2 track order");
+            var result = DeserializeV2OrThrow<V2OrderStatusResponse>(resp, "V2 track order");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2CertificateDownloadResponse> DownloadCertificateV2Async(
+            string productFamilySlug,
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/certificate";
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            if (resp.StatusCode == HttpStatusCode.NotFound)
+            {
+                Logger.MethodExit(LogLevel.Trace);
+                throw new KeyNotFoundException($"V2 certificate for order '{orderId}' not found in family '{productFamilySlug}'.");
+            }
+            ThrowOnV2Failure(resp, "V2 download certificate");
+            var result = DeserializeV2OrThrow<V2CertificateDownloadResponse>(resp, "V2 download certificate");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task RevokeOrderV2Async(
+            string productFamilySlug,
+            string orderId,
+            V2RevokeRequest request,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string idempotencyKey = Guid.NewGuid().ToString();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/revoke";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
+            req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            if (resp.StatusCode == (HttpStatusCode)422)
+            {
+                // EMS-931: order not in an issued state; surface a clear message.
+                string detail = ExtractV2ErrorMessage(resp.Content, "V2 revoke");
+                throw new InvalidOperationException(
+                    $"V2 revoke rejected (order not in issued state). {detail}");
+            }
+            ThrowOnV2Failure(resp, "V2 revoke order");
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2OrderStatusResponse> ResolveAndTrackOrderV2Async(
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var (_, status) = await ResolveV2OrderFamilyAsync(orderId, ct);
+            Logger.MethodExit(LogLevel.Trace);
+            return status;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2CertificateDownloadResponse> ResolveAndDownloadCertificateV2Async(
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var (family, _) = await ResolveV2OrderFamilyAsync(orderId, ct);
+            var cert = await DownloadCertificateV2Async(family, orderId, ct);
+            Logger.MethodExit(LogLevel.Trace);
+            return cert;
+        }
+
+        // ---------------------------------------------------------------------------
+        // V2 private helpers
+        // ---------------------------------------------------------------------------
+
+        private void EnsureV2Client()
+        {
+            if (_httpV2 == null)
+                throw new InvalidOperationException(
+                    "V2 API client is not initialised. Ensure UseV2Api=true and ApiUrlV2 is set in the connector configuration.");
+        }
+
+        private static string BuildV2OrderPath(string productFamilySlug, string orderId)
+            => $"/api/certinext/v2/{productFamilySlug}/{orderId}";
+
+        /// <summary>
+        /// Probes all three V2 product families (SSL → Private PKI → Signature) to find
+        /// which one owns the given order ID.  Returns the matching family slug and the
+        /// TrackOrder response.  Throws <see cref="KeyNotFoundException"/> if not found.
+        /// </summary>
+        private async Task<(string family, V2OrderStatusResponse status)> ResolveV2OrderFamilyAsync(
+            string orderId,
+            CancellationToken ct)
+        {
+            foreach (var family in new[]
+            {
+                Constants.ApiV2.FamilySsl,
+                Constants.ApiV2.FamilyPrivatePki,
+                Constants.ApiV2.FamilySignature
+            })
+            {
+                try
+                {
+                    var status = await TrackOrderV2Async(family, orderId, ct);
+                    return (family, status);
+                }
+                catch (KeyNotFoundException)
+                {
+                    // Not in this family — try the next one
+                }
+            }
+            throw new KeyNotFoundException($"V2 order '{orderId}' not found in any product family.");
+        }
+
+        /// <summary>
+        /// Fetches or returns the cached V2 OAuth2 bearer token.
+        /// Uses standard client_credentials grant with form-encoded body.
+        /// Token is cached until 60 seconds before its expiry.
+        /// </summary>
+        private async Task<string> GetOrRefreshV2TokenAsync(CancellationToken ct)
+        {
+            if (!string.IsNullOrEmpty(_v2Token) && DateTime.UtcNow < _v2TokenExpiry)
+                return _v2Token;
+
+            await _v2TokenLock.WaitAsync(ct);
+            try
+            {
+                if (!string.IsNullOrEmpty(_v2Token) && DateTime.UtcNow < _v2TokenExpiry)
+                    return _v2Token;
+
+                Logger.LogInformation(
+                    "V2 OAuth2 token acquisition started. ApiUrlV2={ApiUrlV2}, ClientId={ClientId}",
+                    _config.ApiUrlV2, _config.ClientId);
+
+                string tokenUrl = _config.ApiUrlV2.TrimEnd('/') + Constants.ApiV2.TokenPath;
+                using var tokenClient = new RestClient(tokenUrl);
+                var tokenReq = new RestRequest(string.Empty, Method.Post);
+                tokenReq.AddHeader("Content-Type", "application/x-www-form-urlencoded");
+                tokenReq.AddParameter("grant_type", "client_credentials");
+                tokenReq.AddParameter("client_id", _config.ClientId);
+                tokenReq.AddParameter("client_secret", _config.ClientSecret);
+
+                var tokenResp = await tokenClient.ExecuteAsync(tokenReq, ct);
+                if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
+                {
+                    // SOX CC6.1: never log tokenResp.Content — may contain client_secret.
+                    if ((int)tokenResp.StatusCode == 403)
+                    {
+                        Logger.LogError(
+                            "V2 OAuth2 token acquisition failed with 403 Forbidden. " +
+                            "ApiUrlV2={ApiUrlV2}, ClientId={ClientId}. " +
+                            "Hint: ensure OAuth2 is enabled in the CERTInext portal under Integration → REST APIs → OAuth2.",
+                            _config.ApiUrlV2, _config.ClientId);
+                        throw new Exception(
+                            "V2 OAuth2 token request denied (403 Forbidden). " +
+                            "Ensure OAuth2 is activated in the CERTInext portal (Integration → REST APIs → OAuth2) " +
+                            "and that the ClientId and ClientSecret are correct. See gateway logs for details.");
+                    }
+                    Logger.LogError(
+                        "V2 OAuth2 token acquisition failed. ApiUrlV2={ApiUrlV2}, ClientId={ClientId}, HttpStatus={Status}",
+                        _config.ApiUrlV2, _config.ClientId, (int)tokenResp.StatusCode);
+                    throw new Exception(
+                        $"Failed to obtain V2 OAuth2 token. HTTP {(int)tokenResp.StatusCode}. See gateway logs for details.");
+                }
+
+                var tokenPayload = JsonSerializer.Deserialize<V2TokenResponse>(tokenResp.Content, GetJsonOptions());
+                if (tokenPayload == null || string.IsNullOrEmpty(tokenPayload.AccessToken))
+                {
+                    Logger.LogError(
+                        "V2 OAuth2 token response did not contain access_token. ApiUrlV2={ApiUrlV2}",
+                        _config.ApiUrlV2);
+                    throw new Exception("V2 OAuth2 token response did not contain an access_token.");
+                }
+
+                _v2Token = tokenPayload.AccessToken;
+                _v2TokenExpiry = DateTime.UtcNow.AddSeconds(Math.Max(tokenPayload.ExpiresIn - 60, 30));
+
+                Logger.LogInformation(
+                    "V2 OAuth2 token acquired. ApiUrlV2={ApiUrlV2}, ClientId={ClientId}, ExpiresAt={Expiry:u}",
+                    _config.ApiUrlV2, _config.ClientId, _v2TokenExpiry);
+                return _v2Token;
+            }
+            finally
+            {
+                _v2TokenLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Builds a V2 REST request with the Authorization: Bearer header populated from
+        /// the cached/refreshed V2 token. Optionally adds an Idempotency-Key header.
+        /// </summary>
+        private async Task<RestRequest> BuildV2RequestAsync(
+            string path,
+            Method method,
+            CancellationToken ct,
+            string idempotencyKey = null)
+        {
+            string token = await GetOrRefreshV2TokenAsync(ct);
+            var req = new RestRequest(path, method);
+            req.AddHeader("Authorization", $"Bearer {token}");
+            req.AddHeader("Accept", "application/json");
+            if (!string.IsNullOrEmpty(idempotencyKey))
+                req.AddHeader("Idempotency-Key", idempotencyKey);
+            return req;
+        }
+
+        /// <summary>
+        /// Throws an appropriate exception for V2 API non-success responses.
+        /// Handles RFC 7807 problem+json and plain HTTP errors.
+        /// </summary>
+        private static void ThrowOnV2Failure(RestResponse resp, string operation)
+        {
+            if (resp.IsSuccessful) return;
+
+            if (resp.StatusCode == HttpStatusCode.Unauthorized)
+                throw new Exception($"V2 authentication failure during '{operation}'. HTTP 401. See gateway logs for details.");
+
+            if (resp.StatusCode == HttpStatusCode.Forbidden)
+            {
+                string hint = ExtractV2ErrorMessage(resp.Content, operation);
+                throw new Exception(
+                    $"V2 access denied during '{operation}'. HTTP 403. {hint} " +
+                    "If error code is EMS-2022, ensure OAuth2 is enabled in the CERTInext portal.");
+            }
+
+            string msg = ExtractV2ErrorMessage(resp.Content, operation);
+            throw new Exception($"CERTInext V2 API error during '{operation}'. HTTP {(int)resp.StatusCode}. {msg}");
+        }
+
+        /// <summary>
+        /// Parses an RFC 7807 problem+json body and returns a human-readable message.
+        /// Falls back to a generic message on parse failure.
+        /// </summary>
+        private static string ExtractV2ErrorMessage(string content, string operation)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return $"CERTInext V2 returned no body for '{operation}'.";
+
+            string capped = content.Length > MaxErrorBodyBytes
+                ? content.Substring(0, MaxErrorBodyBytes)
+                : content;
+
+            try
+            {
+                var problem = JsonSerializer.Deserialize<V2ProblemDetails>(capped, GetJsonOptions());
+                if (problem != null && (!string.IsNullOrWhiteSpace(problem.Detail) || !string.IsNullOrWhiteSpace(problem.Title)))
+                    return $"{problem.Title}: {problem.Detail}".Trim(':').Trim();
+            }
+            catch
+            {
+                // Not a problem+json body — fall through
+            }
+
+            return $"See gateway logs for raw response. Operation='{operation}'.";
+        }
+
+        private static T DeserializeV2OrThrow<T>(RestResponse resp, string operation) where T : class
+        {
+            if (string.IsNullOrWhiteSpace(resp.Content))
+                throw new Exception($"CERTInext V2 returned an empty body for '{operation}'.");
+            var result = JsonSerializer.Deserialize<T>(resp.Content, GetJsonOptions());
+            if (result == null)
+                throw new Exception($"CERTInext V2 returned a null/unrecognised body for '{operation}'.");
+            return result;
+        }
+
+        // ---------------------------------------------------------------------------
+        // V1 token helper (unchanged)
+        // ---------------------------------------------------------------------------
+
         private async Task<string> GetOrRefreshTokenAsync(CancellationToken ct)
         {
             if (!string.IsNullOrEmpty(_cachedToken) && DateTime.UtcNow < _tokenExpiry)

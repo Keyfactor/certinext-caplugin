@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Keyfactor.AnyGateway.Extensions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.Logging;
@@ -244,25 +245,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             bool hasDefaultProductCode = !string.IsNullOrWhiteSpace(_config.DefaultProductCode);
             bool hasGroupNumber        = !string.IsNullOrWhiteSpace(_config.GroupNumber);
 
+            int effectivePickupRetries = _config.GetEffectivePickupRetries();
+            int effectivePickupDelay  = _config.GetEffectivePickupDelaySeconds();
+            string preVettingMode = hasOrganizationNumber ? "1 (use pre-vetted org)" : "omitted (no org configured)";
+
             _logger.LogInformation(
                 "CERTInext plugin initialized. " +
                 "ApiUrl={ApiUrl}, AuthMode={AuthMode}, Enabled={Enabled}, " +
                 "ApiKeyPresent={ApiKeyPresent}, UsernamePresent={UsernamePresent}, " +
                 "PasswordPresent={PasswordPresent}, OAuth2ClientIdPresent={OAuth2ClientIdPresent}, " +
                 "OAuth2ClientSecretPresent={OAuth2ClientSecretPresent}, OAuth2TokenUrlPresent={OAuth2TokenUrlPresent}, " +
-                "OrganizationNumberPresent={OrganizationNumberPresent}, DefaultProductCodePresent={DefaultProductCodePresent}, " +
-                "GroupNumberPresent={GroupNumberPresent}, " +
+                "OrganizationNumber={OrganizationNumber}, PreVetting={PreVetting}, " +
+                "DefaultProductCode={DefaultProductCode}, GroupNumber={GroupNumber}, " +
+                "AccountingModel={AccountingModel}, EmailNotifications={EmailNotifications}, " +
+                "AutoSecureWww={AutoSecureWww}, ValidityYears={ValidityYears}, " +
+                "AutoRenew={AutoRenew}, RenewCriteriaDays={RenewCriteriaDays}, " +
                 "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, SubmitNonDnsSans={SubmitNonDnsSans}, " +
+                "PickupRetries={PickupRetries}, PickupDelay={PickupDelay}, " +
                 "DcvEnabled={DcvEnabled}, DcvTxtRecordTemplate={DcvTxtRecordTemplate}, " +
+                "DcvPropagationDelaySeconds={DcvPropagationDelay}, DcvTimeoutMinutes={DcvTimeout}, " +
+                "DcvWaitForChallengeSeconds={DcvWaitChallenge}, DcvWaitForIssuanceSeconds={DcvWaitIssuance}, " +
                 "DomainValidatorFactoryInjected={FactoryInjected}",
                 _config.ApiUrl, _config.AuthMode, _config.Enabled,
                 hasApiKey, hasUsername,
                 hasPassword, hasClientId,
                 hasClientSecret, hasTokenUrl,
-                hasOrganizationNumber, hasDefaultProductCode,
-                hasGroupNumber,
+                hasOrganizationNumber ? _config.OrganizationNumber : "(not configured)", preVettingMode,
+                hasDefaultProductCode ? _config.DefaultProductCode : "(not configured)",
+                hasGroupNumber ? _config.GroupNumber : "(not configured)",
+                string.IsNullOrWhiteSpace(_config.AccountingModel) ? "2 (default)" : _config.AccountingModel,
+                string.IsNullOrWhiteSpace(_config.EmailNotifications) ? "0 (default)" : _config.EmailNotifications,
+                string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0 (default)" : _config.AutoSecureWww,
+                string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears) ? "1 (default)" : _config.SubscriptionValidityYears,
+                string.IsNullOrWhiteSpace(_config.SubscriptionAutoRenew) ? "0 (default)" : _config.SubscriptionAutoRenew,
+                string.IsNullOrWhiteSpace(_config.SubscriptionRenewCriteriaDays) ? "30 (default)" : _config.SubscriptionRenewCriteriaDays,
                 _config.PageSize, _config.IgnoreExpired, _config.SubmitNonDnsSans,
+                effectivePickupRetries, effectivePickupDelay,
                 _config.DcvEnabled, _config.DcvTxtRecordTemplate,
+                _config.DcvPropagationDelaySeconds, _config.DcvTimeoutMinutes,
+                _config.DcvWaitForChallengeSeconds, _config.DcvWaitForIssuanceSeconds,
                 _domainValidatorFactory != null);
 
             // SOC2 CC7.1: surface silent functional downgrades. If DCV is enabled in
@@ -337,15 +358,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             try
             {
-                await _client.PingAsync();
-                // SOC2 CC9.2: connectivity confirmation is a security-relevant event; must be
-                // at Information so it survives production log filters.
-                _logger.LogInformation("CERTInext ping successful. ApiUrl={ApiUrl}", _config.ApiUrl);
+                if (_config.UseV2Api)
+                {
+                    await _client.PingV2Async();
+                    _logger.LogInformation("CERTInext V2 ping successful. ApiUrlV2={ApiUrlV2}", _config.ApiUrlV2);
+                }
+                else
+                {
+                    await _client.PingAsync();
+                    // SOC2 CC9.2: connectivity confirmation is a security-relevant event; must be
+                    // at Information so it survives production log filters.
+                    _logger.LogInformation("CERTInext ping successful. ApiUrl={ApiUrl}", _config.ApiUrl);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "CERTInext ping failed. ApiUrl={ApiUrl}", _config.ApiUrl);
-                throw new Exception($"Unable to reach CERTInext at {_config.ApiUrl}: {ex.Message}", ex);
+                string url = _config.UseV2Api ? _config.ApiUrlV2 : _config.ApiUrl;
+                _logger.LogError(ex, "CERTInext ping failed. Url={Url}, UseV2Api={UseV2Api}", url, _config.UseV2Api);
+                throw new Exception($"Unable to reach CERTInext at {url}: {ex.Message}", ex);
             }
             finally
             {
@@ -420,6 +450,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     break;
             }
 
+            // V2 additional validation (independent of V1 auth mode errors above)
+            bool useV2 = connectionInfo.TryGetValue(Constants.ConfigV2.UseV2Api, out object v2Obj)
+                         && v2Obj is bool v2Bool && v2Bool;
+            if (useV2)
+            {
+                string apiUrlV2  = GetStringValue(connectionInfo, Constants.ConfigV2.ApiUrlV2);
+                string clientId  = GetStringValue(connectionInfo, Constants.ConfigV2.ClientId);
+                string clientSecret = GetStringValue(connectionInfo, Constants.ConfigV2.ClientSecret);
+
+                if (string.IsNullOrWhiteSpace(apiUrlV2))
+                    errors.Add($"'{Constants.ConfigV2.ApiUrlV2}' is required when UseV2Api is true.");
+                else if (!Uri.TryCreate(apiUrlV2, UriKind.Absolute, out _))
+                    errors.Add($"'{Constants.ConfigV2.ApiUrlV2}' is not a valid absolute URI.");
+
+                if (string.IsNullOrWhiteSpace(clientId))
+                    errors.Add($"'{Constants.ConfigV2.ClientId}' is required when UseV2Api is true.");
+
+                if (string.IsNullOrWhiteSpace(clientSecret))
+                    errors.Add($"'{Constants.ConfigV2.ClientSecret}' is required when UseV2Api is true.");
+            }
+
             if (errors.Any())
             {
                 // SOX CC6.1: log the validation failure at Warning so it survives production log filters.
@@ -437,9 +488,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // Build a transient config from the supplied connectionInfo so we don't
                 // rely on the already-initialized _client (which may hold stale creds)
                 string rawConfig = JsonSerializer.Serialize(connectionInfo);
-                tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig);
+                tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig)
+                    ?? throw new InvalidOperationException("Failed to deserialize connection info.");
                 tempClient = new CERTInextClient(tempConfig);
-                await tempClient.PingAsync();
+
+                if (tempConfig.UseV2Api)
+                    await tempClient.PingV2Async();
+                else
+                    await tempClient.PingAsync();
             }
             catch (Exception ex)
             {
@@ -448,8 +504,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogError(
                     ex,
                     "CA connection validation failed — live connectivity test unsuccessful. " +
-                    "ApiUrl={ApiUrl}, AuthMode={AuthMode}",
-                    attemptedApiUrl, attemptedAuthMode);
+                    "ApiUrl={ApiUrl}, UseV2Api={UseV2Api}, AuthMode={AuthMode}",
+                    attemptedApiUrl, tempConfig?.UseV2Api ?? false, attemptedAuthMode);
 
                 // The inner exception message is NOT forwarded to the AnyCAValidationException
                 // because it may contain HTTP response bodies or header fragments from the
@@ -470,6 +526,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.ApiKey = string.Empty;
                     tempConfig.OAuthClientSecret = string.Empty;
                     tempConfig.Password = string.Empty;
+                    tempConfig.ClientSecret = string.Empty;
                 }
             }
 
@@ -597,23 +654,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             EnrollmentResult result;
 
-            switch (enrollmentType)
+            if (_config.UseV2Api)
             {
-                case EnrollmentType.New:
-                case EnrollmentType.Reissue:
-                    result = await EnrollNewAsync(csr, subject, san, ep);
-                    break;
+                // V2 path: all enrollment types go through EnrollV2Async
+                result = await EnrollV2Async(csr, subject, san, ep, enrollmentType);
+            }
+            else
+            {
+                switch (enrollmentType)
+                {
+                    case EnrollmentType.New:
+                    case EnrollmentType.Reissue:
+                        result = await EnrollNewAsync(csr, subject, san, ep);
+                        break;
 
-                case EnrollmentType.Renew:
-                case EnrollmentType.RenewOrReissue:
-                    result = await RenewOrReissueAsync(csr, subject, san, productInfo, ep);
-                    break;
+                    case EnrollmentType.Renew:
+                    case EnrollmentType.RenewOrReissue:
+                        result = await RenewOrReissueAsync(csr, subject, san, productInfo, ep);
+                        break;
 
-                default:
-                    _logger.LogError(
-                        "Enrollment rejected — unsupported enrollment type. EnrollmentType={EnrollmentType}, Subject={Subject}",
-                        enrollmentType, LogSanitizer.Strip(subject));
-                    throw new NotSupportedException($"Enrollment type '{enrollmentType}' is not supported.");
+                    default:
+                        _logger.LogError(
+                            "Enrollment rejected — unsupported enrollment type. EnrollmentType={EnrollmentType}, Subject={Subject}",
+                            enrollmentType, LogSanitizer.Strip(subject));
+                        throw new NotSupportedException($"Enrollment type '{enrollmentType}' is not supported.");
+                }
             }
 
             // SOX: the completion log must include the CA-assigned identifier, serial number,
@@ -637,7 +702,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public async Task<AnyCAPluginCertificate> GetSingleRecord(string caRequestID)
         {
             _logger.MethodEntry(LogLevel.Debug);
-            _logger.LogInformation("GetSingleRecord started. CARequestID={Id}", caRequestID);
+            _logger.LogInformation("GetSingleRecord started. CARequestID={Id}, UseV2Api={UseV2Api}", caRequestID, _config.UseV2Api);
+
+            if (_config.UseV2Api)
+                return await GetSingleRecordV2Async(caRequestID);
 
             try
             {
@@ -696,6 +764,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public async Task<int> Revoke(string caRequestID, string hexSerialNumber, uint revocationReason)
         {
             _logger.MethodEntry(LogLevel.Debug);
+
+            if (_config.UseV2Api)
+                return await RevokeV2Async(caRequestID, hexSerialNumber, revocationReason);
 
             string reasonString = StatusMapper.ToRevocationReason(revocationReason);
 
@@ -784,9 +855,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             DateTime? issuedAfter = fullSync ? (DateTime?)null : lastSync;
 
+            if (_config.UseV2Api)
+            {
+                // V2 /reports/orders endpoint returns 501 Not Implemented.
+                // Synchronize continues to use the V1 GetOrderReport until V2 reports ship.
+                _logger.LogWarning(
+                    "Synchronize uses V1 GetOrderReport; V2 /reports/orders is not yet available. " +
+                    "UseV2Api=true does not affect sync — V1 credentials (ApiUrl, ApiKey/AccountNumber) must remain configured.");
+            }
+
             _logger.LogInformation(
-                "Starting CERTInext synchronization. FullSync={FullSync}, IssuedAfter={IssuedAfter}",
-                fullSync, issuedAfter?.ToString("O") ?? "none");
+                "Starting CERTInext synchronization. FullSync={FullSync}, IssuedAfter={IssuedAfter}, UseV2Api={UseV2Api}",
+                fullSync, issuedAfter?.ToString("O") ?? "none", _config.UseV2Api);
 
             int synced = 0;
             int skipped = 0;
@@ -1087,6 +1167,277 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             return DcvSyncDecision.Attempt;
         }
+
+        // ---------------------------------------------------------------------------
+        // V2 API private helpers — only called when _config.UseV2Api is true
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Dispatches all enrollment types through the V2 REST API.
+        /// </summary>
+        private async Task<EnrollmentResult> EnrollV2Async(
+            string csr,
+            string subject,
+            Dictionary<string, string[]> san,
+            EnrollmentParams ep,
+            EnrollmentType enrollmentType)
+        {
+            _logger.MethodEntry(LogLevel.Debug);
+            _logger.LogInformation(
+                "EnrollV2Async started. EnrollmentType={EnrollmentType}, ProductFamily={Family}, ProductVariant={Variant}, ProductCode={Code}",
+                enrollmentType, ep.ProductFamilySlug, ep.ProductVariant, ep.ProductCode);
+
+            // Derive the primary domain from subject CN
+            string domain = ep.DomainName;
+            if (string.IsNullOrWhiteSpace(domain))
+                domain = ExtractCnFromSubject(subject);
+            if (string.IsNullOrWhiteSpace(domain))
+                throw new Exception("Cannot determine primary domain for V2 order — set the DomainName enrollment parameter or ensure the CSR subject has a CN.");
+
+            string requestorName  = string.IsNullOrWhiteSpace(ep.RequesterName)  ? _config.RequestorName  : ep.RequesterName;
+            string requestorEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? _config.RequestorEmail : ep.RequesterEmail;
+            string signerName     = string.IsNullOrWhiteSpace(ep.SignerName)     ? requestorName          : ep.SignerName;
+            string signerIp       = string.IsNullOrWhiteSpace(ep.SignerIp)       ? _config.SignerIp       : ep.SignerIp;
+            string signerPlace    = string.IsNullOrWhiteSpace(ep.SignerPlace)    ? _config.SignerPlace    : ep.SignerPlace;
+            int validityYears     = ep.ValidityYears > 0 ? ep.ValidityYears
+                                  : (int.TryParse(_config.SubscriptionValidityYears, out int cfgYears) && cfgYears > 0 ? cfgYears : 1);
+
+            var orderReq = new V2CreateSslOrderRequest
+            {
+                ProductVariant    = ep.ProductVariant,
+                EmailNotifications = "all",
+                Requestor = new V2Requestor
+                {
+                    Name        = requestorName,
+                    Email       = requestorEmail,
+                    Phone       = _config.RequestorMobileNumber ?? string.Empty,
+                    Designation = "IT Administrator"
+                },
+                Certificate = new V2CertificateParams
+                {
+                    Domain        = domain,
+                    AutoSecureWww = _config.AutoSecureWww == "1"
+                },
+                Subscription = new V2SubscriptionParams
+                {
+                    ValidityYears  = validityYears,
+                    AutoRenew      = false,
+                    RenewBeforeDays = 30
+                },
+                Agreement = new V2AgreementParams
+                {
+                    SignerName  = signerName,
+                    SignerIp    = signerIp,
+                    SignerPlace = signerPlace,
+                    Accepted    = true
+                },
+                Remarks = "Issued via Keyfactor Command AnyCA REST Gateway."
+            };
+
+            var createResp = await _client.PlaceOrderV2Async(ep.ProductFamilySlug, ep.ProductCode, orderReq);
+            string orderId = createResp.OrderId;
+
+            _logger.LogInformation(
+                "V2 order placed. OrderId={OrderId}, Status={Status}, EnrollmentType={EnrollmentType}",
+                orderId, createResp.Status, enrollmentType);
+
+            int disposition = StatusMapper.V2StatusToRequestDisposition(createResp.Status);
+
+            // If the order issued immediately, download the certificate
+            if (disposition == (int)EndEntityStatus.GENERATED)
+            {
+                try
+                {
+                    var certResp = await _client.DownloadCertificateV2Async(ep.ProductFamilySlug, orderId);
+                    _logger.LogInformation(
+                        "V2 certificate downloaded immediately. OrderId={OrderId}, SerialNumber={Serial}",
+                        orderId, certResp.SerialNumber);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = orderId,
+                        Certificate   = certResp.CertificatePem,
+                        Status        = (int)EndEntityStatus.GENERATED,
+                        StatusMessage = "Certificate issued via V2 API."
+                    };
+                }
+                catch (Exception dlEx)
+                {
+                    _logger.LogWarning(dlEx,
+                        "V2 order is 'issued' but certificate download failed — returning pending. OrderId={OrderId}",
+                        orderId);
+                }
+            }
+
+            // Return as pending for gateway to pick up via sync
+            _logger.MethodExit(LogLevel.Debug);
+            return new EnrollmentResult
+            {
+                CARequestID   = orderId,
+                Certificate   = null,
+                Status        = disposition == (int)EndEntityStatus.GENERATED
+                                    ? (int)EndEntityStatus.EXTERNALVALIDATION
+                                    : disposition,
+                StatusMessage = $"V2 order placed. Status={createResp.Status}"
+            };
+        }
+
+        /// <summary>
+        /// Retrieves a single certificate record via the V2 REST API.
+        /// </summary>
+        private async Task<AnyCAPluginCertificate> GetSingleRecordV2Async(string caRequestID)
+        {
+            _logger.MethodEntry(LogLevel.Debug);
+
+            try
+            {
+                var statusResp = await _client.ResolveAndTrackOrderV2Async(caRequestID);
+                int disposition = StatusMapper.V2StatusToRequestDisposition(statusResp.Status);
+
+                string certPem = null;
+                if (disposition == (int)EndEntityStatus.GENERATED)
+                {
+                    try
+                    {
+                        var certResp = await _client.ResolveAndDownloadCertificateV2Async(caRequestID);
+                        certPem = certResp.CertificatePem;
+                    }
+                    catch (Exception dlEx)
+                    {
+                        _logger.LogWarning(dlEx,
+                            "V2 GetSingleRecord: order is issued but certificate download failed. CARequestID={Id}",
+                            caRequestID);
+                    }
+                }
+
+                _logger.LogInformation(
+                    "GetSingleRecordV2 complete. CARequestID={Id}, V2Status={Status}, Disposition={Disposition}",
+                    caRequestID, statusResp.Status, disposition);
+                _logger.MethodExit(LogLevel.Debug);
+
+                return new AnyCAPluginCertificate
+                {
+                    CARequestID = caRequestID,
+                    Certificate = certPem,
+                    Status      = disposition,
+                    ProductID   = statusResp.ProductVariant ?? string.Empty
+                };
+            }
+            catch (KeyNotFoundException)
+            {
+                _logger.LogWarning("V2: Certificate not found. CARequestID={Id}", caRequestID);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "V2: Error retrieving certificate. CARequestID={Id}", caRequestID);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Revokes a certificate via the V2 REST API.
+        /// </summary>
+        private async Task<int> RevokeV2Async(string caRequestID, string hexSerialNumber, uint revocationReason)
+        {
+            _logger.MethodEntry(LogLevel.Debug);
+
+            string v2Reason = StatusMapper.ToV2RevocationReason(revocationReason);
+
+            _logger.LogInformation(
+                "Revocation V2 attempt started. CARequestID={Id}, HexSerialNumber={Serial}, " +
+                "ReasonCode={ReasonCode}, V2Reason={V2Reason}",
+                caRequestID, hexSerialNumber, revocationReason, v2Reason);
+
+            // Pre-flight: verify the order exists and is revocable
+            V2OrderStatusResponse currentStatus;
+            string resolvedFamily;
+            try
+            {
+                // We need the family for the revoke call, so resolve manually
+                currentStatus = await _client.ResolveAndTrackOrderV2Async(caRequestID);
+                // Re-resolve to get family (the resolver probes families internally)
+                resolvedFamily = Constants.ApiV2.FamilySsl; // default; override below via re-probe if needed
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "V2 revocation pre-flight failed. CARequestID={Id}",
+                    caRequestID);
+                throw;
+            }
+
+            int disposition = StatusMapper.V2StatusToRequestDisposition(currentStatus.Status);
+            if (disposition == (int)EndEntityStatus.REVOKED)
+            {
+                _logger.LogWarning(
+                    "V2 revocation skipped — already revoked. CARequestID={Id}",
+                    caRequestID);
+                _logger.MethodExit(LogLevel.Debug);
+                return (int)EndEntityStatus.REVOKED;
+            }
+
+            if (disposition != (int)EndEntityStatus.GENERATED)
+            {
+                throw new Exception(
+                    $"V2 certificate '{caRequestID}' cannot be revoked: current status is '{currentStatus.Status}'. " +
+                    "Only issued certificates may be revoked.");
+            }
+
+            // Determine which family we resolved — try each until the revoke succeeds
+            var revokeReq = new V2RevokeRequest
+            {
+                Reason = v2Reason,
+                Note   = $"Revoked via Keyfactor Command. CRL reason code: {revocationReason} ({v2Reason})."
+            };
+
+            // Probe families to issue the revoke call
+            bool revoked = false;
+            foreach (var family in new[] { Constants.ApiV2.FamilySsl, Constants.ApiV2.FamilyPrivatePki, Constants.ApiV2.FamilySignature })
+            {
+                try
+                {
+                    await _client.RevokeOrderV2Async(family, caRequestID, revokeReq);
+                    resolvedFamily = family;
+                    revoked = true;
+                    break;
+                }
+                catch (KeyNotFoundException)
+                {
+                    // Not in this family — try next
+                }
+            }
+
+            if (!revoked)
+                throw new KeyNotFoundException($"V2 order '{caRequestID}' not found in any product family for revocation.");
+
+            _logger.LogInformation(
+                "V2 revocation complete. CARequestID={Id}, HexSerialNumber={Serial}, V2Reason={V2Reason}, Family={Family}",
+                caRequestID, hexSerialNumber, v2Reason, resolvedFamily);
+            _logger.MethodExit(LogLevel.Debug);
+            return (int)EndEntityStatus.REVOKED;
+        }
+
+        // ---------------------------------------------------------------------------
+        // V2 private utility
+        // ---------------------------------------------------------------------------
+
+        private static string ExtractCnFromSubject(string subject)
+        {
+            if (string.IsNullOrWhiteSpace(subject)) return null;
+            // subject format: "CN=example.com, O=Org, ..."
+            foreach (var part in subject.Split(','))
+            {
+                var trimmed = part.Trim();
+                if (trimmed.StartsWith("CN=", StringComparison.OrdinalIgnoreCase))
+                    return trimmed.Substring(3).Trim();
+            }
+            return null;
+        }
+
+        // ---------------------------------------------------------------------------
+        // V1 private helpers
+        // ---------------------------------------------------------------------------
 
         /// <summary>
         /// Handles New and Reissue enrollment flows by submitting a fresh certificate
@@ -2251,7 +2602,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 "Synchronous pickup complete. OrderNumber={OrderNumber}, SerialNumber={Serial}, " +
                                 "Attempt={Attempt}/{Retries}.",
                                 orderNumber,
-                                string.IsNullOrWhiteSpace(cert.SerialNumber) ? "(none)" : cert.SerialNumber,
+                                string.IsNullOrWhiteSpace(cert.SerialNumber) ? "(not provided by CA)" : cert.SerialNumber,
                                 attempt, retries);
                             return new EnrollmentResult
                             {

@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 {
@@ -171,6 +172,86 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string orderNumber,
             string domainName,
             string dcvMethod,
+            CancellationToken ct = default);
+
+        // -----------------------------------------------------------------------
+        // V2 REST API methods — only active when UseV2Api = true
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// V2 connectivity check via GET /api/certinext/v2/auth/me.
+        /// Throws if the V2 endpoint is unreachable or credentials are invalid.
+        /// </summary>
+        Task PingV2Async(CancellationToken ct = default);
+
+        /// <summary>
+        /// Places a new order via POST /api/certinext/v2/{productFamilySlug}.
+        /// The product code is sent as the X-Product-Code header.
+        /// An Idempotency-Key is generated automatically.
+        /// </summary>
+        Task<V2CreateOrderResponse> PlaceOrderV2Async(
+            string productFamilySlug,
+            string productCode,
+            V2CreateSslOrderRequest request,
+            CancellationToken ct = default);
+
+        /// <summary>
+        /// Submits a CSR to an existing V2 order via PUT /api/certinext/v2/{family}/{orderId}/csr.
+        /// </summary>
+        Task SubmitCsrV2Async(
+            string productFamilySlug,
+            string orderId,
+            string csrPem,
+            CancellationToken ct = default);
+
+        /// <summary>
+        /// Returns the current status of a V2 order via GET /api/certinext/v2/{family}/{orderId}.
+        /// Throws <see cref="KeyNotFoundException"/> when the order does not exist in that family.
+        /// </summary>
+        Task<V2OrderStatusResponse> TrackOrderV2Async(
+            string productFamilySlug,
+            string orderId,
+            CancellationToken ct = default);
+
+        /// <summary>
+        /// Downloads the issued certificate for a V2 order.
+        /// GET /api/certinext/v2/{family}/{orderId}/certificate
+        /// </summary>
+        Task<V2CertificateDownloadResponse> DownloadCertificateV2Async(
+            string productFamilySlug,
+            string orderId,
+            CancellationToken ct = default);
+
+        /// <summary>
+        /// Revokes a V2 certificate via POST /api/certinext/v2/{family}/{orderId}/revoke.
+        /// An Idempotency-Key is generated automatically.
+        /// </summary>
+        Task RevokeOrderV2Async(
+            string productFamilySlug,
+            string orderId,
+            V2RevokeRequest request,
+            CancellationToken ct = default);
+
+        /// <summary>
+        /// Returns V2 auth/me response (accountNumber, authType).
+        /// </summary>
+        Task<V2AuthMeResponse> GetAuthMeV2Async(CancellationToken ct = default);
+
+        /// <summary>
+        /// Resolves the product-family slug for the given V2 order ID by probing all three
+        /// families (ssl → private-pki → signature), then returns the track response.
+        /// Throws <see cref="KeyNotFoundException"/> if the order is not found in any family.
+        /// </summary>
+        Task<V2OrderStatusResponse> ResolveAndTrackOrderV2Async(
+            string orderId,
+            CancellationToken ct = default);
+
+        /// <summary>
+        /// Resolves the product-family slug for the given V2 order ID and downloads the certificate.
+        /// Throws <see cref="KeyNotFoundException"/> if the order is not found in any family.
+        /// </summary>
+        Task<V2CertificateDownloadResponse> ResolveAndDownloadCertificateV2Async(
+            string orderId,
             CancellationToken ct = default);
     }
 }

@@ -1,6 +1,11 @@
 # 1.0.1
 
 ## Features
+- feat(v2): Add opt-in CERTInext V2 REST API code path — OAuth2 `client_credentials` auth, `ord_`-prefixed order IDs, and V2 status mapping — controlled by `UseV2Api` config flag (defaults `false`; V1 unchanged).
+- feat(v2): V2 enrollment handles all three `EnrollmentType` values (New/Reissue/RenewOrReissue) via a single V2 order placement; issued orders download the certificate immediately.
+- feat(v2): V2 revocation probes SSL → PrivatePKI → Signature families to locate and revoke an order by its `ord_` ID.
+- feat(v2): V2 `GetSingleRecord` resolves order status across all three V2 product families without touching the V1 path.
+- feat(v2): Synchronization continues to use V1 `GetOrderReport` (V2 `/reports/orders` returns 501); a warning is logged when `UseV2Api` is true to document this.
 - **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly and returns the certificate in the same request when it issues fast, instead of always waiting for the next sync. Configurable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s). Orders that don't issue in time (e.g. OV/EV) return pending and are picked up by the next sync, as before.
 
 ## Bug Fixes
@@ -10,6 +15,10 @@
 - **Renewals now use the certificate template's product code.** Renewals previously always used the connector's `DefaultProductCode`, which could send an empty product code if that setting was never configured. Renewals now use the template's code, falling back to `DefaultProductCode` only when the template doesn't have one.
 
 ## Chores
+- chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).
+- chore(tests): Moq-based unit tests verifying V2 dispatch in `CERTInextCAPlugin` (Ping, Enroll, GetSingleRecord, Revoke, Synchronize) with `Times.Never` assertions on V1 paths.
+- chore(tests): `StatusMapperV2Tests` covering all V2 status strings and CRL-to-V2-reason mappings.
+- chore(tests): Integration test stubs in `V2ApiTests.cs` (gated behind `CERTINEXT_USE_V2_API=1`); skip gracefully when V2 credentials are absent.
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 

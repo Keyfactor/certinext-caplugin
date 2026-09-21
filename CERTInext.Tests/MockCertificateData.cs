@@ -493,6 +493,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             @"{""error"":""UNAUTHORIZED"",""message"":""Invalid API key."",""statusCode"":401}";
 
         // -----------------------------------------------------------------------
+        // V2 API JSON factories
+        // -----------------------------------------------------------------------
+
+        // V2 well-known order IDs
+        public const string V2OrderId1 = "ord_abc001";
+        public const string V2OrderId2 = "ord_abc002";
+
+        /// <summary>Standard OAuth2 client_credentials token response.</summary>
+        public static string V2TokenResponseJson(int expiresIn = 3600) =>
+            $@"{{""access_token"":""eyJhbGciOiJSUzI1NiJ9.test-token"",""token_type"":""Bearer"",""expires_in"":{expiresIn},""refresh_token"":""refresh-opaque-token""}}";
+
+        /// <summary>V2 create order response (status = pending-dcv).</summary>
+        public static string V2CreateOrderPendingJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""pending-dcv"",""_links"":{{""self"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}""}}}}}}";
+
+        /// <summary>V2 create order response (status = issued — unlikely on fresh order but usable for testing).</summary>
+        public static string V2CreateOrderIssuedJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""issued"",""_links"":{{""self"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}""}}}}}}";
+
+        /// <summary>V2 track order response — pending DCV.</summary>
+        public static string V2TrackOrderPendingJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""pending-dcv"",""productVariant"":""dv"",""domain"":""example.com"",""_links"":{{""self"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}""}}}}}}";
+
+        /// <summary>V2 track order response — issued.</summary>
+        public static string V2TrackOrderIssuedJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""issued"",""productVariant"":""dv"",""domain"":""example.com"",""_links"":{{""certificate"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}/certificate""}}}}}}";
+
+        /// <summary>V2 track order response — revoked.</summary>
+        public static string V2TrackOrderRevokedJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""revoked"",""productVariant"":""dv"",""domain"":""example.com"",""revocationReason"":""superseded"",""_links"":{{}}}}";
+
+        /// <summary>V2 certificate download response (leaf PEM only).</summary>
+        public static string V2CertificateDownloadJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""serialNumber"":""0A1B2C3D4E5F"",""subject"":""CN=example.com"",""issuer"":""CN=CERTInext TLS Intermediate"",""notBefore"":""2026-01-01T00:00:00Z"",""notAfter"":""2027-01-01T00:00:00Z"",""certificatePem"":""{EscapeForJson(FakePemCertificate)}""}}";
+
+        /// <summary>V2 auth/me response.</summary>
+        public static string V2AuthMeJson(string accountNumber = "99887766") =>
+            $@"{{""accountNumber"":""{accountNumber}"",""authType"":""oauth2""}}";
+
+        /// <summary>RFC 7807 problem+json error response.</summary>
+        public static string V2ProblemDetailsJson(int status = 403, string title = "Forbidden", string detail = "OAuth2 not enabled", string type = "EMS-2022") =>
+            $@"{{""type"":""{type}"",""title"":""{title}"",""status"":{status},""detail"":""{detail}"",""instance"":null}}";
+
+        // -----------------------------------------------------------------------
         // Helpers
         // -----------------------------------------------------------------------
 
