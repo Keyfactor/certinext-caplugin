@@ -247,7 +247,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
                 var req = new RestRequest(Constants.Api.GenerateOrderSslPath, Method.Post);
                 string jsonBody = JsonSerializer.Serialize(request, GetJsonOptions());
-                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}", jsonBody);
+                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}", RedactCredentials(jsonBody));
                 req.AddJsonBody(jsonBody);
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -1715,18 +1715,43 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (resp.IsSuccessful) return;
 
             if (resp.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                LogV2ApiFailure(operation, resp, LogLevel.Error);
                 throw new Exception($"V2 authentication failure during '{operation}'. HTTP 401. See gateway logs for details.");
+            }
 
             if (resp.StatusCode == HttpStatusCode.Forbidden)
             {
+                LogV2ApiFailure(operation, resp, LogLevel.Error);
                 string hint = ExtractV2ErrorMessage(resp.Content, operation);
                 throw new Exception(
                     $"V2 access denied during '{operation}'. HTTP 403. {hint} " +
                     "If error code is EMS-2022, ensure OAuth2 is enabled in the CERTInext portal.");
             }
 
+            LogV2ApiFailure(operation, resp, LogLevel.Warning);
             string msg = ExtractV2ErrorMessage(resp.Content, operation);
             throw new Exception($"CERTInext V2 API error during '{operation}'. HTTP {(int)resp.StatusCode}. {msg}");
+        }
+
+        /// <summary>
+        /// Writes a structured log for a V2 API non-success response — matching the V1
+        /// <see cref="LogApiFailure"/> pattern but adapted for V2's RFC 7807 error shape.
+        /// Call immediately before throwing so the exception's "See gateway logs for details"
+        /// message has a corresponding structured entry in the gateway log.
+        /// </summary>
+        private static void LogV2ApiFailure(string operation, RestResponse resp, LogLevel level = LogLevel.Warning)
+        {
+            string sanitizedBody = Truncate(RedactCredentials(resp?.Content) ?? "(empty)", LoggedResponseBodyCapBytes);
+            Logger.Log(
+                level,
+                "CERTInext V2 API non-success. Operation={Operation}, Method={Method}, Path={Path}, " +
+                "HttpStatus={HttpStatus}, ResponseBody={ResponseBody}",
+                operation,
+                resp?.Request?.Method.ToString() ?? "(unknown)",
+                resp?.Request?.Resource ?? "(unknown)",
+                (int?)resp?.StatusCode ?? 0,
+                sanitizedBody);
         }
 
         /// <summary>
