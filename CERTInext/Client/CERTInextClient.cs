@@ -1432,6 +1432,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <inheritdoc/>
+        public async Task<(string family, V2OrderStatusResponse status)> ResolveAndTrackOrderV2WithFamilyAsync(
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var result = await ResolveV2OrderFamilyAsync(orderId, ct);
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
         public async Task<V2CertificateDownloadResponse> ResolveAndDownloadCertificateV2Async(
             string orderId,
             CancellationToken ct = default)
@@ -1444,11 +1455,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <inheritdoc/>
-        public async Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, CancellationToken ct = default)
+        public async Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, string familySlug, CancellationToken ct = default)
         {
             Logger.MethodEntry(LogLevel.Trace);
             EnsureV2Client();
-            string path = $"/api/certinext/v2/ssl-certificates/{orderId}/dcv";
+            string path = $"/api/certinext/v2/{familySlug}/{orderId}/dcv";
             var req = await BuildV2RequestAsync(path, Method.Get, ct);
             var resp = await _httpV2.ExecuteAsync(req, ct);
             Logger.LogInformation(
@@ -1461,11 +1472,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <inheritdoc/>
-        public async Task<V2DcvVerifyResponse> VerifyDcvV2Async(string orderId, string domain, CancellationToken ct = default)
+        public async Task<V2DcvVerifyResponse> VerifyDcvV2Async(string orderId, string domain, string familySlug, CancellationToken ct = default)
         {
             Logger.MethodEntry(LogLevel.Trace);
             EnsureV2Client();
-            string path = $"/api/certinext/v2/ssl-certificates/{orderId}/dcv/verify";
+            string path = $"/api/certinext/v2/{familySlug}/{orderId}/dcv/verify";
             var req = await BuildV2RequestAsync(path, Method.Post, ct);
             var body = new V2DcvVerifyRequest { Domain = domain, Method = "dns-txt" };
             req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));

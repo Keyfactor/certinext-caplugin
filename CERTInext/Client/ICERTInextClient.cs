@@ -255,18 +255,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             CancellationToken ct = default);
 
         /// <summary>
-        /// Returns the DCV challenge details for a V2 SSL order.
-        /// GET /api/certinext/v2/ssl-certificates/{orderId}/dcv
+        /// Returns the DCV challenge details for a V2 order.
+        /// GET /api/certinext/v2/{familySlug}/{orderId}/dcv
         /// </summary>
-        Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, CancellationToken ct = default);
+        Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, string familySlug, CancellationToken ct = default);
 
         /// <summary>
         /// Asks CERTInext to verify the DNS TXT record for the given domain on a V2 order.
-        /// POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify
+        /// POST /api/certinext/v2/{familySlug}/{orderId}/dcv/verify
         /// Both 200 OK and 204 No Content are treated as success.
         /// Throws <see cref="InvalidOperationException"/> on 422 (verification failed).
         /// </summary>
-        Task<V2DcvVerifyResponse> VerifyDcvV2Async(string orderId, string domain, CancellationToken ct = default);
+        Task<V2DcvVerifyResponse> VerifyDcvV2Async(string orderId, string domain, string familySlug, CancellationToken ct = default);
+
+        /// <summary>
+        /// Resolves the product-family slug for the given V2 order ID by probing all three
+        /// families (ssl → private-pki → signature), then returns both the resolved slug and the
+        /// track response. Use this when the caller needs to pass the family slug to downstream
+        /// operations such as DCV.
+        /// Throws <see cref="KeyNotFoundException"/> if the order is not found in any family.
+        /// </summary>
+        Task<(string family, V2OrderStatusResponse status)> ResolveAndTrackOrderV2WithFamilyAsync(
+            string orderId,
+            CancellationToken ct = default);
 
         /// <summary>
         /// Returns the list of products available in the V2 catalog.

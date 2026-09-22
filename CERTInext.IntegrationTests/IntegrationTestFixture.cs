@@ -21,6 +21,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     public sealed class IntegrationTestFixture : IDisposable
     {
         // ---------------------------------------------------------------------------
+        // Opt-in guard
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Env-var keys that must be set explicitly in the shell and must NOT be
+        /// auto-promoted from the env file.  These gate destructive or mutating tests
+        /// so a developer cannot accidentally arm them by leaving flags in ~/.env_certinext.
+        /// </summary>
+        private static readonly System.Collections.Generic.HashSet<string> _optInOnlyFlags =
+            new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "CERTINEXT_COMPLETE_PENDING",
+                "CERTINEXT_RUN_BULK_TEST",
+            };
+
+        // ---------------------------------------------------------------------------
         // Credential properties
         // ---------------------------------------------------------------------------
 
@@ -85,8 +101,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             // Promote env-file values into the process environment so that any code
             // calling System.Environment.GetEnvironmentVariable() picks them up.
+            // Opt-in destructive-test flags are deliberately excluded: they must be
+            // set explicitly in the shell so a developer who leaves them in the file
+            // does not accidentally arm bulk/mutating tests on every bare `dotnet test`.
             foreach (var kv in env)
-                if (System.Environment.GetEnvironmentVariable(kv.Key) == null)
+                if (System.Environment.GetEnvironmentVariable(kv.Key) == null
+                    && !_optInOnlyFlags.Contains(kv.Key))
                     System.Environment.SetEnvironmentVariable(kv.Key, kv.Value);
 
             ApiUrl        = GetEnvValue(env, "CERTINEXT_API_URL");

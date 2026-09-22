@@ -21,6 +21,7 @@ using Keyfactor.AnyGateway.Extensions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
+using Keyfactor.Extensions.CAPlugin.CERTInext;
 using Keyfactor.PKI.Enums.EJBCA;
 using Moq;
 using Xunit;
@@ -210,14 +211,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task GetSingleRecord_V2Enabled_UsesResolveAndTrack()
         {
             var mock = NewMock();
-            mock.Setup(c => c.ResolveAndTrackOrderV2Async(
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
                     MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2OrderStatusResponse
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
                 {
                     OrderId  = MockCertificateData.V2OrderId1,
                     Status   = "issued",
                     ProductVariant = "dv"
-                });
+                }));
 
             mock.Setup(c => c.ResolveAndDownloadCertificateV2Async(
                     MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
@@ -235,7 +236,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             record.Status.Should().Be((int)EndEntityStatus.GENERATED);
             record.Certificate.Should().StartWith("-----BEGIN CERTIFICATE-----");
 
-            mock.Verify(c => c.ResolveAndTrackOrderV2Async(
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
                 MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()), Times.Once);
         }
 
@@ -243,9 +244,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task GetSingleRecord_V2Enabled_DoesNotCallV1GetCertificate()
         {
             var mock = new Mock<ICERTInextClient>(); // Loose
-            mock.Setup(c => c.ResolveAndTrackOrderV2Async(
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
                     It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_x", Status = "pending-dcv" });
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse { OrderId = "ord_x", Status = "pending-dcv" }));
 
             var plugin = BuildV2Plugin(mock.Object);
             await plugin.GetSingleRecord("ord_x");

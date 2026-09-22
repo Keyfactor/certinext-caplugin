@@ -402,7 +402,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     .WithBody(MockCertificateData.V2DcvChallengeJson(MockCertificateData.V2OrderId1, "example.com", "my-dcv-token")));
 
             using var client = BuildV2Client();
-            var result = await client.GetDcvV2Async(MockCertificateData.V2OrderId1);
+            var result = await client.GetDcvV2Async(MockCertificateData.V2OrderId1, Constants.ApiV2.FamilySsl);
 
             result.OrderNumber.Should().Be(MockCertificateData.V2OrderId1);
             result.DomainName.Should().Be("example.com");
@@ -425,7 +425,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             using var client = BuildV2Client();
             await Assert.ThrowsAsync<Exception>(
-                () => client.GetDcvV2Async(MockCertificateData.V2OrderId1));
+                () => client.GetDcvV2Async(MockCertificateData.V2OrderId1, Constants.ApiV2.FamilySsl));
         }
 
         // ---------------------------------------------------------------------------
@@ -446,7 +446,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     .WithBody(MockCertificateData.V2DcvVerifySuccessJson()));
 
             using var client = BuildV2Client();
-            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com");
+            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com", Constants.ApiV2.FamilySsl);
 
             result.OverallStatus.Should().Be("VERIFIED");
         }
@@ -463,7 +463,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     .WithStatusCode(204));
 
             using var client = BuildV2Client();
-            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com");
+            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com", Constants.ApiV2.FamilySsl);
 
             result.OverallStatus.Should().Be("VERIFIED");
         }
@@ -483,7 +483,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             using var client = BuildV2Client();
             var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-                () => client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com"));
+                () => client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com", Constants.ApiV2.FamilySsl));
 
             ex.Message.Should().Contain("DCV verification failed");
         }
@@ -503,7 +503,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     .WithBody(MockCertificateData.V2DcvVerifySuccessJson()));
 
             using var client = BuildV2Client();
-            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com");
+            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com", Constants.ApiV2.FamilySsl);
 
             result.OverallStatus.Should().Be("VERIFIED");
         }

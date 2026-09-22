@@ -528,6 +528,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.Password = string.Empty;
                     tempConfig.ClientSecret = string.Empty;
                 }
+                tempClient?.Dispose();
             }
 
             _logger.LogInformation(
@@ -605,6 +606,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.OAuthClientSecret = string.Empty;
                     tempConfig.Password = string.Empty;
                 }
+                tempClient?.Dispose();
             }
 
             _logger.LogInformation("Product/profile validation succeeded. ProfileId={ProfileId}", profileId);
@@ -1321,7 +1323,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             try
             {
-                var statusResp = await _client.ResolveAndTrackOrderV2Async(caRequestID);
+                // Use the family-aware resolve so DCV (if needed) hits the correct endpoint for
+                // non-SSL families (private-pki, signature). ResolveAndTrackOrderV2Async discards
+                // the family; here we keep it to thread through PerformDcvV2IfNeededAsync.
+                var (resolvedFamily, statusResp) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(caRequestID);
                 int disposition = StatusMapper.V2StatusToRequestDisposition(statusResp.Status);
 
 #if SUPPORTS_DCV
@@ -1335,7 +1340,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     try
                     {
                         bool dcvDone = await PerformDcvV2IfNeededAsync(
-                            caRequestID, statusResp.Domain, Constants.ApiV2.FamilySsl, dcvCts.Token);
+                            caRequestID, statusResp.Domain, resolvedFamily, dcvCts.Token);
                         if (dcvDone)
                         {
                             statusResp = await _client.ResolveAndTrackOrderV2Async(caRequestID);
@@ -1407,7 +1412,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return certResp?.CertificatePem;
 
             var sb = new System.Text.StringBuilder();
-            sb.Append(certResp.CertificatePem?.TrimEnd());
+            if (string.IsNullOrWhiteSpace(certResp.CertificatePem))
+                throw new InvalidOperationException(
+                    $"V2 certificate download for order '{certResp?.OrderId}' returned a null or empty leaf " +
+                    "certificate PEM while a chain PEM is present; cannot assemble a valid chain without the leaf.");
+            sb.Append(certResp.CertificatePem.TrimEnd());
             foreach (var intermediate in certResp.ChainPem)
             {
                 if (string.IsNullOrWhiteSpace(intermediate)) continue;
@@ -2005,6 +2014,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
                 catch (OperationCanceledException)
                 {
+                    // Rethrow if the gateway-level token is cancelled so shutdown is not blocked;
+                    // only swallow an internal timeout (e.g. a per-poll deadline CTS).
+                    ct.ThrowIfCancellationRequested();
                     return false;
                 }
             }
@@ -2449,7 +2461,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             V2DcvChallengeResponse challenge;
             try
             {
-                challenge = await _client.GetDcvV2Async(orderId, ct);
+                challenge = await _client.GetDcvV2Async(orderId, productFamilySlug, ct);
             }
             catch (Exception ex)
             {
@@ -2483,29 +2495,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation(
                 "Staging V2 DNS TXT record. OrderId={OrderId}, Hostname={Hostname}", orderId, LogSanitizer.Strip(hostname));
 
-            DomainValidationResult stageResult;
+            // staged=true only after a successful StageValidation so the finally only attempts
+            // cleanup when there is a record to remove (Finding C — cleanup skipped on !Success).
+            bool staged = false;
             try
             {
-                stageResult = await validator.StageValidation(hostname, token, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex,
-                    "V2 DCV: DNS provider threw while staging '{Domain}' for order {OrderId}.",
-                    LogSanitizer.Strip(domain), orderId);
-                return false;
-            }
+                DomainValidationResult stageResult;
+                try
+                {
+                    stageResult = await validator.StageValidation(hostname, token, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "V2 DCV: DNS provider threw while staging '{Domain}' for order {OrderId}.",
+                        LogSanitizer.Strip(domain), orderId);
+                    return false;
+                }
 
-            if (!stageResult.Success)
-            {
-                _logger.LogError(
-                    "V2 DCV: Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}.",
-                    LogSanitizer.Strip(domain), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
-                return false;
-            }
+                if (!stageResult.Success)
+                {
+                    _logger.LogError(
+                        "V2 DCV: Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}.",
+                        LogSanitizer.Strip(domain), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
+                    return false;
+                }
+                staged = true;
 
-            try
-            {
                 // Wait for DNS propagation
                 int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
                 _logger.LogInformation(
@@ -2515,7 +2531,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // 3. Trigger CA-side verification
                 _logger.LogInformation(
                     "Triggering V2 DCV verification. OrderId={OrderId}, Domain={Domain}", orderId, LogSanitizer.Strip(domain));
-                var verifyResp = await _client.VerifyDcvV2Async(orderId, domain, ct);
+                var verifyResp = await _client.VerifyDcvV2Async(orderId, domain, productFamilySlug, ct);
                 _logger.LogInformation(
                     "V2 DCV verify response. OrderId={OrderId}, OverallStatus={Status}",
                     orderId, verifyResp?.OverallStatus ?? "(null)");
@@ -2550,28 +2566,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         break;
                     }
                 }
+
+                return true;
             }
             finally
             {
-                // 5. Always clean up TXT record
-                try
+                // 5. Clean up TXT record — only when staging succeeded (staged=true).
+                if (staged)
                 {
-                    using var cleanupCts = new CancellationTokenSource(
-                        TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
-                    await validator.CleanupValidation(hostname, cleanupCts.Token);
-                    _logger.LogInformation(
-                        "V2 DCV: DNS TXT record cleaned up. OrderId={OrderId}, Hostname={Hostname}",
-                        orderId, LogSanitizer.Strip(hostname));
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "V2 DCV: Failed to clean up DNS TXT record. OrderId={OrderId}, Hostname={Hostname}. " +
-                        "May require manual removal.", orderId, LogSanitizer.Strip(hostname));
+                    try
+                    {
+                        using var cleanupCts = new CancellationTokenSource(
+                            TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
+                        await validator.CleanupValidation(hostname, cleanupCts.Token);
+                        _logger.LogInformation(
+                            "V2 DCV: DNS TXT record cleaned up. OrderId={OrderId}, Hostname={Hostname}",
+                            orderId, LogSanitizer.Strip(hostname));
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "V2 DCV: Failed to clean up DNS TXT record. OrderId={OrderId}, Hostname={Hostname}. " +
+                            "May require manual removal.", orderId, LogSanitizer.Strip(hostname));
+                    }
                 }
             }
-
-            return true;
         }
 #endif
 
@@ -2759,7 +2778,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// orders return in-call. Never throws — any polling error degrades to the pending result.
         /// </summary>
         private async Task<EnrollmentResult> PickUpEnrolledCertificateAsync(
-            EnrollmentResult pendingResult, string orderNumber, bool dcvIssuanceWaitRan)
+            EnrollmentResult pendingResult, string orderNumber, bool dcvIssuanceWaitRan,
+            CancellationToken ct = default)
         {
             // The DCV path already owns the in-call issuance wait for this order — running a second
             // stacked poll here would double the wait budget (when DCV ran WaitForIssuanceAfterDcvAsync)
@@ -2822,13 +2842,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 // Small static delay before the first poll — mirrors the Sectigo connector's
                 // attempt to let a fast order finish issuing before we start polling at all.
-                await Task.Delay(TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds));
+                await Task.Delay(TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds), ct);
 
                 for (int attempt = 1; attempt <= retries; attempt++)
                 {
                     try
                     {
-                        var cert = await _client.GetCertificateAsync(orderNumber);
+                        var cert = await _client.GetCertificateAsync(orderNumber, ct);
                         int disposition = StatusMapper.ToRequestDisposition(cert.Status);
 
                         // SOC2 CC7.3: record each poll's observed disposition so the issuance
@@ -2898,7 +2918,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                     // Delay after every attempt (including the last), matching the Sectigo
                     // connector's pickup cadence so the max-occupancy ceiling is identical.
-                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
                 }
 
                 // SOC1 accuracy: don't attribute non-completion to "OV/EV async by design" when the
