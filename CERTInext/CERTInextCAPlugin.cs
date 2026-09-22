@@ -2917,6 +2917,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                     catch (Exception ex)
                     {
+                        if (ex is OperationCanceledException) throw;
                         // A transient fetch failure consumes an attempt rather than aborting the
                         // wait; if it never recovers the pending result is returned below.
                         pollErrors++;
