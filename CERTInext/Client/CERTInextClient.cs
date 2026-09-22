@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -1493,9 +1494,74 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return result;
         }
 
+        /// <inheritdoc/>
+        public async Task<List<ProductDetail>> GetProductDetailsV2Async(CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            var req = await BuildV2RequestAsync(Constants.ApiV2.CatalogProductsPath, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                Constants.ApiV2.CatalogProductsPath, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 get product details");
+            var result = ParseProductDetailsV2Response(resp.Content);
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
         // ---------------------------------------------------------------------------
         // V2 private helpers
         // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Parses the GET /api/certinext/v2/catalog/products response into a flat
+        /// <see cref="ProductDetail"/> list.  The endpoint may return a bare JSON array
+        /// or a JSON object that wraps the list under a known property name
+        /// ("products", "data", "items", or "catalog").  Both shapes are handled so
+        /// the method stays resilient as the API evolves.
+        /// </summary>
+        private List<ProductDetail> ParseProductDetailsV2Response(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return new List<ProductDetail>();
+
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                return JsonSerializer.Deserialize<List<ProductDetail>>(content, GetJsonOptions())
+                       ?? new List<ProductDetail>();
+            }
+
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                // Log the top-level property names so the actual schema is visible in test output.
+                var keys = string.Join(", ", root.EnumerateObject().Select(p => p.Name));
+                Logger.LogInformation(
+                    "GetProductDetailsV2Async: response is a JSON object with top-level keys: [{Keys}]", keys);
+
+                // Try known wrapper property names in order of likelihood.
+                foreach (string candidate in new[] { "products", "data", "items", "catalog" })
+                {
+                    if (root.TryGetProperty(candidate, out JsonElement arr) && arr.ValueKind == JsonValueKind.Array)
+                    {
+                        return JsonSerializer.Deserialize<List<ProductDetail>>(arr.GetRawText(), GetJsonOptions())
+                               ?? new List<ProductDetail>();
+                    }
+                }
+
+                // No recognised array property found — surface the object keys in the exception
+                // so the caller/test can see the actual schema and create a proper DTO.
+                throw new InvalidOperationException(
+                    $"V2 catalog/products returned an unexpected JSON object. Top-level keys: [{keys}]. " +
+                    "Update ParseProductDetailsV2Response with the correct property name.");
+            }
+
+            throw new InvalidOperationException(
+                $"V2 catalog/products returned unexpected JSON kind: {root.ValueKind}.");
+        }
 
         private void EnsureV2Client()
         {

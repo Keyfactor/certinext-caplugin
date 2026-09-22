@@ -267,5 +267,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Throws <see cref="InvalidOperationException"/> on 422 (verification failed).
         /// </summary>
         Task<V2DcvVerifyResponse> VerifyDcvV2Async(string orderId, string domain, CancellationToken ct = default);
+
+        /// <summary>
+        /// Returns the list of products available in the V2 catalog.
+        /// GET /api/certinext/v2/catalog/products
+        /// </summary>
+        Task<List<ProductDetail>> GetProductDetailsV2Async(CancellationToken ct = default);
     }
 }

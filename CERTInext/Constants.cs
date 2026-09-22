@@ -366,6 +366,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SslCertificatesPath        = "/api/certinext/v2/ssl-certificates";
             public const string PrivatePkiCertificatesPath = "/api/certinext/v2/private-pki-certificates";
             public const string SignatureCertificatesPath  = "/api/certinext/v2/signature-certificates";
+            public const string CatalogProductsPath        = "/api/certinext/v2/catalog/products";
 
             // Order status strings (V2 REST — NOT numeric IDs)
             public const string StatusPendingDcv       = "pending-dcv";

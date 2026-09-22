@@ -16,14 +16,17 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Keyfactor.AnyGateway.Extensions;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.PKI.Enums.EJBCA;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 {
@@ -55,16 +58,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     public class V2ApiTests : IClassFixture<IntegrationTestFixture>
     {
         private readonly IntegrationTestFixture _fixture;
+        private readonly ITestOutputHelper _output;
         private readonly string _v2ApiUrl;
         private readonly string _v2ClientId;
         private readonly string _v2ClientSecret;
         private readonly string _v2ProductCode;
         private readonly string _v2Domain;
         private readonly bool _v2Enabled;
+        private readonly string _cfApiToken;
+        private readonly string _cfZoneId;
+        private readonly bool _dcvEnabled;
+        private readonly string _issuedOrderId;
 
-        public V2ApiTests(IntegrationTestFixture fixture)
+        public V2ApiTests(IntegrationTestFixture fixture, ITestOutputHelper output)
         {
             _fixture = fixture;
+            _output  = output;
 
             // Load ~/.env_certinext_v2 if present; real env vars take precedence.
             var env = LoadEnvFile(Path.Combine(
@@ -81,11 +90,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _v2ClientSecret = GetEnv(env, "CERTINEXT_CLIENT_SECRET");
             _v2ProductCode  = GetEnv(env, "CERTINEXT_PRODUCT_CODE", "842");
             _v2Domain       = GetEnv(env, "CERTINEXT_DCV_DOMAIN", "test.example.com");
+            _cfApiToken     = GetEnv(env, "CERTINEXT_CF_API_TOKEN");
+            _cfZoneId       = GetEnv(env, "CERTINEXT_CF_ZONE_ID");
+            _issuedOrderId  = GetEnv(env, "CERTINEXT_V2_ISSUED_ORDER_ID");
 
             _v2Enabled = !string.IsNullOrWhiteSpace(GetEnv(env, "CERTINEXT_USE_V2_API"))
                          && !string.IsNullOrWhiteSpace(_v2ApiUrl)
                          && !string.IsNullOrWhiteSpace(_v2ClientId)
                          && !string.IsNullOrWhiteSpace(_v2ClientSecret);
+
+            _dcvEnabled = _v2Enabled
+                          && !string.IsNullOrWhiteSpace(_cfApiToken)
+                          && !string.IsNullOrWhiteSpace(_cfZoneId);
         }
 
         // ---------------------------------------------------------------------------
@@ -126,38 +142,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             using var client = BuildV2Client();
 
             // Place order
-            var orderReq = new V2CreateSslOrderRequest
-            {
-                ProductVariant    = "dv",
-                EmailNotifications = "all",
-                Requestor = new V2Requestor
-                {
-                    Name        = _fixture.Config?.RequestorName ?? "Keyfactor Test",
-                    Email       = _fixture.Config?.RequestorEmail ?? "test@example.com",
-                    Phone       = "0000000000",
-                    Designation = "IT Administrator"
-                },
-                Certificate = new V2CertificateParams
-                {
-                    Domain        = _v2Domain,
-                    AutoSecureWww = false
-                },
-                Subscription = new V2SubscriptionParams
-                {
-                    ValidityYears   = 1,
-                    AutoRenew       = false,
-                    RenewBeforeDays = 30
-                },
-                Agreement = new V2AgreementParams
-                {
-                    SignerName  = _fixture.Config?.RequestorName ?? "Keyfactor Test",
-                    SignerIp    = "127.0.0.1",
-                    SignerPlace  = "Gateway Lab",
-                    Accepted    = true
-                },
-                Remarks = "Keyfactor V2 integration test — safe to revoke immediately."
-            };
-
+            var orderReq   = BuildStandardOrderRequest();
             var createResp = await client.PlaceOrderV2Async(
                 Constants.ApiV2.FamilySsl, _v2ProductCode, orderReq);
 
@@ -235,8 +220,261 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
+        // V2 Product catalogue
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Calls GET /api/certinext/v2/catalog/products and asserts a non-empty list
+        /// is returned.  Skips when CERTINEXT_USE_V2_API is not set.
+        /// </summary>
+        [SkippableFact]
+        public async Task GetProductDetails_V2_ReturnsProducts()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().NotBeNull("V2 catalog/products must return a non-null list");
+            products.Should().NotBeEmpty("V2 catalog/products must return at least one product");
+        }
+
+        // ---------------------------------------------------------------------------
+        // GetSingleRecord via V2 (ResolveAndTrackOrderV2Async)
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Places a fresh DV SSL order then calls ResolveAndTrackOrderV2Async on the
+        /// returned orderId.  Asserts that the order can be found and has a non-empty
+        /// status.  The order will typically be pending-csr or pending-dcv; that is fine.
+        /// Skips when CERTINEXT_USE_V2_API is not set.
+        /// </summary>
+        [SkippableFact]
+        public async Task GetSingleRecord_V2_ReturnsOrderDetails()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+
+            using var client = BuildV2Client();
+
+            var orderReq = BuildStandardOrderRequest();
+            var createResp = await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, _v2ProductCode, orderReq);
+
+            createResp.Should().NotBeNull();
+            string orderId = createResp.OrderId;
+            orderId.Should().NotBeNullOrEmpty("PlaceOrderV2Async must return a non-empty orderId");
+
+            var status = await client.ResolveAndTrackOrderV2Async(orderId);
+
+            status.Should().NotBeNull("ResolveAndTrackOrderV2Async must return a non-null status");
+            status.OrderId.Should().Be(orderId, "tracked order ID must match the placed order");
+            status.Status.Should().NotBeNullOrEmpty("TrackOrder must return a non-empty status string");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Revoke a known-issued V2 order
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Revokes a previously issued V2 order using CERTINEXT_V2_ISSUED_ORDER_ID.
+        /// Skips when that env var is absent (sandbox orders sit in pending-csr, so
+        /// a real issued order must be pre-created separately).
+        /// </summary>
+        [SkippableFact]
+        public async Task Revoke_V2_IssuedOrder()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            Skip.If(string.IsNullOrWhiteSpace(_issuedOrderId),
+                "CERTINEXT_V2_ISSUED_ORDER_ID not set — skipping revoke test.");
+
+            using var client = BuildV2Client();
+
+            // Resolve family + confirm status is "issued"
+            var (family, trackBefore) = await ResolveOrderFamilyAsync(client, _issuedOrderId);
+            trackBefore.Status.Should().Be(
+                Constants.ApiV2.StatusIssued,
+                $"order {_issuedOrderId} must be in 'issued' state before revocation");
+
+            // Revoke
+            var revokeReq = new V2RevokeRequest
+            {
+                Reason = "superseded",
+                Note   = "V2 integration test cleanup"
+            };
+            await client.RevokeOrderV2Async(family, _issuedOrderId, revokeReq);
+
+            // Re-track — must be revoked
+            var trackAfter = await client.ResolveAndTrackOrderV2Async(_issuedOrderId);
+            trackAfter.Status.Should().Be(
+                Constants.ApiV2.StatusRevoked,
+                $"order {_issuedOrderId} must be 'revoked' after revocation");
+        }
+
+        // ---------------------------------------------------------------------------
+        // DCV flow (publishes real Cloudflare TXT record) — requires SUPPORTS_DCV build
+        // ---------------------------------------------------------------------------
+
+#if SUPPORTS_DCV
+        /// <summary>
+        /// Places a DV SSL order, publishes the DCV TXT token via real Cloudflare DNS,
+        /// calls VerifyDcvV2Async, and polls until the order leaves pending-dcv.
+        /// Requires CERTINEXT_CF_API_TOKEN and CERTINEXT_CF_ZONE_ID in addition to
+        /// CERTINEXT_USE_V2_API.  Skips if either is absent.
+        /// </summary>
+        [SkippableFact]
+        public async Task DcvFlow_V2_PublishesAndVerifies()
+        {
+            Skip.If(!_dcvEnabled,
+                "DCV test requires CERTINEXT_USE_V2_API + CERTINEXT_CF_API_TOKEN + CERTINEXT_CF_ZONE_ID — skipping.");
+
+            using var client  = BuildV2Client();
+            var dns           = new CloudflareDomainValidator(_cfApiToken, _cfZoneId);
+            string txtKey     = null;
+            string orderId    = null;
+
+            try
+            {
+                // 1. Place a DV SSL order — it lands in pending-dcv
+                var orderReq   = BuildStandardOrderRequest();
+                var createResp = await client.PlaceOrderV2Async(
+                    Constants.ApiV2.FamilySsl, _v2ProductCode, orderReq);
+                orderId = createResp.OrderId;
+                orderId.Should().NotBeNullOrEmpty();
+
+                // 2. Get DCV challenge
+                var dcvResp = await client.GetDcvV2Async(orderId);
+                dcvResp.Should().NotBeNull();
+                dcvResp.FileNameContent.Should().NotBeNullOrEmpty(
+                    "GetDcvV2Async must return a TXT token in FileNameContent");
+
+                string domainName = string.IsNullOrWhiteSpace(dcvResp.DomainName)
+                    ? _v2Domain
+                    : dcvResp.DomainName;
+
+                // 3. Publish TXT record
+                txtKey = $"_emudhra-challenge.{domainName}";
+                _output.WriteLine($"Publishing TXT {txtKey} = {dcvResp.FileNameContent}");
+                var staged = await dns.StageValidation(txtKey, dcvResp.FileNameContent, CancellationToken.None);
+                staged.Success.Should().BeTrue($"Cloudflare TXT record creation must succeed: {staged.ErrorMessage}");
+
+                // Brief propagation pause
+                await Task.Delay(TimeSpan.FromSeconds(5));
+
+                // 4. Ask CERTInext to verify
+                var verifyResp = await client.VerifyDcvV2Async(orderId, _v2Domain);
+                verifyResp.Should().NotBeNull();
+                verifyResp.OverallStatus.Should().Be("VERIFIED",
+                    "VerifyDcvV2Async must return OverallStatus=VERIFIED after DNS record is published");
+
+                // 5. Poll until order leaves pending-dcv (up to 60s)
+                V2OrderStatusResponse finalStatus = null;
+                var deadline = DateTime.UtcNow.AddSeconds(60);
+                while (DateTime.UtcNow < deadline)
+                {
+                    finalStatus = await client.ResolveAndTrackOrderV2Async(orderId);
+                    _output.WriteLine($"Poll: orderId={orderId} status={finalStatus.Status}");
+                    if (finalStatus.Status != Constants.ApiV2.StatusPendingDcv)
+                        break;
+                    await Task.Delay(TimeSpan.FromSeconds(5));
+                }
+
+                finalStatus.Should().NotBeNull();
+                finalStatus!.Status.Should().NotBe(
+                    Constants.ApiV2.StatusPendingDcv,
+                    "order must leave pending-dcv after successful DCV verification");
+            }
+            finally
+            {
+                if (txtKey != null)
+                {
+                    _output.WriteLine($"Cleaning up TXT record: {txtKey}");
+                    await dns.CleanupValidation(txtKey, CancellationToken.None);
+                }
+            }
+        }
+#endif
+
+        // ---------------------------------------------------------------------------
+        // Chain PEM assembly
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Downloads the certificate for a known-issued V2 order and logs whether
+        /// ChainPem is populated.  The test passes in either case — it is a
+        /// best-effort diagnostic to confirm chain assembly works in production.
+        /// Requires CERTINEXT_V2_ISSUED_ORDER_ID.  Skips if absent.
+        /// </summary>
+        [SkippableFact]
+        public async Task ChainPem_V2_IsAssembled()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            Skip.If(string.IsNullOrWhiteSpace(_issuedOrderId),
+                "CERTINEXT_V2_ISSUED_ORDER_ID not set — skipping chain assembly test.");
+
+            using var client = BuildV2Client();
+
+            var downloadResp = await client.DownloadCertificateV2Async(
+                Constants.ApiV2.FamilySsl, _issuedOrderId);
+
+            downloadResp.Should().NotBeNull("DownloadCertificateV2Async must return a non-null response");
+            downloadResp.CertificatePem.Should().NotBeNull(
+                "CertificatePem must be present for an issued order");
+            downloadResp.CertificatePem.Should().StartWith(
+                "-----BEGIN CERTIFICATE-----",
+                "leaf certificate must be PEM-encoded");
+
+            bool chainPresent = downloadResp.ChainPem != null && downloadResp.ChainPem.Count > 0;
+            _output.WriteLine(chainPresent
+                ? $"ChainPem: {downloadResp.ChainPem!.Count} intermediate(s) returned."
+                : "ChainPem: null or empty — sandbox may not return chain.");
+
+            if (chainPresent)
+            {
+                foreach (string chainCert in downloadResp.ChainPem!)
+                {
+                    chainCert.Should().StartWith(
+                        "-----BEGIN CERTIFICATE-----",
+                        "each chain entry must be a PEM-encoded certificate");
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------------
         // Private helpers
         // ---------------------------------------------------------------------------
+
+        private V2CreateSslOrderRequest BuildStandardOrderRequest() =>
+            new V2CreateSslOrderRequest
+            {
+                ProductVariant     = "dv",
+                EmailNotifications = "all",
+                Requestor = new V2Requestor
+                {
+                    Name        = _fixture.Config?.RequestorName ?? "Keyfactor Test",
+                    Email       = _fixture.Config?.RequestorEmail ?? "test@example.com",
+                    Phone       = "0000000000",
+                    Designation = "IT Administrator"
+                },
+                Certificate = new V2CertificateParams
+                {
+                    Domain        = _v2Domain,
+                    AutoSecureWww = false
+                },
+                Subscription = new V2SubscriptionParams
+                {
+                    ValidityYears   = 1,
+                    AutoRenew       = false,
+                    RenewBeforeDays = 30
+                },
+                Agreement = new V2AgreementParams
+                {
+                    SignerName  = _fixture.Config?.RequestorName ?? "Keyfactor Test",
+                    SignerIp    = "127.0.0.1",
+                    SignerPlace = "Gateway Lab",
+                    Accepted    = true
+                },
+                Remarks = "Keyfactor V2 integration test — safe to revoke immediately."
+            };
 
         private CERTInextClient BuildV2Client()
         {
