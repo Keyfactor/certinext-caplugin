@@ -1198,6 +1198,42 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (string.IsNullOrWhiteSpace(domain))
                 throw new Exception("Cannot determine primary domain for V2 order — set the DomainName enrollment parameter or ensure the CSR subject has a CN.");
 
+            // V2 API only supports single-domain certificates. autoSecureWww covers the
+            // www.<domain> variant; any other DNS SAN in the CSR would be silently dropped
+            // or cause a CA-side rejection. Fail fast with a clear message rather than
+            // letting the CA return an opaque error. See issues/f3-v2-multi-san-limitation.md.
+            {
+                var sanEntries = ExtractSanEntriesFromCsr(csr, out _);
+                var extraSans = sanEntries
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .Select(s => s.Value?.ToLowerInvariant())
+                    .Where(v => !string.IsNullOrWhiteSpace(v))
+                    .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
+                    .Where(v => !string.Equals(v, "www." + domain, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                if (extraSans.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async rejected multi-SAN CSR for order on domain '{Domain}'. " +
+                        "V2 only supports single-domain certificates (autoSecureWww covers www.). " +
+                        "ExtraSans=[{ExtraSans}]",
+                        LogSanitizer.Strip(domain),
+                        LogSanitizer.Strip(string.Join(", ", extraSans)));
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: the CSR contains {extraSans.Count} SAN(s) beyond " +
+                                        $"the primary domain ('{domain}') and its www. variant. " +
+                                        "The V2 API only supports single-domain certificates. " +
+                                        "Resubmit with a single-domain CSR."
+                    };
+                }
+            }
+
             string requestorName  = string.IsNullOrWhiteSpace(ep.RequesterName)  ? _config.RequestorName  : ep.RequesterName;
             string requestorEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? _config.RequestorEmail : ep.RequesterEmail;
             string signerName     = string.IsNullOrWhiteSpace(ep.SignerName)     ? requestorName          : ep.SignerName;
