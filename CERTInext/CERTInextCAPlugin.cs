@@ -1251,8 +1251,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation("V2 CSR submitted. OrderId={OrderId}", orderId);
 
             // Re-read status after CSR submission — the order advances past pending-csr.
-            var postCsrStatus = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
-            int disposition = StatusMapper.V2StatusToRequestDisposition(postCsrStatus.Status);
+            // Guard: if TrackOrderV2Async fails transiently here the order is already
+            // placed and the CSR submitted; return pending with the known orderId so Command
+            // has a CARequestID and the next sync can resolve the status.
+            V2OrderStatusResponse postCsrStatus;
+            int disposition;
+            try
+            {
+                postCsrStatus = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+                disposition = StatusMapper.V2StatusToRequestDisposition(postCsrStatus.Status);
+            }
+            catch (Exception trackEx)
+            {
+                _logger.LogWarning(trackEx,
+                    "V2 TrackOrderV2Async failed after CSR submission for order {OrderId}; " +
+                    "returning pending so sync can pick it up.", orderId);
+                _logger.MethodExit(LogLevel.Debug);
+                return new EnrollmentResult
+                {
+                    CARequestID   = orderId,
+                    Certificate   = null,
+                    Status        = (int)EndEntityStatus.EXTERNALVALIDATION,
+                    StatusMessage = "V2 order placed and CSR submitted; status check failed transiently — sync will resolve."
+                };
+            }
 
 #if SUPPORTS_DCV
             // Attempt DCV inline when the order lands in pending-dcv and DCV is configured
