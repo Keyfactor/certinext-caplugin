@@ -646,7 +646,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
                 enrollmentType, requestFormat, LogSanitizer.Strip(subject),
                 ep.ProfileId, LogSanitizer.Strip(sanSummary),
-                ep.RequesterName, ep.RequesterEmail);
+                LogSanitizer.Strip(ep.RequesterName), LogSanitizer.Strip(ep.RequesterEmail));
 
             if (string.IsNullOrWhiteSpace(ep.ProfileId))
             {
@@ -1245,7 +1245,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "V2 order placed. OrderId={OrderId}, Status={Status}, EnrollmentType={EnrollmentType}",
                 orderId, createResp.Status, enrollmentType);
 
-            int disposition = StatusMapper.V2StatusToRequestDisposition(createResp.Status);
+            // The V2 API creates the order in 'pending-csr' and requires a separate PUT to submit
+            // the CSR before the order can progress to validation or issuance.
+            await _client.SubmitCsrV2Async(ep.ProductFamilySlug, orderId, csr);
+            _logger.LogInformation("V2 CSR submitted. OrderId={OrderId}", orderId);
+
+            // Re-read status after CSR submission — the order advances past pending-csr.
+            var postCsrStatus = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+            int disposition = StatusMapper.V2StatusToRequestDisposition(postCsrStatus.Status);
 
 #if SUPPORTS_DCV
             // Attempt DCV inline when the order lands in pending-dcv and DCV is configured

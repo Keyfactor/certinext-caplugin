@@ -126,6 +126,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Status    = "pending-dcv"
                 });
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), MockCertificateData.V2OrderId1,
+                    It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(
+                    It.IsAny<string>(), MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = MockCertificateData.V2OrderId1, Status = "pending-dcv" });
+
             var plugin = BuildV2Plugin(mock.Object);
             var result = await plugin.Enroll(
                 MockCertificateData.FakeCsrPem,
@@ -151,6 +159,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     OrderId = MockCertificateData.V2OrderId1,
                     Status  = "issued"
                 });
+
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), MockCertificateData.V2OrderId1,
+                    It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(
+                    It.IsAny<string>(), MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = MockCertificateData.V2OrderId1, Status = "issued" });
 
             mock.Setup(c => c.DownloadCertificateV2Async(
                     It.IsAny<string>(), MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
@@ -187,6 +203,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     OrderId = MockCertificateData.V2OrderId2,
                     Status  = "pending-csr"
                 });
+
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), MockCertificateData.V2OrderId2,
+                    It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(
+                    It.IsAny<string>(), MockCertificateData.V2OrderId2, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = MockCertificateData.V2OrderId2, Status = "pending-validation" });
 
             var plugin = BuildV2Plugin(mock.Object);
             var result = await plugin.Enroll(
@@ -348,6 +372,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Status  = "issued"
                 });
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_chain_test",
+                    It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(
+                    It.IsAny<string>(), "ord_chain_test", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_chain_test", Status = "issued" });
+
             // Download response includes a chain PEM entry
             mock.Setup(c => c.DownloadCertificateV2Async(
                     It.IsAny<string>(), "ord_chain_test", It.IsAny<CancellationToken>()))
@@ -392,6 +424,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_nochain", Status = "issued" });
+
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_nochain",
+                    It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(
+                    It.IsAny<string>(), "ord_nochain", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_nochain", Status = "issued" });
 
             mock.Setup(c => c.DownloadCertificateV2Async(
                     It.IsAny<string>(), "ord_nochain", It.IsAny<CancellationToken>()))
