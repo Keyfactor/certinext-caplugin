@@ -536,6 +536,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public static string V2ProblemDetailsJson(int status = 403, string title = "Forbidden", string detail = "OAuth2 not enabled", string type = "EMS-2022") =>
             $@"{{""type"":""{type}"",""title"":""{title}"",""status"":{status},""detail"":""{detail}"",""instance"":null}}";
 
+        /// <summary>V2 DCV challenge response (DNS-TXT method).</summary>
+        public static string V2DcvChallengeJson(string orderId = "ord_abc001", string domain = "example.com", string token = "emudhra-dcv-abc123") =>
+            $@"{{""orderNumber"":""{orderId}"",""domainName"":""{domain}"",""dcvMethod"":""2"",""fileNameContent"":""{token}"",""tokenExpiryDate"":""2026-12-31 23:59:59""}}";
+
+        /// <summary>V2 DCV verify response (success).</summary>
+        public static string V2DcvVerifySuccessJson(string domain = "example.com") =>
+            $@"{{""overallStatus"":""VERIFIED"",""method"":""dns-txt"",""verifiedAt"":""2026-09-21T10:00:00Z""}}";
+
+        /// <summary>V2 DCV verify response (failure).</summary>
+        public static string V2DcvVerifyFailedJson() =>
+            $@"{{""overallStatus"":""FAILED"",""method"":""dns-txt"",""verifiedAt"":null}}";
+
+        /// <summary>V2 certificate download response with chain PEM.</summary>
+        public static string V2CertificateDownloadWithChainJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""serialNumber"":""0A1B2C3D4E5F"",""subject"":""CN=example.com"",""issuer"":""CN=CERTInext TLS Intermediate"",""notBefore"":""2026-01-01T00:00:00Z"",""notAfter"":""2027-01-01T00:00:00Z"",""certificatePem"":""{EscapeForJson(FakePemCertificate)}"",""chainPem"":[""{EscapeForJson(FakeIntermediatePemCertificate)}""]}}";
+
+        public static readonly string FakeIntermediatePemCertificate =
+            "-----BEGIN CERTIFICATE-----\nMIIBfakeBASE64INTERMEDIATE==\n-----END CERTIFICATE-----";
+
         // -----------------------------------------------------------------------
         // Helpers
         // -----------------------------------------------------------------------

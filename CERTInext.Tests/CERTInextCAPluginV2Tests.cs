@@ -330,6 +330,93 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Chain PEM assembly — Enroll V2 with chainPem
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Enroll_V2_WithChainPem_ConcatenatesLeafAndIntermediate()
+        {
+            var mock = NewMock();
+
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CreateOrderResponse
+                {
+                    OrderId = "ord_chain_test",
+                    Status  = "issued"
+                });
+
+            // Download response includes a chain PEM entry
+            mock.Setup(c => c.DownloadCertificateV2Async(
+                    It.IsAny<string>(), "ord_chain_test", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_chain_test",
+                    SerialNumber   = "AABBCC",
+                    CertificatePem = MockCertificateData.FakePemCertificate,
+                    ChainPem       = new System.Collections.Generic.List<string>
+                    {
+                        MockCertificateData.FakeIntermediatePemCertificate
+                    }
+                });
+
+            mock.Setup(c => c.Dispose());
+
+            mock.Setup(c => c.Dispose());
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem,
+                "CN=example.com",
+                new Dictionary<string, string[]>(),
+                MakeV2ProductInfo(productVariant: "dv"),
+                RequestFormat.PKCS10,
+                EnrollmentType.New);
+
+            result.CARequestID.Should().Be("ord_chain_test");
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            // Full chain must contain both leaf and intermediate
+            result.Certificate.Should().Contain("-----BEGIN CERTIFICATE-----");
+            result.Certificate.Should().Contain("INTERMEDIATE",
+                because: "chain PEM from the CA should be appended to the leaf");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_WithoutChainPem_ReturnsCertificatePemOnly()
+        {
+            var mock = NewMock();
+
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_nochain", Status = "issued" });
+
+            mock.Setup(c => c.DownloadCertificateV2Async(
+                    It.IsAny<string>(), "ord_nochain", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_nochain",
+                    CertificatePem = MockCertificateData.FakePemCertificate,
+                    ChainPem       = null
+                });
+
+            mock.Setup(c => c.Dispose());
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem,
+                "CN=example.com",
+                new Dictionary<string, string[]>(),
+                MakeV2ProductInfo(productVariant: "dv"),
+                RequestFormat.PKCS10,
+                EnrollmentType.New);
+
+            result.Certificate.Should().Be(MockCertificateData.FakePemCertificate,
+                because: "no chainPem means only the leaf cert is returned");
+        }
+
+        // ---------------------------------------------------------------------------
         // Helpers
         // ---------------------------------------------------------------------------
 

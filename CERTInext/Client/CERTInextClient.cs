@@ -1442,6 +1442,57 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return cert;
         }
 
+        /// <inheritdoc/>
+        public async Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = $"/api/certinext/v2/ssl-certificates/{orderId}/dcv";
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 get DCV challenge");
+            var result = DeserializeV2OrThrow<V2DcvChallengeResponse>(resp, "V2 get DCV challenge");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2DcvVerifyResponse> VerifyDcvV2Async(string orderId, string domain, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = $"/api/certinext/v2/ssl-certificates/{orderId}/dcv/verify";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct);
+            var body = new V2DcvVerifyRequest { Domain = domain, Method = "dns-txt" };
+            req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+
+            if (resp.StatusCode == (HttpStatusCode)422)
+            {
+                string detail = ExtractV2ErrorMessage(resp.Content, "V2 verify DCV");
+                throw new InvalidOperationException(
+                    $"V2 DCV verification failed for order '{orderId}', domain '{domain}'. {detail}");
+            }
+
+            // 204 No Content is a valid success — return an empty verified response
+            if (resp.StatusCode == System.Net.HttpStatusCode.NoContent || string.IsNullOrWhiteSpace(resp.Content))
+            {
+                Logger.MethodExit(LogLevel.Trace);
+                return new V2DcvVerifyResponse { OverallStatus = "VERIFIED" };
+            }
+
+            ThrowOnV2Failure(resp, "V2 verify DCV");
+            var result = DeserializeV2OrThrow<V2DcvVerifyResponse>(resp, "V2 verify DCV");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
         // ---------------------------------------------------------------------------
         // V2 private helpers
         // ---------------------------------------------------------------------------

@@ -133,11 +133,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         [JsonPropertyName("revocationDate")]
         public DateTime? RevocationDate { get; set; }
+
+        /// <summary>ISO 8601 timestamp when the certificate was issued. Present when status = "issued".</summary>
+        [JsonPropertyName("issuedAt")]
+        public string IssuedAt { get; set; }
+
+        /// <summary>ISO 8601 timestamp when the certificate expires. Present when status = "issued".</summary>
+        [JsonPropertyName("expiresAt")]
+        public string ExpiresAt { get; set; }
     }
 
     /// <summary>
     /// Response body for GET /api/certinext/v2/{family}-certificates/{orderId}/certificate.
-    /// Returns the leaf certificate only — no chain or root field exists in the V2 response.
+    /// Returns the leaf certificate and, when present, intermediate chain PEM strings.
     /// </summary>
     public class V2CertificateDownloadResponse
     {
@@ -159,9 +167,72 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("notAfter")]
         public DateTime? NotAfter { get; set; }
 
-        /// <summary>PEM-encoded leaf certificate (no chain).</summary>
+        /// <summary>PEM-encoded leaf certificate.</summary>
         [JsonPropertyName("certificatePem")]
         public string CertificatePem { get; set; }
+
+        /// <summary>
+        /// Array of intermediate PEM strings returned alongside the leaf cert.
+        /// May be null or empty when the CA does not include chain in the response.
+        /// </summary>
+        [JsonPropertyName("chainPem")]
+        public List<string> ChainPem { get; set; }
+    }
+
+    /// <summary>
+    /// Response body for GET /api/certinext/v2/ssl-certificates/{orderId}/dcv.
+    /// Returns the DCV challenge details needed to publish a DNS TXT record.
+    /// dcvMethod: "2" = DNS-TXT, "1" = HTTP file.
+    /// </summary>
+    public class V2DcvChallengeResponse
+    {
+        [JsonPropertyName("orderNumber")]
+        public string OrderNumber { get; set; }
+
+        [JsonPropertyName("domainName")]
+        public string DomainName { get; set; }
+
+        /// <summary>"2" = DNS-TXT, "1" = HTTP file.</summary>
+        [JsonPropertyName("dcvMethod")]
+        public string DcvMethod { get; set; }
+
+        /// <summary>Value to publish as the DNS TXT record (the token).</summary>
+        [JsonPropertyName("fileNameContent")]
+        public string FileNameContent { get; set; }
+
+        [JsonPropertyName("tokenExpiryDate")]
+        public string TokenExpiryDate { get; set; }
+    }
+
+    /// <summary>
+    /// Request body for POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify.
+    /// </summary>
+    public class V2DcvVerifyRequest
+    {
+        [JsonPropertyName("domain")]
+        public string Domain { get; set; }
+
+        /// <summary>"dns-txt" for DNS TXT record validation.</summary>
+        [JsonPropertyName("method")]
+        public string Method { get; set; }
+    }
+
+    /// <summary>
+    /// Response body for POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify.
+    /// 200 OK with this body, or 204 No Content, both indicate success.
+    /// 422 with overallStatus="FAILED" indicates verification failure.
+    /// </summary>
+    public class V2DcvVerifyResponse
+    {
+        /// <summary>"VERIFIED" on success, "FAILED" on failure.</summary>
+        [JsonPropertyName("overallStatus")]
+        public string OverallStatus { get; set; }
+
+        [JsonPropertyName("method")]
+        public string Method { get; set; }
+
+        [JsonPropertyName("verifiedAt")]
+        public string VerifiedAt { get; set; }
     }
 
     /// <summary>

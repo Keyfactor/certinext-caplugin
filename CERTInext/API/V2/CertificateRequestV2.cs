@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Text.Json.Serialization;
+using System.Text.Json;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 {
@@ -77,10 +78,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("signerName")]
         public string SignerName { get; set; }
 
+        /// <summary>Optional in V2. Omitted from serialisation when null or empty.</summary>
         [JsonPropertyName("signerIp")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string SignerIp { get; set; }
 
+        /// <summary>Optional in V2. Omitted from serialisation when null or empty.</summary>
         [JsonPropertyName("signerPlace")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string SignerPlace { get; set; }
 
         [JsonPropertyName("accepted")]

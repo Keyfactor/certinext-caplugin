@@ -1227,8 +1227,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Agreement = new V2AgreementParams
                 {
                     SignerName  = signerName,
-                    SignerIp    = signerIp,
-                    SignerPlace = signerPlace,
+                    SignerIp    = string.IsNullOrWhiteSpace(signerIp)    ? null : signerIp,
+                    SignerPlace = string.IsNullOrWhiteSpace(signerPlace)  ? null : signerPlace,
                     Accepted    = true
                 },
                 Remarks = "Issued via Keyfactor Command AnyCA REST Gateway."
@@ -1243,20 +1243,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             int disposition = StatusMapper.V2StatusToRequestDisposition(createResp.Status);
 
+#if SUPPORTS_DCV
+            // Attempt DCV inline when the order lands in pending-dcv and DCV is configured
+            if (disposition == (int)EndEntityStatus.EXTERNALVALIDATION)
+            {
+                int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+                using var dcvCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+                dcvCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
+                try
+                {
+                    bool dcvDone = await PerformDcvV2IfNeededAsync(orderId, domain, ep.ProductFamilySlug, dcvCts.Token);
+                    if (dcvDone)
+                    {
+                        // Re-check status after DCV completes
+                        var tracked = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+                        disposition = StatusMapper.V2StatusToRequestDisposition(tracked.Status);
+                        _logger.LogInformation(
+                            "V2 DCV completed inline for order {OrderId}. Post-DCV status={Status}",
+                            orderId, tracked.Status);
+                    }
+                }
+                catch (Exception dcvEx)
+                {
+                    _logger.LogWarning(dcvEx,
+                        "V2 inline DCV attempt failed for order {OrderId}; order will remain pending for sync.",
+                        orderId);
+                }
+            }
+#endif
+
             // If the order issued immediately, download the certificate
             if (disposition == (int)EndEntityStatus.GENERATED)
             {
                 try
                 {
                     var certResp = await _client.DownloadCertificateV2Async(ep.ProductFamilySlug, orderId);
+                    string fullChain = AssembleV2CertChain(certResp);
                     _logger.LogInformation(
-                        "V2 certificate downloaded immediately. OrderId={OrderId}, SerialNumber={Serial}",
-                        orderId, certResp.SerialNumber);
+                        "V2 certificate downloaded immediately. OrderId={OrderId}, SerialNumber={Serial}, ChainPemCount={ChainCount}",
+                        orderId, certResp.SerialNumber, certResp.ChainPem?.Count ?? 0);
                     _logger.MethodExit(LogLevel.Debug);
                     return new EnrollmentResult
                     {
                         CARequestID   = orderId,
-                        Certificate   = certResp.CertificatePem,
+                        Certificate   = fullChain,
                         Status        = (int)EndEntityStatus.GENERATED,
                         StatusMessage = "Certificate issued via V2 API."
                     };
@@ -1294,13 +1324,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var statusResp = await _client.ResolveAndTrackOrderV2Async(caRequestID);
                 int disposition = StatusMapper.V2StatusToRequestDisposition(statusResp.Status);
 
+#if SUPPORTS_DCV
+                // Mirror V1 GetSingleRecord: attempt DCV on pending-dcv orders so a manual
+                // single-record refresh can unstick an order whose DCV wasn't completed at enroll time.
+                if (disposition == (int)EndEntityStatus.EXTERNALVALIDATION
+                    && !string.IsNullOrWhiteSpace(statusResp.Domain))
+                {
+                    int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+                    using var dcvCts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+                    try
+                    {
+                        bool dcvDone = await PerformDcvV2IfNeededAsync(
+                            caRequestID, statusResp.Domain, Constants.ApiV2.FamilySsl, dcvCts.Token);
+                        if (dcvDone)
+                        {
+                            statusResp = await _client.ResolveAndTrackOrderV2Async(caRequestID);
+                            disposition = StatusMapper.V2StatusToRequestDisposition(statusResp.Status);
+                        }
+                    }
+                    catch (Exception dcvEx)
+                    {
+                        _logger.LogWarning(dcvEx,
+                            "V2 GetSingleRecord: DCV attempt failed for order {Id}.", caRequestID);
+                    }
+                }
+#endif
+
                 string certPem = null;
                 if (disposition == (int)EndEntityStatus.GENERATED)
                 {
+                    if (!string.IsNullOrWhiteSpace(statusResp.ExpiresAt))
+                        _logger.LogDebug(
+                            "V2 order expiry from status response. CARequestID={Id}, ExpiresAt={ExpiresAt}",
+                            caRequestID, statusResp.ExpiresAt);
+
                     try
                     {
                         var certResp = await _client.ResolveAndDownloadCertificateV2Async(caRequestID);
-                        certPem = certResp.CertificatePem;
+                        certPem = AssembleV2CertChain(certResp);
                     }
                     catch (Exception dlEx)
                     {
@@ -1333,6 +1394,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogError(ex, "V2: Error retrieving certificate. CARequestID={Id}", caRequestID);
                 throw;
             }
+        }
+
+        /// <summary>
+        /// Assembles a full PEM chain from a V2 certificate download response.
+        /// Concatenates the leaf <c>certificatePem</c> and any intermediate PEM strings
+        /// in <c>chainPem</c> (when present) in leaf-first order, matching the V1 chain format.
+        /// </summary>
+        private static string AssembleV2CertChain(V2CertificateDownloadResponse certResp)
+        {
+            if (certResp?.ChainPem == null || certResp.ChainPem.Count == 0)
+                return certResp?.CertificatePem;
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append(certResp.CertificatePem?.TrimEnd());
+            foreach (var intermediate in certResp.ChainPem)
+            {
+                if (string.IsNullOrWhiteSpace(intermediate)) continue;
+                sb.AppendLine();
+                sb.Append(intermediate.TrimEnd());
+            }
+            return sb.ToString();
         }
 
         /// <summary>
@@ -2322,6 +2404,171 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // domains, unbounded relative to DcvTimeoutMinutes, on this ordinary success path too.
                 await Task.WhenAll(stagedValidations.Select(entry =>
                     CleanupOneStagedValidationAsync(entry, "")));
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Performs DNS-01 DCV for a V2 SSL order using the V2 DCV endpoints.
+        /// Mirrors <see cref="PerformDcvIfNeededAsync"/> for the V2 API path.
+        ///
+        /// Flow:
+        ///   1. GET /ssl-certificates/{orderId}/dcv → retrieve token (<c>fileNameContent</c>)
+        ///   2. Publish TXT record at <c>_emudhra-challenge.{domain}</c> via <see cref="IDomainValidator"/>
+        ///   3. POST /ssl-certificates/{orderId}/dcv/verify → trigger CA-side verification
+        ///   4. Poll <see cref="ICERTInextClient.TrackOrderV2Async"/> until status != "pending-dcv"
+        ///   5. Clean up TXT record
+        ///
+        /// Returns <c>true</c> when DCV steps were executed, <c>false</c> when skipped.
+        /// </summary>
+        private async Task<bool> PerformDcvV2IfNeededAsync(
+            string orderId,
+            string domain,
+            string productFamilySlug,
+            CancellationToken ct)
+        {
+            if (_domainValidatorFactory == null || !_config.DcvEnabled)
+            {
+                _logger.LogDebug(
+                    "V2 DCV skipped: DCV factory not configured or DcvEnabled=false. OrderId={OrderId}", orderId);
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(domain))
+            {
+                _logger.LogWarning(
+                    "V2 DCV skipped: no domain name available for order {OrderId}.", orderId);
+                return false;
+            }
+
+            _logger.LogInformation(
+                "V2 DCV starting for order {OrderId}, domain {Domain}.", orderId, LogSanitizer.Strip(domain));
+
+            // 1. Fetch challenge
+            V2DcvChallengeResponse challenge;
+            try
+            {
+                challenge = await _client.GetDcvV2Async(orderId, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 GetDcv failed for order {OrderId}; deferring DCV to next sync cycle.", orderId);
+                return false;
+            }
+
+            string token = challenge?.FileNameContent;
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                _logger.LogWarning(
+                    "V2 GetDcv returned no token for order {OrderId}; deferring DCV.", orderId);
+                return false;
+            }
+
+            // V2 TXT record name uses the _emudhra-challenge prefix
+            string hostname = $"_emudhra-challenge.{domain}";
+
+            var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
+            if (validator == null)
+            {
+                _logger.LogError(
+                    "No DNS provider plugin resolved for domain '{Domain}' on V2 order {OrderId}. " +
+                    "Ensure the appropriate DNS provider plugin is deployed and configured.",
+                    LogSanitizer.Strip(domain), orderId);
+                return false;
+            }
+
+            // 2. Publish TXT record
+            _logger.LogInformation(
+                "Staging V2 DNS TXT record. OrderId={OrderId}, Hostname={Hostname}", orderId, LogSanitizer.Strip(hostname));
+
+            DomainValidationResult stageResult;
+            try
+            {
+                stageResult = await validator.StageValidation(hostname, token, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "V2 DCV: DNS provider threw while staging '{Domain}' for order {OrderId}.",
+                    LogSanitizer.Strip(domain), orderId);
+                return false;
+            }
+
+            if (!stageResult.Success)
+            {
+                _logger.LogError(
+                    "V2 DCV: Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}.",
+                    LogSanitizer.Strip(domain), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
+                return false;
+            }
+
+            try
+            {
+                // Wait for DNS propagation
+                int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
+                _logger.LogInformation(
+                    "Waiting {Delay}s for DNS propagation before V2 DCV verify. OrderId={OrderId}", delaySeconds, orderId);
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+
+                // 3. Trigger CA-side verification
+                _logger.LogInformation(
+                    "Triggering V2 DCV verification. OrderId={OrderId}, Domain={Domain}", orderId, LogSanitizer.Strip(domain));
+                var verifyResp = await _client.VerifyDcvV2Async(orderId, domain, ct);
+                _logger.LogInformation(
+                    "V2 DCV verify response. OrderId={OrderId}, OverallStatus={Status}",
+                    orderId, verifyResp?.OverallStatus ?? "(null)");
+
+                if (!string.Equals(verifyResp?.OverallStatus, "VERIFIED", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning(
+                        "V2 DCV verify did not return VERIFIED for order {OrderId}. Status={Status}",
+                        orderId, verifyResp?.OverallStatus);
+                    return false;
+                }
+
+                // 4. Poll TrackOrderV2 until status leaves pending-dcv
+                int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+                var deadline = DateTime.UtcNow.AddMinutes(timeoutMinutes);
+                int pollSeconds = Math.Max(3, _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 5);
+
+                while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
+                    try
+                    {
+                        var trackResp = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
+                        _logger.LogDebug(
+                            "V2 DCV poll. OrderId={OrderId}, Status={Status}", orderId, trackResp.Status);
+                        if (!string.Equals(trackResp.Status, "pending-dcv", StringComparison.OrdinalIgnoreCase))
+                            break;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "V2 DCV: TrackOrderV2 poll failed for order {OrderId}.", orderId);
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                // 5. Always clean up TXT record
+                try
+                {
+                    using var cleanupCts = new CancellationTokenSource(
+                        TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
+                    await validator.CleanupValidation(hostname, cleanupCts.Token);
+                    _logger.LogInformation(
+                        "V2 DCV: DNS TXT record cleaned up. OrderId={OrderId}, Hostname={Hostname}",
+                        orderId, LogSanitizer.Strip(hostname));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "V2 DCV: Failed to clean up DNS TXT record. OrderId={OrderId}, Hostname={Hostname}. " +
+                        "May require manual removal.", orderId, LogSanitizer.Strip(hostname));
+                }
             }
 
             return true;

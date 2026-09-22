@@ -253,5 +253,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         Task<V2CertificateDownloadResponse> ResolveAndDownloadCertificateV2Async(
             string orderId,
             CancellationToken ct = default);
+
+        /// <summary>
+        /// Returns the DCV challenge details for a V2 SSL order.
+        /// GET /api/certinext/v2/ssl-certificates/{orderId}/dcv
+        /// </summary>
+        Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, CancellationToken ct = default);
+
+        /// <summary>
+        /// Asks CERTInext to verify the DNS TXT record for the given domain on a V2 order.
+        /// POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify
+        /// Both 200 OK and 204 No Content are treated as success.
+        /// Throws <see cref="InvalidOperationException"/> on 422 (verification failed).
+        /// </summary>
+        Task<V2DcvVerifyResponse> VerifyDcvV2Async(string orderId, string domain, CancellationToken ct = default);
     }
 }

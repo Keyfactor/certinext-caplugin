@@ -385,6 +385,176 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // GetDcvV2Async
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetDcvV2Async_ReturnsChallengeWithToken()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2DcvChallengeJson(MockCertificateData.V2OrderId1, "example.com", "my-dcv-token")));
+
+            using var client = BuildV2Client();
+            var result = await client.GetDcvV2Async(MockCertificateData.V2OrderId1);
+
+            result.OrderNumber.Should().Be(MockCertificateData.V2OrderId1);
+            result.DomainName.Should().Be("example.com");
+            result.DcvMethod.Should().Be("2");
+            result.FileNameContent.Should().Be("my-dcv-token");
+        }
+
+        [Fact]
+        public async Task GetDcvV2Async_NonSuccess_Throws()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(400)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(400, "Bad Request", "Order not found")));
+
+            using var client = BuildV2Client();
+            await Assert.ThrowsAsync<Exception>(
+                () => client.GetDcvV2Async(MockCertificateData.V2OrderId1));
+        }
+
+        // ---------------------------------------------------------------------------
+        // VerifyDcvV2Async
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task VerifyDcvV2Async_200Ok_ReturnsVerified()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv/verify")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2DcvVerifySuccessJson()));
+
+            using var client = BuildV2Client();
+            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com");
+
+            result.OverallStatus.Should().Be("VERIFIED");
+        }
+
+        [Fact]
+        public async Task VerifyDcvV2Async_204NoContent_ReturnsVerified()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv/verify")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(204));
+
+            using var client = BuildV2Client();
+            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com");
+
+            result.OverallStatus.Should().Be("VERIFIED");
+        }
+
+        [Fact]
+        public async Task VerifyDcvV2Async_422_ThrowsInvalidOperationException()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv/verify")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(422)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(422, "Unprocessable Entity", "DNS record not found")));
+
+            using var client = BuildV2Client();
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com"));
+
+            ex.Message.Should().Contain("DCV verification failed");
+        }
+
+        [Fact]
+        public async Task VerifyDcvV2Async_SendsDnsTxtMethod()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv/verify")
+                    .UsingPost()
+                    .WithBody(b => b != null && b.Contains("\"dns-txt\"")))
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2DcvVerifySuccessJson()));
+
+            using var client = BuildV2Client();
+            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com");
+
+            result.OverallStatus.Should().Be("VERIFIED");
+        }
+
+        // ---------------------------------------------------------------------------
+        // DownloadCertificateV2Async — chain PEM assembly
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task DownloadCertificateV2Async_WithChainPem_DeserializesChain()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/certificate")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CertificateDownloadWithChainJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.DownloadCertificateV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            result.CertificatePem.Should().StartWith("-----BEGIN CERTIFICATE-----");
+            result.ChainPem.Should().NotBeNullOrEmpty("API returned a chainPem array");
+            result.ChainPem.Should().HaveCount(1);
+            result.ChainPem[0].Should().Contain("INTERMEDIATE");
+        }
+
+        [Fact]
+        public async Task DownloadCertificateV2Async_WithoutChainPem_ChainIsNull()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/certificate")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CertificateDownloadJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.DownloadCertificateV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            result.CertificatePem.Should().StartWith("-----BEGIN CERTIFICATE-----");
+            result.ChainPem.Should().BeNullOrEmpty("API did not return chainPem");
+        }
+
+        // ---------------------------------------------------------------------------
         // Token refresh when expired
         // ---------------------------------------------------------------------------
 
