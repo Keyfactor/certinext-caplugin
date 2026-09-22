@@ -606,6 +606,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.ApiKey = string.Empty;
                     tempConfig.OAuthClientSecret = string.Empty;
                     tempConfig.Password = string.Empty;
+                    tempConfig.ClientSecret = string.Empty;
                 }
                 tempClient?.Dispose();
             }

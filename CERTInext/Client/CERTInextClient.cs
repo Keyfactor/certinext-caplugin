@@ -1409,6 +1409,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
             var resp = await _httpV2.ExecuteAsync(req, ct);
+            if (resp.StatusCode == HttpStatusCode.NotFound)
+            {
+                Logger.MethodExit(LogLevel.Trace);
+                throw new KeyNotFoundException($"V2 order '{orderId}' not found in family '{productFamilySlug}'.");
+            }
             if (resp.StatusCode == (HttpStatusCode)422)
             {
                 // EMS-931: order not in an issued state; surface a clear message.
