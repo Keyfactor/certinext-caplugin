@@ -851,12 +851,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         ? (_config.DefaultProductCode ?? string.Empty)
                         : request.ProfileId,
                     SaveAndHold = "0",
+                    // Mirrors BuildOrderRequestFromLegacyEnrollRequest — omit when blank so the
+                    // order falls back to the unvetted/ungroup path, same as new enrollments.
+                    DelegationInformation = !string.IsNullOrWhiteSpace(_config.GroupNumber)
+                        ? new DelegationInformation { GroupNumber = _config.GroupNumber }
+                        : null,
                     RequestorInformation = new RequestorInformation
                     {
                         RequestorName = request.RequesterName ?? _config.RequestorName,
                         RequestorEmail = request.RequesterEmail ?? _config.RequestorEmail,
                         RequestorIsdCode = _config.RequestorIsdCode ?? "1",
                         RequestorMobileNumber = _config.RequestorMobileNumber ?? string.Empty
+                    },
+                    TechnicalPointOfContact = new TechnicalPointOfContact
+                    {
+                        TpcName = string.IsNullOrWhiteSpace(_config.TechnicalContactName)
+                            ? (request.RequesterName ?? _config.RequestorName)
+                            : _config.TechnicalContactName,
+                        TpcEmail = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail)
+                            ? (request.RequesterEmail ?? _config.RequestorEmail)
+                            : _config.TechnicalContactEmail,
+                        TpcIsdCode = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode)
+                            ? (string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode)
+                            : _config.TechnicalContactIsdCode,
+                        TpcMobileNumber = string.IsNullOrWhiteSpace(_config.TechnicalContactMobileNumber)
+                            ? (_config.RequestorMobileNumber ?? string.Empty)
+                            : _config.TechnicalContactMobileNumber
                     },
                     SubscriptionDetails = new SubscriptionDetails { Validity = "1" },
                     CertificateInformation = new CertificateInformation
