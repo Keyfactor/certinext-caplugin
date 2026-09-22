@@ -2466,6 +2466,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation(
                 "V2 DCV starting for order {OrderId}, domain {Domain}.", orderId, LogSanitizer.Strip(domain));
 
+            // Prevent concurrent DCV staging for the same order (enrollment + sync overlap).
+            // Mirrors the _dcvInFlight guard in TryRunDcvDuringSyncAsync (V1 path).
+            if (!_dcvInFlight.TryAdd(orderId, 0))
+            {
+                _logger.LogInformation(
+                    "DCV already in flight for V2 order {OrderId}; skipping concurrent attempt.", orderId);
+                return false;
+            }
+
             // 1. Fetch challenge
             V2DcvChallengeResponse challenge;
             try
@@ -2474,6 +2483,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             catch (Exception ex)
             {
+                _dcvInFlight.TryRemove(orderId, out _);
                 _logger.LogWarning(ex,
                     "V2 GetDcv failed for order {OrderId}; deferring DCV to next sync cycle.", orderId);
                 return false;
@@ -2482,6 +2492,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string token = challenge?.FileNameContent;
             if (string.IsNullOrWhiteSpace(token))
             {
+                _dcvInFlight.TryRemove(orderId, out _);
                 _logger.LogWarning(
                     "V2 GetDcv returned no token for order {OrderId}; deferring DCV.", orderId);
                 return false;
@@ -2493,6 +2504,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
             if (validator == null)
             {
+                _dcvInFlight.TryRemove(orderId, out _);
                 _logger.LogError(
                     "No DNS provider plugin resolved for domain '{Domain}' on V2 order {OrderId}. " +
                     "Ensure the appropriate DNS provider plugin is deployed and configured.",
@@ -2583,6 +2595,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             finally
             {
+                // Release the in-flight guard regardless of how the staged block exits.
+                _dcvInFlight.TryRemove(orderId, out _);
+
                 // 5. Clean up TXT record — only when staging succeeded (staged=true).
                 if (staged)
                 {
