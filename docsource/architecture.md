@@ -26,9 +26,17 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 ┌────────────────────────────▼────────────────────────────┐
 │               CERTInext REST API (eMudhra)               │
 │                                                         │
-│   ValidateCredentials   GenerateOrderSSL   TrackOrder   │
-│   GetCertificate   RevokeOrder   GetOrderReport         │
-│   GetProductDetails   SubmitCSR                         │
+│  V1 (HMAC)  ValidateCredentials · GenerateOrderSSL      │
+│             TrackOrder · GetCertificate · GetOrderReport │
+│             RevokeOrder · GetProductDetails · SubmitCSR  │
+│                                                         │
+│  V2 (OAuth2 Bearer)  POST /oauth/token                  │
+│             POST /ssl-certificates                       │
+│             GET  /ssl-certificates/{id}                  │
+│             GET  /ssl-certificates/{id}/dcv              │
+│             POST /ssl-certificates/{id}/dcv/verify       │
+│             GET  /ssl-certificates/{id}/certificate      │
+│             POST /ssl-certificates/{id}/revoke           │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -43,6 +51,8 @@ authKey = SHA256(accessKey + requestTs + requestTxnId)
 A unique transaction ID (`requestTxnId`) is generated for each request. The timestamp (`requestTs`) and transaction ID travel alongside the `authKey` so the CERTInext server can reproduce and verify the hash. The plugin handles this automatically; no manual signing is required during normal operation.
 
 An OAuth client-credentials mode is also available as an alternative. When OAuth is configured, the plugin exchanges a client ID and secret for a short-lived bearer token and automatically refreshes it before expiry.
+
+When `UseV2Api` is enabled, the plugin uses a dedicated OAuth2 `client_credentials` flow — separate from the V1 OAuth alternative. The plugin posts `client_id` and `client_secret` (form-encoded) to `/oauth/token`, caches the resulting bearer token for its 1-hour lifetime, and automatically refreshes it 60 seconds before expiry. V2 credentials are provisioned separately by CERTInext and are not derived from the V1 access key.
 
 ## Certificate Identifiers
 
@@ -148,9 +158,9 @@ sequenceDiagram
     alt Certificate issued immediately
         Plugin-->>CMD: Certificate ready — PEM returned
     else Certificate pending or not yet downloadable
-        loop Certificate-pickup retries\n(bounded, ~55s by default — PickupRetries/PickupDelay)
-            Plugin->>API: Poll for the certificate
-            API-->>Plugin: Status and certificate, if ready
+        loop Synchronous certificate pickup\n(PickupRetries × PickupDelay, default 3 × 5 s; ceiling 180 s)
+            Plugin->>API: Poll order status\nand attempt certificate download
+            API-->>Plugin: Status / certificate PEM
         end
         alt Certificate became available during pickup
             Plugin-->>CMD: Certificate ready — PEM returned
@@ -166,7 +176,7 @@ sequenceDiagram
 
 **DCV:** on a DCV-enabled build, DNS-01 validation runs inline for DV orders that require it, bounded by `DcvTimeoutMinutes`. When DCV isn't enabled, isn't built into this host, or the order doesn't require it, this step is skipped entirely and the order proceeds straight to the pending/pickup path like any other asynchronously-issued order.
 
-**Synchronous certificate pickup:** if the certificate isn't available immediately (a fresh order, or DCV that just validated but hasn't finished generating the PEM), `Enroll()` polls CERTInext a bounded number of times (`PickupRetries` × `PickupDelay`, capped at a 180s ceiling) before giving up and returning pending. This lets a fast-issuing certificate (DV, or an already-approved order) come back in the same enrollment call instead of always waiting for the next sync. OV/EV orders validate asynchronously over minutes to hours and typically exhaust this window regardless.
+**Synchronous certificate pickup:** after placing an order (or after DCV completes), the plugin polls CERTInext a bounded number of times — `PickupRetries` attempts spaced `PickupDelay` seconds apart, with a hard ceiling of 180 seconds — before returning a pending disposition to Command. This lets fast-issuing DV certificates (and pre-approved renewals) come back in the same enrollment call. OV and EV orders undergo human review over minutes to hours and almost always exhaust this window; they are picked up by the next synchronization run.
 
 ### Renewal
 
@@ -190,6 +200,107 @@ flowchart TD
     H --> I([Certificate issued or pending])
     C --> I
 ```
+
+### V2 API Path (UseV2Api = true)
+
+When `UseV2Api` is enabled, Ping, Enroll, GetSingleRecord, and Revoke route through the V2 REST API. Synchronize continues to call the V1 `GetOrderReport` endpoint until the V2 `/reports/orders` endpoint is available.
+
+#### DCV required (DV SSL)
+
+```mermaid
+sequenceDiagram
+    participant CMD as Keyfactor Command
+    participant Plugin as CERTInext Plugin
+    participant API as CERTInext API (V2)
+    participant DNS as DNS Provider
+
+    CMD->>Plugin: Request new certificate\n(CSR, subject, SANs, product code, requester details)
+    Plugin->>Plugin: Record enrollment intent in audit log
+
+    Plugin->>API: POST /oauth/token\n(client_credentials grant)
+    API-->>Plugin: Bearer token (1-hour TTL)
+
+    Plugin->>API: POST /ssl-certificates\n(X-Product-Code header · Idempotency-Key · JSON body)
+    API-->>Plugin: 201 Created — orderId assigned\nstatus: pending-dcv
+
+    Plugin->>API: GET /ssl-certificates/{orderId}/dcv
+    API-->>Plugin: DCV challenge\n(fileNameContent = TXT value,\ndcvMethod = "2" for DNS-TXT)
+
+    Plugin->>DNS: Publish TXT record\n_emudhra-challenge.{domain} → fileNameContent
+    Plugin->>Plugin: Wait for DNS propagation
+
+    Plugin->>API: POST /ssl-certificates/{orderId}/dcv/verify\n(domain, method: "dns-txt")
+    API-->>Plugin: { "overallStatus": "VERIFIED" }\n(multi-perspective check)
+
+    Plugin->>DNS: Remove TXT record
+
+    loop Poll until status leaves pending-dcv\n(bounded by DcvTimeoutMinutes)
+        Plugin->>API: GET /ssl-certificates/{orderId}
+        API-->>Plugin: Current status
+    end
+
+    loop Synchronous certificate pickup\n(PickupRetries × PickupDelay, ceiling 180 s)
+        Plugin->>API: GET /ssl-certificates/{orderId}\nGET /ssl-certificates/{orderId}/certificate
+        API-->>Plugin: Status · certificatePem · chainPem[]
+    end
+
+    alt Certificate issued
+        Plugin->>Plugin: Assemble full chain\n(leaf + intermediates from chainPem[])
+        Plugin-->>CMD: Certificate ready — PEM chain returned
+    else Still pending
+        Plugin-->>CMD: Pending — picked up by next sync
+    else Order rejected
+        Plugin-->>CMD: Enrollment failed — see gateway logs
+    end
+
+    Plugin->>Plugin: Record enrollment outcome in audit log
+```
+
+#### No DCV required (OV/EV/Private PKI)
+
+```mermaid
+sequenceDiagram
+    participant CMD as Keyfactor Command
+    participant Plugin as CERTInext Plugin
+    participant API as CERTInext API (V2)
+
+    CMD->>Plugin: Request new certificate
+    Plugin->>Plugin: Record enrollment intent in audit log
+
+    Plugin->>API: POST /oauth/token
+    API-->>Plugin: Bearer token
+
+    Plugin->>API: POST /ssl-certificates\n(or /private-pki-certificates · /signature-certificates)
+    API-->>Plugin: 201 Created — orderId assigned\nstatus: pending-csr or pending-agreement
+
+    loop Synchronous certificate pickup\n(PickupRetries × PickupDelay, ceiling 180 s)
+        Plugin->>API: GET /ssl-certificates/{orderId}
+        API-->>Plugin: Current status
+    end
+
+    alt Certificate issued
+        Plugin->>API: GET /ssl-certificates/{orderId}/certificate
+        API-->>Plugin: certificatePem · chainPem[]
+        Plugin->>Plugin: Assemble full chain
+        Plugin-->>CMD: Certificate ready — PEM chain returned
+    else Still pending (OV/EV human review)
+        Plugin-->>CMD: Pending — picked up by next sync
+    else Order rejected
+        Plugin-->>CMD: Enrollment failed
+    end
+
+    Plugin->>Plugin: Record enrollment outcome in audit log
+```
+
+**Token caching:** the Bearer token is cached for its 1-hour lifetime and shared across all V2 calls in the same gateway process. A new token is fetched automatically 60 seconds before expiry.
+
+**Idempotency:** every unsafe V2 POST carries a unique `Idempotency-Key` UUID. If the gateway retries the same request (for example after a timeout), CERTInext returns the original response without creating a duplicate order.
+
+**Full certificate chain:** the V2 `/certificate` endpoint returns the leaf certificate in `certificatePem` and any intermediate certificates in `chainPem[]`. The plugin concatenates these into a single PEM before returning to Command.
+
+**Order IDs:** V2 order IDs are opaque strings (e.g. `ord_abc123`). They are stored as the `CARequestID` in Command alongside V1 numeric IDs — both coexist in the database.
+
+**Synchronize stays on V1:** the V2 `/reports/orders` endpoint returns 501 Not Implemented. Synchronization always calls the V1 `GetOrderReport` endpoint regardless of `UseV2Api`. A warning is logged when `UseV2Api = true` to make this visible. A follow-up update will switch sync to V2 once the endpoint ships.
 
 ---
 
@@ -255,6 +366,8 @@ flowchart TD
 
 The table below maps each Keyfactor Command operation to the CERTInext API endpoint it calls.
 
+**V1 endpoints (default)**
+
 | Operation | CERTInext API endpoint |
 |---|---|
 | Test connection / verify credentials | `POST ValidateCredentials` |
@@ -265,3 +378,20 @@ The table below maps each Keyfactor Command operation to the CERTInext API endpo
 | Synchronize inventory | `POST GetOrderReport` (paginated) |
 | List available product codes | `POST GetProductDetails` |
 | Attach CSR to draft order | `POST SubmitCSR` |
+
+**V2 endpoints (UseV2Api = true)**
+
+| Operation | V2 endpoint |
+|---|---|
+| Obtain Bearer token | `POST /oauth/token` |
+| Test connection | `GET /api/certinext/v2/auth/me` |
+| Issue / renew certificate | `POST /api/certinext/v2/{family}-certificates` |
+| Check order status | `GET /api/certinext/v2/{family}-certificates/{orderId}` |
+| Get DCV challenge (DV SSL) | `GET /api/certinext/v2/ssl-certificates/{orderId}/dcv` |
+| Verify DCV | `POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify` |
+| Download certificate | `GET /api/certinext/v2/{family}-certificates/{orderId}/certificate` |
+| Revoke certificate | `POST /api/certinext/v2/{family}-certificates/{orderId}/revoke` |
+| List available products | `GET /api/certinext/v2/catalog/products` |
+| Synchronize inventory | `POST GetOrderReport` (V1 — V2 /reports/orders not yet available) |
+
+`{family}` is `ssl-certificates`, `private-pki-certificates`, or `signature-certificates`.
