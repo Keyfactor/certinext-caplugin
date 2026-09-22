@@ -2556,7 +2556,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // 4. Poll TrackOrderV2 until status leaves pending-dcv
                 int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
                 var deadline = DateTime.UtcNow.AddMinutes(timeoutMinutes);
-                int pollSeconds = Math.Max(3, _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 5);
+                // Fixed short cadence — decoupled from DcvPropagationDelaySeconds (one-shot
+                // DNS wait), not a poll interval. Reusing it here would yield only ~2 polls
+                // before the 5-minute timeout.
+                int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
 
                 while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
                 {
@@ -2705,7 +2708,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (domains.Count == 0) return;
 
             var pending = new HashSet<string>(domains, StringComparer.OrdinalIgnoreCase);
-            int pollSeconds = Math.Max(1, _config.DcvPropagationDelaySeconds);
+            // Fixed short cadence — decoupled from DcvPropagationDelaySeconds, which is a
+            // one-shot DNS propagation wait, not a polling interval. Reusing it here would
+            // reduce the number of polls to ~2 before the 5-minute timeout.
+            int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
 
             // Defense-in-depth deadline: SOX CC7.3 requires every wait to be bounded.
             // The caller passes a `ct` derived from a CancellationTokenSource that already
