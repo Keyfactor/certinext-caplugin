@@ -169,6 +169,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             trackResp.OrderId.Should().Be(createResp.OrderId);
             trackResp.Status.Should().NotBeNullOrEmpty(
                 "V2 TrackOrder must return a status for the placed order");
+            // Best-effort structural check: this sandbox's TrackOrder response has been
+            // observed to omit "_links" entirely (see issues/0016), so we log rather than
+            // hard-fail — the regression we actually guard against is OrderId/Status shape.
+            if (trackResp.Links?.Self?.Href is string href && !string.IsNullOrWhiteSpace(href))
+                _output.WriteLine($"TrackOrder links.self.href: {href}");
+            else
+                _output.WriteLine("TrackOrder response did not include a links.self.href (sandbox may omit _links).");
 
             // Store the order ID so Revoke/ChainPem tests can use it if no
             // CERTINEXT_V2_ISSUED_ORDER_ID env var is configured.
@@ -256,6 +263,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             products.Should().NotBeNull("V2 catalog/products must return a non-null list");
             products.Should().NotBeEmpty("V2 catalog/products must return at least one product");
+
+            // Best-effort structural check: this sandbox's catalog/products entries have been
+            // observed to carry null ProductCode/ProductName/ProductType (see issues/0016), so
+            // we log rather than hard-fail — the regression we actually guard against is an
+            // empty/null list, asserted above.
+            int withCode = products.Count(p => !string.IsNullOrWhiteSpace(p.ProductCode));
+            _output.WriteLine($"{withCode}/{products.Count} catalog products carry a non-empty ProductCode.");
         }
 
         // ---------------------------------------------------------------------------
