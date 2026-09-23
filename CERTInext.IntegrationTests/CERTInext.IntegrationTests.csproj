@@ -22,6 +22,7 @@
        SUPPORTS_DCV is defined. See issue 0003. -->
   <ItemGroup Condition="!$(DefineConstants.Contains('SUPPORTS_DCV'))">
     <Compile Remove="DcvLifecycleTests.cs" />
+    <Compile Remove="V2DcvLifecycleTests.cs" />
     <Compile Remove="CloudflareDomainValidator.cs" />
     <Compile Remove="StubDomainValidator.cs" />
   </ItemGroup>

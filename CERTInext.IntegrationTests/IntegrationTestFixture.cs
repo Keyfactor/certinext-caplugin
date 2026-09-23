@@ -34,6 +34,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 "CERTINEXT_COMPLETE_PENDING",
                 "CERTINEXT_RUN_BULK_TEST",
+                "CERTINEXT_V2_RUN_BULK_TEST",
             };
 
         // ---------------------------------------------------------------------------
