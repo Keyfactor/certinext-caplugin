@@ -52,6 +52,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <summary>Alias for ProductCode — kept for backward compat.</summary>
         public string ProfileId => ProductCode;
 
+        /// <summary>Requested subscription validity in years (1, 2, or 3). Takes precedence over ValidityDays.</summary>
+        public int ValidityYears => GetInt(Constants.EnrollmentParam.ValidityYears, 0);
+
         /// <summary>Requested validity in days; 0 means "use profile default".</summary>
         public int ValidityDays => GetInt(Constants.EnrollmentParam.ValidityDays, 0);
 
@@ -95,6 +98,35 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// Falls back to the connector-level <c>SignerIp</c> if empty.
         /// </summary>
         public string SignerIp => GetString(Constants.EnrollmentParam.SignerIp, string.Empty);
+
+        // ------------------------------------------------------------------
+        // V2 API parameters
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// V2 product family. Accepted values: "ssl" (default), "private-pki", "signature".
+        /// Used to select the correct V2 resource path.
+        /// </summary>
+        public string ProductFamily => GetString(Constants.EnrollmentParam.ProductFamily, "ssl");
+
+        /// <summary>
+        /// V2 product family as the REST path slug used in V2 URL construction.
+        /// Maps "ssl" → "ssl-certificates", "private-pki" → "private-pki-certificates",
+        /// "signature" → "signature-certificates".
+        /// </summary>
+        public string ProductFamilySlug => ProductFamily.ToLowerInvariant() switch
+        {
+            "ssl"         => Constants.ApiV2.FamilySsl,
+            "private-pki" => Constants.ApiV2.FamilyPrivatePki,
+            "signature"   => Constants.ApiV2.FamilySignature,
+            _             => Constants.ApiV2.FamilySsl
+        };
+
+        /// <summary>
+        /// V2 product variant sent in the order body (e.g. "dv", "ov", "ev").
+        /// Default: "dv".
+        /// </summary>
+        public string ProductVariant => GetString(Constants.EnrollmentParam.ProductVariant, "dv");
 
         // ------------------------------------------------------------------
         // Helpers
