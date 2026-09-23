@@ -66,10 +66,38 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // sees synchronously-completing calls in practice.
         private readonly object _cleanupLock = new();
 
+        // Tracks how many CleanupValidation calls were in flight (past the increment below,
+        // still inside CleanupDelay) at the same time. This is the direct, wall-clock-independent
+        // proof that cleanup ran concurrently rather than sequentially — see
+        // Dcv_CleanupOfMultipleDomains_RunsConcurrently_NotSequentially, which asserts on this
+        // instead of total elapsed time (0023: elapsed time also includes fixed overhead from the
+        // surrounding DCV flow — propagation delay + verification poll interval — unrelated to
+        // cleanup concurrency, which made a wall-clock threshold an unreliable proxy).
+        private int _inFlightCleanups;
+
+        /// <summary>
+        /// The maximum number of <see cref="CleanupValidation"/> calls observed executing
+        /// concurrently (i.e. inside the artificial <see cref="CleanupDelay"/>) at once.
+        /// </summary>
+        public int PeakConcurrentCleanups { get; private set; }
+
         public async Task<DomainValidationResult> CleanupValidation(string key, CancellationToken cancellationToken)
         {
-            if (CleanupDelay > TimeSpan.Zero)
-                await Task.Delay(CleanupDelay, cancellationToken);
+            int inFlight = Interlocked.Increment(ref _inFlightCleanups);
+            lock (_cleanupLock)
+            {
+                if (inFlight > PeakConcurrentCleanups)
+                    PeakConcurrentCleanups = inFlight;
+            }
+            try
+            {
+                if (CleanupDelay > TimeSpan.Zero)
+                    await Task.Delay(CleanupDelay, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlightCleanups);
+            }
             lock (_cleanupLock)
             {
                 CleanedUpKeys.Add(key);

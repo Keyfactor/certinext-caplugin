@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
@@ -24,6 +25,9 @@ using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.Extensions.CAPlugin.CERTInext;
 using Keyfactor.PKI.Enums.EJBCA;
 using Moq;
+using WireMock.RequestBuilders;
+using WireMock.ResponseBuilders;
+using WireMock.Server;
 using Xunit;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
@@ -455,6 +459,143 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.Certificate.Should().Be(MockCertificateData.FakePemCertificate,
                 because: "no chainPem means only the leaf cert is returned");
+        }
+
+        // ---------------------------------------------------------------------------
+        // G1: ValidateCAConnectionInfo — V2 branch (ApiUrlV2/ClientId/ClientSecret)
+        //
+        // These test the CURRENT requirements: the V1 fields (ApiUrl/AccountNumber/AuthMode/...)
+        // are always required, independent of UseV2Api. Phase 4 may relax that in V2 mode — each
+        // case below builds its own minimal `info` dictionary so that change is a local edit per
+        // test rather than a shared fixture that would need to be untangled.
+        // ---------------------------------------------------------------------------
+
+        private static Dictionary<string, object> ValidV1Fields() => new()
+        {
+            ["ApiUrl"] = "https://v1.certinext.io",
+            ["AccountNumber"] = "12345",
+            ["AuthMode"] = "AccessKey",
+            ["ApiKey"] = "v1-key"
+        };
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenApiUrlV2Missing()
+        {
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = ValidV1Fields();
+            info["UseV2Api"] = true;
+            info["ClientId"] = "my-client";
+            info["ClientSecret"] = "my-secret";
+            // No ApiUrlV2
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*ApiUrlV2*required*");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenApiUrlV2IsNotUri()
+        {
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = ValidV1Fields();
+            info["UseV2Api"] = true;
+            info["ApiUrlV2"] = "not-a-url";
+            info["ClientId"] = "my-client";
+            info["ClientSecret"] = "my-secret";
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*ApiUrlV2*valid absolute URI*");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenClientIdMissing()
+        {
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = ValidV1Fields();
+            info["UseV2Api"] = true;
+            info["ApiUrlV2"] = "https://v2.certinext.io";
+            // No ClientId
+            info["ClientSecret"] = "my-secret";
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*ClientId*required*");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenClientSecretMissing()
+        {
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = ValidV1Fields();
+            info["UseV2Api"] = true;
+            info["ApiUrlV2"] = "https://v2.certinext.io";
+            info["ClientId"] = "my-client";
+            // No ClientSecret
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*ClientSecret*required*");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_UseV2ApiFalse_IgnoresV2Fields()
+        {
+            // V1 field deliberately missing (ApiUrl) so the method throws before attempting any
+            // live connectivity — proving this offline. The point of the test is that the
+            // resulting error is about the V1 field only; the missing/invalid V2 fields below
+            // must not appear in the error at all when UseV2Api is false.
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = new Dictionary<string, object>
+            {
+                ["AccountNumber"] = "12345",
+                ["AuthMode"] = "AccessKey",
+                ["ApiKey"] = "v1-key",
+                // No ApiUrl
+                ["UseV2Api"] = false,
+                ["ApiUrlV2"] = "not-a-url",
+                // ClientId / ClientSecret also missing
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            var ex = await act.Should().ThrowAsync<AnyCAValidationException>();
+            ex.Which.Message.Should().Contain("ApiUrl").And.NotContain("ApiUrlV2")
+                .And.NotContain("ClientId").And.NotContain("ClientSecret");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_AllV2FieldsPresent_Passes()
+        {
+            using var server = WireMockServer.Start();
+            server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TokenResponseJson()));
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/auth/me").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2AuthMeJson()));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = ValidV1Fields();
+            info["UseV2Api"] = true;
+            info["ApiUrlV2"] = server.Urls[0];
+            info["ClientId"] = "my-client";
+            info["ClientSecret"] = "my-secret";
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().NotThrowAsync(
+                "all V1 and V2 fields are present and valid, and the live V2 ping succeeds");
         }
 
         // ---------------------------------------------------------------------------

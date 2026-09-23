@@ -1200,8 +1200,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         /// bound was per-call, not in aggregate — a UCC order with N staged domains could hold the
         /// calling request open for up to N x the per-call ceiling if the DNS provider was merely
         /// slow (not even hung) on every delete, which can exceed DcvTimeoutMinutes itself for a
-        /// realistic multi-SAN count. Proven here by timing: three domains each with an artificial
-        /// cleanup delay must complete in close to ONE delay's worth of wall time, not three.
+        /// realistic multi-SAN count.
+        ///
+        /// Proven directly via <see cref="FakeDomainValidator.PeakConcurrentCleanups"/> — the number
+        /// of CleanupValidation calls the validator observed in flight at once — rather than total
+        /// wall-clock time. 0023: a prior version of this test asserted elapsed time &lt; 4000ms, which
+        /// failed deterministically (~4801ms) because the surrounding DCV flow carries ~4s of fixed
+        /// overhead unrelated to cleanup concurrency (DcvConfig's 1s propagation delay plus
+        /// WaitForDcvVerificationAsync's separate, hardcoded 3s poll interval,
+        /// Constants.Dcv.SyncPropagationDelaySeconds — not the 1s the old comment assumed), on top of
+        /// which the (already-concurrent) ~800ms cleanup pushed the total past the threshold. That was
+        /// a test-design defect present since the test was introduced, not a cleanup regression — the
+        /// finally block here already runs cleanup via Task.WhenAll. Measuring peak concurrency proves
+        /// the same thing the wall-clock check intended, without being coupled to unrelated fixed
+        /// delays elsewhere in the flow.
         /// </summary>
         [Fact]
         public async Task Dcv_CleanupOfMultipleDomains_RunsConcurrently_NotSequentially()
@@ -1249,22 +1261,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
                 DcvConfig(dcvWaitForIssuanceSeconds: 10));
 
-            var sw = System.Diagnostics.Stopwatch.StartNew();
             await Enroll(plugin);
-            sw.Stop();
 
             validator.CleanedUpKeys.Should().HaveCount(3, "all three staged domains must be cleaned up");
 
-            // This flow carries ~2s of fixed overhead unrelated to cleanup (DcvPropagationDelaySeconds
-            // and WaitForDcvVerificationAsync's poll interval both floor at 1s each — DcvConfig's
-            // propagationDelaySeconds default is deliberately 1, since 0 falls back to a 30s default
-            // in PerformDcvIfNeededAsync, not "no delay"). An 800ms-per-domain cleanup delay makes the
-            // concurrent-vs-sequential gap (≈800ms vs ≈2400ms of cleanup time) large relative to that
-            // fixed cost and to CI jitter. 4000ms sits well above "fixed overhead + one 800ms delay"
-            // and well below "fixed overhead + three 800ms delays run one after another".
-            sw.ElapsedMilliseconds.Should().BeLessThan(4000,
+            // Direct proof of concurrency: all three CleanupValidation calls must have been in
+            // flight at the same instant. If cleanup ran sequentially, PeakConcurrentCleanups would
+            // be 1 regardless of how long the whole call took — this assertion doesn't depend on any
+            // wall-clock budget or on the fixed overhead elsewhere in the DCV flow (see 0023).
+            validator.PeakConcurrentCleanups.Should().Be(3,
                 "cleanup for independent domains must run concurrently, not sequentially — " +
-                "3 domains x 800ms sequential would add roughly 3x this call's actual cleanup time");
+                "all three CleanupValidation calls should have been in flight at once");
         }
 
         /// <summary>

@@ -14,6 +14,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
@@ -559,15 +561,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Token_RefreshedWhenExpired()
+        public async Task Token_CachedAndReused_WhenNotNearExpiry()
         {
-            // First token expires in 2 seconds (cache TTL = max(2-60, 30) = 30 — but we
-            // simulate expiry by using a very small expires_in so the cache thinks it's stale.
-            // We exploit the fact that GetOrRefreshV2TokenAsync uses expires_in - 60 with a
-            // floor of 30 seconds. To truly test refresh we use a mock token client that
-            // tracks call count rather than waiting.
-            // Instead, verify that two sequential calls to GetAuthMeV2Async with a fresh
-            // server stub each get the same token (cached) — proving caching works.
+            // Restates PingV2Async_TokenCached_OnlyOneFetch's proof via GetAuthMeV2Async — kept
+            // as its own case (G11) so cache-reuse and expiry-refetch (below) are each one
+            // single-purpose test rather than folded into one.
             StubV2Token();
             _server
                 .Given(Request.Create()
@@ -582,11 +580,185 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             await client.GetAuthMeV2Async();
             await client.GetAuthMeV2Async();
 
-            // Exactly one token call — cached on second call
-            var tokenCalls = 0;
-            foreach (var e in _server.LogEntries)
-                if (e.RequestMessage.Path == "/oauth/token") tokenCalls++;
-            tokenCalls.Should().Be(1);
+            TokenFetchCount(_server).Should().Be(1, "a non-expired cached token must be reused");
+        }
+
+        /// <summary>
+        /// G11: a cached token past its early-expiry window must be re-fetched via a fresh
+        /// <c>client_credentials</c> call — never via <c>refresh_token</c>. Per the V2 spec,
+        /// refresh tokens are single-use and refreshing invalidates the current access token, so
+        /// this locks in the client's current (safe) behaviour of only ever using
+        /// client_credentials.
+        ///
+        /// The real cache TTL floors at 30 seconds (<c>Math.Max(expires_in - 60, 30)</c> in
+        /// <c>GetOrRefreshV2TokenAsync</c>), which is too slow to wait out in a unit test — so this
+        /// reaches into the private <c>_v2TokenExpiry</c> field via reflection to simulate the
+        /// passage of time instead of actually waiting.
+        /// </summary>
+        [Fact]
+        public async Task Token_RefetchedViaClientCredentials_WhenPastEarlyExpiryWindow()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/auth/me")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2AuthMeJson()));
+
+            using var client = BuildV2Client();
+            await client.GetAuthMeV2Async();
+            TokenFetchCount(_server).Should().Be(1);
+
+            // Simulate the cached token having entered/passed its early-expiry window.
+            SetV2TokenExpiry(client, DateTime.UtcNow.AddSeconds(-1));
+
+            await client.GetAuthMeV2Async();
+            TokenFetchCount(_server).Should().Be(2,
+                "a token past its early-expiry window must be re-fetched, not reused");
+
+            // Every /oauth/token call must use client_credentials — never refresh_token, even
+            // though the stubbed token response includes a refresh_token field.
+            foreach (var entry in _server.LogEntries.Where(e => e.RequestMessage.Path == "/oauth/token"))
+            {
+                string body = entry.RequestMessage.Body ?? string.Empty;
+                body.Should().Contain("grant_type=client_credentials");
+                body.Should().NotContain("grant_type=refresh_token",
+                    "refresh tokens are single-use per the V2 spec — the client must never send this grant proactively");
+            }
+        }
+
+        private static int TokenFetchCount(WireMockServer server) =>
+            server.LogEntries.Count(e => e.RequestMessage.Path == "/oauth/token");
+
+        private static void SetV2TokenExpiry(CERTInextClient client, DateTime value)
+        {
+            var field = typeof(CERTInextClient)
+                .GetField("_v2TokenExpiry", BindingFlags.NonPublic | BindingFlags.Instance);
+            field.Should().NotBeNull("test relies on CERTInextClient's private _v2TokenExpiry field existing");
+            field!.SetValue(client, value);
+        }
+
+        // ---------------------------------------------------------------------------
+        // G2: OAuth2 token failure hints (401 invalid_client vs 403 unauthorized_client)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetOrRefreshV2Token_Throws_DistinctHint_On401InvalidClient()
+        {
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(401)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""error"":""invalid_client"",""error_description"":""Client authentication failed.""}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = () => client.PingV2Async();
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*401*")
+                .Where(ex => ex.Message.Contains("ClientId", StringComparison.OrdinalIgnoreCase)
+                          || ex.Message.Contains("ClientSecret", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public async Task GetOrRefreshV2Token_Throws_DistinctHint_On403UnauthorizedClient()
+        {
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(403)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""error"":""unauthorized_client"",""error_description"":""Key not generated in OAuth mode.""}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = () => client.PingV2Async();
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*403*")
+                .Where(ex => ex.Message.Contains("OAuth mode", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public async Task GetOrRefreshV2Token_401And403_ProduceDifferentMessages()
+        {
+            // The two hints must actually differ — otherwise the distinction above is cosmetic.
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(401)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""error"":""invalid_client""}"));
+            using var client401 = BuildV2Client();
+            Exception ex401 = null;
+            try { await client401.PingV2Async(); } catch (Exception ex) { ex401 = ex; }
+
+            _server.Reset();
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(403)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""error"":""unauthorized_client""}"));
+            using var client403 = BuildV2Client();
+            Exception ex403 = null;
+            try { await client403.PingV2Async(); } catch (Exception ex) { ex403 = ex; }
+
+            ex401.Should().NotBeNull();
+            ex403.Should().NotBeNull();
+            ex401!.Message.Should().NotBe(ex403!.Message);
+        }
+
+        [Fact]
+        public async Task GetOrRefreshV2Token_Throws_WhenTokenResponseLacksAccessToken()
+        {
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""token_type"":""Bearer"",""expires_in"":3600}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = () => client.PingV2Async();
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*access_token*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // G12: RFC 7807 field-level errors surfaced in the exception message
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ThrowOnV2Failure_IncludesFieldLevelErrors_FromProblemJson()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(400)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(
+                        @"{""type"":""https://api.certinext.io/errors/validation""," +
+                        @"""title"":""Bad Request"",""status"":400," +
+                        @"""detail"":""Body malformed""," +
+                        @"""errors"":[{""field"":""certificate.domain"",""message"":""must not be blank""}]}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = () => client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*certificate.domain*must not be blank*");
         }
     }
 }

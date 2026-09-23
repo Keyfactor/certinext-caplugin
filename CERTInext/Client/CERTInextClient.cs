@@ -1692,17 +1692,35 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
                 {
                     // SOX CC6.1: never log tokenResp.Content — may contain client_secret.
+                    // Per the V2 spec's OAuth2 error table: 401 invalid_client = wrong client_id /
+                    // client_secret (or a revoked key); 403 unauthorized_client = the key exists but
+                    // was never generated in OAuth mode in the portal. These are distinct failure
+                    // modes with distinct fixes, so each gets its own hint rather than sharing one.
+                    if ((int)tokenResp.StatusCode == 401)
+                    {
+                        Logger.LogError(
+                            "V2 OAuth2 token acquisition failed with 401 Unauthorized (invalid_client). " +
+                            "ApiUrlV2={ApiUrlV2}, ClientId={ClientId}. " +
+                            "Hint: the ClientId or ClientSecret is wrong, or the key was revoked in the portal.",
+                            _config.ApiUrlV2, _config.ClientId);
+                        throw new Exception(
+                            "V2 OAuth2 token request denied (401 Unauthorized, invalid_client). " +
+                            "The ClientId or ClientSecret is incorrect, or the key was revoked. " +
+                            "Regenerate the client secret in the CERTInext portal (Integration → REST APIs → OAuth2) " +
+                            "and update the connector config. See gateway logs for details.");
+                    }
                     if ((int)tokenResp.StatusCode == 403)
                     {
                         Logger.LogError(
-                            "V2 OAuth2 token acquisition failed with 403 Forbidden. " +
+                            "V2 OAuth2 token acquisition failed with 403 Forbidden (unauthorized_client). " +
                             "ApiUrlV2={ApiUrlV2}, ClientId={ClientId}. " +
-                            "Hint: ensure OAuth2 is enabled in the CERTInext portal under Integration → REST APIs → OAuth2.",
+                            "Hint: the access key exists but was not generated in OAuth mode in the portal.",
                             _config.ApiUrlV2, _config.ClientId);
                         throw new Exception(
-                            "V2 OAuth2 token request denied (403 Forbidden). " +
-                            "Ensure OAuth2 is activated in the CERTInext portal (Integration → REST APIs → OAuth2) " +
-                            "and that the ClientId and ClientSecret are correct. See gateway logs for details.");
+                            "V2 OAuth2 token request denied (403 Forbidden, unauthorized_client). " +
+                            "The access key was not generated in OAuth mode. Recreate the key in the CERTInext " +
+                            "portal (Integration → REST APIs → OAuth2) with the OAuth radio button selected. " +
+                            "See gateway logs for details.");
                     }
                     Logger.LogError(
                         "V2 OAuth2 token acquisition failed. ApiUrlV2={ApiUrlV2}, ClientId={ClientId}, HttpStatus={Status}",
@@ -1817,8 +1835,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             try
             {
                 var problem = JsonSerializer.Deserialize<V2ProblemDetails>(capped, GetJsonOptions());
-                if (problem != null && (!string.IsNullOrWhiteSpace(problem.Detail) || !string.IsNullOrWhiteSpace(problem.Title)))
-                    return $"{problem.Title}: {problem.Detail}".Trim(':').Trim();
+                if (problem != null && (!string.IsNullOrWhiteSpace(problem.Detail) || !string.IsNullOrWhiteSpace(problem.Title)
+                    || (problem.Errors != null && problem.Errors.Count > 0)))
+                {
+                    string msg = $"{problem.Title}: {problem.Detail}".Trim(':').Trim();
+
+                    // RFC 7807 per-field validation errors (spec's "errors[]", e.g. a 400 on
+                    // order create naming exactly which field failed) — fold them into the
+                    // message so the operator doesn't have to go dig the raw response out of
+                    // the gateway log to find out which field CERTInext rejected.
+                    if (problem.Errors != null && problem.Errors.Count > 0)
+                    {
+                        string fieldErrors = string.Join("; ", problem.Errors
+                            .Where(e => !string.IsNullOrWhiteSpace(e?.Field) || !string.IsNullOrWhiteSpace(e?.Message))
+                            .Select(e => $"{e.Field}: {e.Message}".Trim(':').Trim()));
+                        if (!string.IsNullOrWhiteSpace(fieldErrors))
+                            msg = string.IsNullOrWhiteSpace(msg) ? fieldErrors : $"{msg} [{fieldErrors}]";
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(msg))
+                        return msg;
+                }
             }
             catch
             {

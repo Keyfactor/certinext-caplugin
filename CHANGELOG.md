@@ -13,12 +13,17 @@
 - **Renewals no longer lose their SANs.** Renewals were submitted with no additional domains and the wrong primary domain; both now come from the certificate being renewed.
 - **Enrollment no longer fails on an order CERTInext auto-approves before it finishes issuing.** The plugin used to report these as issued with no certificate attached, which the gateway rejected. It now returns pending and picks up the certificate once CERTInext finishes issuing it.
 - **Renewals now use the certificate template's product code.** Renewals previously always used the connector's `DefaultProductCode`, which could send an empty product code if that setting was never configured. Renewals now use the template's code, falling back to `DefaultProductCode` only when the template doesn't have one.
+- **V2 OAuth errors now name the right cause.** 401 means a bad ClientId/ClientSecret; 403 means the key wasn't created in OAuth mode.
+- **V2 error messages now include CERTInext's per-field validation errors.**
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).
 - chore(tests): Moq-based unit tests verifying V2 dispatch in `CERTInextCAPlugin` (Ping, Enroll, GetSingleRecord, Revoke, Synchronize) with `Times.Never` assertions on V1 paths.
 - chore(tests): `StatusMapperV2Tests` covering all V2 status strings and CRL-to-V2-reason mappings.
 - chore(tests): Integration test stubs in `V2ApiTests.cs` (gated behind `CERTINEXT_USE_V2_API=1`); skip gracefully when V2 credentials are absent.
+- chore(tests): Unit tests for V2 `ValidateCAConnectionInfo`.
+- chore(tests): Unit tests for V2 token caching and expiry (`refresh_token` grant never sent).
+- chore(tests): DCV cleanup-concurrency test now checks peak concurrency instead of wall-clock time.
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 
