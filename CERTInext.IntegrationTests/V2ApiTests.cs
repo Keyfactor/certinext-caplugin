@@ -39,10 +39,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     ///
     /// <b>To run against a live V2 environment:</b>
     /// <code>
-    ///   set -a; . ~/.env_certinext; . ~/.env_certinext_v2; set +a
+    ///   set -a; . ~/.env_certinext; set +a
     ///   export CERTINEXT_USE_V2_API=1
     ///   dotnet test CERTInext.IntegrationTests/ --filter "FullyQualifiedName~V2ApiTests"
     /// </code>
+    /// Note: the shell must source ONLY <c>~/.env_certinext</c> (never <c>~/.env_certinext_v2</c> —
+    /// see issue 0017); this class loads <c>~/.env_certinext_v2</c> itself from disk at
+    /// test-construction time.
     ///
     /// <b>Required variables in <c>~/.env_certinext_v2</c> (or real env vars):</b>
     /// <list type="bullet">
@@ -69,10 +72,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private readonly string _cfZoneId;
         private readonly bool _dcvEnabled;
         private readonly string _issuedOrderId;
-
-        // Shared across test instances so Lifecycle can hand an order ID to
-        // Revoke/ChainPem tests that run later in the same class.
-        private static string s_lastCreatedOrderId;
 
         public V2ApiTests(IntegrationTestFixture fixture, ITestOutputHelper output)
         {
@@ -177,11 +176,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             else
                 _output.WriteLine("TrackOrder response did not include a links.self.href (sandbox may omit _links).");
 
-            // Store the order ID so Revoke/ChainPem tests can use it if no
-            // CERTINEXT_V2_ISSUED_ORDER_ID env var is configured.
-            s_lastCreatedOrderId = createResp.OrderId;
-            _output.WriteLine($"Stored lifecycle order ID for downstream tests: {s_lastCreatedOrderId}");
-
             // Note: revoke requires the order to reach 'issued' state first.
             // The sandbox processes orders asynchronously, so we only assert enroll + track here.
             // A full revoke smoke test requires waiting for issuance (run separately with DCV configured).
@@ -235,14 +229,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 caughtEx = ex;
             }
-            buffer.CompleteAdding();
+            if (!buffer.IsAddingCompleted)
+                buffer.CompleteAdding();
+
+            var records = new List<AnyCAPluginCertificate>();
+            foreach (var record in buffer.GetConsumingEnumerable())
+                records.Add(record);
 
             // Sync must call V1 GetOrderReport, not V2 endpoints.
             // A V2-routing bug would throw KeyNotFoundException with "not found in any V2 product family".
             // A V1 API error (wrong creds / URL mismatch) is acceptable here — it proves the V1 path ran.
             if (caughtEx != null)
+            {
                 caughtEx.Message.Should().NotContain("V2 product family",
                     "sync must use V1 GetOrderReport, not V2 product-family routing");
+            }
+            else
+            {
+                // Success path must actually prove something: the delta sync window is a day,
+                // so a healthy V1 account is expected to return at least one record. An empty,
+                // silent success here would be exactly as uninformative as the old "only check
+                // the exception message" assertion (see gap G6).
+                records.Should().NotBeEmpty(
+                    "Synchronize must return records via V1 GetOrderReport when it succeeds with UseV2Api=true " +
+                    "(an empty result here proves nothing about which code path actually ran)");
+                _output.WriteLine($"Sync_UsesV1_WhenV2Enabled: {records.Count} record(s) returned via V1.");
+            }
         }
 
         // ---------------------------------------------------------------------------
@@ -311,19 +323,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Revokes a previously issued V2 order using CERTINEXT_V2_ISSUED_ORDER_ID.
         /// Skips when that env var is absent (sandbox orders sit in pending-csr, so
-        /// a real issued order must be pre-created separately).
+        /// a real issued order must be pre-created separately). Intentionally does
+        /// not fall back to an order ID produced by another test in this class —
+        /// results must not depend on test run order (see issues/0017, gap G7).
         /// </summary>
         [SkippableFact]
         public async Task Revoke_V2_IssuedOrder()
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            // Prefer env var, fall back to order ID produced by the lifecycle test
-            string orderId = !string.IsNullOrWhiteSpace(_issuedOrderId)
-                ? _issuedOrderId
-                : s_lastCreatedOrderId;
+            string orderId = _issuedOrderId;
             Skip.If(string.IsNullOrWhiteSpace(orderId),
-                "No V2 order ID available (CERTINEXT_V2_ISSUED_ORDER_ID not set and lifecycle test has not run) — skipping.");
+                "No V2 order ID available — set CERTINEXT_V2_ISSUED_ORDER_ID to a real issued order to run this test.");
 
             using var client = BuildV2Client();
 
@@ -368,6 +379,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// calls VerifyDcvV2Async, and polls until the order leaves pending-dcv.
         /// Requires CERTINEXT_CF_API_TOKEN and CERTINEXT_CF_ZONE_ID in addition to
         /// CERTINEXT_USE_V2_API.  Skips if either is absent.
+        ///
+        /// CERTInext's domain DCV is account-scoped and reusable (BR 3.2.2.5): once
+        /// <c>CERTINEXT_DCV_DOMAIN</c> is verified once, it stays verified for the
+        /// <c>validTill</c> reuse window, and GetDcv/VerifyDcv return EMS-1080
+        /// ("Domain is already verified") instead of issuing a fresh challenge — see
+        /// issues/0020. That is treated here as the reuse-path outcome, not a failure:
+        /// the publish/verify steps are skipped and the order is polled directly for
+        /// leaving pending-dcv.
         /// </summary>
         [SkippableFact]
         public async Task DcvFlow_V2_PublishesAndVerifies()
@@ -380,6 +399,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             string txtKey     = null;
             string orderId    = null;
 
+            var (domainVerifiedBeforeEnroll, rawStatus) = await V2DomainStatusHelper.GetDcvStatusAsync(client, _v2Domain);
+            _output.WriteLine($"Pre-enroll domain status for '{_v2Domain}': dcvStatus={rawStatus ?? "<no row>"}");
+
             try
             {
                 // 1. Place a DV SSL order — it lands in pending-dcv
@@ -390,7 +412,37 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 orderId.Should().NotBeNullOrEmpty();
 
                 // 2. Get DCV challenge
-                var dcvResp = await client.GetDcvV2Async(orderId, Constants.ApiV2.FamilySsl);
+                V2DcvChallengeResponse dcvResp;
+                try
+                {
+                    dcvResp = await client.GetDcvV2Async(orderId, Constants.ApiV2.FamilySsl);
+                }
+                catch (Exception ex) when (ex.Message.Contains("EMS-1080"))
+                {
+                    // Reuse path: the domain is already verified account-wide, so there is no
+                    // fresh challenge to publish. Prove the order still reaches a non-pending-dcv
+                    // state without ever staging a TXT record.
+                    _output.WriteLine($"GetDcv returned EMS-1080 (domain already verified) — reuse path: {ex.Message}");
+                    _output.WriteLine($"(pre-enroll domain probe {(domainVerifiedBeforeEnroll ? "agreed: VERIFIED" : "did NOT show VERIFIED — status may have changed between the probe and this order")}.)");
+
+                    V2OrderStatusResponse reuseStatus = null;
+                    var reuseDeadline = DateTime.UtcNow.AddSeconds(30);
+                    while (DateTime.UtcNow < reuseDeadline)
+                    {
+                        reuseStatus = await client.ResolveAndTrackOrderV2Async(orderId);
+                        _output.WriteLine($"Poll (reuse path): orderId={orderId} status={reuseStatus.Status}");
+                        if (reuseStatus.Status != Constants.ApiV2.StatusPendingDcv)
+                            break;
+                        await Task.Delay(TimeSpan.FromSeconds(5));
+                    }
+
+                    reuseStatus.Should().NotBeNull();
+                    reuseStatus!.Status.Should().NotBe(
+                        Constants.ApiV2.StatusPendingDcv,
+                        $"order {orderId} must leave pending-dcv on a reused/already-verified domain (EMS-1080) " +
+                        "without a fresh TXT challenge. If this fails, see issues/0020.");
+                    return;
+                }
                 dcvResp.Should().NotBeNull();
                 dcvResp.FileNameContent.Should().NotBeNullOrEmpty(
                     "GetDcvV2Async must return a TXT token in FileNameContent");
@@ -450,19 +502,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Downloads the certificate for a known-issued V2 order and logs whether
         /// ChainPem is populated.  The test passes in either case — it is a
         /// best-effort diagnostic to confirm chain assembly works in production.
-        /// Requires CERTINEXT_V2_ISSUED_ORDER_ID.  Skips if absent.
+        /// Requires CERTINEXT_V2_ISSUED_ORDER_ID.  Skips if absent. Intentionally does
+        /// not fall back to an order ID produced by another test in this class —
+        /// results must not depend on test run order (see issues/0017, gap G7).
         /// </summary>
         [SkippableFact]
         public async Task ChainPem_V2_IsAssembled()
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            // Prefer env var, fall back to order ID produced by the lifecycle test
-            string orderId = !string.IsNullOrWhiteSpace(_issuedOrderId)
-                ? _issuedOrderId
-                : s_lastCreatedOrderId;
+            string orderId = _issuedOrderId;
             Skip.If(string.IsNullOrWhiteSpace(orderId),
-                "No V2 order ID available (CERTINEXT_V2_ISSUED_ORDER_ID not set and lifecycle test has not run) — skipping.");
+                "No V2 order ID available — set CERTINEXT_V2_ISSUED_ORDER_ID to a real issued order to run this test.");
 
             using var client = BuildV2Client();
 

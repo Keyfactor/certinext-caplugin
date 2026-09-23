@@ -243,7 +243,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            var plugin = BuildV2DcvPlugin(dcvEnabled: true);
+            var config = BuildV2Config(dcvEnabled: true);
+            using var probeClient = new CERTInextClient(config);
+            var (domainVerified, rawStatus) = await V2DomainStatusHelper.GetDcvStatusAsync(probeClient, _v2Domain);
+            _output.WriteLine($"Pre-enroll domain status for '{_v2Domain}': dcvStatus={rawStatus ?? "<no row>"}");
+
+            var recordingFactory = new RecordingDomainValidatorFactory(BuildV2DnsFactory());
+            var plugin = new CERTInextCAPlugin(new CERTInextClient(config), recordingFactory, config);
 
             var result = await plugin.Enroll(
                 csr:            GenerateCsrPem(_v2Domain),
@@ -257,6 +263,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _output.WriteLine($"CARequestID: {result.CARequestID}");
             _output.WriteLine($"Status:      {result.Status}");
             _output.WriteLine($"Message:     {result.StatusMessage}");
+
+            var staged = recordingFactory.StagedCalls;
+            var cleaned = recordingFactory.CleanedUpFqdns;
+            _output.WriteLine($"DNS provider calls: staged={staged.Count}, cleaned={cleaned.Count}");
+
+            if (domainVerified)
+            {
+                // Reuse path (issues/0020): the domain is already verified account-wide, so no
+                // fresh TXT record should ever be staged for it.
+                staged.Should().BeEmpty(
+                    $"domain '{_v2Domain}' was already VERIFIED before enrollment (reuse path) — no TXT record " +
+                    "should be staged. If this fails, see issues/0020 (the plugin currently treats the CA's " +
+                    "EMS-1080 'already verified' response as a failure and defers, rather than as satisfied).");
+                new[] { (int)EndEntityStatus.EXTERNALVALIDATION, (int)EndEntityStatus.GENERATED }
+                    .Should().Contain(result.Status,
+                        $"a reused, already-verified domain must let the order proceed to pending or issued; " +
+                        $"got {result.Status}. Message: {result.StatusMessage}");
+            }
+            else
+            {
+                // Publish path: a fresh challenge must actually get staged and cleaned up.
+                staged.Should().NotBeEmpty(
+                    $"domain '{_v2Domain}' was not yet VERIFIED (dcvStatus={rawStatus ?? "<no row>"}) — Enroll " +
+                    "must stage a TXT record to exercise the publish path.");
+                cleaned.Should().NotBeEmpty(
+                    "a staged DCV TXT record must be cleaned up after the publish-path attempt.");
+            }
         }
 
         // ---------------------------------------------------------------------------
@@ -268,7 +301,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            var plugin = BuildV2DcvPlugin(dcvEnabled: false);
+            var config = BuildV2Config(dcvEnabled: false);
+            var recordingFactory = new RecordingDomainValidatorFactory(BuildV2DnsFactory());
+            var plugin = new CERTInextCAPlugin(new CERTInextClient(config), recordingFactory, config);
 
             var result = await plugin.Enroll(
                 csr:            GenerateCsrPem(_v2Domain),
@@ -281,6 +316,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             result.Should().NotBeNull();
             result.CARequestID.Should().NotBeNullOrWhiteSpace(
                 "the CA must accept the order even with DCV off — DCV-off must not block enrollment");
+
+            recordingFactory.StagedCalls.Should().BeEmpty(
+                "with DcvEnabled=false the plugin must never stage a DCV TXT record — this test's name promised " +
+                "that, but nothing previously checked it");
+            recordingFactory.CleanedUpFqdns.Should().BeEmpty(
+                "with DcvEnabled=false the plugin must never attempt DCV cleanup either");
         }
 
         // ---------------------------------------------------------------------------
@@ -322,7 +363,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_CF_API_TOKEN + CERTINEXT_CF_ZONE_ID required — DCV-on test must publish real TXT records.");
 
             var config = BuildV2Config(dcvEnabled: true);
-            var plugin = new CERTInextCAPlugin(new CERTInextClient(config), BuildV2DnsFactory(), config);
+            using var probeClient = new CERTInextClient(config);
+            var (domainVerified, rawStatus) = await V2DomainStatusHelper.GetDcvStatusAsync(probeClient, _v2Domain);
+            _output.WriteLine($"Pre-enroll domain status for '{_v2Domain}': dcvStatus={rawStatus ?? "<no row>"}");
+
+            var recordingFactory = new RecordingDomainValidatorFactory(BuildV2DnsFactory());
+            var plugin = new CERTInextCAPlugin(new CERTInextClient(config), recordingFactory, config);
 
             var enrollResult = await plugin.Enroll(
                 csr:            GenerateCsrPem(_v2Domain),
@@ -339,6 +385,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             new[] { (int)EndEntityStatus.EXTERNALVALIDATION, (int)EndEntityStatus.GENERATED }
                 .Should().Contain(enrollResult.Status,
                     $"DCV-on V2 Enroll must return pending or issued; got {enrollResult.Status}");
+
+            var staged = recordingFactory.StagedCalls;
+            var cleaned = recordingFactory.CleanedUpFqdns;
+            _output.WriteLine($"DNS provider calls: staged={staged.Count}, cleaned={cleaned.Count}");
+
+            if (domainVerified)
+            {
+                // Reuse path (issues/0020): no fresh TXT record should be staged for an
+                // already-verified domain.
+                staged.Should().BeEmpty(
+                    $"domain '{_v2Domain}' was already VERIFIED before enrollment (reuse path) — no TXT record " +
+                    "should be staged. See issues/0020.");
+            }
+            else
+            {
+                staged.Should().NotBeEmpty(
+                    $"domain '{_v2Domain}' was not yet VERIFIED (dcvStatus={rawStatus ?? "<no row>"}) — Enroll " +
+                    "must stage a TXT record to exercise the publish path.");
+                cleaned.Should().NotBeEmpty(
+                    "a staged DCV TXT record must be cleaned up after the publish-path attempt.");
+            }
 
             // Delta sync — this sandbox account has 1000+ historical orders.
             var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddDays(-1), fullSync: false);

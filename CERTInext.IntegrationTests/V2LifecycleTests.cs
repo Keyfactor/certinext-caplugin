@@ -56,11 +56,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private readonly string _v2Domain;
         private readonly bool _v2Enabled;
 
-        // Shared across test instances in this class so an order enrolled by one test
-        // (gap 1 / gap 4) can be consumed by a later test (gap 2 / gap 3 / gap 9) when
-        // no explicit CERTINEXT_V2_ORDER_ID env var is configured.
-        private static string s_lastV2OrderId;
-
         public V2LifecycleTests(IntegrationTestFixture fixture, ITestOutputHelper output)
         {
             _fixture = fixture;
@@ -214,15 +209,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             };
 
         /// <summary>
-        /// Resolves the order ID to exercise for tests that need a pre-existing V2 order:
-        /// prefers <c>CERTINEXT_V2_ORDER_ID</c>, falls back to whatever a prior Enroll
-        /// test in this class stored in <see cref="s_lastV2OrderId"/>.
+        /// Resolves the order ID to exercise for tests that need a pre-existing V2 order.
+        /// Reads only <c>CERTINEXT_V2_ORDER_ID</c> — deliberately does not fall back to an
+        /// order ID produced by another test in this class, so results do not depend on
+        /// test run order (see issues/0017, gap G7).
         /// </summary>
         private static string ResolveOrderId()
-        {
-            string fromEnv = Environment.GetEnvironmentVariable("CERTINEXT_V2_ORDER_ID");
-            return !string.IsNullOrWhiteSpace(fromEnv) ? fromEnv : s_lastV2OrderId;
-        }
+            => Environment.GetEnvironmentVariable("CERTINEXT_V2_ORDER_ID");
 
         // ---------------------------------------------------------------------------
         // Gap 1 — Enroll() via the plugin, V2 path
@@ -252,8 +245,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _output.WriteLine($"CARequestID: {result.CARequestID}");
             _output.WriteLine($"Status:      {result.Status}");
             _output.WriteLine($"Message:     {result.StatusMessage}");
-
-            s_lastV2OrderId = result.CARequestID;
         }
 
         // ---------------------------------------------------------------------------
@@ -267,7 +258,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             string orderId = ResolveOrderId();
             Skip.If(string.IsNullOrWhiteSpace(orderId),
-                "No V2 order ID available (set CERTINEXT_V2_ORDER_ID, or run Enroll_V2_ReturnsCARequestID first) — skipping.");
+                "No V2 order ID available — set CERTINEXT_V2_ORDER_ID to a real V2 order to run this test.");
 
             var plugin = BuildV2Plugin();
 
@@ -275,14 +266,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             Skip.If(current?.Status != (int)EndEntityStatus.GENERATED,
                 $"Order '{orderId}' is in status {current?.Status} (not GENERATED) — revocation requires an issued certificate; skipping.");
 
-            int revokeResult = 0;
+            int revokeResult;
             try
             {
                 revokeResult = await plugin.Revoke(orderId, hexSerialNumber: string.Empty, revocationReason: 1 /* keyCompromise */);
             }
-            catch (Exception ex)
+            catch (InvalidOperationException ex) when (ex.Message.Contains("not in issued state"))
             {
-                Skip.If(true, $"V2 Revoke rejected order '{orderId}': {ex.Message}");
+                // Documented sandbox-timing quirk: the CA reports 'issued' via GetSingleRecord
+                // while still internally finalizing the order, and rejects revoke with 422 in
+                // that window (see issues/0019). Any other exception must fail the test.
+                Skip.If(true,
+                    $"Order '{orderId}' tracked as GENERATED but CA rejected revocation (sandbox timing): {ex.Message}");
                 return; // unreachable
             }
 
@@ -301,7 +296,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             string orderId = ResolveOrderId();
             Skip.If(string.IsNullOrWhiteSpace(orderId),
-                "No V2 order ID available (set CERTINEXT_V2_ORDER_ID, or run Enroll_V2_ReturnsCARequestID first) — skipping.");
+                "No V2 order ID available — set CERTINEXT_V2_ORDER_ID to a real V2 order to run this test.");
 
             var plugin = BuildV2Plugin();
             var record = await plugin.GetSingleRecord(orderId);
@@ -339,7 +334,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             enrollResult.Status.Should().NotBe((int)EndEntityStatus.FAILED,
                 $"V2 Enroll must not FAILED at submission time; message: {enrollResult.StatusMessage}");
 
-            s_lastV2OrderId = enrollResult.CARequestID;
             _output.WriteLine($"Enrolled V2 order {enrollResult.CARequestID}, status={enrollResult.Status}");
 
             // --- Synchronize (always V1, even though UseV2Api=true) ---
@@ -370,12 +364,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 revokeResult = await plugin.Revoke(enrollResult.CARequestID, hexSerialNumber: string.Empty, revocationReason: 1);
             }
-            catch (Exception ex)
+            catch (InvalidOperationException ex) when (ex.Message.Contains("not in issued state"))
             {
-                // The sandbox has been observed to report an order as 'issued' via
-                // TrackOrder/GetSingleRecord while still internally finalizing it, and
-                // reject a revoke attempted in that window (see V2ApiTests.Revoke_V2_IssuedOrder).
-                // Skip rather than hard-fail on this documented sandbox-timing quirk.
+                // Documented sandbox-timing quirk: the sandbox has been observed to report an
+                // order as 'issued' via TrackOrder/GetSingleRecord while still internally
+                // finalizing it, and reject a revoke attempted in that window (see issues/0019).
+                // Any other exception (e.g. the camelCase-reason HTTP 400 that 0019 describes)
+                // must fail the test rather than be swallowed here.
                 Skip.If(true,
                     $"Order '{enrollResult.CARequestID}' tracked as GENERATED but CA rejected revocation " +
                     $"(sandbox timing): {ex.Message}");
@@ -397,7 +392,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             string orderId = ResolveOrderId();
             Skip.If(string.IsNullOrWhiteSpace(orderId),
-                "No V2 order ID available (set CERTINEXT_V2_ORDER_ID, or run Enroll_V2_ReturnsCARequestID first) — skipping.");
+                "No V2 order ID available — set CERTINEXT_V2_ORDER_ID to a real V2 order to run this test.");
 
             var plugin = BuildV2Plugin();
             var record = await WaitForIssuanceAsync(plugin, orderId, maxPolls: 1);
@@ -442,6 +437,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var plugin = BuildV2Plugin();
             var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddDays(-7), fullSync: false);
             synced.Should().NotBeNull();
+            synced.Should().NotBeEmpty(
+                "the delta sync window must return at least one record from this sandbox account to sample " +
+                "GetSingleRecord against — an empty sync makes the rest of this test vacuous (see gap G6)");
 
             var sample = synced.Take(10).ToList();
             _output.WriteLine($"Sampling {sample.Count} of {synced.Count} synced records for GetSingleRecord (V2-configured plugin).");
@@ -463,6 +461,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
 
             _output.WriteLine($"GetSingleRecord results: {ok} succeeded, {keyNotFound} KeyNotFoundException (expected for V1 orders under V2 config).");
+            (ok + keyNotFound).Should().Be(sample.Count,
+                "every sampled GetSingleRecord call must either succeed or throw the documented KeyNotFoundException " +
+                "(issues/0016) — any other exception type must escape this loop and fail the test (see gap G6)");
         }
 
         // ---------------------------------------------------------------------------
