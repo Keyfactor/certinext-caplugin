@@ -390,7 +390,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 orderId.Should().NotBeNullOrEmpty();
 
                 // 2. Get DCV challenge
-                var dcvResp = await client.GetDcvV2Async(orderId);
+                var dcvResp = await client.GetDcvV2Async(orderId, Constants.ApiV2.FamilySsl);
                 dcvResp.Should().NotBeNull();
                 dcvResp.FileNameContent.Should().NotBeNullOrEmpty(
                     "GetDcvV2Async must return a TXT token in FileNameContent");
@@ -409,7 +409,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 await Task.Delay(TimeSpan.FromSeconds(5));
 
                 // 4. Ask CERTInext to verify
-                var verifyResp = await client.VerifyDcvV2Async(orderId, _v2Domain);
+                var verifyResp = await client.VerifyDcvV2Async(orderId, _v2Domain, Constants.ApiV2.FamilySsl);
                 verifyResp.Should().NotBeNull();
                 verifyResp.OverallStatus.Should().Be("VERIFIED",
                     "VerifyDcvV2Async must return OverallStatus=VERIFIED after DNS record is published");
