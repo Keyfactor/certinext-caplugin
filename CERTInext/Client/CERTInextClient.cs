@@ -1546,6 +1546,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return result;
         }
 
+        /// <summary>
+        /// Minimal, read-only escape hatch for probing V2 endpoints that don't yet have a
+        /// typed client method (e.g. <c>/reports/orders</c>, <c>/domains</c> during discovery).
+        /// Issues a GET against the V2 base URL using the same token/header machinery as the
+        /// typed V2 methods, and returns the raw status/content instead of throwing on
+        /// non-success so callers can inspect 4xx/5xx bodies directly. Intended for
+        /// integration-test spikes — prefer a typed method once the response shape is known.
+        /// </summary>
+        public async Task<(int StatusCode, string ContentType, string Content)> ProbeV2GetAsync(
+            string pathAndQuery, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            var req = await BuildV2RequestAsync(pathAndQuery, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 probe call: Method=GET, Path={Path}, HttpStatus={Status}",
+                pathAndQuery, (int)resp.StatusCode);
+            Logger.MethodExit(LogLevel.Trace);
+            return ((int)resp.StatusCode, resp.ContentType, resp.Content);
+        }
+
         // ---------------------------------------------------------------------------
         // V2 private helpers
         // ---------------------------------------------------------------------------
