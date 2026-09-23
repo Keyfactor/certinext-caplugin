@@ -42,6 +42,7 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
     * New certificate enrollment (new keys and certificate).
     * Certificate renewal — submits a new `GenerateOrderSSL` order when the prior certificate is within the configured renewal window (CERTInext has no dedicated renewal endpoint; the renewal-window check governs how Command tracks old→new, not which API is called).
     * Certificate reissuance (new keys with the same or updated subject/SANs) when outside the renewal window or no prior certificate is found.
+    * Synchronous certificate pickup — a fast-issuing order (DV, or already-approved) can return the certificate in the same enrollment call instead of always waiting for the next sync, via `PickupRetries`/`PickupDelay`.
 * Certificate Revocation:
     * Request revocation of a previously issued certificate using any RFC 5280 CRL reason code.
 * Supported authentication modes for calls to the CERTInext API:
@@ -159,11 +160,11 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductCode` | Optional | String | Override the numeric CERTInext product code for this template. Product codes are provisioned per account by eMudhra — obtain the correct code from `GetProductDetails` for your account. Set this explicitly when targeting the sandbox environment or when the connector `DefaultProductCode` should not apply to this template. See the [Product Codes](#product-codes) section for the sandbox/production lookup table. | DV SSL: `842` (sandbox) or `838` (production) |
+| `ProductCode` | Optional | String | Override the numeric CERTInext product code for this template. Product codes are provisioned per account by eMudhra — obtain the correct code from `GetProductDetails` for your account. If omitted, the built-in default code for the selected product name is used (see [Product Codes](#product-codes)). Set this explicitly when targeting the sandbox environment or a non-standard code. | DV SSL: `842` (sandbox) or `838` (production) |
 | `ProfileId` | Deprecated | String | Legacy alias for `ProductCode`. Accepted for backward compatibility — if `ProductCode` is not set, `ProfileId` is used in its place. New templates should use `ProductCode`. | `838` |
 | `ValidityYears` | Optional | Number | Subscription validity period in years: `1`, `2`, or `3`. Default: `1`. CERTInext certificates are issued within a subscription term at up to 390 days per certificate, with free renewals within the term. | `1` |
 | `ValidityDays` | Deprecated | Number | Legacy validity field. If set, the value is divided by 365 and rounded up to derive a year count. New templates should use `ValidityYears`. | `365` |
-| `AutoApprove` | Optional | Boolean | If `true`, the gateway will attempt automatic approval of certificates returned in a pending-approval state. Only set this if your CERTInext product is configured with automatic approval. Default: `false`. | `false` |
+| `AutoApprove` | Optional | Boolean | **Currently has no effect** — reserved for future use. The plugin does not call any approval endpoint against CERTInext regardless of this setting. See [issue tracking this](https://github.com/Keyfactor/certinext-caplugin/issues/25). | `false` |
 | `RequesterName` | Optional | String | Per-template override for the requestor name. When set, overrides the connector-level `RequestorName` for orders using this template. | `Keyfactor Automation` |
 | `RequesterEmail` | Optional | String | Per-template override for the requestor email address. When set, overrides the connector-level `RequestorEmail` for orders using this template. | `pki-admin@example.com` |
 | `RenewalWindowDays` | Optional | Number | Number of days before certificate expiration within which a renewal is attempted instead of a reissue. Default: `90`. | `90` |
@@ -238,7 +239,9 @@ If your CERTInext account has OAuth enabled, you can use OAuth client credential
 
 ## CA Configuration
 
-The following fields are presented in the Keyfactor Command Management Portal when creating or editing the CERTInext CA connector. All fields marked **Required** must be provided before the connector can be saved in an enabled state.
+The following fields are presented in the Keyfactor Command Management Portal when creating or editing the CERTInext CA connector.
+
+> Note: the connector's own save-time validation only enforces `ApiUrl`, `AccountNumber`, and the credential fields for the selected `AuthMode`. Other fields marked **Required** below are required by CERTInext for a successful order — the connector will save without them, but enrollment will fail or the order will be parked pending until they're set.
 
 | Field | Required / Optional | Description | Where to find it | Example |
 |---|---|---|---|---|
@@ -255,15 +258,43 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `RequestorMobileNumber` | Optional | Requestor mobile number (digits only, no country code). Included in the `requestorInformation` block. | N/A | `5551234567` |
 | `SignerPlace` | Required | City or location of the person accepting the subscriber agreement on behalf of your organization. Required by CERTInext for all orders. | Use the physical city where the signer is located. | `Austin` |
 | `SignerIp` | Required | Public IP address of the host accepting the subscriber agreement. Required by CERTInext for all orders. | Use the outbound IP of the AnyCA Gateway host, or the IP of the workstation from which the agreement was accepted. | `203.0.113.10` |
-| `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in the `productDetails.groupNumber` field of `GetProductDetails` requests. Some sandbox accounts return an empty product list from `GetProductDetails` unless this field is included. Available in the CERTInext portal under **Delegation → Groups**. | Portal → **Delegation → Groups**. | `2345678901` |
-| `DefaultProductCode` | Optional | Default numeric product code to use when no product code is set on the certificate template. If omitted and the template also has no product code, enrollment will fail. Product codes are provisioned per account by eMudhra — contact your eMudhra account representative to obtain the numeric codes available to your account. | Call `GetProductDetails` against your account/environment (see product code table below). | `842` |
+| `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in the `productDetails.groupNumber` field of `GetProductDetails` requests *and* in `delegationInformation.groupNumber` on every SSL order. Some sandbox accounts return an empty product list from `GetProductDetails` unless this field is included. Available in the CERTInext portal under **Delegation → Groups**. | Portal → **Delegation → Groups**. | `2345678901` |
+| `OrganizationNumber` | Optional, strongly recommended for OV/EV and faster DV | Numeric CERTInext organization number for a pre-vetted organization. When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and this number, telling CERTInext to skip its manual organization-vetting queue. Without it, orders may sit in `Pending System RA` for extended manual review (observed: tens of hours). | Portal → **Organizations → Pre-vetted Organizations**. | `1234567` |
+| `TechnicalContactName` / `TechnicalContactEmail` / `TechnicalContactIsdCode` / `TechnicalContactMobileNumber` | Optional | Populate `technicalPointOfContact` on every SSL order. Each defaults to the corresponding `Requestor*` field when blank. Some product configurations require a technical point of contact to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field. | N/A | *(defaults to Requestor fields)* |
+| `AccountingModel` | Optional | CERTInext billing model sent in `orderDetails.accountingModel`. `2` = credit-based (most accounts). `1` = cash model. Default: `2`. | N/A | `2` |
+| `EmailNotifications` | Optional | Whether CERTInext sends lifecycle-event emails to the requestor. `1` = enabled, `0` = silent (recommended for gateway-driven orders). Default: `0`. | N/A | `0` |
+| `SubscriptionValidityYears` | Optional | Connector-level default validity in years for SSL orders (`1`, `2`, or `3`). Overridden per template by the `ValidityYears` enrollment parameter. Default: `1`. | N/A | `1` |
+| `SubscriptionAutoRenew` | Optional | Whether CERTInext should auto-renew certificates issued through this connector. `0` = disabled (recommended — renewal is driven by Keyfactor Command), `1` = enabled. Default: `0`. | N/A | `0` |
+| `SubscriptionRenewCriteriaDays` | Optional | Days before expiry at which CERTInext auto-renews. Only honored when `SubscriptionAutoRenew` is `1`. Default: `30`. | N/A | `30` |
+| `AutoSecureWww` | Optional | If `1`, CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. Default: `0`. | N/A | `0` |
+| `SubmitNonDnsSans` | Optional | If `true` (default), SANs that aren't DNS names (IP address, email, URI) are submitted to CERTInext instead of silently dropped. CERTInext can't validate them, so such an order won't issue until they're removed. Set to `false` to restore the pre-1.0.1 behavior of submitting DNS names only. Default: `true`. | N/A | `true` |
+| `DefaultProductCode` | Optional, but effectively required if you use renewals | Numeric product code used for **renewals only** — CERTInext's `TrackOrder` doesn't return the prior order's product code, so the renewal path sends this value verbatim, ignoring the template's `ProductCode`/`ProfileId`. If left blank, renewals go out with an empty product code. Has **no effect on new enrollments** — the `ProductCode`/`ProfileId` template resolution never falls back to it. See [issue tracking this](https://github.com/Keyfactor/certinext-caplugin/issues/26). | Call `GetProductDetails` against your account/environment (see product code table below). | `842` |
 | `IgnoreExpired` | Optional | If `true`, expired certificates are skipped during synchronization and are not imported into Keyfactor Command. Default: `false`. | N/A | `false` |
 | `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500`. Reduce this value if synchronization requests time out. | N/A | `100` |
 | `Enabled` | Optional | Enables or disables the CA connector. Setting this to `false` allows the connector record to be created before all credentials are available, without triggering a live connectivity test. Default: `true`. | N/A | `true` |
+| `PickupRetries` | Optional | Number of times `Enroll` polls CERTInext for the certificate after a successful order submission, before returning pending and leaving pickup to the next sync. Set to `0` to disable the wait entirely. OV/EV orders validate asynchronously (minutes to hours) and typically exhaust this wait regardless of the value. Default: `5`. | N/A | `5` |
+| `PickupDelay` | Optional | Seconds between certificate-pickup retries. The total pickup budget is a fixed 5-second initial delay + (`PickupRetries` × `PickupDelay`), hard-capped at 180 seconds regardless of how the two values are set. Aim for well under ~90s total so the call doesn't run long enough to trip Command's own enrollment timeout. Default: `10` (a ~55s ceiling with default `PickupRetries`). | N/A | `10` |
+
+> **Pickup timing detail:** after a successful order placement, the plugin waits a fixed 5-second initial delay before the first poll attempt, then polls CERTInext every `PickupDelay` seconds up to `PickupRetries` times. Each poll calls `GetCertificate` to check whether the certificate has been issued. The total time budget is: **5s + (PickupRetries × PickupDelay) + API round-trip time per poll (~1s each)**. With defaults this is approximately 5 + (5 × 10) + 5 = **~60 seconds**.
+>
+> **Tuning for faster pickup:** if the CERTInext API typically issues certificates within a few seconds of order placement (as observed with DV and auto-approved orders), you can reduce per-enrollment wait time by lowering `PickupDelay` and raising `PickupRetries` to compensate — this polls more frequently without changing the total budget. For example:
+>
+> | Configuration | PickupRetries | PickupDelay | Total budget | Poll cadence |
+> |---------------|:---:|:---:|---|---|
+> | Default | `5` | `10` | ~55s | Every 10s |
+> | Faster polling | `10` | `5` | ~55s | Every 5s |
+> | Aggressive | `50` | `1` | ~55s | Every 1s |
+> | Minimal wait | `0` | — | 0s | No polling; defers to sync |
+>
+> The 5-second initial delay before the first poll is not configurable. The 180-second hard ceiling applies regardless of configuration.
 | `DcvEnabled` | Optional | When `true`, the gateway performs DNS-based Domain Control Validation (DCV) during enrollment for orders that require it. Requires a DNS provider plugin (e.g. `azure-azuredns-dnsplugin`) to be deployed on the gateway. Default: `false`. | N/A | `false` |
 | `DcvTxtRecordTemplate` | Optional | Format string for the DNS TXT record hostname published during DCV. `{0}` is replaced with the domain being validated. Default: `_emsign-validation.{0}`. | N/A | `_emsign-validation.{0}` |
-| `DcvPropagationDelaySeconds` | Optional | Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: `30`. | N/A | `30` |
+| `DcvPropagationDelaySeconds` | Optional | Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Applies only to the `Enroll()`-time DCV path — DCV driven during sync uses its own fixed 3-second delay. Default: `30`. | N/A | `30` |
 | `DcvTimeoutMinutes` | Optional | Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) before cancelling the enrollment. Can also be set via the `CERTINEXT_DCV_TIMEOUT_MINUTES` environment variable; the environment variable takes precedence when both are set. Default: `10`. | N/A | `10` |
+| `DcvWaitForChallengeSeconds` | Optional | How long `Enroll()` waits for CERTInext to expose the DCV challenge after order placement, before giving up and deferring to the next sync. Set to `0` to disable the wait. Can also be set via `CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS`. Default: `60`. | N/A | `60` |
+| `DcvWaitForIssuanceSeconds` | Optional | How long `Enroll()` waits for CERTInext to finish generating the certificate after DCV verifies. Set to `0` to disable the wait. Can also be set via `CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS`. Default: `60`. | N/A | `60` |
+| `DcvSyncMaxOrderAgeHours` | Optional | During synchronization, only pending DV orders younger than this many hours are driven through DCV, so a large backlog of old/abandoned pending orders doesn't slow down every sync pass. Set to `0` to disable the age filter. Default: `24`. | N/A | `24` |
+| `DcvSyncMaxPerPass` | Optional | Maximum number of pending DV orders driven through DCV in a single sync pass. Set to `0` to disable the cap. Default: `50`. | N/A | `50` |
 
 > Note: `AccountNumber` and group-level identifiers are distinct values. The `AccountNumber` is your top-level user account identifier. CERTInext groups (cost centers or departments) each have their own `groupNumber`, which is passed per-order and is separate from any organization number displayed on the Organizations page.
 
@@ -338,6 +369,62 @@ To retrieve the full list of product codes available to your account, call the `
 
 > Note: SSL/TLS products are supported on standard accounts — see the SSL/TLS table above for the exact sandbox/production code pair for each product. Private PKI (Production `100`, `104` / Sandbox `149`), S/MIME (`894`), and document-signing products (`819`–`827`) require special provisioning by eMudhra and are not available on standard SSL/TLS accounts — ordering them returns EMS-1162.
 
+## V2 API (Preview)
+
+The plugin includes an opt-in CERTInext V2 REST API code path that uses modern OAuth2 `client_credentials` authentication and a new order-centric resource model. V2 is disabled by default; V1 remains the active path unless `UseV2Api` is explicitly set to `true`.
+
+> **Synchronization note:** The V2 `/reports/orders` endpoint is not yet available (returns HTTP 501). When `UseV2Api` is `true`, synchronization continues to use the V1 `GetOrderReport` endpoint. V1 credentials (`ApiUrl`, `ApiKey`, `AccountNumber`) must remain configured even when V2 is enabled.
+
+### V2 CA Connector Fields
+
+| Field | Required / Optional | Description | Example |
+|---|---|---|---|
+| `UseV2Api` | Optional | Enable the V2 API code path for enrollment, revocation, and status checks. V1 is used for synchronization regardless. Default: `false`. | `false` |
+| `ApiUrlV2` | Conditional | Base URL for the CERTInext V2 REST API (no trailing path suffix). Required when `UseV2Api` is `true`. | `https://sandbox-us-api.certinext.io` |
+| `ClientId` | Conditional | OAuth2 client ID for V2 authentication. Required when `UseV2Api` is `true`. | `keyfactor-gateway` |
+| `ClientSecret` | Conditional | OAuth2 client secret for V2 authentication. This field is masked in the UI. Required when `UseV2Api` is `true`. | *(generated, masked in UI)* |
+
+#### V2 OAuth2 Setup
+
+1. Log in to the CERTInext portal for your environment.
+2. Navigate to **Integrations → APIs**.
+3. Click **+ Create API Credentials** and select **Auth Type**: `OAuth2 (V2)`.
+4. Note the **Client ID** and **Client Secret**. Enter them in `ClientId` and `ClientSecret`.
+5. Set `UseV2Api` to `true` and enter the V2 base URL in `ApiUrlV2`.
+6. Leave all V1 fields (`ApiUrl`, `ApiKey`, `AccountNumber`) configured — they are still used for synchronization.
+
+#### V2 Token Caching
+
+The plugin obtains a V2 bearer token via the standard OAuth2 `client_credentials` grant (`grant_type=client_credentials`, form-encoded) against `{ApiUrlV2}/oauth/token`. Tokens are cached in memory and reused until 60 seconds before expiry (minimum 30-second cache). Token refresh is thread-safe.
+
+### V2 Certificate Template Fields
+
+When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
+
+| Parameter | Required / Optional | Type | Description | Example / Default |
+|---|---|---|---|---|
+| `ProductFamily` | Optional | String | CERTInext V2 product family. Accepted values: `ssl`, `private-pki`, `signature`. Default: `ssl`. | `ssl` |
+| `ProductVariant` | Optional | String | Product variant within the family (e.g. `dv`, `ov`, `ev`). Default: `dv`. | `dv` |
+
+`ProductCode` continues to carry the numeric product code and is sent in the `X-Product-Code` header on V2 order placement.
+
+### V2 Order Lifecycle
+
+V2 orders are identified by an opaque string ID prefixed with `ord_` (e.g. `ord_a1b2c3d4`). This ID is returned by the V2 order placement endpoint and stored as the `CARequestID`. It is stable for the lifetime of the order and is used for all subsequent tracking, certificate download, and revocation calls.
+
+V2 status strings map to Keyfactor enrollment statuses as follows:
+
+| V2 Status | Keyfactor Status | Notes |
+|---|---|---|
+| `issued` | Issued | Certificate is immediately downloaded and returned to Command. |
+| `pending-dcv` | Pending External Validation | Order is awaiting domain control validation. |
+| `pending-csr` | Pending External Validation | Order is awaiting CSR submission or processing. |
+| `pending-agreement` | Pending External Validation | Order requires subscriber agreement acceptance. |
+| `revoked` | Revoked | Order has been revoked. |
+| `cancelled` | Failed | Order was cancelled; a new enrollment is required. |
+
+Because V2 has no distinct renewal endpoint, all three enrollment types (New, Reissue, RenewOrReissue) place a fresh V2 order.
+
 ## Architecture
 
 This document describes how the CERTInext AnyCA Gateway REST plugin integrates with Keyfactor Command and the CERTInext certificate authority. It covers the three primary certificate lifecycle operations — synchronization, enrollment, and revocation — and how the plugin routes each through the CERTInext API.
@@ -366,9 +453,17 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 ┌────────────────────────────▼────────────────────────────┐
 │               CERTInext REST API (eMudhra)               │
 │                                                         │
-│   ValidateCredentials   GenerateOrderSSL   TrackOrder   │
-│   GetCertificate   RevokeOrder   GetOrderReport         │
-│   GetProductDetails   SubmitCSR                         │
+│  V1 (HMAC)  ValidateCredentials · GenerateOrderSSL      │
+│             TrackOrder · GetCertificate · GetOrderReport │
+│             RevokeOrder · GetProductDetails · SubmitCSR  │
+│                                                         │
+│  V2 (OAuth2 Bearer)  POST /oauth/token                  │
+│             POST /ssl-certificates                       │
+│             GET  /ssl-certificates/{id}                  │
+│             GET  /ssl-certificates/{id}/dcv              │
+│             POST /ssl-certificates/{id}/dcv/verify       │
+│             GET  /ssl-certificates/{id}/certificate      │
+│             POST /ssl-certificates/{id}/revoke           │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -383,6 +478,8 @@ authKey = SHA256(accessKey + requestTs + requestTxnId)
 A unique transaction ID (`requestTxnId`) is generated for each request. The timestamp (`requestTs`) and transaction ID travel alongside the `authKey` so the CERTInext server can reproduce and verify the hash. The plugin handles this automatically; no manual signing is required during normal operation.
 
 An OAuth client-credentials mode is also available as an alternative. When OAuth is configured, the plugin exchanges a client ID and secret for a short-lived bearer token and automatically refreshes it before expiry.
+
+When `UseV2Api` is enabled, the plugin uses a dedicated OAuth2 `client_credentials` flow — separate from the V1 OAuth alternative. The plugin posts `client_id` and `client_secret` (form-encoded) to `/oauth/token`, caches the resulting bearer token for its 1-hour lifetime, and automatically refreshes it 60 seconds before expiry. V2 credentials are provisioned separately by CERTInext and are not derived from the V1 access key.
 
 ## Certificate Identifiers
 
@@ -453,6 +550,8 @@ sequenceDiagram
 
 **Expired certificates:** The `IgnoreExpired` connector setting controls whether expired certificates are included in synchronization. When enabled, expired certificates are silently skipped and will not appear in the Keyfactor Command inventory.
 
+**DCV-during-sync:** on a DCV-enabled build, each sync pass also drives DNS-01 validation forward for pending DV orders that are still waiting on it, bounded by `DcvSyncMaxOrderAgeHours` (skip orders older than this) and `DcvSyncMaxPerPass` (cap how many are attempted per pass), so a large backlog of stalled pending orders can't slow down every sync.
+
 ---
 
 ## Certificate Enrollment
@@ -474,13 +573,27 @@ sequenceDiagram
     Plugin->>API: Place certificate order\n(CSR, domain, organization details,\nsubscriber agreement, requestor info)
     API-->>Plugin: Order accepted — order number assigned
 
+    opt DNS-01 DCV build, DCV enabled, and this order requires it
+        Plugin->>Plugin: Publish DNS TXT challenge\nvia the configured DNS provider plugin
+        Plugin->>API: Ask CERTInext to verify the record
+        API-->>Plugin: Domain validated (or still pending —\nfalls through to the pending path below)
+    end
+
     Plugin->>API: Check order status
     API-->>Plugin: Order status and certificate details
 
     alt Certificate issued immediately
         Plugin-->>CMD: Certificate ready — PEM returned
-    else Certificate pending approval
-        Plugin-->>CMD: Pending — Command will pick it up\nduring the next synchronization
+    else Certificate pending or not yet downloadable
+        loop Synchronous certificate pickup\n(PickupRetries × PickupDelay, default 3 × 5 s; ceiling 180 s)
+            Plugin->>API: Poll order status\nand attempt certificate download
+            API-->>Plugin: Status / certificate PEM
+        end
+        alt Certificate became available during pickup
+            Plugin-->>CMD: Certificate ready — PEM returned
+        else Still not available
+            Plugin-->>CMD: Pending — Command will pick it up\nduring the next synchronization
+        end
     else Order rejected by CERTInext
         Plugin-->>CMD: Enrollment failed — see gateway logs
     end
@@ -488,11 +601,17 @@ sequenceDiagram
     Plugin->>Plugin: Record enrollment outcome in audit log\n(order number, serial number, status)
 ```
 
+**DCV:** on a DCV-enabled build, DNS-01 validation runs inline for DV orders that require it, bounded by `DcvTimeoutMinutes`. When DCV isn't enabled, isn't built into this host, or the order doesn't require it, this step is skipped entirely and the order proceeds straight to the pending/pickup path like any other asynchronously-issued order.
+
+**Synchronous certificate pickup:** after placing an order (or after DCV completes), the plugin polls CERTInext a bounded number of times — `PickupRetries` attempts spaced `PickupDelay` seconds apart, with a hard ceiling of 180 seconds — before returning a pending disposition to Command. This lets fast-issuing DV certificates (and pre-approved renewals) come back in the same enrollment call. OV and EV orders undergo human review over minutes to hours and almost always exhaust this window; they are picked up by the next synchronization run.
+
 ### Renewal
 
 When Command initiates a renewal, the plugin checks whether the existing certificate is within the configured renewal window. If it is, the prior order record is used as context for the new request. If it is outside the window (or the prior certificate cannot be located), the plugin falls back to issuing a new certificate.
 
 > **Note:** CERTInext does not have a dedicated certificate renewal endpoint. Both renewal and reissuance paths submit a new `GenerateOrderSSL` order. The distinction affects how Keyfactor Command tracks the certificate record, not what is sent to CERTInext.
+
+> **Note:** If the prior-order lookup itself throws (rather than cleanly returning "not found" — e.g. a transient database error), the plugin falls back to issuing a new certificate rather than failing the enrollment.
 
 ```mermaid
 flowchart TD
@@ -508,6 +627,107 @@ flowchart TD
     H --> I([Certificate issued or pending])
     C --> I
 ```
+
+### V2 API Path (UseV2Api = true)
+
+When `UseV2Api` is enabled, Ping, Enroll, GetSingleRecord, and Revoke route through the V2 REST API. Synchronize continues to call the V1 `GetOrderReport` endpoint until the V2 `/reports/orders` endpoint is available.
+
+#### DCV required (DV SSL)
+
+```mermaid
+sequenceDiagram
+    participant CMD as Keyfactor Command
+    participant Plugin as CERTInext Plugin
+    participant API as CERTInext API (V2)
+    participant DNS as DNS Provider
+
+    CMD->>Plugin: Request new certificate\n(CSR, subject, SANs, product code, requester details)
+    Plugin->>Plugin: Record enrollment intent in audit log
+
+    Plugin->>API: POST /oauth/token\n(client_credentials grant)
+    API-->>Plugin: Bearer token (1-hour TTL)
+
+    Plugin->>API: POST /ssl-certificates\n(X-Product-Code header · Idempotency-Key · JSON body)
+    API-->>Plugin: 201 Created — orderId assigned\nstatus: pending-dcv
+
+    Plugin->>API: GET /ssl-certificates/{orderId}/dcv
+    API-->>Plugin: DCV challenge\n(fileNameContent = TXT value,\ndcvMethod = "2" for DNS-TXT)
+
+    Plugin->>DNS: Publish TXT record\n_emudhra-challenge.{domain} → fileNameContent
+    Plugin->>Plugin: Wait for DNS propagation
+
+    Plugin->>API: POST /ssl-certificates/{orderId}/dcv/verify\n(domain, method: "dns-txt")
+    API-->>Plugin: { "overallStatus": "VERIFIED" }\n(multi-perspective check)
+
+    Plugin->>DNS: Remove TXT record
+
+    loop Poll until status leaves pending-dcv\n(bounded by DcvTimeoutMinutes)
+        Plugin->>API: GET /ssl-certificates/{orderId}
+        API-->>Plugin: Current status
+    end
+
+    loop Synchronous certificate pickup\n(PickupRetries × PickupDelay, ceiling 180 s)
+        Plugin->>API: GET /ssl-certificates/{orderId}\nGET /ssl-certificates/{orderId}/certificate
+        API-->>Plugin: Status · certificatePem · chainPem[]
+    end
+
+    alt Certificate issued
+        Plugin->>Plugin: Assemble full chain\n(leaf + intermediates from chainPem[])
+        Plugin-->>CMD: Certificate ready — PEM chain returned
+    else Still pending
+        Plugin-->>CMD: Pending — picked up by next sync
+    else Order rejected
+        Plugin-->>CMD: Enrollment failed — see gateway logs
+    end
+
+    Plugin->>Plugin: Record enrollment outcome in audit log
+```
+
+#### No DCV required (OV/EV/Private PKI)
+
+```mermaid
+sequenceDiagram
+    participant CMD as Keyfactor Command
+    participant Plugin as CERTInext Plugin
+    participant API as CERTInext API (V2)
+
+    CMD->>Plugin: Request new certificate
+    Plugin->>Plugin: Record enrollment intent in audit log
+
+    Plugin->>API: POST /oauth/token
+    API-->>Plugin: Bearer token
+
+    Plugin->>API: POST /ssl-certificates\n(or /private-pki-certificates · /signature-certificates)
+    API-->>Plugin: 201 Created — orderId assigned\nstatus: pending-csr or pending-agreement
+
+    loop Synchronous certificate pickup\n(PickupRetries × PickupDelay, ceiling 180 s)
+        Plugin->>API: GET /ssl-certificates/{orderId}
+        API-->>Plugin: Current status
+    end
+
+    alt Certificate issued
+        Plugin->>API: GET /ssl-certificates/{orderId}/certificate
+        API-->>Plugin: certificatePem · chainPem[]
+        Plugin->>Plugin: Assemble full chain
+        Plugin-->>CMD: Certificate ready — PEM chain returned
+    else Still pending (OV/EV human review)
+        Plugin-->>CMD: Pending — picked up by next sync
+    else Order rejected
+        Plugin-->>CMD: Enrollment failed
+    end
+
+    Plugin->>Plugin: Record enrollment outcome in audit log
+```
+
+**Token caching:** the Bearer token is cached for its 1-hour lifetime and shared across all V2 calls in the same gateway process. A new token is fetched automatically 60 seconds before expiry.
+
+**Idempotency:** every unsafe V2 POST carries a unique `Idempotency-Key` UUID. If the gateway retries the same request (for example after a timeout), CERTInext returns the original response without creating a duplicate order.
+
+**Full certificate chain:** the V2 `/certificate` endpoint returns the leaf certificate in `certificatePem` and any intermediate certificates in `chainPem[]`. The plugin concatenates these into a single PEM before returning to Command.
+
+**Order IDs:** V2 order IDs are opaque strings (e.g. `ord_abc123`). They are stored as the `CARequestID` in Command alongside V1 numeric IDs — both coexist in the database.
+
+**Synchronize stays on V1:** the V2 `/reports/orders` endpoint returns 501 Not Implemented. Synchronization always calls the V1 `GetOrderReport` endpoint regardless of `UseV2Api`. A warning is logged when `UseV2Api = true` to make this visible. A follow-up update will switch sync to V2 once the endpoint ships.
 
 ---
 
@@ -573,6 +793,8 @@ flowchart TD
 
 The table below maps each Keyfactor Command operation to the CERTInext API endpoint it calls.
 
+**V1 endpoints (default)**
+
 | Operation | CERTInext API endpoint |
 |---|---|
 | Test connection / verify credentials | `POST ValidateCredentials` |
@@ -583,6 +805,23 @@ The table below maps each Keyfactor Command operation to the CERTInext API endpo
 | Synchronize inventory | `POST GetOrderReport` (paginated) |
 | List available product codes | `POST GetProductDetails` |
 | Attach CSR to draft order | `POST SubmitCSR` |
+
+**V2 endpoints (UseV2Api = true)**
+
+| Operation | V2 endpoint |
+|---|---|
+| Obtain Bearer token | `POST /oauth/token` |
+| Test connection | `GET /api/certinext/v2/auth/me` |
+| Issue / renew certificate | `POST /api/certinext/v2/{family}-certificates` |
+| Check order status | `GET /api/certinext/v2/{family}-certificates/{orderId}` |
+| Get DCV challenge (DV SSL) | `GET /api/certinext/v2/ssl-certificates/{orderId}/dcv` |
+| Verify DCV | `POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify` |
+| Download certificate | `GET /api/certinext/v2/{family}-certificates/{orderId}/certificate` |
+| Revoke certificate | `POST /api/certinext/v2/{family}-certificates/{orderId}/revoke` |
+| List available products | `GET /api/certinext/v2/catalog/products` |
+| Synchronize inventory | `POST GetOrderReport` (V1 — V2 /reports/orders not yet available) |
+
+`{family}` is `ssl-certificates`, `private-pki-certificates`, or `signature-certificates`.
 
 ## License
 

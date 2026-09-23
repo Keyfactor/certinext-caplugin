@@ -191,6 +191,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
             }
         }
 
+        // -----------------------------------------------------------------------
+        // V2 API status mapping
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// Maps a V2 REST API order status string to the Keyfactor
+        /// <see cref="EndEntityStatus"/> integer code expected by the gateway.
+        /// </summary>
+        /// <param name="v2Status">Status string from the V2 order response.</param>
+        public static int V2StatusToRequestDisposition(string v2Status) =>
+            v2Status?.ToLowerInvariant() switch
+            {
+                Constants.ApiV2.StatusIssued           => (int)EndEntityStatus.GENERATED,
+                Constants.ApiV2.StatusPendingDcv       => (int)EndEntityStatus.EXTERNALVALIDATION,
+                Constants.ApiV2.StatusPendingCsr       => (int)EndEntityStatus.EXTERNALVALIDATION,
+                Constants.ApiV2.StatusPendingAgreement => (int)EndEntityStatus.EXTERNALVALIDATION,
+                Constants.ApiV2.StatusRevoked          => (int)EndEntityStatus.REVOKED,
+                Constants.ApiV2.StatusCancelled        => (int)EndEntityStatus.FAILED,
+                _                                      => (int)EndEntityStatus.FAILED
+            };
+
+        /// <summary>
+        /// Converts an RFC 5280 CRL reason code to the V2 API revocation reason string.
+        /// Values are the CERTInext V2 spec's kebab-case `reason` enum (see
+        /// <see cref="Constants.RevocationReasonV2"/> and issues/0019 — sending the
+        /// legacy camelCase strings gets HTTP 400). Codes without a direct V2
+        /// equivalent (e.g. RFC 5280 code 8, "removeFromCRL", which is CRL-only and
+        /// not a valid revocation request reason) are mapped to "unspecified".
+        /// </summary>
+        /// <param name="crlReason">RFC 5280 CRL reason code from the gateway.</param>
+        public static string ToV2RevocationReason(uint crlReason) =>
+            crlReason switch
+            {
+                1  => Constants.RevocationReasonV2.KeyCompromise,        // RFC: keyCompromise
+                2  => Constants.RevocationReasonV2.CACompromise,         // RFC: cACompromise
+                3  => Constants.RevocationReasonV2.AffiliationChanged,  // RFC: affiliationChanged
+                4  => Constants.RevocationReasonV2.Superseded,          // RFC: superseded
+                5  => Constants.RevocationReasonV2.CessationOfOperation,// RFC: cessationOfOperation
+                6  => Constants.RevocationReasonV2.CertificateHold,     // RFC: certificateHold
+                9  => Constants.RevocationReasonV2.PrivilegeWithdrawn,  // RFC: privilegeWithdrawn
+                10 => Constants.RevocationReasonV2.AACompromise,        // RFC: aACompromise
+                _  => Constants.RevocationReasonV2.Unspecified
+            };
+
         /// <summary>
         /// Converts a CERTInext <c>revokeReasonId</c> integer back to the RFC 5280 CRL
         /// reason code for storage in the Keyfactor Command database.

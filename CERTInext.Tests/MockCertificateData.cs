@@ -294,6 +294,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Message = "Awaiting approval."
             };
 
+        // Reproduces the CERTInext "auto-approved" race: TrackOrder reports a
+        // certificateStatusId the client legacy-maps to "issued", but the immediate
+        // GetCertificate download failed (cert bytes not generated yet), so no PEM
+        // ever arrived. See issue 0009.
+        public static EnrollCertificateResponse AutoApprovedNoBodyEnrollResponse(string id = null) =>
+            new EnrollCertificateResponse
+            {
+                Id = id ?? CertId1,
+                Status = "issued",
+                Certificate = null,
+                ProfileId = ProfileIdTls,
+                Message = "Order auto-approved."
+            };
+
         // -----------------------------------------------------------------------
         // GetCertificate response (object helpers — used by Moq-based plugin tests)
         // These use the legacy inferred type (LegacyGetCertificateResponse).
@@ -477,6 +491,69 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         public static string UnauthorizedJson() =>
             @"{""error"":""UNAUTHORIZED"",""message"":""Invalid API key."",""statusCode"":401}";
+
+        // -----------------------------------------------------------------------
+        // V2 API JSON factories
+        // -----------------------------------------------------------------------
+
+        // V2 well-known order IDs
+        public const string V2OrderId1 = "ord_abc001";
+        public const string V2OrderId2 = "ord_abc002";
+
+        /// <summary>Standard OAuth2 client_credentials token response.</summary>
+        public static string V2TokenResponseJson(int expiresIn = 3600) =>
+            $@"{{""access_token"":""eyJhbGciOiJSUzI1NiJ9.test-token"",""token_type"":""Bearer"",""expires_in"":{expiresIn},""refresh_token"":""refresh-opaque-token""}}";
+
+        /// <summary>V2 create order response (status = pending-dcv).</summary>
+        public static string V2CreateOrderPendingJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""pending-dcv"",""_links"":{{""self"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}""}}}}}}";
+
+        /// <summary>V2 create order response (status = issued — unlikely on fresh order but usable for testing).</summary>
+        public static string V2CreateOrderIssuedJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""issued"",""_links"":{{""self"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}""}}}}}}";
+
+        /// <summary>V2 track order response — pending DCV.</summary>
+        public static string V2TrackOrderPendingJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""pending-dcv"",""productVariant"":""dv"",""domain"":""example.com"",""_links"":{{""self"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}""}}}}}}";
+
+        /// <summary>V2 track order response — issued.</summary>
+        public static string V2TrackOrderIssuedJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""issued"",""productVariant"":""dv"",""domain"":""example.com"",""_links"":{{""certificate"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}/certificate""}}}}}}";
+
+        /// <summary>V2 track order response — revoked.</summary>
+        public static string V2TrackOrderRevokedJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""revoked"",""productVariant"":""dv"",""domain"":""example.com"",""revocationReason"":""superseded"",""_links"":{{}}}}";
+
+        /// <summary>V2 certificate download response (leaf PEM only).</summary>
+        public static string V2CertificateDownloadJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""serialNumber"":""0A1B2C3D4E5F"",""subject"":""CN=example.com"",""issuer"":""CN=CERTInext TLS Intermediate"",""notBefore"":""2026-01-01T00:00:00Z"",""notAfter"":""2027-01-01T00:00:00Z"",""certificatePem"":""{EscapeForJson(FakePemCertificate)}""}}";
+
+        /// <summary>V2 auth/me response.</summary>
+        public static string V2AuthMeJson(string accountNumber = "99887766") =>
+            $@"{{""accountNumber"":""{accountNumber}"",""authType"":""oauth2""}}";
+
+        /// <summary>RFC 7807 problem+json error response.</summary>
+        public static string V2ProblemDetailsJson(int status = 403, string title = "Forbidden", string detail = "OAuth2 not enabled", string type = "EMS-2022") =>
+            $@"{{""type"":""{type}"",""title"":""{title}"",""status"":{status},""detail"":""{detail}"",""instance"":null}}";
+
+        /// <summary>V2 DCV challenge response (DNS-TXT method).</summary>
+        public static string V2DcvChallengeJson(string orderId = "ord_abc001", string domain = "example.com", string token = "emudhra-dcv-abc123") =>
+            $@"{{""orderNumber"":""{orderId}"",""domainName"":""{domain}"",""dcvMethod"":""2"",""fileNameContent"":""{token}"",""tokenExpiryDate"":""2026-12-31 23:59:59""}}";
+
+        /// <summary>V2 DCV verify response (success).</summary>
+        public static string V2DcvVerifySuccessJson(string domain = "example.com") =>
+            $@"{{""overallStatus"":""VERIFIED"",""method"":""dns-txt"",""verifiedAt"":""2026-09-21T10:00:00Z""}}";
+
+        /// <summary>V2 DCV verify response (failure).</summary>
+        public static string V2DcvVerifyFailedJson() =>
+            $@"{{""overallStatus"":""FAILED"",""method"":""dns-txt"",""verifiedAt"":null}}";
+
+        /// <summary>V2 certificate download response with chain PEM.</summary>
+        public static string V2CertificateDownloadWithChainJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""serialNumber"":""0A1B2C3D4E5F"",""subject"":""CN=example.com"",""issuer"":""CN=CERTInext TLS Intermediate"",""notBefore"":""2026-01-01T00:00:00Z"",""notAfter"":""2027-01-01T00:00:00Z"",""certificatePem"":""{EscapeForJson(FakePemCertificate)}"",""chainPem"":[""{EscapeForJson(FakeIntermediatePemCertificate)}""]}}";
+
+        public static readonly string FakeIntermediatePemCertificate =
+            "-----BEGIN CERTIFICATE-----\nMIIBfakeBASE64INTERMEDIATE==\n-----END CERTIFICATE-----";
 
         // -----------------------------------------------------------------------
         // Helpers

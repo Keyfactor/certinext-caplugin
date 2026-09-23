@@ -20,7 +20,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string AuthMode = "AuthMode";
             public const string Enabled = "Enabled";
             public const string IgnoreExpired = "IgnoreExpired";
+            public const string SubmitNonDnsSans = "SubmitNonDnsSans";
             public const string PageSize = "PageSize";
+
+            // Synchronous certificate pickup (parity with the legacy Sectigo connector).
+            // After submitting an order, Enroll() polls GetCertificate up to PickupRetries
+            // times, PickupDelay seconds apart (after a fixed initial delay), so a fast-issuing
+            // order returns the issued certificate in the same enrollment call instead of
+            // waiting for the next synchronization. On timeout the order is returned pending and
+            // imported by a later sync — behaviour identical to before this feature.
+            public const string PickupRetries = "PickupRetries";
+            public const string PickupDelay = "PickupDelay";
+
             public const string RequestorName = "RequestorName";
             public const string RequestorEmail = "RequestorEmail";
             public const string RequestorIsdCode = "RequestorIsdCode";
@@ -111,6 +122,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SignerIp = "SignerIp";
             public const string DomainName = "DomainName";      // primary domain for SSL/TLS orders
             public const string KeyType = "KeyType";
+
+            // V2 API enrollment parameters
+            public const string ProductFamily = "ProductFamily";  // V2: "ssl", "private-pki", or "signature"
+            public const string ProductVariant = "ProductVariant"; // V2: "dv", "ov", or "ev"
         }
 
         public static class Products
@@ -268,6 +283,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const int Default = KeyCompromise;
         }
 
+        public static class Pickup
+        {
+            // Defaults mirror the legacy Sectigo connector's PickUpEnrolledCertificate:
+            // a 5-second initial delay, then up to 5 poll attempts 10 seconds apart, so the
+            // maximum time an enrollment call occupies a Command worker thread is
+            // InitialDelaySeconds + DefaultRetries * DefaultDelaySeconds = 5 + 5*10 = 55 seconds.
+            // Set PickupRetries to 0 to disable the wait entirely (immediate pending return).
+            public const int DefaultRetries = 5;
+            public const int DefaultDelaySeconds = 10;
+
+            // Small static delay before the first poll — gives a fast order a chance to finish
+            // issuing before we poll at all, avoiding a guaranteed-miss first attempt.
+            public const int InitialDelaySeconds = 5;
+
+            // Per-factor safety clamps so a single mis-typed value cannot produce a tight busy-loop
+            // or an absurd per-attempt delay. These bound each knob independently; the *product*
+            // (retries * delay) is bounded separately by MaxTotalWaitSeconds below.
+            public const int MaxRetries = 30;
+            public const int MaxDelaySeconds = 60;
+
+            // Hard ceiling on total in-call pickup occupancy (initial delay + retries * delay).
+            // The per-factor clamps above still permit a ~1805s product at the extremes, which could
+            // push Enroll() past Command's enrollment timeout; PickUpEnrolledCertificateAsync caps the
+            // effective retry count so the total never exceeds this. Kept comfortably under a typical
+            // enrollment timeout while leaving room for the documented ~90s default guidance.
+            public const int MaxTotalWaitSeconds = 180;
+        }
+
         public static class Dcv
         {
             // CERTInext dcvMethod values (dcvDetails.dcvMethod in GetDcv / VerifyDcv)
@@ -285,6 +328,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Override via the DcvTxtRecordTemplate connector config field.
             public const string DefaultTxtRecordTemplate = "_emsign-validation.{0}";
 
+            // Independent bound for a single CleanupValidation (TXT-record removal) call. This is
+            // deliberately its own fixed ceiling, not a fraction of DcvTimeoutMinutes and not the
+            // ambient DCV-flow cancellation token: cleanup is a best-effort compensating action that
+            // must get a real chance to run even when the operation it's cleaning up after was
+            // itself cancelled (the ambient token would already be cancelled at that point), but it
+            // still must not be allowed to hang the calling gateway request forever if a DNS
+            // provider plugin's underlying network call stalls. 60s comfortably covers a single
+            // DELETE-shaped call under normal conditions (the reference CloudflareDomainValidator's
+            // HttpClient default alone is 100s) without risking an indefinite hang.
+            public const int CleanupValidationTimeoutSeconds = 60;
+
             // Defaults for the DCV-during-sync bounds (issue 0002).
             public const int DefaultSyncMaxOrderAgeHours = 24;
             public const int DefaultSyncMaxPerPass = 50;
@@ -297,7 +351,51 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const int SyncPropagationDelaySeconds = 3;
         }
 
+        /// <summary>
+        /// V2 REST API constants — all paths, status strings, and family slugs for the
+        /// <c>/api/certinext/v2/</c> surface. Auth is OAuth2 client_credentials; every
+        /// unsafe call requires an <c>Idempotency-Key</c> header.
+        /// </summary>
+        public static class ApiV2
+        {
+            // Auth / connectivity
+            public const string TokenPath         = "/oauth/token";
+            public const string AuthMePath        = "/api/certinext/v2/auth/me";
+
+            // Product-family resource paths (appended to base URL)
+            public const string SslCertificatesPath        = "/api/certinext/v2/ssl-certificates";
+            public const string PrivatePkiCertificatesPath = "/api/certinext/v2/private-pki-certificates";
+            public const string SignatureCertificatesPath  = "/api/certinext/v2/signature-certificates";
+            public const string CatalogProductsPath        = "/api/certinext/v2/catalog/products";
+
+            // Order status strings (V2 REST — NOT numeric IDs)
+            public const string StatusPendingDcv       = "pending-dcv";
+            public const string StatusPendingCsr       = "pending-csr";
+            public const string StatusPendingAgreement = "pending-agreement";
+            public const string StatusIssued           = "issued";
+            public const string StatusCancelled        = "cancelled";
+            public const string StatusRevoked          = "revoked";
+
+            // Product-family slugs (used as URL path segments)
+            public const string FamilySsl        = "ssl-certificates";
+            public const string FamilyPrivatePki = "private-pki-certificates";
+            public const string FamilySignature  = "signature-certificates";
+        }
+
+        // V2 config key constants (added here alongside existing Config constants)
+        public static class ConfigV2
+        {
+            public const string UseV2Api      = "UseV2Api";
+            public const string ApiUrlV2      = "ApiUrlV2";
+            public const string ClientId      = "ClientId";
+            public const string ClientSecret  = "ClientSecret";
+        }
+
         // Legacy string revocation reasons — retained so StatusMapper still compiles.
+        // V1 never puts these on the wire (RevokeOrderRequest sends a numeric
+        // revokeReasonId — see CERTInextClient.RevokeCertificateAsync /
+        // MapLegacyReasonStringToCrlCode), so this class is intentionally left
+        // untouched by the 0019 V2 kebab-case fix; see RevocationReasonV2 below.
         public static class RevocationReason
         {
             public const string Unspecified = "unspecified";
@@ -310,6 +408,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string RemoveFromCRL = "removeFromCRL";
             public const string PrivilegeWithdrawn = "privilegeWithdrawn";
             public const string AACompromise = "aACompromise";
+        }
+
+        // V2 API revocation reason strings. These must match the CERTInext V2 spec's
+        // kebab-case `reason` enum exactly (docs/reference/specs/CERTInext API
+        // v2.postman_collection.json, "Revoke Certificate"). Sending camelCase (the
+        // pre-fix values, shared with the legacy RevocationReason class above) gets
+        // HTTP 400 — see issues/0019. `AACompromise` is accepted on the
+        // signature-certificates / private-pki-certificates revoke endpoints per spec,
+        // but is not documented on ssl-certificates; kept here as the RFC 5280 code-10
+        // mapping for those other families. There is no V2 equivalent of the RFC 5280
+        // CRL-only "removeFromCRL" (code 8) reason, so it is intentionally absent here.
+        public static class RevocationReasonV2
+        {
+            public const string Unspecified = "unspecified";
+            public const string KeyCompromise = "key-compromise";
+            public const string CACompromise = "ca-compromise";
+            public const string AffiliationChanged = "affiliation-changed";
+            public const string Superseded = "superseded";
+            public const string CessationOfOperation = "cessation-of-operation";
+            public const string CertificateHold = "certificate-hold";
+            public const string PrivilegeWithdrawn = "privilege-withdrawn";
+            public const string AACompromise = "aa-compromise";
         }
     }
 }
