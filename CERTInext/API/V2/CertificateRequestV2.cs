@@ -138,9 +138,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     public class V2RevokeRequest
     {
         /// <summary>
-        /// RFC 5280 string reason. Valid values: unspecified, keyCompromise,
-        /// caCompromise, affiliationChanged, superseded, cessationOfOperation,
-        /// privilegeWithdrawn.
+        /// RFC 5280 string reason, kebab-case per the V2 spec. Valid values: unspecified,
+        /// key-compromise, ca-compromise, affiliation-changed, superseded,
+        /// cessation-of-operation, certificate-hold, privilege-withdrawn (plus
+        /// aa-compromise on the signature-certificates / private-pki-certificates
+        /// endpoints). Sending camelCase gets HTTP 400 — see issues/0019.
         /// </summary>
         [JsonPropertyName("reason")]
         public string Reason { get; set; } = "unspecified";

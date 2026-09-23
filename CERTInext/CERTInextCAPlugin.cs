@@ -1507,15 +1507,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "ReasonCode={ReasonCode}, V2Reason={V2Reason}",
                 caRequestID, hexSerialNumber, revocationReason, v2Reason);
 
-            // Pre-flight: verify the order exists and is revocable
+            // Pre-flight: resolve which product family owns this order (via TrackOrder,
+            // which probes families and 404s cleanly per-family) and verify it is revocable.
+            // This resolves the family definitively *before* we ever call revoke, so a 404
+            // from RevokeOrderV2Async below is unambiguous — issues/0019: revoke's own 404
+            // means "not found or not revokable" (per spec), and probing multiple families
+            // on a revoke 404 previously produced a misleading "not found in any product
+            // family" for orders that legitimately exist but simply aren't revokable yet.
             V2OrderStatusResponse currentStatus;
             string resolvedFamily;
             try
             {
-                // We need the family for the revoke call, so resolve manually
-                currentStatus = await _client.ResolveAndTrackOrderV2Async(caRequestID);
-                // Re-resolve to get family (the resolver probes families internally)
-                resolvedFamily = Constants.ApiV2.FamilySsl; // default; override below via re-probe if needed
+                (resolvedFamily, currentStatus) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(caRequestID);
             }
             catch (Exception ex)
             {
@@ -1542,32 +1545,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "Only issued certificates may be revoked.");
             }
 
-            // Determine which family we resolved — try each until the revoke succeeds
             var revokeReq = new V2RevokeRequest
             {
                 Reason = v2Reason,
                 Note   = $"Revoked via Keyfactor Command. CRL reason code: {revocationReason} ({v2Reason})."
             };
 
-            // Probe families to issue the revoke call
-            bool revoked = false;
-            foreach (var family in new[] { Constants.ApiV2.FamilySsl, Constants.ApiV2.FamilyPrivatePki, Constants.ApiV2.FamilySignature })
+            try
             {
-                try
-                {
-                    await _client.RevokeOrderV2Async(family, caRequestID, revokeReq);
-                    resolvedFamily = family;
-                    revoked = true;
-                    break;
-                }
-                catch (KeyNotFoundException)
-                {
-                    // Not in this family — try next
-                }
+                await _client.RevokeOrderV2Async(resolvedFamily, caRequestID, revokeReq);
             }
-
-            if (!revoked)
-                throw new KeyNotFoundException($"V2 order '{caRequestID}' not found in any product family for revocation.");
+            catch (KeyNotFoundException knf)
+            {
+                // We already confirmed the order lives in `resolvedFamily` via TrackOrder
+                // above, so a 404 here is the spec's other documented meaning — "not in a
+                // revokable state" — not a genuine family miss. Surface that plainly
+                // instead of retrying other families.
+                throw new InvalidOperationException(
+                    $"V2 order '{caRequestID}' (family '{resolvedFamily}') could not be revoked: " +
+                    $"CERTInext reports it as not found or not in a revokable state. {knf.Message}");
+            }
 
             _logger.LogInformation(
                 "V2 revocation complete. CARequestID={Id}, HexSerialNumber={Serial}, V2Reason={V2Reason}, Family={Family}",
@@ -2489,6 +2486,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// True when the exception's message contains the CERTInext V2 EMS-1080 code
+        /// ("Domain is already verified"), the spec's documented no-op for both
+        /// GetDcv and VerifyDcv on a domain that is still within its DCV reuse window
+        /// (issues/0020). Message-based rather than a typed field because the API's
+        /// RFC 7807 body carries the EMS code as text embedded in `detail`/`title`,
+        /// not as a separate structured field (see <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2ProblemDetails"/>).
+        /// </summary>
+        private static bool IsEms1080DomainAlreadyVerified(Exception ex) =>
+            ex?.Message?.IndexOf("EMS-1080", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        /// <summary>
         /// Performs DNS-01 DCV for a V2 SSL order using the V2 DCV endpoints.
         /// Mirrors <see cref="PerformDcvIfNeededAsync"/> for the V2 API path.
         ///
@@ -2498,6 +2506,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///   3. POST /ssl-certificates/{orderId}/dcv/verify → trigger CA-side verification
         ///   4. Poll <see cref="ICERTInextClient.TrackOrderV2Async"/> until status != "pending-dcv"
         ///   5. Clean up TXT record
+        ///
+        /// EMS-1080 ("Domain is already verified") from either GetDcv or VerifyDcv is
+        /// treated as DCV already satisfied (issues/0020): publishing is skipped and
+        /// the flow proceeds straight to step 4.
         ///
         /// Returns <c>true</c> when DCV steps were executed, <c>false</c> when skipped.
         /// </summary>
@@ -2534,10 +2546,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             // 1. Fetch challenge
-            V2DcvChallengeResponse challenge;
+            V2DcvChallengeResponse challenge = null;
+            bool dcvAlreadySatisfied = false;
             try
             {
                 challenge = await _client.GetDcvV2Async(orderId, productFamilySlug, ct);
+            }
+            catch (Exception ex) when (IsEms1080DomainAlreadyVerified(ex))
+            {
+                // EMS-1080 "Domain is already verified" is a documented no-op (issues/0020),
+                // not a failure: the domain is account-scoped and reusable, so there is no
+                // fresh challenge to fetch. Treat DCV as already satisfied and skip straight
+                // to tracking/issuance instead of deferring to the next sync cycle.
+                _logger.LogInformation(
+                    "V2 DCV already satisfied (EMS-1080 domain already verified) for order {OrderId}; " +
+                    "skipping TXT publish and proceeding to tracking.", orderId);
+                dcvAlreadySatisfied = true;
             }
             catch (Exception ex)
             {
@@ -2547,80 +2571,105 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return false;
             }
 
-            string token = challenge?.FileNameContent;
-            if (string.IsNullOrWhiteSpace(token))
+            string token = null;
+            string hostname = null;
+            Keyfactor.AnyGateway.Extensions.IDomainValidator validator = null;
+
+            if (!dcvAlreadySatisfied)
             {
-                _dcvInFlight.TryRemove(orderId, out _);
-                _logger.LogWarning(
-                    "V2 GetDcv returned no token for order {OrderId}; deferring DCV.", orderId);
-                return false;
+                token = challenge?.FileNameContent;
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    _dcvInFlight.TryRemove(orderId, out _);
+                    _logger.LogWarning(
+                        "V2 GetDcv returned no token for order {OrderId}; deferring DCV.", orderId);
+                    return false;
+                }
+
+                // V2 TXT record name uses the _emudhra-challenge prefix
+                hostname = $"_emudhra-challenge.{domain}";
+
+                validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
+                if (validator == null)
+                {
+                    _dcvInFlight.TryRemove(orderId, out _);
+                    _logger.LogError(
+                        "No DNS provider plugin resolved for domain '{Domain}' on V2 order {OrderId}. " +
+                        "Ensure the appropriate DNS provider plugin is deployed and configured.",
+                        LogSanitizer.Strip(domain), orderId);
+                    return false;
+                }
             }
-
-            // V2 TXT record name uses the _emudhra-challenge prefix
-            string hostname = $"_emudhra-challenge.{domain}";
-
-            var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
-            if (validator == null)
-            {
-                _dcvInFlight.TryRemove(orderId, out _);
-                _logger.LogError(
-                    "No DNS provider plugin resolved for domain '{Domain}' on V2 order {OrderId}. " +
-                    "Ensure the appropriate DNS provider plugin is deployed and configured.",
-                    LogSanitizer.Strip(domain), orderId);
-                return false;
-            }
-
-            // 2. Publish TXT record
-            _logger.LogInformation(
-                "Staging V2 DNS TXT record. OrderId={OrderId}, Hostname={Hostname}", orderId, LogSanitizer.Strip(hostname));
 
             // staged=true only after a successful StageValidation so the finally only attempts
             // cleanup when there is a record to remove (Finding C — cleanup skipped on !Success).
             bool staged = false;
             try
             {
-                DomainValidationResult stageResult;
-                try
+                if (!dcvAlreadySatisfied)
                 {
-                    stageResult = await validator.StageValidation(hostname, token, ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex,
-                        "V2 DCV: DNS provider threw while staging '{Domain}' for order {OrderId}.",
-                        LogSanitizer.Strip(domain), orderId);
-                    return false;
-                }
+                    // 2. Publish TXT record
+                    _logger.LogInformation(
+                        "Staging V2 DNS TXT record. OrderId={OrderId}, Hostname={Hostname}", orderId, LogSanitizer.Strip(hostname));
 
-                if (!stageResult.Success)
-                {
-                    _logger.LogError(
-                        "V2 DCV: Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}.",
-                        LogSanitizer.Strip(domain), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
-                    return false;
-                }
-                staged = true;
+                    DomainValidationResult stageResult;
+                    try
+                    {
+                        // Non-null here: only reached when !dcvAlreadySatisfied, and
+                        // validator/hostname are always assigned together in that branch above.
+                        stageResult = await validator!.StageValidation(hostname!, token, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "V2 DCV: DNS provider threw while staging '{Domain}' for order {OrderId}.",
+                            LogSanitizer.Strip(domain), orderId);
+                        return false;
+                    }
 
-                // Wait for DNS propagation
-                int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
-                _logger.LogInformation(
-                    "Waiting {Delay}s for DNS propagation before V2 DCV verify. OrderId={OrderId}", delaySeconds, orderId);
-                await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+                    if (!stageResult.Success)
+                    {
+                        _logger.LogError(
+                            "V2 DCV: Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}.",
+                            LogSanitizer.Strip(domain), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
+                        return false;
+                    }
+                    staged = true;
 
-                // 3. Trigger CA-side verification
-                _logger.LogInformation(
-                    "Triggering V2 DCV verification. OrderId={OrderId}, Domain={Domain}", orderId, LogSanitizer.Strip(domain));
-                var verifyResp = await _client.VerifyDcvV2Async(orderId, domain, productFamilySlug, ct);
-                _logger.LogInformation(
-                    "V2 DCV verify response. OrderId={OrderId}, OverallStatus={Status}",
-                    orderId, verifyResp?.OverallStatus ?? "(null)");
+                    // Wait for DNS propagation
+                    int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
+                    _logger.LogInformation(
+                        "Waiting {Delay}s for DNS propagation before V2 DCV verify. OrderId={OrderId}", delaySeconds, orderId);
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
 
-                if (!string.Equals(verifyResp?.OverallStatus, "VERIFIED", StringComparison.OrdinalIgnoreCase))
-                {
-                    _logger.LogWarning(
-                        "V2 DCV verify did not return VERIFIED for order {OrderId}. Status={Status}",
-                        orderId, verifyResp?.OverallStatus);
-                    return false;
+                    // 3. Trigger CA-side verification
+                    _logger.LogInformation(
+                        "Triggering V2 DCV verification. OrderId={OrderId}, Domain={Domain}", orderId, LogSanitizer.Strip(domain));
+                    try
+                    {
+                        var verifyResp = await _client.VerifyDcvV2Async(orderId, domain, productFamilySlug, ct);
+                        _logger.LogInformation(
+                            "V2 DCV verify response. OrderId={OrderId}, OverallStatus={Status}",
+                            orderId, verifyResp?.OverallStatus ?? "(null)");
+
+                        if (!string.Equals(verifyResp?.OverallStatus, "VERIFIED", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogWarning(
+                                "V2 DCV verify did not return VERIFIED for order {OrderId}. Status={Status}",
+                                orderId, verifyResp?.OverallStatus);
+                            return false;
+                        }
+                    }
+                    catch (Exception ex) when (IsEms1080DomainAlreadyVerified(ex))
+                    {
+                        // Same no-op as the GetDcv branch above, but surfaced at Verify time
+                        // instead — the domain became/was already verified between the two
+                        // calls. Treat as verified and continue to tracking rather than
+                        // deferring (issues/0020).
+                        _logger.LogInformation(
+                            "V2 DCV already satisfied (EMS-1080 domain already verified) for order {OrderId} " +
+                            "during VerifyDcv; treating as verified and proceeding to tracking.", orderId);
+                    }
                 }
 
                 // 4. Poll TrackOrderV2 until status leaves pending-dcv
@@ -2663,7 +2712,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     {
                         using var cleanupCts = new CancellationTokenSource(
                             TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
-                        await validator.CleanupValidation(hostname, cleanupCts.Token);
+                        // Non-null here: staged is only true when !dcvAlreadySatisfied, in
+                        // which case validator/hostname were assigned before staging began.
+                        await validator!.CleanupValidation(hostname!, cleanupCts.Token);
                         _logger.LogInformation(
                             "V2 DCV: DNS TXT record cleaned up. OrderId={OrderId}, Hostname={Hostname}",
                             orderId, LogSanitizer.Strip(hostname));

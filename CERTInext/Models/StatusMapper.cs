@@ -214,18 +214,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 
         /// <summary>
         /// Converts an RFC 5280 CRL reason code to the V2 API revocation reason string.
-        /// Codes without a direct V2 equivalent are mapped to "unspecified".
+        /// Values are the CERTInext V2 spec's kebab-case `reason` enum (see
+        /// <see cref="Constants.RevocationReasonV2"/> and issues/0019 — sending the
+        /// legacy camelCase strings gets HTTP 400). Codes without a direct V2
+        /// equivalent (e.g. RFC 5280 code 8, "removeFromCRL", which is CRL-only and
+        /// not a valid revocation request reason) are mapped to "unspecified".
         /// </summary>
         /// <param name="crlReason">RFC 5280 CRL reason code from the gateway.</param>
         public static string ToV2RevocationReason(uint crlReason) =>
             crlReason switch
             {
-                1 => Constants.RevocationReason.KeyCompromise,        // RFC: keyCompromise
-                3 => Constants.RevocationReason.AffiliationChanged,   // RFC: affiliationChanged
-                4 => Constants.RevocationReason.Superseded,           // RFC: superseded
-                5 => Constants.RevocationReason.CessationOfOperation, // RFC: cessationOfOperation
-                9 => Constants.RevocationReason.PrivilegeWithdrawn,   // RFC: privilegeWithdrawn
-                _ => Constants.RevocationReason.Unspecified
+                1  => Constants.RevocationReasonV2.KeyCompromise,        // RFC: keyCompromise
+                2  => Constants.RevocationReasonV2.CACompromise,         // RFC: cACompromise
+                3  => Constants.RevocationReasonV2.AffiliationChanged,  // RFC: affiliationChanged
+                4  => Constants.RevocationReasonV2.Superseded,          // RFC: superseded
+                5  => Constants.RevocationReasonV2.CessationOfOperation,// RFC: cessationOfOperation
+                6  => Constants.RevocationReasonV2.CertificateHold,     // RFC: certificateHold
+                9  => Constants.RevocationReasonV2.PrivilegeWithdrawn,  // RFC: privilegeWithdrawn
+                10 => Constants.RevocationReasonV2.AACompromise,        // RFC: aACompromise
+                _  => Constants.RevocationReasonV2.Unspecified
             };
 
         /// <summary>

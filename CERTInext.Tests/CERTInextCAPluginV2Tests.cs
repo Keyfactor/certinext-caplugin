@@ -290,16 +290,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Revoke_V2Enabled_ResolvesAndRevokes()
         {
             var mock = new Mock<ICERTInextClient>(); // Loose
-            mock.Setup(c => c.ResolveAndTrackOrderV2Async(
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
                     MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2OrderStatusResponse
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
                 {
                     OrderId = MockCertificateData.V2OrderId1,
                     Status  = "issued"
-                });
+                }));
 
             mock.Setup(c => c.RevokeOrderV2Async(
-                    It.IsAny<string>(), MockCertificateData.V2OrderId1,
+                    Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1,
                     It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
 
@@ -313,9 +313,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Revoke_V2Enabled_DoesNotCallV1RevokeCertificate()
         {
             var mock = new Mock<ICERTInextClient>();
-            mock.Setup(c => c.ResolveAndTrackOrderV2Async(
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
                     It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2OrderStatusResponse { Status = "issued", OrderId = "ord_x" });
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse { Status = "issued", OrderId = "ord_x" }));
 
             mock.Setup(c => c.RevokeOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
@@ -327,6 +327,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             mock.Verify(c => c.RevokeCertificateAsync(
                 It.IsAny<string>(), It.IsAny<RevokeCertificateRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Regression (issues/0019): revoke 404 after the family is already resolved
+        // must not be reported as a family miss.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Revoke_V2Enabled_RevokeReturns404AfterFamilyResolved_ReportsNotRevokable_NotFamilyMiss()
+        {
+            var mock = new Mock<ICERTInextClient>(); // Loose
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = MockCertificateData.V2OrderId1,
+                    Status  = "issued"
+                }));
+
+            // Order is confirmed to live in the SSL family (TrackOrder above succeeded),
+            // but the revoke call itself 404s — per spec that means "not revokable",
+            // not "wrong family". The plugin must not retry other families for it.
+            mock.Setup(c => c.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1,
+                    It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new KeyNotFoundException(
+                    $"V2 order '{MockCertificateData.V2OrderId1}' in family '{Constants.ApiV2.FamilySsl}' " +
+                    "not found or not in a revokable state."));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => plugin.Revoke(MockCertificateData.V2OrderId1, "AABB", 4u));
+
+            ex.Message.Should().Contain("not found or not in a revokable state");
+            ex.Message.Should().NotContain("any product family",
+                "a 404 after the family was already resolved must not be mislabeled as a family miss");
+
+            // Must not have probed the other two families.
+            mock.Verify(c => c.RevokeOrderV2Async(
+                Constants.ApiV2.FamilyPrivatePki, It.IsAny<string>(),
+                It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.RevokeOrderV2Async(
+                Constants.ApiV2.FamilySignature, It.IsAny<string>(),
+                It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()), Times.Never);
         }
 
         // ---------------------------------------------------------------------------

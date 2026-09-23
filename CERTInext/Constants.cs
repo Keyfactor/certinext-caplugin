@@ -392,6 +392,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         // Legacy string revocation reasons — retained so StatusMapper still compiles.
+        // V1 never puts these on the wire (RevokeOrderRequest sends a numeric
+        // revokeReasonId — see CERTInextClient.RevokeCertificateAsync /
+        // MapLegacyReasonStringToCrlCode), so this class is intentionally left
+        // untouched by the 0019 V2 kebab-case fix; see RevocationReasonV2 below.
         public static class RevocationReason
         {
             public const string Unspecified = "unspecified";
@@ -404,6 +408,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string RemoveFromCRL = "removeFromCRL";
             public const string PrivilegeWithdrawn = "privilegeWithdrawn";
             public const string AACompromise = "aACompromise";
+        }
+
+        // V2 API revocation reason strings. These must match the CERTInext V2 spec's
+        // kebab-case `reason` enum exactly (docs/reference/specs/CERTInext API
+        // v2.postman_collection.json, "Revoke Certificate"). Sending camelCase (the
+        // pre-fix values, shared with the legacy RevocationReason class above) gets
+        // HTTP 400 — see issues/0019. `AACompromise` is accepted on the
+        // signature-certificates / private-pki-certificates revoke endpoints per spec,
+        // but is not documented on ssl-certificates; kept here as the RFC 5280 code-10
+        // mapping for those other families. There is no V2 equivalent of the RFC 5280
+        // CRL-only "removeFromCRL" (code 8) reason, so it is intentionally absent here.
+        public static class RevocationReasonV2
+        {
+            public const string Unspecified = "unspecified";
+            public const string KeyCompromise = "key-compromise";
+            public const string CACompromise = "ca-compromise";
+            public const string AffiliationChanged = "affiliation-changed";
+            public const string Superseded = "superseded";
+            public const string CessationOfOperation = "cessation-of-operation";
+            public const string CertificateHold = "certificate-hold";
+            public const string PrivilegeWithdrawn = "privilege-withdrawn";
+            public const string AACompromise = "aa-compromise";
         }
     }
 }

@@ -318,6 +318,88 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Regression (issues/0019): 422 message reflects the CA's actual detail
+        // rather than presuming "order not in issued state" for every 422.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task RevokeOrderV2Async_422_LabelsByActualDetail_NotHardcodedIssuedStateMessage()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/revoke")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(422)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    // Observed live sandbox behavior for a revoke attempted while the
+                    // order is still internally finalizing — no EMS code in this detail.
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(
+                        422, "Unprocessable Entity", "Certificate Request still being processed")));
+
+            using var client = BuildV2Client();
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => client.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl,
+                    MockCertificateData.V2OrderId1,
+                    new V2RevokeRequest { Reason = "superseded" }));
+
+            ex.Message.Should().Contain("still being processed");
+            ex.Message.Should().NotContain("not in issued state",
+                "the message must reflect the CA's actual detail text, not a hardcoded assumption");
+        }
+
+        [Fact]
+        public async Task RevokeOrderV2Async_422_DistinctEmsCode_LabelsByThatCode()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/revoke")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(422)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(
+                        422, "Unprocessable Entity", "EMS-969 Revoke reason ID missing")));
+
+            using var client = BuildV2Client();
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => client.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl,
+                    MockCertificateData.V2OrderId1,
+                    new V2RevokeRequest { Reason = "superseded" }));
+
+            ex.Message.Should().Contain("EMS-969");
+            ex.Message.Should().NotContain("not in issued state");
+        }
+
+        [Fact]
+        public async Task RevokeOrderV2Async_404_ThrowsNotFoundOrNotRevokable_NotGenericNotFound()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/revoke")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(404)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(
+                        404, "Not Found", "Order not found or not in a revokable state.")));
+
+            using var client = BuildV2Client();
+            var ex = await Assert.ThrowsAsync<KeyNotFoundException>(
+                () => client.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl,
+                    MockCertificateData.V2OrderId1,
+                    new V2RevokeRequest { Reason = "superseded" }));
+
+            ex.Message.Should().Contain("not found or not in a revokable state");
+        }
+
+        // ---------------------------------------------------------------------------
         // Product-family resolution
         // ---------------------------------------------------------------------------
 

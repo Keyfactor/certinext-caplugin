@@ -15,6 +15,9 @@
 - **Renewals now use the certificate template's product code.** Renewals previously always used the connector's `DefaultProductCode`, which could send an empty product code if that setting was never configured. Renewals now use the template's code, falling back to `DefaultProductCode` only when the template doesn't have one.
 - **V2 OAuth errors now name the right cause.** 401 means a bad ClientId/ClientSecret; 403 means the key wasn't created in OAuth mode.
 - **V2 error messages now include CERTInext's per-field validation errors.**
+- **V2 revocation no longer fails with HTTP 400 for most reasons.** Reasons are now sent in the kebab-case form the API requires.
+- **V2 revocation now reports "not found or not revokable" instead of a misleading product-family error.**
+- **V2 DCV now treats an already-verified domain (EMS-1080) as satisfied instead of deferring.**
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).

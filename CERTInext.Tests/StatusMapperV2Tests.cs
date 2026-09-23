@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Collections.Generic;
 using FluentAssertions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.PKI.Enums.EJBCA;
@@ -49,17 +50,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Theory]
-        [InlineData(0u,  Constants.RevocationReason.Unspecified)]
-        [InlineData(1u,  Constants.RevocationReason.KeyCompromise)]
-        [InlineData(2u,  Constants.RevocationReason.Unspecified)]       // caCompromise has no V2 equivalent
-        [InlineData(3u,  Constants.RevocationReason.AffiliationChanged)]
-        [InlineData(4u,  Constants.RevocationReason.Superseded)]
-        [InlineData(5u,  Constants.RevocationReason.CessationOfOperation)]
-        [InlineData(6u,  Constants.RevocationReason.Unspecified)]       // certificateHold → unspecified
-        [InlineData(8u,  Constants.RevocationReason.Unspecified)]       // removeFromCRL → unspecified
-        [InlineData(9u,  Constants.RevocationReason.PrivilegeWithdrawn)]
-        [InlineData(10u, Constants.RevocationReason.Unspecified)]       // aACompromise → unspecified
-        [InlineData(99u, Constants.RevocationReason.Unspecified)]       // unknown → unspecified
+        [InlineData(0u,  Constants.RevocationReasonV2.Unspecified)]
+        [InlineData(1u,  Constants.RevocationReasonV2.KeyCompromise)]
+        [InlineData(2u,  Constants.RevocationReasonV2.CACompromise)]
+        [InlineData(3u,  Constants.RevocationReasonV2.AffiliationChanged)]
+        [InlineData(4u,  Constants.RevocationReasonV2.Superseded)]
+        [InlineData(5u,  Constants.RevocationReasonV2.CessationOfOperation)]
+        [InlineData(6u,  Constants.RevocationReasonV2.CertificateHold)]
+        [InlineData(8u,  Constants.RevocationReasonV2.Unspecified)]      // removeFromCRL: CRL-only, not a valid revoke reason
+        [InlineData(9u,  Constants.RevocationReasonV2.PrivilegeWithdrawn)]
+        [InlineData(10u, Constants.RevocationReasonV2.AACompromise)]
+        [InlineData(99u, Constants.RevocationReasonV2.Unspecified)]      // unknown → unspecified
         public void ToV2RevocationReason_MapsCorrectly(uint crlReason, string expectedV2Reason)
         {
             StatusMapper.ToV2RevocationReason(crlReason).Should().Be(expectedV2Reason);
@@ -74,6 +75,56 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public void ToV2RevocationReason_NeverReturnsNullOrEmpty(uint crlReason)
         {
             StatusMapper.ToV2RevocationReason(crlReason).Should().NotBeNullOrEmpty();
+        }
+
+        // ---------------------------------------------------------------------------
+        // Regression (issues/0019): every CRL reason code Keyfactor Command can send
+        // to IAnyCAPlugin.Revoke must map to a value in the V2 spec's kebab-case
+        // `reason` enum (docs/reference/specs/CERTInext API v2.postman_collection.json,
+        // "Revoke Certificate"), never to a camelCase string that would get HTTP 400.
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// The V2 spec's `reason` enum, hardcoded from the spec text rather than from
+        /// <see cref="Constants.RevocationReasonV2"/> so this test still catches a
+        /// future accidental edit to that class drifting away from the spec.
+        /// </summary>
+        private static readonly HashSet<string> SpecRevocationReasonEnum = new()
+        {
+            "unspecified",
+            "key-compromise",
+            "ca-compromise",
+            "affiliation-changed",
+            "superseded",
+            "cessation-of-operation",
+            "certificate-hold",
+            "privilege-withdrawn",
+            "aa-compromise",
+        };
+
+        // RFC 5280 CRLReason codes that Keyfactor Command can pass through to
+        // IAnyCAPlugin.Revoke's revocationReason parameter (0-10, minus the two
+        // codes RFC 5280 never assigns: 7 and, for a *request* reason, 8
+        // (removeFromCRL is CRL-only) is still exercised here to prove it degrades
+        // safely to "unspecified" rather than to an invalid string).
+        [Theory]
+        [InlineData(0u)]
+        [InlineData(1u)]
+        [InlineData(2u)]
+        [InlineData(3u)]
+        [InlineData(4u)]
+        [InlineData(5u)]
+        [InlineData(6u)]
+        [InlineData(8u)]
+        [InlineData(9u)]
+        [InlineData(10u)]
+        public void ToV2RevocationReason_EveryCrlCode_MapsToASpecEnumValue(uint crlReason)
+        {
+            string v2Reason = StatusMapper.ToV2RevocationReason(crlReason);
+
+            SpecRevocationReasonEnum.Should().Contain(v2Reason,
+                $"CRL reason code {crlReason} mapped to '{v2Reason}', which is not one of the V2 spec's " +
+                "kebab-case reason values — sending it would get HTTP 400 (issues/0019).");
         }
     }
 }

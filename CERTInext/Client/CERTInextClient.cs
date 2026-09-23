@@ -1432,14 +1432,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (resp.StatusCode == HttpStatusCode.NotFound)
             {
                 Logger.MethodExit(LogLevel.Trace);
-                throw new KeyNotFoundException($"V2 order '{orderId}' not found in family '{productFamilySlug}'.");
+                // Per the V2 spec ("Revoke Certificate", 404 response): "Order not found
+                // or not in a revokable state." This is deliberately ambiguous on the
+                // wire — callers that have already confirmed the order lives in
+                // `productFamilySlug` (e.g. via TrackOrderV2Async) should treat a 404
+                // here as "not revokable", not as a family miss (issues/0019).
+                throw new KeyNotFoundException(
+                    $"V2 order '{orderId}' in family '{productFamilySlug}' not found or not in a revokable state.");
             }
             if (resp.StatusCode == (HttpStatusCode)422)
             {
-                // EMS-931: order not in an issued state; surface a clear message.
+                // Label by whatever EMS code/detail CERTInext actually returned rather
+                // than presuming "not in issued state" — 422s here cover multiple
+                // distinct conditions (EMS-969 revoke reason ID missing, sandbox-timing
+                // "Certificate Request still being processed", etc. — see issues/0019).
                 string detail = ExtractV2ErrorMessage(resp.Content, "V2 revoke");
-                throw new InvalidOperationException(
-                    $"V2 revoke rejected (order not in issued state). {detail}");
+                throw new InvalidOperationException($"V2 revoke rejected. {detail}");
             }
             ThrowOnV2Failure(resp, "V2 revoke order");
             Logger.MethodExit(LogLevel.Trace);

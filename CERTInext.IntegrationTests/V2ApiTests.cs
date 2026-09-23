@@ -321,30 +321,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Revokes a previously issued V2 order using CERTINEXT_V2_ISSUED_ORDER_ID.
-        /// Skips when that env var is absent (sandbox orders sit in pending-csr, so
-        /// a real issued order must be pre-created separately). Intentionally does
-        /// not fall back to an order ID produced by another test in this class —
-        /// results must not depend on test run order (see issues/0017, gap G7).
+        /// Revokes a previously issued V2 order. Prefers CERTINEXT_V2_ISSUED_ORDER_ID;
+        /// otherwise self-enrolls a fresh order via <see cref="EnsureIssuedOrderIdAsync"/>
+        /// and polls (bounded) for issuance (V2_TEST_GAP_PLAN.md Phase 1.4b) — so the test
+        /// no longer depends on another test's run order (issues/0017, gap G7) to have a
+        /// usable order ID.
         /// </summary>
         [SkippableFact]
         public async Task Revoke_V2_IssuedOrder()
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            string orderId = _issuedOrderId;
-            Skip.If(string.IsNullOrWhiteSpace(orderId),
-                "No V2 order ID available — set CERTINEXT_V2_ISSUED_ORDER_ID to a real issued order to run this test.");
-
             using var client = BuildV2Client();
-
-            // Resolve family + confirm status is "issued"
-            var (family, trackBefore) = await ResolveOrderFamilyAsync(client, orderId);
-            Skip.If(trackBefore.Status != Constants.ApiV2.StatusIssued,
-                $"Order {orderId} is in '{trackBefore.Status}' state, not 'issued' — skipping revoke (sandbox orders may not reach issued without DCV).");
+            var (orderId, family) = await EnsureIssuedOrderIdAsync(client);
 
             // Revoke — sandbox may report 'issued' via track but reject revocation
-            // with 422 while the order is still being processed internally.
+            // with 422 ("Certificate Request still being processed") while the order
+            // is still being processed internally (issues/0019).
             var revokeReq = new V2RevokeRequest
             {
                 Reason = "superseded",
@@ -355,11 +348,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 await client.RevokeOrderV2Async(family, orderId, revokeReq);
             }
-            catch (InvalidOperationException ex) when (ex.Message.Contains("not in issued state"))
+            catch (InvalidOperationException ex) when (ex.Message.Contains("still being processed"))
             {
-                Skip.If(true,
-                    $"Order {orderId} tracked as '{trackBefore.Status}' but CA rejected revocation (sandbox timing): {ex.Message}");
-                return; // unreachable; satisfies compiler
+                // Retry once after a short delay before giving up — any other exception
+                // (or a second failure) must fail the test rather than be swallowed here.
+                _output.WriteLine($"Revoke rejected as still-processing; retrying once after 15s: {ex.Message}");
+                await Task.Delay(TimeSpan.FromSeconds(15));
+                try
+                {
+                    await client.RevokeOrderV2Async(family, orderId, revokeReq);
+                }
+                catch (InvalidOperationException ex2) when (ex2.Message.Contains("still being processed"))
+                {
+                    Skip.If(true,
+                        $"Order {orderId} tracked as 'issued' but CA rejected revocation twice (sandbox timing): {ex2.Message}");
+                    return; // unreachable; satisfies compiler
+                }
             }
 
             // Re-track — must be revoked
@@ -502,36 +506,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Downloads the certificate for a known-issued V2 order and logs whether
         /// ChainPem is populated.  The test passes in either case — it is a
         /// best-effort diagnostic to confirm chain assembly works in production.
-        /// Requires CERTINEXT_V2_ISSUED_ORDER_ID.  Skips if absent. Intentionally does
-        /// not fall back to an order ID produced by another test in this class —
-        /// results must not depend on test run order (see issues/0017, gap G7).
+        /// Prefers CERTINEXT_V2_ISSUED_ORDER_ID; otherwise self-enrolls a fresh order
+        /// via <see cref="EnsureIssuedOrderIdAsync"/> (V2_TEST_GAP_PLAN.md Phase 1.4b).
         /// </summary>
         [SkippableFact]
         public async Task ChainPem_V2_IsAssembled()
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            string orderId = _issuedOrderId;
-            Skip.If(string.IsNullOrWhiteSpace(orderId),
-                "No V2 order ID available — set CERTINEXT_V2_ISSUED_ORDER_ID to a real issued order to run this test.");
-
             using var client = BuildV2Client();
-
-            // Verify the order is actually issued before attempting download
-            var trackResp = await client.ResolveAndTrackOrderV2Async(orderId);
-            Skip.If(trackResp.Status != Constants.ApiV2.StatusIssued,
-                $"Order {orderId} is in '{trackResp.Status}' state, not 'issued' — skipping chain assembly (sandbox orders may not reach issued without DCV).");
+            var (orderId, family) = await EnsureIssuedOrderIdAsync(client);
 
             V2CertificateDownloadResponse downloadResp;
             try
             {
-                downloadResp = await client.DownloadCertificateV2Async(
-                    Constants.ApiV2.FamilySsl, orderId);
+                downloadResp = await client.DownloadCertificateV2Async(family, orderId);
             }
             catch (Exception ex) when (ex.Message.Contains("422") || ex.Message.Contains("Invalid request status"))
             {
                 Skip.If(true,
-                    $"Order {orderId} tracked as '{trackResp.Status}' but CA rejected download (sandbox timing): {ex.Message}");
+                    $"Order {orderId} tracked as 'issued' but CA rejected download (sandbox timing): {ex.Message}");
                 return; // unreachable; satisfies compiler
             }
 
@@ -615,6 +609,52 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 SignerPlace    = "Gateway Lab",
                 PageSize       = 100
             });
+        }
+
+        /// <summary>
+        /// Returns an issued V2 order (and the family it lives in) to exercise. Prefers
+        /// <c>CERTINEXT_V2_ISSUED_ORDER_ID</c> if set; otherwise places a fresh order on
+        /// <paramref name="client"/> and polls (bounded) until it reaches <c>issued</c>, so
+        /// tests using this helper are self-contained and don't depend on env state or
+        /// another test's run order (V2_TEST_GAP_PLAN.md Phase 1.4b). <c>Skip.If</c>s when
+        /// no env ID is set and the freshly-placed order never reaches <c>issued</c> within
+        /// the poll budget — sandboxes may require DCV to auto-issue.
+        /// </summary>
+        private async Task<(string orderId, string family)> EnsureIssuedOrderIdAsync(CERTInextClient client)
+        {
+            if (!string.IsNullOrWhiteSpace(_issuedOrderId))
+            {
+                var (family, status) = await ResolveOrderFamilyAsync(client, _issuedOrderId);
+                Skip.If(status.Status != Constants.ApiV2.StatusIssued,
+                    $"Order '{_issuedOrderId}' is in '{status.Status}' state, not 'issued' — skipping.");
+                return (_issuedOrderId, family);
+            }
+
+            var orderReq   = BuildStandardOrderRequest();
+            var createResp = await client.PlaceOrderV2Async(Constants.ApiV2.FamilySsl, _v2ProductCode, orderReq);
+            createResp.Should().NotBeNull();
+            string orderId = createResp.OrderId;
+            orderId.Should().NotBeNullOrEmpty("PlaceOrderV2Async must return a non-empty orderId");
+            _output.WriteLine(
+                $"EnsureIssuedOrderIdAsync: no CERTINEXT_V2_ISSUED_ORDER_ID set — placed fresh order {orderId}.");
+
+            V2OrderStatusResponse trackResp = null;
+            var deadline = DateTime.UtcNow.AddSeconds(90);
+            while (DateTime.UtcNow < deadline)
+            {
+                trackResp = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, orderId);
+                _output.WriteLine($"EnsureIssuedOrderIdAsync poll: orderId={orderId} status={trackResp.Status}");
+                if (trackResp.Status == Constants.ApiV2.StatusIssued)
+                    break;
+                await Task.Delay(TimeSpan.FromSeconds(15));
+            }
+
+            Skip.If(trackResp?.Status != Constants.ApiV2.StatusIssued,
+                $"Freshly-placed order '{orderId}' did not reach 'issued' within the poll budget " +
+                $"(status={trackResp?.Status}) — sandbox may require DCV to auto-issue. Set " +
+                "CERTINEXT_V2_ISSUED_ORDER_ID to a known-issued order to bypass placement.");
+
+            return (orderId, Constants.ApiV2.FamilySsl);
         }
 
         private static async Task<(string family, V2OrderStatusResponse status)> ResolveOrderFamilyAsync(

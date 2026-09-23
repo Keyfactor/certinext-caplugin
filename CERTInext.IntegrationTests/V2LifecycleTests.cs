@@ -217,6 +217,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private static string ResolveOrderId()
             => Environment.GetEnvironmentVariable("CERTINEXT_V2_ORDER_ID");
 
+        /// <summary>
+        /// Returns an issued (GENERATED) V2 order to exercise, plus the plugin instance
+        /// that owns it. Prefers <c>CERTINEXT_V2_ORDER_ID</c> if set; otherwise enrolls a
+        /// fresh order in this test and polls (bounded) for issuance, so tests using this
+        /// helper are self-contained and don't depend on env state or another test's run
+        /// order (V2_TEST_GAP_PLAN.md Phase 1.4b). <c>Skip.If</c>s (via <see cref="SkippableFactAttribute"/>)
+        /// when no env ID is set and the freshly-enrolled order never reaches GENERATED
+        /// within the poll budget — sandboxes may require DCV to auto-issue.
+        /// </summary>
+        private async Task<(string orderId, CERTInextCAPlugin plugin)> EnsureIssuedOrderIdAsync()
+        {
+            var plugin = BuildV2Plugin();
+            string envOrderId = ResolveOrderId();
+            if (!string.IsNullOrWhiteSpace(envOrderId))
+                return (envOrderId, plugin);
+
+            var enrollResult = await plugin.Enroll(
+                csr:            GenerateCsrPem(_v2Domain),
+                subject:        $"CN={_v2Domain}",
+                san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
+                productInfo:    BuildV2ProductInfo(),
+                requestFormat:  RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            enrollResult.Should().NotBeNull();
+            enrollResult.CARequestID.Should().NotBeNullOrWhiteSpace();
+            _output.WriteLine(
+                $"EnsureIssuedOrderIdAsync: no CERTINEXT_V2_ORDER_ID set — enrolled fresh order {enrollResult.CARequestID}.");
+
+            var record = await WaitForIssuanceAsync(plugin, enrollResult.CARequestID);
+            Skip.If(record?.Status != (int)EndEntityStatus.GENERATED,
+                $"Freshly-enrolled order '{enrollResult.CARequestID}' did not reach GENERATED within the poll " +
+                $"budget (status={record?.Status}) — sandbox may require DCV to auto-issue. Set " +
+                "CERTINEXT_V2_ORDER_ID to a known-issued order to bypass enrollment.");
+
+            return (enrollResult.CARequestID, plugin);
+        }
+
         // ---------------------------------------------------------------------------
         // Gap 1 — Enroll() via the plugin, V2 path
         // ---------------------------------------------------------------------------
@@ -256,11 +294,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            string orderId = ResolveOrderId();
-            Skip.If(string.IsNullOrWhiteSpace(orderId),
-                "No V2 order ID available — set CERTINEXT_V2_ORDER_ID to a real V2 order to run this test.");
-
-            var plugin = BuildV2Plugin();
+            var (orderId, plugin) = await EnsureIssuedOrderIdAsync();
 
             var current = await plugin.GetSingleRecord(orderId);
             Skip.If(current?.Status != (int)EndEntityStatus.GENERATED,
@@ -271,14 +305,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 revokeResult = await plugin.Revoke(orderId, hexSerialNumber: string.Empty, revocationReason: 1 /* keyCompromise */);
             }
-            catch (InvalidOperationException ex) when (ex.Message.Contains("not in issued state"))
+            catch (InvalidOperationException ex) when (ex.Message.Contains("still being processed"))
             {
                 // Documented sandbox-timing quirk: the CA reports 'issued' via GetSingleRecord
-                // while still internally finalizing the order, and rejects revoke with 422 in
-                // that window (see issues/0019). Any other exception must fail the test.
-                Skip.If(true,
-                    $"Order '{orderId}' tracked as GENERATED but CA rejected revocation (sandbox timing): {ex.Message}");
-                return; // unreachable
+                // while still internally finalizing the order, and rejects revoke with 422
+                // ("Certificate Request still being processed") in that window (issues/0019).
+                // Retry once after a short delay before giving up — any other exception (or a
+                // second failure) must fail the test rather than be swallowed here.
+                _output.WriteLine($"Revoke rejected as still-processing; retrying once after 15s: {ex.Message}");
+                await Task.Delay(TimeSpan.FromSeconds(15));
+                try
+                {
+                    revokeResult = await plugin.Revoke(orderId, hexSerialNumber: string.Empty, revocationReason: 1);
+                }
+                catch (InvalidOperationException ex2) when (ex2.Message.Contains("still being processed"))
+                {
+                    Skip.If(true,
+                        $"Order '{orderId}' tracked as GENERATED but CA rejected revocation twice (sandbox timing): {ex2.Message}");
+                    return; // unreachable
+                }
             }
 
             revokeResult.Should().Be((int)EndEntityStatus.REVOKED,
@@ -364,17 +409,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 revokeResult = await plugin.Revoke(enrollResult.CARequestID, hexSerialNumber: string.Empty, revocationReason: 1);
             }
-            catch (InvalidOperationException ex) when (ex.Message.Contains("not in issued state"))
+            catch (InvalidOperationException ex) when (ex.Message.Contains("still being processed"))
             {
                 // Documented sandbox-timing quirk: the sandbox has been observed to report an
                 // order as 'issued' via TrackOrder/GetSingleRecord while still internally
-                // finalizing it, and reject a revoke attempted in that window (see issues/0019).
-                // Any other exception (e.g. the camelCase-reason HTTP 400 that 0019 describes)
-                // must fail the test rather than be swallowed here.
-                Skip.If(true,
-                    $"Order '{enrollResult.CARequestID}' tracked as GENERATED but CA rejected revocation " +
-                    $"(sandbox timing): {ex.Message}");
-                return; // unreachable
+                // finalizing it, and reject a revoke attempted in that window with 422
+                // "Certificate Request still being processed" (see issues/0019). Retry once
+                // after a short delay before giving up — any other exception (e.g. the
+                // camelCase-reason HTTP 400 that 0019 describes) must fail the test rather
+                // than be swallowed here.
+                _output.WriteLine($"Revoke rejected as still-processing; retrying once after 15s: {ex.Message}");
+                await Task.Delay(TimeSpan.FromSeconds(15));
+                try
+                {
+                    revokeResult = await plugin.Revoke(enrollResult.CARequestID, hexSerialNumber: string.Empty, revocationReason: 1);
+                }
+                catch (InvalidOperationException ex2) when (ex2.Message.Contains("still being processed"))
+                {
+                    Skip.If(true,
+                        $"Order '{enrollResult.CARequestID}' tracked as GENERATED but CA rejected revocation " +
+                        $"twice (sandbox timing): {ex2.Message}");
+                    return; // unreachable
+                }
             }
 
             revokeResult.Should().Be((int)EndEntityStatus.REVOKED,
@@ -390,11 +446,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            string orderId = ResolveOrderId();
-            Skip.If(string.IsNullOrWhiteSpace(orderId),
-                "No V2 order ID available — set CERTINEXT_V2_ORDER_ID to a real V2 order to run this test.");
-
-            var plugin = BuildV2Plugin();
+            var (orderId, plugin) = await EnsureIssuedOrderIdAsync();
             var record = await WaitForIssuanceAsync(plugin, orderId, maxPolls: 1);
 
             Skip.If(record?.Status != (int)EndEntityStatus.GENERATED,
@@ -404,13 +456,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "GetSingleRecord must populate the PEM body for a GENERATED V2 order");
             record.Certificate.Should().StartWith("-----BEGIN CERTIFICATE-----");
 
-            var b64 = record.Certificate
-                .Replace("-----BEGIN CERTIFICATE-----", string.Empty)
-                .Replace("-----END CERTIFICATE-----", string.Empty)
+            // record.Certificate may be the leaf cert alone, or the leaf followed by one or
+            // more chain PEM blocks (AssembleV2CertChain concatenates them) — extract only the
+            // FIRST block. Naively stripping every BEGIN/END marker and decoding the
+            // concatenation as one base64 blob breaks as soon as a chain is present, because
+            // each block's own '=' padding then lands mid-string, which is illegal base64.
+            var firstBlock = System.Text.RegularExpressions.Regex.Match(
+                record.Certificate,
+                @"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----",
+                System.Text.RegularExpressions.RegexOptions.Singleline);
+            firstBlock.Success.Should().BeTrue("the certificate body must contain at least one PEM block");
+
+            var b64 = firstBlock.Groups[1].Value
                 .Replace("\r", string.Empty).Replace("\n", string.Empty).Trim();
 
             Action parse = () => new Org.BouncyCastle.X509.X509CertificateParser().ReadCertificate(Convert.FromBase64String(b64));
-            parse.Should().NotThrow("the issued V2 certificate PEM must be parseable");
+            parse.Should().NotThrow("the issued V2 certificate's leaf PEM block must be parseable");
         }
 
         // ---------------------------------------------------------------------------
