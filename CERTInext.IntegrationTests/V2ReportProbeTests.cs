@@ -437,6 +437,122 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
+        // Probe 7: catalog/products shape (issue 0025 step 0 — settles which parser
+        // branch ParseProductDetailsV2Response needs: nested category envelope
+        // (matches V1's GetProductDetails shape) vs. flat productId rows (the
+        // Postman example body). Read-only: GET only, no order/domain side effects.
+        // ---------------------------------------------------------------------------
+
+        [SkippableFact]
+        public async Task Probe7_CatalogProducts_ShapeAndFieldVocabulary()
+        {
+            Skip.IfNot(_probeEnabled, "CERTINEXT_V2_REPORT_PROBE not set (or V2 not enabled) — skipping catalog probe.");
+
+            using var client = BuildV2Client();
+
+            _output.WriteLine("=== Probe 7: GET /api/certinext/v2/catalog/products ===");
+            var (status, contentType, content) = await client.ProbeV2GetAsync("/api/certinext/v2/catalog/products");
+            _output.WriteLine($"HTTP {status} (Content-Type: {contentType})");
+            InspectCatalogProductsBody(status, content, "(no groupNumber)");
+
+            // Also probe with ?groupNumber= when configured — the kfclab spec sets GroupNumber
+            // and V1's GetProductDetails passes it (CERTInextClient.cs:697-700); the V2 catalog
+            // may default to a different billing group without it.
+            string groupNumber = _fixture.IsConfigured ? _fixture.GroupNumber : null;
+            if (!string.IsNullOrWhiteSpace(groupNumber))
+            {
+                _output.WriteLine($"=== Probe 7b: GET /api/certinext/v2/catalog/products?groupNumber={Redact(groupNumber)} ===");
+                var (status2, contentType2, content2) = await client.ProbeV2GetAsync(
+                    $"/api/certinext/v2/catalog/products?groupNumber={Uri.EscapeDataString(groupNumber)}");
+                _output.WriteLine($"HTTP {status2} (Content-Type: {contentType2})");
+                InspectCatalogProductsBody(status2, content2, "(with groupNumber)");
+            }
+            else
+            {
+                _output.WriteLine("CERTINEXT_GROUP_NUMBER not set on this fixture — skipping the groupNumber variant.");
+            }
+        }
+
+        /// <summary>
+        /// Shared body inspector for Probe7's two calls. Logs the top-level shape (bare array
+        /// vs. wrapper object) and, for each element, whether it looks like a nested category
+        /// envelope (own "products" array) or a flat product row (has productCode/productId
+        /// directly). Does not assert — this is discovery only (issue 0025 step 0).
+        /// </summary>
+        private void InspectCatalogProductsBody(int status, string content, string label)
+        {
+            if (status != 200 || string.IsNullOrWhiteSpace(content))
+            {
+                _output.WriteLine($"FINDING {label}: catalog/products did not return 200 with a body. Raw: {Redact(content)}");
+                return;
+            }
+
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+
+            JsonElement arr;
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                arr = root;
+                _output.WriteLine($"FINDING {label}: top-level shape = bare array, length={arr.GetArrayLength()}.");
+            }
+            else if (root.ValueKind == JsonValueKind.Object)
+            {
+                var topKeys = root.EnumerateObject().Select(p => p.Name).ToList();
+                _output.WriteLine($"FINDING {label}: top-level shape = object, keys=[{string.Join(", ", topKeys)}].");
+
+                string foundKey = new[] { "products", "data", "items", "catalog" }
+                    .FirstOrDefault(k => root.TryGetProperty(k, out var e) && e.ValueKind == JsonValueKind.Array);
+                if (foundKey == null || !root.TryGetProperty(foundKey, out arr))
+                {
+                    _output.WriteLine($"FINDING {label}: no known array wrapper property found — cannot inspect rows.");
+                    return;
+                }
+                _output.WriteLine($"FINDING {label}: array is under top-level key '{foundKey}', length={arr.GetArrayLength()}.");
+            }
+            else
+            {
+                _output.WriteLine($"FINDING {label}: unexpected top-level JSON kind {root.ValueKind}.");
+                return;
+            }
+
+            var elements = arr.EnumerateArray().Take(3).ToList();
+            for (int i = 0; i < elements.Count; i++)
+            {
+                var el = elements[i];
+                if (el.ValueKind != JsonValueKind.Object)
+                {
+                    _output.WriteLine($"{label} element[{i}]: non-object kind={el.ValueKind}");
+                    continue;
+                }
+
+                var keys = el.EnumerateObject().Select(p => $"{p.Name}:{p.Value.ValueKind}").ToList();
+                bool hasNestedProducts = el.TryGetProperty("products", out var nested) && nested.ValueKind == JsonValueKind.Array;
+                bool hasFlatProductCode = el.TryGetProperty("productCode", out _);
+                bool hasFlatProductId = el.TryGetProperty("productId", out _);
+
+                _output.WriteLine($"{label} element[{i}] fields (name:type): [{string.Join(", ", keys)}]");
+                _output.WriteLine($"{label} element[{i}]: hasNestedProductsArray={hasNestedProducts}, " +
+                                   $"hasProductCode={hasFlatProductCode}, hasProductId={hasFlatProductId}");
+
+                if (hasNestedProducts && nested.GetArrayLength() > 0)
+                {
+                    var innerKeys = nested[0].EnumerateObject().Select(p => $"{p.Name}:{p.Value.ValueKind}").ToList();
+                    _output.WriteLine($"{label} element[{i}].products[0] fields: [{string.Join(", ", innerKeys)}]");
+                }
+
+                _output.WriteLine($"{label} element[{i}] raw (redacted): {Redact(el.GetRawText())}");
+            }
+
+            _output.WriteLine($"FINDING {label}: CONCLUSION — shape is " +
+                               (elements.Any(e => e.ValueKind == JsonValueKind.Object && e.TryGetProperty("products", out _))
+                                   ? "NESTED category envelope (matches V1 GetProductDetails / FlattenProducts)."
+                                   : elements.Any(e => e.ValueKind == JsonValueKind.Object && (e.TryGetProperty("productCode", out _) || e.TryGetProperty("productId", out _)))
+                                       ? "FLAT product rows."
+                                       : "UNRECOGNISED — inspect the raw output above."));
+        }
+
+        // ---------------------------------------------------------------------------
         // Helpers
         // ---------------------------------------------------------------------------
 
