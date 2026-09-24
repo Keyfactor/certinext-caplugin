@@ -49,10 +49,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             new CERTInextCAPlugin(client, new CERTInextConfig
             {
                 UseV2Api        = true,
-                ApiUrlV2        = "https://v2.certinext.io",
-                ClientId        = "my-client",
-                ClientSecret    = "my-secret",
-                ApiUrl          = "https://v1.certinext.io",
+                ApiUrl          = "https://v2.certinext.io",
+                OAuthClientId     = "my-client",
+                OAuthClientSecret = "my-secret",
                 AccountNumber   = "12345",
                 AuthMode        = "AccessKey",
                 ApiKey          = "v1-key",
@@ -374,32 +373,200 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Synchronize still uses V1
+        // Synchronize (V2, issues/0022) — uses V2 /reports/orders, not V1 GetOrderReport.
         // ---------------------------------------------------------------------------
 
+        private static OrderReportEntryV2 ReportRow(
+            string orderNumber, string orderStatus, string certificateStatus,
+            string domainName = "example.com", string productCode = "842") =>
+            new OrderReportEntryV2
+            {
+                OrderNumber       = orderNumber,
+                OrderStatus       = orderStatus,
+                CertificateStatus = certificateStatus,
+                DomainName        = domainName,
+                ProductCode       = productCode,
+                OrderDate         = System.DateTime.UtcNow.AddHours(-1).ToString("o")
+            };
+
         [Fact]
-        public async Task Synchronize_V2Enabled_StillCallsV1ListCertificatesAsync()
+        public async Task Synchronize_V2Enabled_UsesListOrdersV2Async_NotV1ListCertificates()
         {
             var mock = new Mock<ICERTInextClient>();
 
-            // V1 sync path uses ListCertificatesAsync (the legacy wrapper)
-            mock.Setup(c => c.ListCertificatesAsync(
-                    It.IsAny<System.DateTime?>(),
-                    It.IsAny<int>(),
-                    It.IsAny<CancellationToken>()))
-                .Returns(AsyncEnumerable<LegacyGetCertificateResponse>());
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable<OrderReportEntryV2>());
 
             var plugin = BuildV2Plugin(mock.Object);
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
-            buffer.CompleteAdding();
 
-            // Run sync — should not throw
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
 
+            mock.Verify(c => c.ListOrdersV2Async(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.AtLeastOnce);
             mock.Verify(c => c.ListCertificatesAsync(
-                It.IsAny<System.DateTime?>(),
-                It.IsAny<int>(),
-                It.IsAny<CancellationToken>()), Times.AtLeastOnce);
+                It.IsAny<System.DateTime?>(), It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_IssuedRow_DownloadsCertificateBody()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_v2sync_001", "Order Fulfilled", "Certificate Downloaded");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_001", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_v2sync_001",
+                    SerialNumber   = "AABBCC",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].CARequestID.Should().Be("ord_v2sync_001");
+            records[0].Status.Should().Be((int)EndEntityStatus.GENERATED);
+            records[0].Certificate.Should().StartWith("-----BEGIN CERTIFICATE-----");
+            records[0].ProductID.Should().Be("842");
+
+            // Recognised report-status strings must not need a live track fallback.
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_UnrecognizedStatus_FallsBackToLiveTrack()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            // "Something New" is deliberately not in the known display-string vocabulary
+            // (issues/0022 — the vocabulary is not confirmed exhaustive).
+            var row = ReportRow("ord_v2sync_002", "Something New", "Also New");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_v2sync_002", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = "ord_v2sync_002", Status = "issued", Domain = "example.com"
+                }));
+
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_002", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_v2sync_002",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "an unrecognised report status must fall back to the authoritative live track " +
+                "call rather than being dropped or guessed");
+
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                "ord_v2sync_002", It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_RevokedRow_EmittedAsRevoked()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_v2sync_003", "Revoked", "Certificate Revoked");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].Status.Should().Be((int)EndEntityStatus.REVOKED);
+
+            // Revoked rows have no body to download.
+            mock.Verify(c => c.ResolveAndDownloadCertificateV2Async(
+                It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_TerminalStatus_SkippedNotEmitted()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_v2sync_004", "Order Cancelled", null);
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().BeEmpty("terminal/cancelled orders are skipped, not emitted");
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_IncrementalSync_RequestsLookbackWindow()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            string capturedFrom = null;
+            var lastSync = new System.DateTime(2026, 6, 15, 12, 0, 0, System.DateTimeKind.Utc);
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, int, CancellationToken>((from, to, size, ct) => capturedFrom = from)
+                .Returns(AsyncEnumerable<OrderReportEntryV2>());
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, lastSync, fullSync: false, CancellationToken.None);
+
+            // Default lookback is 72h (Constants.ApiV2.DefaultSyncLookbackHours) — the requested
+            // 'from' must be lastSync minus that window, not lastSync itself (issues/0022: the
+            // from/to filter's order-date-vs-issue-date semantics were not confirmed live).
+            var expectedFrom = lastSync.AddHours(-Constants.ApiV2.DefaultSyncLookbackHours).ToString("yyyy-MM-dd");
+            capturedFrom.Should().Be(expectedFrom);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_FullSync_RequestsNoFromFilter()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            string capturedFrom = "unset";
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, int, CancellationToken>((from, to, size, ct) => capturedFrom = from)
+                .Returns(AsyncEnumerable<OrderReportEntryV2>());
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, System.DateTime.UtcNow, fullSync: true, CancellationToken.None);
+
+            capturedFrom.Should().BeNull("a full sync requests the entire order history, not a bounded window");
         }
 
         // ---------------------------------------------------------------------------
@@ -506,110 +673,139 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // G1: ValidateCAConnectionInfo — V2 branch (ApiUrlV2/ClientId/ClientSecret)
+        // ValidateCAConnectionInfo — consolidated config (issues/0022).
         //
-        // These test the CURRENT requirements: the V1 fields (ApiUrl/AccountNumber/AuthMode/...)
-        // are always required, independent of UseV2Api. Phase 4 may relax that in V2 mode — each
-        // case below builds its own minimal `info` dictionary so that change is a local edit per
-        // test rather than a shared fixture that would need to be untangled.
+        // V2 mode: a single ApiUrl (required in both modes) plus OAuthClientId/OAuthClientSecret.
+        // V1-only fields (AccountNumber, AuthMode, ApiKey, ...) are NOT required when UseV2Api
+        // is true. ApiUrlV2/ClientId/ClientSecret no longer exist.
         // ---------------------------------------------------------------------------
 
-        private static Dictionary<string, object> ValidV1Fields() => new()
-        {
-            ["ApiUrl"] = "https://v1.certinext.io",
-            ["AccountNumber"] = "12345",
-            ["AuthMode"] = "AccessKey",
-            ["ApiKey"] = "v1-key"
-        };
-
         [Fact]
-        public async Task ValidateCAConnectionInfo_Throws_WhenApiUrlV2Missing()
+        public async Task ValidateCAConnectionInfo_V2_Throws_WhenApiUrlMissing()
         {
-            var plugin = BuildV2Plugin(NewMock().Object);
-            var info = ValidV1Fields();
-            info["UseV2Api"] = true;
-            info["ClientId"] = "my-client";
-            info["ClientSecret"] = "my-secret";
-            // No ApiUrlV2
-
-            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
-
-            await act.Should().ThrowAsync<AnyCAValidationException>()
-                .WithMessage("*ApiUrlV2*required*");
-        }
-
-        [Fact]
-        public async Task ValidateCAConnectionInfo_Throws_WhenApiUrlV2IsNotUri()
-        {
-            var plugin = BuildV2Plugin(NewMock().Object);
-            var info = ValidV1Fields();
-            info["UseV2Api"] = true;
-            info["ApiUrlV2"] = "not-a-url";
-            info["ClientId"] = "my-client";
-            info["ClientSecret"] = "my-secret";
-
-            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
-
-            await act.Should().ThrowAsync<AnyCAValidationException>()
-                .WithMessage("*ApiUrlV2*valid absolute URI*");
-        }
-
-        [Fact]
-        public async Task ValidateCAConnectionInfo_Throws_WhenClientIdMissing()
-        {
-            var plugin = BuildV2Plugin(NewMock().Object);
-            var info = ValidV1Fields();
-            info["UseV2Api"] = true;
-            info["ApiUrlV2"] = "https://v2.certinext.io";
-            // No ClientId
-            info["ClientSecret"] = "my-secret";
-
-            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
-
-            await act.Should().ThrowAsync<AnyCAValidationException>()
-                .WithMessage("*ClientId*required*");
-        }
-
-        [Fact]
-        public async Task ValidateCAConnectionInfo_Throws_WhenClientSecretMissing()
-        {
-            var plugin = BuildV2Plugin(NewMock().Object);
-            var info = ValidV1Fields();
-            info["UseV2Api"] = true;
-            info["ApiUrlV2"] = "https://v2.certinext.io";
-            info["ClientId"] = "my-client";
-            // No ClientSecret
-
-            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
-
-            await act.Should().ThrowAsync<AnyCAValidationException>()
-                .WithMessage("*ClientSecret*required*");
-        }
-
-        [Fact]
-        public async Task ValidateCAConnectionInfo_UseV2ApiFalse_IgnoresV2Fields()
-        {
-            // V1 field deliberately missing (ApiUrl) so the method throws before attempting any
-            // live connectivity — proving this offline. The point of the test is that the
-            // resulting error is about the V1 field only; the missing/invalid V2 fields below
-            // must not appear in the error at all when UseV2Api is false.
             var plugin = BuildV2Plugin(NewMock().Object);
             var info = new Dictionary<string, object>
             {
-                ["AccountNumber"] = "12345",
-                ["AuthMode"] = "AccessKey",
-                ["ApiKey"] = "v1-key",
+                ["UseV2Api"] = true,
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
                 // No ApiUrl
-                ["UseV2Api"] = false,
-                ["ApiUrlV2"] = "not-a-url",
-                // ClientId / ClientSecret also missing
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*ApiUrl*required*");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_V2_Throws_WhenApiUrlIsNotUri()
+        {
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = new Dictionary<string, object>
+            {
+                ["UseV2Api"] = true,
+                ["ApiUrl"] = "not-a-url",
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*ApiUrl*valid absolute URI*");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_V2_Throws_WhenOAuthClientIdMissing()
+        {
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = new Dictionary<string, object>
+            {
+                ["UseV2Api"] = true,
+                ["ApiUrl"] = "https://v2.certinext.io",
+                // No OAuthClientId
+                ["OAuthClientSecret"] = "my-secret"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*OAuthClientId*required*");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_V2_Throws_WhenOAuthClientSecretMissing()
+        {
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = new Dictionary<string, object>
+            {
+                ["UseV2Api"] = true,
+                ["ApiUrl"] = "https://v2.certinext.io",
+                ["OAuthClientId"] = "my-client"
+                // No OAuthClientSecret
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*OAuthClientSecret*required*");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_V2_DoesNotRequireV1Credentials()
+        {
+            // No AccountNumber, AuthMode, or ApiKey at all — V1 credentials must be optional
+            // when UseV2Api is true (issues/0022). Uses a real WireMock server so the live V2
+            // ping (the only other thing this method does) succeeds.
+            using var server = WireMockServer.Start();
+            server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TokenResponseJson()));
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/auth/me").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2AuthMeJson()));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = new Dictionary<string, object>
+            {
+                ["UseV2Api"] = true,
+                ["ApiUrl"] = server.Urls[0],
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+                // No AccountNumber / AuthMode / ApiKey at all.
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().NotThrowAsync(
+                "V1 credentials (AccountNumber/AuthMode/ApiKey) must not be required when UseV2Api is true");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_V1_UseV2ApiFalse_StillRequiresAccountNumberAndAuthMode()
+        {
+            // UseV2Api false (the default/legacy path) — V1 requirements are unchanged, and the
+            // (now nonexistent) V2-only fields must never appear in the resulting error.
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = "https://v1.certinext.io",
+                ["UseV2Api"] = false
+                // No AccountNumber, no AuthMode/ApiKey.
             };
 
             Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
 
             var ex = await act.Should().ThrowAsync<AnyCAValidationException>();
-            ex.Which.Message.Should().Contain("ApiUrl").And.NotContain("ApiUrlV2")
-                .And.NotContain("ClientId").And.NotContain("ClientSecret");
+            ex.Which.Message.Should().Contain("AccountNumber")
+                .And.NotContain("ApiUrlV2").And.NotContain("OAuthClientId").And.NotContain("OAuthClientSecret");
         }
 
         [Fact]
@@ -630,16 +826,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     .WithBody(MockCertificateData.V2AuthMeJson()));
 
             var plugin = BuildV2Plugin(NewMock().Object);
-            var info = ValidV1Fields();
-            info["UseV2Api"] = true;
-            info["ApiUrlV2"] = server.Urls[0];
-            info["ClientId"] = "my-client";
-            info["ClientSecret"] = "my-secret";
+            var info = new Dictionary<string, object>
+            {
+                ["UseV2Api"] = true,
+                ["ApiUrl"] = server.Urls[0],
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+            };
 
             Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
 
             await act.Should().NotThrowAsync(
-                "all V1 and V2 fields are present and valid, and the live V2 ping succeeds");
+                "ApiUrl and OAuthClientId/OAuthClientSecret are present and valid, and the live V2 ping succeeds");
         }
 
         // ---------------------------------------------------------------------------

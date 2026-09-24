@@ -361,7 +361,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 if (_config.UseV2Api)
                 {
                     await _client.PingV2Async();
-                    _logger.LogInformation("CERTInext V2 ping successful. ApiUrlV2={ApiUrlV2}", _config.ApiUrlV2);
+                    _logger.LogInformation("CERTInext V2 ping successful. ApiUrl={ApiUrl}", _config.ApiUrl);
                 }
                 else
                 {
@@ -373,7 +373,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             catch (Exception ex)
             {
-                string url = _config.UseV2Api ? _config.ApiUrlV2 : _config.ApiUrl;
+                string url = _config.ApiUrl;
                 _logger.LogError(ex, "CERTInext ping failed. Url={Url}, UseV2Api={UseV2Api}", url, _config.UseV2Api);
                 throw new Exception($"Unable to reach CERTInext at {url}: {ex.Message}", ex);
             }
@@ -410,65 +410,66 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var errors = new List<string>();
 
-            // ApiUrl and AccountNumber are always required
+            // ApiUrl is always required in both modes — its meaning follows UseV2Api (V1 base
+            // URL incl. /emSignHub-API vs the bare V2 host). See issues/0022 config consolidation.
             string apiUrl = GetStringValue(connectionInfo, Constants.Config.ApiUrl);
             if (string.IsNullOrWhiteSpace(apiUrl))
                 errors.Add($"'{Constants.Config.ApiUrl}' is required.");
             else if (!Uri.TryCreate(apiUrl, UriKind.Absolute, out _))
                 errors.Add($"'{Constants.Config.ApiUrl}' is not a valid absolute URI.");
 
-            string accountNumber = GetStringValue(connectionInfo, Constants.Config.AccountNumber);
-            if (string.IsNullOrWhiteSpace(accountNumber))
-                errors.Add($"'{Constants.Config.AccountNumber}' is required.");
-
-            // Auth mode — validate the required credentials for the chosen mode
-            string authMode = GetStringValue(connectionInfo, Constants.Config.AuthMode, Constants.Config.AuthModeAccessKey);
-            switch (authMode.ToUpperInvariant())
-            {
-                case "ACCESSKEY":
-                case "APIKEY":  // legacy alias
-                    string apiKey = GetStringValue(connectionInfo, Constants.Config.ApiKey);
-                    if (string.IsNullOrWhiteSpace(apiKey))
-                        errors.Add($"'{Constants.Config.ApiKey}' is required when AuthMode is 'AccessKey'.");
-                    break;
-
-                case "OAUTH":
-                case "OAUTH2":
-                    string tokenUrl = GetStringValue(connectionInfo, Constants.Config.OAuth2TokenUrl);
-                    string clientId = GetStringValue(connectionInfo, Constants.Config.OAuth2ClientId);
-                    string clientSecret = GetStringValue(connectionInfo, Constants.Config.OAuth2ClientSecret);
-                    if (string.IsNullOrWhiteSpace(tokenUrl))
-                        errors.Add($"'{Constants.Config.OAuth2TokenUrl}' is required when AuthMode is 'OAuth'.");
-                    if (string.IsNullOrWhiteSpace(clientId))
-                        errors.Add($"'{Constants.Config.OAuth2ClientId}' is required when AuthMode is 'OAuth'.");
-                    if (string.IsNullOrWhiteSpace(clientSecret))
-                        errors.Add($"'{Constants.Config.OAuth2ClientSecret}' is required when AuthMode is 'OAuth'.");
-                    break;
-
-                default:
-                    errors.Add($"'{Constants.Config.AuthMode}' must be one of: AccessKey, OAuth. Got: '{authMode}'.");
-                    break;
-            }
-
-            // V2 additional validation (independent of V1 auth mode errors above)
             bool useV2 = connectionInfo.TryGetValue(Constants.ConfigV2.UseV2Api, out object v2Obj)
                          && v2Obj is bool v2Bool && v2Bool;
+
             if (useV2)
             {
-                string apiUrlV2  = GetStringValue(connectionInfo, Constants.ConfigV2.ApiUrlV2);
-                string clientId  = GetStringValue(connectionInfo, Constants.ConfigV2.ClientId);
-                string clientSecret = GetStringValue(connectionInfo, Constants.ConfigV2.ClientSecret);
+                // V2 mode: OAuth2 client_credentials against {ApiUrl}/oauth/token, reusing the
+                // same OAuthClientId/OAuthClientSecret fields V1's AuthMode=OAuth uses. V1-only
+                // credentials (AccountNumber, AuthMode, ApiKey, ...) are NOT required here — the
+                // V1 AuthMode switch below is skipped entirely (issues/0022).
+                string oauthClientId = GetStringValue(connectionInfo, Constants.Config.OAuthClientId);
+                string oauthClientSecret = GetStringValue(connectionInfo, Constants.Config.OAuthClientSecret);
 
-                if (string.IsNullOrWhiteSpace(apiUrlV2))
-                    errors.Add($"'{Constants.ConfigV2.ApiUrlV2}' is required when UseV2Api is true.");
-                else if (!Uri.TryCreate(apiUrlV2, UriKind.Absolute, out _))
-                    errors.Add($"'{Constants.ConfigV2.ApiUrlV2}' is not a valid absolute URI.");
+                if (string.IsNullOrWhiteSpace(oauthClientId))
+                    errors.Add($"'{Constants.Config.OAuthClientId}' is required when UseV2Api is true.");
 
-                if (string.IsNullOrWhiteSpace(clientId))
-                    errors.Add($"'{Constants.ConfigV2.ClientId}' is required when UseV2Api is true.");
+                if (string.IsNullOrWhiteSpace(oauthClientSecret))
+                    errors.Add($"'{Constants.Config.OAuthClientSecret}' is required when UseV2Api is true.");
+            }
+            else
+            {
+                // V1 mode: AccountNumber is always required, plus whatever the selected AuthMode needs.
+                string accountNumber = GetStringValue(connectionInfo, Constants.Config.AccountNumber);
+                if (string.IsNullOrWhiteSpace(accountNumber))
+                    errors.Add($"'{Constants.Config.AccountNumber}' is required.");
 
-                if (string.IsNullOrWhiteSpace(clientSecret))
-                    errors.Add($"'{Constants.ConfigV2.ClientSecret}' is required when UseV2Api is true.");
+                string authMode = GetStringValue(connectionInfo, Constants.Config.AuthMode, Constants.Config.AuthModeAccessKey);
+                switch (authMode.ToUpperInvariant())
+                {
+                    case "ACCESSKEY":
+                    case "APIKEY":  // legacy alias
+                        string apiKey = GetStringValue(connectionInfo, Constants.Config.ApiKey);
+                        if (string.IsNullOrWhiteSpace(apiKey))
+                            errors.Add($"'{Constants.Config.ApiKey}' is required when AuthMode is 'AccessKey'.");
+                        break;
+
+                    case "OAUTH":
+                    case "OAUTH2":
+                        string tokenUrl = GetStringValue(connectionInfo, Constants.Config.OAuth2TokenUrl);
+                        string clientId = GetStringValue(connectionInfo, Constants.Config.OAuth2ClientId);
+                        string clientSecret = GetStringValue(connectionInfo, Constants.Config.OAuth2ClientSecret);
+                        if (string.IsNullOrWhiteSpace(tokenUrl))
+                            errors.Add($"'{Constants.Config.OAuth2TokenUrl}' is required when AuthMode is 'OAuth'.");
+                        if (string.IsNullOrWhiteSpace(clientId))
+                            errors.Add($"'{Constants.Config.OAuth2ClientId}' is required when AuthMode is 'OAuth'.");
+                        if (string.IsNullOrWhiteSpace(clientSecret))
+                            errors.Add($"'{Constants.Config.OAuth2ClientSecret}' is required when AuthMode is 'OAuth'.");
+                        break;
+
+                    default:
+                        errors.Add($"'{Constants.Config.AuthMode}' must be one of: AccessKey, OAuth. Got: '{authMode}'.");
+                        break;
+                }
             }
 
             if (errors.Any())
@@ -526,7 +527,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.ApiKey = string.Empty;
                     tempConfig.OAuthClientSecret = string.Empty;
                     tempConfig.Password = string.Empty;
-                    tempConfig.ClientSecret = string.Empty;
                 }
                 tempClient?.Dispose();
             }
@@ -606,7 +606,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.ApiKey = string.Empty;
                     tempConfig.OAuthClientSecret = string.Empty;
                     tempConfig.Password = string.Empty;
-                    tempConfig.ClientSecret = string.Empty;
                 }
                 tempClient?.Dispose();
             }
@@ -857,16 +856,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             _logger.MethodEntry(LogLevel.Debug);
 
-            DateTime? issuedAfter = fullSync ? (DateTime?)null : lastSync;
-
             if (_config.UseV2Api)
             {
-                // V2 /reports/orders endpoint returns 501 Not Implemented.
-                // Synchronize continues to use the V1 GetOrderReport until V2 reports ship.
-                _logger.LogWarning(
-                    "Synchronize uses V1 GetOrderReport; V2 /reports/orders is not yet available. " +
-                    "UseV2Api=true does not affect sync — V1 credentials (ApiUrl, ApiKey/AccountNumber) must remain configured.");
+                // V2 mode routes Synchronize through V2 /reports/orders (issues/0022) — the V1
+                // GetOrderReport path below is never used, and V1 credentials are optional.
+                await SynchronizeV2Async(blockingBuffer, lastSync, fullSync, cancelToken);
+                _logger.MethodExit(LogLevel.Debug);
+                return;
             }
+
+            DateTime? issuedAfter = fullSync ? (DateTime?)null : lastSync;
 
             _logger.LogInformation(
                 "Starting CERTInext synchronization. FullSync={FullSync}, IssuedAfter={IssuedAfter}, UseV2Api={UseV2Api}",
@@ -1465,6 +1464,357 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 _logger.LogError(ex, "V2: Error retrieving certificate. CARequestID={Id}", caRequestID);
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Synchronizes certificates via the V2 <c>/reports/orders</c> endpoint (issues/0022).
+        /// Called from <see cref="Synchronize"/> when <c>_config.UseV2Api</c> is true; V1
+        /// credentials are not required on this path.
+        ///
+        /// Lookback window (incremental sync): live probing of <c>from</c>/<c>to</c> could not
+        /// determine whether the filter brackets order-placement date or issuance date
+        /// (issues/0022). Rather than depend on that, an incremental pass requests
+        /// <c>from = lastSync - V2SyncLookbackHours</c> (default 72h) so an order created before
+        /// <c>lastSync</c> but issued afterward (e.g. a slow-DCV order) still surfaces.
+        /// </summary>
+        private async Task SynchronizeV2Async(
+            BlockingCollection<AnyCAPluginCertificate> blockingBuffer,
+            DateTime? lastSync,
+            bool fullSync,
+            CancellationToken cancelToken)
+        {
+            _logger.MethodEntry(LogLevel.Debug);
+
+            string from = null;
+            if (!fullSync && lastSync.HasValue)
+            {
+                int lookbackHours = _config.V2SyncLookbackHours > 0
+                    ? _config.V2SyncLookbackHours
+                    : Constants.ApiV2.DefaultSyncLookbackHours;
+                DateTime effectiveFrom = lastSync.Value.ToUniversalTime().AddHours(-lookbackHours);
+                from = effectiveFrom.ToString("yyyy-MM-dd");
+            }
+
+            _logger.LogInformation(
+                "Starting CERTInext V2 synchronization. FullSync={FullSync}, LastSync={LastSync}, " +
+                "LookbackFrom={From}, UseV2Api=true",
+                fullSync, lastSync?.ToString("O") ?? "none", from ?? "(none — full history)");
+
+            int synced = 0;
+            int skipped = 0;
+            int errors = 0;
+            int unresolvedStatusFallbacks = 0; // report rows whose display strings needed a live track call
+
+            // Emit-side accounting (mirrors the V1 path, issue 0003).
+            int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
+
+#if SUPPORTS_DCV
+            bool dcvOperational = _config.DcvEnabled && _domainValidatorFactory != null;
+            int ageWindowHours = _config.DcvSyncMaxOrderAgeHours;
+            int perPassCap = _config.DcvSyncMaxPerPass;
+            int dcvAttempted = 0, dcvSkippedAge = 0, dcvSkippedCap = 0;
+#endif
+
+            try
+            {
+                await foreach (var row in _client.ListOrdersV2Async(from, null, _config.PageSize, cancelToken))
+                {
+                    cancelToken.ThrowIfCancellationRequested();
+
+                    try
+                    {
+                        DateTime? orderDateUtc = null;
+                        if (DateTime.TryParse(
+                                row.OrderDate, System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+                                out DateTime parsedOrderDate))
+                            orderDateUtc = parsedOrderDate;
+
+                        int? disposition = MapV2ReportStatusToDisposition(row.OrderStatus, row.CertificateStatus);
+                        string resolvedFamily = null;
+                        V2OrderStatusResponse trackedStatus = null;
+
+                        if (disposition == null)
+                        {
+                            // Unrecognised orderStatus/certificateStatus combination — the display-
+                            // string vocabulary observed so far (issues/0022) is NOT confirmed
+                            // exhaustive. Don't guess: fall back to a live TrackOrder call, which
+                            // returns the authoritative V2 `status` enum via StatusMapper.
+                            unresolvedStatusFallbacks++;
+                            _logger.LogDebug(
+                                "V2 sync: unrecognised report status — falling back to live track. " +
+                                "Id={Id}, OrderStatus={OrderStatus}, CertificateStatus={CertificateStatus}",
+                                row.OrderNumber, row.OrderStatus, row.CertificateStatus);
+                            (resolvedFamily, trackedStatus) =
+                                await _client.ResolveAndTrackOrderV2WithFamilyAsync(row.OrderNumber, cancelToken);
+                            disposition = StatusMapper.V2StatusToRequestDisposition(trackedStatus.Status);
+                        }
+
+                        if (disposition == (int)EndEntityStatus.FAILED)
+                        {
+                            _logger.LogTrace(
+                                "V2 sync: skipping order '{Id}' with terminal status. OrderStatus={OrderStatus}, " +
+                                "CertificateStatus={CertificateStatus}",
+                                row.OrderNumber, row.OrderStatus, row.CertificateStatus);
+                            skipped++;
+                            continue;
+                        }
+
+#if SUPPORTS_DCV
+                        if (dcvOperational && disposition == (int)EndEntityStatus.EXTERNALVALIDATION)
+                        {
+                            var decision = EvaluateDcvSyncEligibility(
+                                orderDateUtc, DateTime.UtcNow, ageWindowHours, dcvAttempted, perPassCap);
+
+                            _logger.LogTrace(
+                                "V2 sync DCV gate: Id={Id}, decision={Decision}, orderDate={OrderDate}, " +
+                                "ageWindowHours={Age}, attemptedSoFar={Attempted}, perPassCap={Cap}",
+                                row.OrderNumber, decision, orderDateUtc?.ToString("o") ?? "(none)",
+                                ageWindowHours, dcvAttempted, perPassCap);
+
+                            if (decision == DcvSyncDecision.SkipByAge)
+                            {
+                                _logger.LogInformation(
+                                    "V2 sync: pending DV order aged out of the DCV-during-sync window and will " +
+                                    "not be advanced. CARequestID={Id}, OrderDate={OrderDate}, AgeWindowHours={Age}.",
+                                    row.OrderNumber, orderDateUtc?.ToString("o") ?? "(none)", ageWindowHours);
+                                dcvSkippedAge++;
+                            }
+                            else if (decision == DcvSyncDecision.SkipByCap)
+                            {
+                                dcvSkippedCap++;
+                            }
+                            else
+                            {
+                                dcvAttempted++;
+
+                                // Resolve family lazily — only for rows actually attempting DCV.
+                                // Report rows carry no family, and productCode is often empty
+                                // (issue 0016), so this costs one extra call per attempted row,
+                                // not per row in the page (per the task's cost concern).
+                                if (resolvedFamily == null)
+                                {
+                                    (resolvedFamily, trackedStatus) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(
+                                        row.OrderNumber, cancelToken);
+                                }
+
+                                string domain = !string.IsNullOrWhiteSpace(trackedStatus?.Domain)
+                                    ? trackedStatus.Domain
+                                    : row.DomainName;
+
+                                if (!string.IsNullOrWhiteSpace(domain))
+                                {
+                                    int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+                                    using var dcvCts = CancellationTokenSource.CreateLinkedTokenSource(cancelToken);
+                                    dcvCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
+                                    try
+                                    {
+                                        bool dcvDone = await PerformDcvV2IfNeededAsync(
+                                            row.OrderNumber, domain, resolvedFamily, dcvCts.Token);
+                                        if (dcvDone)
+                                        {
+                                            trackedStatus = await _client.ResolveAndTrackOrderV2Async(row.OrderNumber, cancelToken);
+                                            disposition = StatusMapper.V2StatusToRequestDisposition(trackedStatus.Status);
+                                        }
+                                    }
+                                    catch (Exception dcvEx)
+                                    {
+                                        _logger.LogWarning(dcvEx,
+                                            "V2 sync: DCV attempt failed for order {Id}.", row.OrderNumber);
+                                    }
+                                }
+                                else
+                                {
+                                    _logger.LogWarning(
+                                        "V2 sync: no domain available for pending-dcv order {Id} — cannot drive DCV.",
+                                        row.OrderNumber);
+                                }
+                            }
+                        }
+#endif
+
+                        string certPem = null;
+                        if (disposition == (int)EndEntityStatus.GENERATED)
+                        {
+                            try
+                            {
+                                var certResp = await _client.ResolveAndDownloadCertificateV2Async(row.OrderNumber, cancelToken);
+                                certPem = AssembleV2CertChain(certResp);
+                            }
+                            catch (Exception dlEx)
+                            {
+                                _logger.LogWarning(dlEx,
+                                    "V2 sync: order '{Id}' is issued but certificate download failed — emitting " +
+                                    "metadata-only record.", row.OrderNumber);
+                            }
+                        }
+
+                        var record = new AnyCAPluginCertificate
+                        {
+                            CARequestID = row.OrderNumber,
+                            Certificate = certPem,
+                            Status      = disposition.Value,
+                            ProductID   = row.ProductCode ?? string.Empty
+                        };
+
+                        bool recordHasBody = !string.IsNullOrWhiteSpace(record.Certificate);
+                        if (record.Status == (int)EndEntityStatus.GENERATED)
+                        {
+                            if (recordHasBody) emittedGeneratedWithBody++; else emittedGeneratedNoBody++;
+                        }
+                        else if (record.Status == (int)EndEntityStatus.REVOKED)
+                        {
+                            emittedRevoked++;
+                        }
+                        else if (record.Status == (int)EndEntityStatus.EXTERNALVALIDATION)
+                        {
+                            emittedPending++;
+                        }
+
+                        _logger.LogDebug(
+                            "V2 sync emit: CARequestID={Id}, Status={Status}, CertBytes={CertBytes}, " +
+                            "OrderStatus={OrderStatus}, CertificateStatus={CertificateStatus}",
+                            record.CARequestID, record.Status, record.Certificate?.Length ?? 0,
+                            row.OrderStatus, row.CertificateStatus);
+
+                        blockingBuffer.Add(record, cancelToken);
+                        synced++;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _logger.LogWarning(
+                            "CERTInext V2 synchronization cancelled by caller. FullSync={FullSync}, Synced={Synced}, " +
+                            "Skipped={Skipped}, Errors={Errors}",
+                            fullSync, synced, skipped, errors);
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error processing V2 order '{Id}' during synchronization.", row.OrderNumber);
+                        errors++;
+
+                        // SOC1 completeness/accuracy: abort on an error-rate cliff rather than
+                        // silently 'completing' with mostly-failed records (mirrors the V1 gate).
+                        int totalSeen = synced + skipped + errors;
+                        if (totalSeen >= 50 && errors > totalSeen / 4)
+                        {
+                            _logger.LogError(
+                                "CERTInext V2 synchronization aborted — error rate ({Errors}/{Total}) exceeded " +
+                                "25% threshold. Likely CA-side outage; will retry on next sync cycle.",
+                                errors, totalSeen);
+                            throw new Exception(
+                                $"CERTInext V2 synchronization aborted after {errors}/{totalSeen} records failed " +
+                                "(>25% error rate). See gateway logs for the underlying CA errors.");
+                        }
+                    }
+                }
+
+                string dcvClause;
+#if SUPPORTS_DCV
+                if (dcvOperational)
+                    dcvClause = $"DCV-during-sync: Attempted={dcvAttempted}, SkippedByAge={dcvSkippedAge} (>{ageWindowHours}h), SkippedByCap={dcvSkippedCap} (cap={perPassCap}).";
+                else
+                    dcvClause = $"DCV-during-sync: not active (DcvEnabled={_config.DcvEnabled}, DnsProviderInjected={_domainValidatorFactory != null}) — pending orders left as EXTERNALVALIDATION.";
+#else
+                dcvClause = "DCV-during-sync: not supported on this build (IAnyCAPlugin 3.2.0).";
+#endif
+                _logger.LogInformation(
+                    "CERTInext V2 synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}, " +
+                    "UnresolvedStatusFallbacks={Fallbacks}. Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
+                    "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}. {DcvClause}",
+                    synced, skipped, errors, unresolvedStatusFallbacks,
+                    emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
+                    dcvClause);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("CERTInext V2 synchronization was cancelled.");
+                throw;
+            }
+            finally
+            {
+                blockingBuffer.CompleteAdding();
+            }
+
+            _logger.MethodExit(LogLevel.Debug);
+        }
+
+        /// <summary>
+        /// Maps a V2 <c>/reports/orders</c> row's human-readable <c>orderStatus</c>/
+        /// <c>certificateStatus</c> display strings to an <see cref="EndEntityStatus"/>
+        /// disposition (issues/0022). These are display strings (e.g. "Order Accepted",
+        /// "Certificate Downloaded") — NOT the V2 <c>status</c> enum used by TrackOrder (see
+        /// <see cref="StatusMapper.V2StatusToRequestDisposition"/> for that). The vocabulary
+        /// below combines what was actually observed live in Phase 0 (orderStatus "Order
+        /// Accepted"/"Order Fulfilled"; certificateStatus "Pending for Approver"/"Certificate
+        /// Downloaded") with additional values the spec's field-table prose names ("Approved by
+        /// System", "Issued", "Certificate Generated") that have not yet been confirmed live.
+        ///
+        /// Returns <c>null</c> for anything not confidently recognised so the caller falls back
+        /// to a live TrackOrder call rather than guessing — the vocabulary is explicitly NOT
+        /// confirmed exhaustive, and silently misclassifying a row (e.g. treating a still-pending
+        /// order as issued, or dropping a row that is actually revoked) would be worse than the
+        /// cost of an extra API call.
+        /// </summary>
+        internal static int? MapV2ReportStatusToDisposition(string orderStatus, string certificateStatus)
+        {
+            // certificateStatus is the more specific signal when present — prefer it.
+            if (TryMapV2ReportDisplayStatus(certificateStatus, out int certDisposition))
+                return certDisposition;
+
+            if (TryMapV2ReportDisplayStatus(orderStatus, out int orderDisposition))
+                return orderDisposition;
+
+            return null;
+        }
+
+        private static bool TryMapV2ReportDisplayStatus(string status, out int disposition)
+        {
+            disposition = default;
+            if (string.IsNullOrWhiteSpace(status))
+                return false;
+
+            switch (status.Trim().ToLowerInvariant())
+            {
+                // Issued — certificate exists and is downloadable.
+                case "certificate downloaded":
+                case "certificate generated":
+                case "order fulfilled":
+                case "issued":
+                    disposition = (int)EndEntityStatus.GENERATED;
+                    return true;
+
+                // Pending — somewhere in the approval/DCV/issuance workflow.
+                case "order accepted":
+                case "pending for approver":
+                case "approved by system":
+                    disposition = (int)EndEntityStatus.EXTERNALVALIDATION;
+                    return true;
+
+                // Revoked.
+                case "revoked":
+                case "certificate revoked":
+                    disposition = (int)EndEntityStatus.REVOKED;
+                    return true;
+
+                // Expired-but-not-revoked certs remain visible in inventory as GENERATED —
+                // mirrors StatusMapper.ToRequestDisposition's V1 convention.
+                case "expired":
+                    disposition = (int)EndEntityStatus.GENERATED;
+                    return true;
+
+                // Terminal failure — never issued, or explicitly cancelled/rejected.
+                case "rejected":
+                case "cancelled":
+                case "certificate rejected":
+                case "order rejected":
+                case "order cancelled":
+                    disposition = (int)EndEntityStatus.FAILED;
+                    return true;
+
+                default:
+                    return false;
             }
         }
 

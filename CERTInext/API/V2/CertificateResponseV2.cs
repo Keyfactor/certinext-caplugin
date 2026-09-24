@@ -24,7 +24,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
     /// <summary>
     /// Standard OAuth2 client_credentials token response (flat shape — no tokenDetails wrapper).
-    /// POST {ApiUrlV2}/oauth/token with form-encoded body.
+    /// POST {ApiUrl}/oauth/token with form-encoded body (ApiUrl is the V2 base URL when
+    /// UseV2Api=true — issues/0022 config consolidation).
     /// </summary>
     public class V2TokenResponse
     {
@@ -284,5 +285,105 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         [JsonPropertyName("authType")]
         public string AuthType { get; set; }
+    }
+
+    /// <summary>
+    /// Spring-style page envelope for GET /api/certinext/v2/reports/orders (issues/0022,
+    /// Phase 0 live probe — confirmed live 2026-09-23; the spec's example body is stale,
+    /// its field table is what's actually returned).
+    /// </summary>
+    public class V2OrdersReportResponse
+    {
+        [JsonPropertyName("content")]
+        public List<OrderReportEntryV2> Content { get; set; }
+
+        /// <summary>1-based page index (mirrors the request's page query param).</summary>
+        [JsonPropertyName("page")]
+        public int Page { get; set; }
+
+        [JsonPropertyName("size")]
+        public int Size { get; set; }
+
+        [JsonPropertyName("totalElements")]
+        public long TotalElements { get; set; }
+
+        [JsonPropertyName("totalPages")]
+        public int TotalPages { get; set; }
+    }
+
+    /// <summary>
+    /// A single row from the V2 /reports/orders "content" array. Field names match the live
+    /// field table confirmed in issues/0022 Phase 0 (NOT the spec's stale example body, which
+    /// uses different field names — state/identifier/account/group/product).
+    ///
+    /// orderStatus/certificateStatus are human-readable display strings (e.g. "Order Accepted",
+    /// "Certificate Downloaded") — NOT the V2 `status` enum used by TrackOrder
+    /// (see <see cref="V2OrderStatusResponse.Status"/> and
+    /// <c>Keyfactor.Extensions.CAPlugin.CERTInext.Models.StatusMapper.V2StatusToRequestDisposition</c>).
+    /// See <c>CERTInextCAPlugin.MapV2ReportStatusToDisposition</c> for how these display strings
+    /// are mapped, and issues/0022 for the vocabulary observed so far (not confirmed exhaustive).
+    /// </summary>
+    public class OrderReportEntryV2
+    {
+        [JsonPropertyName("orderNumber")]
+        public string OrderNumber { get; set; }
+
+        /// <summary>Most-recent request identifier on the order (reissues create new requests).</summary>
+        [JsonPropertyName("requestNumber")]
+        public string RequestNumber { get; set; }
+
+        /// <summary>Human-readable order state, e.g. "Order Accepted", "Order Fulfilled".</summary>
+        [JsonPropertyName("orderStatus")]
+        public string OrderStatus { get; set; }
+
+        /// <summary>Human-readable request/certificate state, e.g. "Pending for Approver", "Certificate Downloaded".</summary>
+        [JsonPropertyName("certificateStatus")]
+        public string CertificateStatus { get; set; }
+
+        /// <summary>Hex serial assigned by the CA. Empty until issuance.</summary>
+        [JsonPropertyName("certificateSerialNumber")]
+        public string CertificateSerialNumber { get; set; }
+
+        /// <summary>Certificate notAfter. Empty until issuance. Kept as string — format not confirmed live.</summary>
+        [JsonPropertyName("certificateExpiryDate")]
+        public string CertificateExpiryDate { get; set; }
+
+        /// <summary>Issuing CA's CN. Empty until issuance.</summary>
+        [JsonPropertyName("issuerCA")]
+        public string IssuerCa { get; set; }
+
+        /// <summary>
+        /// Catalog product code. Often empty on report rows (issues/0016) — do not rely on this
+        /// for family resolution; use <c>ResolveAndTrackOrderV2WithFamilyAsync</c> instead.
+        /// </summary>
+        [JsonPropertyName("productCode")]
+        public string ProductCode { get; set; }
+
+        /// <summary>Primary CN for SSL/TLS orders. Empty for non-SSL families.</summary>
+        [JsonPropertyName("domainName")]
+        public string DomainName { get; set; }
+
+        [JsonPropertyName("groupNumber")]
+        public string GroupNumber { get; set; }
+
+        /// <summary>Order creation time (UTC). Kept as string and parsed defensively by the caller —
+        /// mirrors the V1 <see cref="OrderReportEntry.OrderDate"/> pattern.</summary>
+        [JsonPropertyName("orderDate")]
+        public string OrderDate { get; set; }
+
+        [JsonPropertyName("organizationName")]
+        public string OrganizationName { get; set; }
+
+        [JsonPropertyName("countryName")]
+        public string CountryName { get; set; }
+
+        [JsonPropertyName("originator")]
+        public string Originator { get; set; }
+
+        [JsonPropertyName("tags")]
+        public List<string> Tags { get; set; }
+
+        [JsonPropertyName("customFields")]
+        public List<object> CustomFields { get; set; }
     }
 }

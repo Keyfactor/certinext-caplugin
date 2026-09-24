@@ -52,7 +52,7 @@ A unique transaction ID (`requestTxnId`) is generated for each request. The time
 
 An OAuth client-credentials mode is also available as an alternative. When OAuth is configured, the plugin exchanges a client ID and secret for a short-lived bearer token and automatically refreshes it before expiry.
 
-When `UseV2Api` is enabled, the plugin uses a dedicated OAuth2 `client_credentials` flow — separate from the V1 OAuth alternative. The plugin posts `client_id` and `client_secret` (form-encoded) to `/oauth/token`, caches the resulting bearer token for its 1-hour lifetime, and automatically refreshes it 60 seconds before expiry. V2 credentials are provisioned separately by CERTInext and are not derived from the V1 access key.
+When `UseV2Api` is enabled, the plugin uses a dedicated OAuth2 `client_credentials` flow, reusing the connector's `OAuthClientId`/`OAuthClientSecret` fields regardless of the V1 `AuthMode` setting. The plugin posts `client_id` and `client_secret` (form-encoded) to `{ApiUrl}/oauth/token` (the same `ApiUrl` field, which becomes the V2 host in this mode), caches the resulting bearer token for its 1-hour lifetime, and automatically refreshes it 60 seconds before expiry.
 
 ## Certificate Identifiers
 
@@ -203,7 +203,7 @@ flowchart TD
 
 ### V2 API Path (UseV2Api = true)
 
-When `UseV2Api` is enabled, Ping, Enroll, GetSingleRecord, and Revoke route through the V2 REST API. Synchronize continues to call the V1 `GetOrderReport` endpoint until the V2 `/reports/orders` endpoint is available.
+When `UseV2Api` is enabled, Ping, Enroll, GetSingleRecord, Revoke, and Synchronize all route through the V2 REST API — Synchronize calls V2 `/reports/orders` rather than the V1 `GetOrderReport` endpoint, and V1 credentials are not required in this mode.
 
 #### DCV required (DV SSL)
 
@@ -392,6 +392,6 @@ The table below maps each Keyfactor Command operation to the CERTInext API endpo
 | Download certificate | `GET /api/certinext/v2/{family}-certificates/{orderId}/certificate` |
 | Revoke certificate | `POST /api/certinext/v2/{family}-certificates/{orderId}/revoke` |
 | List available products | `GET /api/certinext/v2/catalog/products` |
-| Synchronize inventory | `POST GetOrderReport` (V1 — V2 /reports/orders not yet available) |
+| Synchronize inventory | `GET /api/certinext/v2/reports/orders` (paginated) |
 
 `{family}` is `ssl-certificates`, `private-pki-certificates`, or `signature-certificates`.

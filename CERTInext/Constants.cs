@@ -81,6 +81,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string DcvSyncMaxOrderAgeHours = "DcvSyncMaxOrderAgeHours";
             public const string DcvSyncMaxPerPass = "DcvSyncMaxPerPass";
 
+            // V2 mode only: incremental-sync lookback window for /reports/orders (issues/0022).
+            public const string V2SyncLookbackHours = "V2SyncLookbackHours";
+
             // Environment variable that overrides DcvTimeoutMinutes when set.
             public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";
             public const string DcvWaitForChallengeSecondsEnvVar = "CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS";
@@ -380,15 +383,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string FamilySsl        = "ssl-certificates";
             public const string FamilyPrivatePki = "private-pki-certificates";
             public const string FamilySignature  = "signature-certificates";
+
+            // Orders report (Synchronize, V2 mode) — GET /api/certinext/v2/reports/orders.
+            // Spring-style page envelope: content/page/size/totalPages/totalElements.
+            // Paging is 1-based; size is clamped to 100 server-side; page=0 is treated as
+            // page 1 (issues/0022 Phase 0 live probe findings).
+            public const string OrdersReportPath = "/api/certinext/v2/reports/orders";
+            public const int OrdersReportMaxPageSize = 100;
+
+            // Default lookback window (issues/0022): live probing could not determine
+            // whether /reports/orders' from/to filter brackets order date or issue date.
+            // An incremental sync re-requests from (lastSync - this window) rather than
+            // exactly lastSync, so an order created before lastSync but issued after it
+            // (e.g. a slow-DCV order) still surfaces. See CERTInextConfig.V2SyncLookbackHours.
+            public const int DefaultSyncLookbackHours = 72;
         }
 
         // V2 config key constants (added here alongside existing Config constants)
         public static class ConfigV2
         {
             public const string UseV2Api      = "UseV2Api";
-            public const string ApiUrlV2      = "ApiUrlV2";
-            public const string ClientId      = "ClientId";
-            public const string ClientSecret  = "ClientSecret";
         }
 
         // Legacy string revocation reasons — retained so StatusMapper still compiles.

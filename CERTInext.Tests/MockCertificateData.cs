@@ -555,6 +555,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public static readonly string FakeIntermediatePemCertificate =
             "-----BEGIN CERTIFICATE-----\nMIIBfakeBASE64INTERMEDIATE==\n-----END CERTIFICATE-----";
 
+        /// <summary>
+        /// V2 <c>/reports/orders</c> page envelope (issues/0022). Rows default to a
+        /// pending-DCV-shaped display-string pair ("Order Accepted" / "Pending for Approver") —
+        /// override <paramref name="orderStatus"/>/<paramref name="certificateStatus"/> for other
+        /// scenarios. Field names match the live field table confirmed in issues/0022 Phase 0.
+        /// </summary>
+        public static string V2OrdersReportJson(
+            int page, int totalPages, string[] orderNumbers,
+            int size = 50, long? totalElements = null,
+            string orderStatus = "Order Accepted", string certificateStatus = "Pending for Approver")
+        {
+            var rows = new List<string>();
+            foreach (string id in orderNumbers)
+            {
+                rows.Add(
+                    $@"{{""orderNumber"":""{id}"",""requestNumber"":""{id}-req"",""orderStatus"":""{orderStatus}""," +
+                    $@"""certificateStatus"":""{certificateStatus}"",""domainName"":""example.com""," +
+                    $@"""productCode"":""842"",""orderDate"":""2026-01-01T00:00:00Z""}}");
+            }
+            long total = totalElements ?? orderNumbers.Length;
+            return $@"{{""content"":[{string.Join(",", rows)}],""page"":{page},""size"":{size}," +
+                   $@"""totalElements"":{total},""totalPages"":{totalPages}}}";
+        }
+
         // -----------------------------------------------------------------------
         // Helpers
         // -----------------------------------------------------------------------

@@ -52,16 +52,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private CERTInextClient BuildV2Client() =>
             new CERTInextClient(new CERTInextConfig
             {
-                // V1 fields still required (Synchronize uses V1)
+                // A single ApiUrl now serves both V1 and V2 (issues/0022 config consolidation).
                 ApiUrl        = _baseUrl,
                 AuthMode      = "AccessKey",
                 ApiKey        = "test-v1-key",
                 AccountNumber = "12345",
-                // V2 fields
-                UseV2Api      = true,
-                ApiUrlV2      = _baseUrl,
-                ClientId      = "my-v2-client",
-                ClientSecret  = "my-v2-secret",
+                UseV2Api          = true,
+                OAuthClientId     = "my-v2-client",
+                OAuthClientSecret = "my-v2-secret",
                 RequestorName  = "Test User",
                 RequestorEmail = "test@example.com",
                 PageSize       = 100
@@ -841,6 +839,133 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().ThrowAsync<Exception>()
                 .WithMessage("*certificate.domain*must not be blank*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // ListOrdersV2Async (issues/0022) — V2 /reports/orders page enumeration
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ListOrdersV2Async_MultiplePages_EnumeratesAllRowsInOrder()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("page", "1")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(
+                        page: 1, totalPages: 2, orderNumbers: new[] { "ord_p1_001", "ord_p1_002" })));
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("page", "2")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(
+                        page: 2, totalPages: 2, orderNumbers: new[] { "ord_p2_001" })));
+
+            using var client = BuildV2Client();
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async(pageSize: 2))
+                results.Add(row);
+
+            results.Should().HaveCount(3);
+            results.ConvertAll(r => r.OrderNumber).Should().Equal("ord_p1_001", "ord_p1_002", "ord_p2_001");
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_NoRows_ReturnsEmpty()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/reports/orders").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client();
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async())
+                results.Add(row);
+
+            results.Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_PassesFromAndToAsQueryParams()
+        {
+            StubV2Token();
+            // Only matches if from/to were actually sent as query params — if the client
+            // dropped them, WireMock's default (unmatched) 404 response would make
+            // ThrowOnV2Failure throw, and the test would fail.
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("from", "2026-01-01")
+                    .WithParam("to", "2026-12-31")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client();
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async(from: "2026-01-01", to: "2026-12-31"))
+                results.Add(row);
+
+            results.Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_PageSizeOver100_ClampedServerRequest()
+        {
+            StubV2Token();
+            // Only matches size=100 — if the client sent the raw 500 through, this would 404.
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("size", "100")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client();
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async(pageSize: 500))
+                results.Add(row);
+
+            results.Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_NonSuccessResponse_Throws()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/reports/orders").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(500)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(@"{""title"":""Internal Server Error"",""status"":500,""detail"":""boom""}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = async () =>
+            {
+                await foreach (var _ in client.ListOrdersV2Async()) { }
+            };
+
+            await act.Should().ThrowAsync<Exception>().WithMessage("*V2 list orders*");
         }
     }
 }

@@ -76,11 +76,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             _http = new RestClient(options);
 
-            // V2 client — only constructed when V2 is enabled and ApiUrlV2 is set.
+            // V2 client — only constructed when V2 is enabled and ApiUrl is set. A single ApiUrl
+            // serves both modes (its meaning follows UseV2Api — issues/0022 config consolidation);
+            // in V2 mode it is the V2 base URL (no trailing path suffix).
             // No authenticator: tokens are injected per-request via BuildV2RequestAsync.
-            if (config.UseV2Api && !string.IsNullOrWhiteSpace(config.ApiUrlV2))
+            if (config.UseV2Api && !string.IsNullOrWhiteSpace(config.ApiUrl))
             {
-                var v2Options = new RestClientOptions(config.ApiUrlV2.TrimEnd('/'))
+                var v2Options = new RestClientOptions(config.ApiUrl.TrimEnd('/'))
                 {
                     ThrowOnAnyError = false,
                     Timeout = TimeSpan.FromSeconds(120)
@@ -1554,6 +1556,74 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return result;
         }
 
+        /// <inheritdoc/>
+        public async IAsyncEnumerable<OrderReportEntryV2> ListOrdersV2Async(
+            string from = null,
+            string to = null,
+            int pageSize = Constants.Api.DefaultPageSize,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+
+            // Server clamps size to 100 and treats page=0 as page 1 (issues/0022 Phase 0 probe);
+            // the client always sends 1-based pages itself so that quirk never surfaces here.
+            int size = pageSize <= 0
+                ? Constants.Api.DefaultPageSize
+                : Math.Min(pageSize, Constants.ApiV2.OrdersReportMaxPageSize);
+
+            int page = 1;
+            int totalPages = int.MaxValue; // sentinel until the first response tells us
+
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var query = new StringBuilder();
+                query.Append(Constants.ApiV2.OrdersReportPath)
+                     .Append("?page=").Append(page)
+                     .Append("&size=").Append(size);
+                if (!string.IsNullOrWhiteSpace(from))
+                    query.Append("&from=").Append(Uri.EscapeDataString(from));
+                if (!string.IsNullOrWhiteSpace(to))
+                    query.Append("&to=").Append(Uri.EscapeDataString(to));
+
+                var req = await BuildV2RequestAsync(query.ToString(), Method.Get, ct);
+
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var resp = await _httpV2.ExecuteAsync(req, ct);
+                sw.Stop();
+
+                Logger.LogInformation(
+                    "CERTInext V2 API call: Method=GET, Path={Path}, Page={Page}, HttpStatus={Status}, LatencyMs={Latency}",
+                    Constants.ApiV2.OrdersReportPath, page, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+
+                ThrowOnV2Failure(resp, "V2 list orders");
+                var listResp = DeserializeV2OrThrow<V2OrdersReportResponse>(resp, $"V2 list orders page {page}");
+
+                var rows = listResp.Content;
+                if (rows == null || rows.Count == 0)
+                    break;
+
+                if (page == 1)
+                    totalPages = listResp.TotalPages > 0 ? listResp.TotalPages : 1;
+
+                Logger.LogDebug(
+                    "V2 orders report: fetched page {Page}/{TotalPages} with {Count} rows (totalElements={Total}).",
+                    page, totalPages, rows.Count, listResp.TotalElements);
+
+                foreach (var row in rows)
+                    yield return row;
+
+                if (page >= totalPages)
+                    break;
+
+                page++;
+            }
+
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
         /// <summary>
         /// Minimal, read-only escape hatch for probing V2 endpoints that don't yet have a
         /// typed client method (e.g. <c>/reports/orders</c>, <c>/domains</c> during discovery).
@@ -1633,7 +1703,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             if (_httpV2 == null)
                 throw new InvalidOperationException(
-                    "V2 API client is not initialised. Ensure UseV2Api=true and ApiUrlV2 is set in the connector configuration.");
+                    "V2 API client is not initialised. Ensure UseV2Api=true and ApiUrl is set in the connector configuration.");
         }
 
         private static string BuildV2OrderPath(string productFamilySlug, string orderId)
@@ -1685,16 +1755,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     return _v2Token;
 
                 Logger.LogInformation(
-                    "V2 OAuth2 token acquisition started. ApiUrlV2={ApiUrlV2}, ClientId={ClientId}",
-                    _config.ApiUrlV2, _config.ClientId);
+                    "V2 OAuth2 token acquisition started. ApiUrl={ApiUrl}, ClientId={ClientId}",
+                    _config.ApiUrl, _config.OAuthClientId);
 
-                string tokenUrl = _config.ApiUrlV2.TrimEnd('/') + Constants.ApiV2.TokenPath;
+                string tokenUrl = _config.ApiUrl.TrimEnd('/') + Constants.ApiV2.TokenPath;
                 using var tokenClient = new RestClient(tokenUrl);
                 var tokenReq = new RestRequest(string.Empty, Method.Post);
                 tokenReq.AddHeader("Content-Type", "application/x-www-form-urlencoded");
                 tokenReq.AddParameter("grant_type", "client_credentials");
-                tokenReq.AddParameter("client_id", _config.ClientId);
-                tokenReq.AddParameter("client_secret", _config.ClientSecret);
+                tokenReq.AddParameter("client_id", _config.OAuthClientId);
+                tokenReq.AddParameter("client_secret", _config.OAuthClientSecret);
 
                 var tokenResp = await tokenClient.ExecuteAsync(tokenReq, ct);
                 if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
@@ -1708,12 +1778,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     {
                         Logger.LogError(
                             "V2 OAuth2 token acquisition failed with 401 Unauthorized (invalid_client). " +
-                            "ApiUrlV2={ApiUrlV2}, ClientId={ClientId}. " +
-                            "Hint: the ClientId or ClientSecret is wrong, or the key was revoked in the portal.",
-                            _config.ApiUrlV2, _config.ClientId);
+                            "ApiUrl={ApiUrl}, ClientId={ClientId}. " +
+                            "Hint: the OAuthClientId or OAuthClientSecret is wrong, or the key was revoked in the portal.",
+                            _config.ApiUrl, _config.OAuthClientId);
                         throw new Exception(
                             "V2 OAuth2 token request denied (401 Unauthorized, invalid_client). " +
-                            "The ClientId or ClientSecret is incorrect, or the key was revoked. " +
+                            "The OAuthClientId or OAuthClientSecret is incorrect, or the key was revoked. " +
                             "Regenerate the client secret in the CERTInext portal (Integration → REST APIs → OAuth2) " +
                             "and update the connector config. See gateway logs for details.");
                     }
@@ -1721,9 +1791,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     {
                         Logger.LogError(
                             "V2 OAuth2 token acquisition failed with 403 Forbidden (unauthorized_client). " +
-                            "ApiUrlV2={ApiUrlV2}, ClientId={ClientId}. " +
+                            "ApiUrl={ApiUrl}, ClientId={ClientId}. " +
                             "Hint: the access key exists but was not generated in OAuth mode in the portal.",
-                            _config.ApiUrlV2, _config.ClientId);
+                            _config.ApiUrl, _config.OAuthClientId);
                         throw new Exception(
                             "V2 OAuth2 token request denied (403 Forbidden, unauthorized_client). " +
                             "The access key was not generated in OAuth mode. Recreate the key in the CERTInext " +
@@ -1731,8 +1801,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             "See gateway logs for details.");
                     }
                     Logger.LogError(
-                        "V2 OAuth2 token acquisition failed. ApiUrlV2={ApiUrlV2}, ClientId={ClientId}, HttpStatus={Status}",
-                        _config.ApiUrlV2, _config.ClientId, (int)tokenResp.StatusCode);
+                        "V2 OAuth2 token acquisition failed. ApiUrl={ApiUrl}, ClientId={ClientId}, HttpStatus={Status}",
+                        _config.ApiUrl, _config.OAuthClientId, (int)tokenResp.StatusCode);
                     throw new Exception(
                         $"Failed to obtain V2 OAuth2 token. HTTP {(int)tokenResp.StatusCode}. See gateway logs for details.");
                 }
@@ -1741,8 +1811,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 if (tokenPayload == null || string.IsNullOrEmpty(tokenPayload.AccessToken))
                 {
                     Logger.LogError(
-                        "V2 OAuth2 token response did not contain access_token. ApiUrlV2={ApiUrlV2}",
-                        _config.ApiUrlV2);
+                        "V2 OAuth2 token response did not contain access_token. ApiUrl={ApiUrl}",
+                        _config.ApiUrl);
                     throw new Exception("V2 OAuth2 token response did not contain an access_token.");
                 }
 
@@ -1750,8 +1820,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 _v2TokenExpiry = DateTime.UtcNow.AddSeconds(Math.Max(tokenPayload.ExpiresIn - 60, 30));
 
                 Logger.LogInformation(
-                    "V2 OAuth2 token acquired. ApiUrlV2={ApiUrlV2}, ClientId={ClientId}, ExpiresAt={Expiry:u}",
-                    _config.ApiUrlV2, _config.ClientId, _v2TokenExpiry);
+                    "V2 OAuth2 token acquired. ApiUrl={ApiUrl}, ClientId={ClientId}, ExpiresAt={Expiry:u}",
+                    _config.ApiUrl, _config.OAuthClientId, _v2TokenExpiry);
                 return _v2Token;
             }
             finally

@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -65,34 +64,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _fixture = fixture;
             _output = output;
 
-            // Load ~/.env_certinext_v2 if present, same priority rules as V2ApiTests:
+            // Load ~/.env_certinext_v2 via the shared helper (issues/0017, gap G14 — one env
+            // loader, not a private copy per test class), same priority rules as V2ApiTests:
             // V2-file-defined keys override whatever the fixture already promoted into
             // process env (the V1 CERTINEXT_API_URL differs from the V2 base URL).
-            string v2Path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".env_certinext_v2");
-            var (env, fileKeys) = LoadEnvFile(v2Path);
+            var env = V2EnvHelper.LoadAndPromote();
 
-            foreach (string key in fileKeys)
-                if (env.TryGetValue(key, out string fv))
-                    Environment.SetEnvironmentVariable(key, fv);
+            _v2ApiUrl = V2EnvHelper.GetEnv(env, "CERTINEXT_API_URL");
+            _v2ClientId = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_ID");
+            _v2ClientSecret = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_SECRET");
+            _v2Domain = V2EnvHelper.GetEnv(env, "CERTINEXT_DCV_DOMAIN", "test.example.com");
+            _issuedOrderId = V2EnvHelper.GetEnv(env, "CERTINEXT_V2_ISSUED_ORDER_ID");
 
-            foreach (var kv in env)
-                if (Environment.GetEnvironmentVariable(kv.Key) == null)
-                    Environment.SetEnvironmentVariable(kv.Key, kv.Value);
-
-            _v2ApiUrl = GetEnv(env, "CERTINEXT_API_URL");
-            _v2ClientId = GetEnv(env, "CERTINEXT_CLIENT_ID");
-            _v2ClientSecret = GetEnv(env, "CERTINEXT_CLIENT_SECRET");
-            _v2Domain = GetEnv(env, "CERTINEXT_DCV_DOMAIN", "test.example.com");
-            _issuedOrderId = GetEnv(env, "CERTINEXT_V2_ISSUED_ORDER_ID");
-
-            _v2Enabled = !string.IsNullOrWhiteSpace(GetEnv(env, "CERTINEXT_USE_V2_API"))
+            _v2Enabled = !string.IsNullOrWhiteSpace(V2EnvHelper.GetEnv(env, "CERTINEXT_USE_V2_API"))
                          && !string.IsNullOrWhiteSpace(_v2ApiUrl)
                          && !string.IsNullOrWhiteSpace(_v2ClientId)
                          && !string.IsNullOrWhiteSpace(_v2ClientSecret);
 
-            _probeEnabled = _v2Enabled && !string.IsNullOrWhiteSpace(GetEnv(env, "CERTINEXT_V2_REPORT_PROBE"));
+            _probeEnabled = _v2Enabled && !string.IsNullOrWhiteSpace(V2EnvHelper.GetEnv(env, "CERTINEXT_V2_REPORT_PROBE"));
         }
 
         // ---------------------------------------------------------------------------
@@ -486,16 +475,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             return new CERTInextClient(new CERTInextConfig
             {
-                // V1 fields (still needed for construction; not exercised by these probes).
-                ApiUrl        = _fixture.IsConfigured ? _fixture.Config.ApiUrl : "https://v1-placeholder.certinext.io",
-                AuthMode      = "AccessKey",
-                ApiKey        = _fixture.IsConfigured ? _fixture.Config.ApiKey : "placeholder",
-                AccountNumber = _fixture.IsConfigured ? _fixture.Config.AccountNumber : "0",
-                // V2 fields
-                UseV2Api      = true,
-                ApiUrlV2      = _v2ApiUrl,
-                ClientId      = _v2ClientId,
-                ClientSecret  = _v2ClientSecret,
+                // A single ApiUrl now serves V2 (issues/0022 config consolidation) — no V1-only
+                // fields are set here.
+                ApiUrl            = _v2ApiUrl,
+                UseV2Api          = true,
+                OAuthClientId     = _v2ClientId,
+                OAuthClientSecret = _v2ClientSecret,
                 RequestorName  = _fixture.IsConfigured ? _fixture.Config.RequestorName : "Test",
                 RequestorEmail = _fixture.IsConfigured ? _fixture.Config.RequestorEmail : "test@example.com",
                 SignerIp       = "127.0.0.1",
@@ -530,39 +515,5 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             return value.Substring(0, maxLength) + "...(truncated)";
         }
 
-        private static (Dictionary<string, string> env, HashSet<string> fileKeys) LoadEnvFile(string path)
-        {
-            var fileKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (System.Collections.DictionaryEntry de in Environment.GetEnvironmentVariables())
-            {
-                string k = de.Key?.ToString();
-                string v = de.Value?.ToString();
-                if (!string.IsNullOrEmpty(k)) result[k] = v ?? string.Empty;
-            }
-
-            if (File.Exists(path))
-            {
-                foreach (string rawLine in File.ReadAllLines(path))
-                {
-                    string line = rawLine.Trim();
-                    if (string.IsNullOrEmpty(line) || line.StartsWith("#")) continue;
-
-                    int idx = line.IndexOf('=');
-                    if (idx <= 0) continue;
-
-                    string key = line.Substring(0, idx).Trim();
-                    string val = line.Substring(idx + 1).Trim().Trim('"').Trim('\'');
-                    result[key] = val;
-                    fileKeys.Add(key);
-                }
-            }
-
-            return (result, fileKeys);
-        }
-
-        private static string GetEnv(Dictionary<string, string> env, string key, string defaultValue = "")
-            => env.TryGetValue(key, out string v) && !string.IsNullOrWhiteSpace(v) ? v : defaultValue;
     }
 }

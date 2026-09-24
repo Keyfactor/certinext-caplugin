@@ -141,24 +141,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             return new StubDomainValidatorFactory();
         }
 
-        private CERTInextConfig BuildV2Config(bool dcvEnabled = true, int propagationDelaySeconds = 5, int? pageSize = null)
+        /// <summary>
+        /// Builds a <see cref="CERTInextConfig"/> wired for the V2 API. A single
+        /// <see cref="CERTInextConfig.ApiUrl"/> now serves both modes (issues/0022 config
+        /// consolidation), and V2 auth reuses <see cref="CERTInextConfig.OAuthClientId"/>/
+        /// <see cref="CERTInextConfig.OAuthClientSecret"/>. Deliberately omits every V1-only
+        /// field (ApiKey/AccountNumber/AuthMode) — V1 credentials are optional when UseV2Api
+        /// is true, including for Synchronize (now V2 /reports/orders — issues/0022).
+        /// </summary>
+        private CERTInextConfig BuildV2Config(
+            bool dcvEnabled = true, int propagationDelaySeconds = 5, int? pageSize = null, int? syncLookbackHours = null)
         {
             return new CERTInextConfig
             {
-                // V1 fields — required so Synchronize (always V1) keeps working.
-                ApiUrl             = _fixture.IsConfigured ? _fixture.Config.ApiUrl : "https://v1-placeholder.certinext.io",
-                AuthMode           = "AccessKey",
-                ApiKey             = _fixture.IsConfigured ? _fixture.Config.ApiKey : "placeholder",
-                AccountNumber      = _fixture.IsConfigured ? _fixture.Config.AccountNumber : "0",
-                GroupNumber        = _fixture.IsConfigured ? _fixture.Config.GroupNumber : string.Empty,
-                OrganizationNumber = _fixture.IsConfigured ? _fixture.Config.OrganizationNumber : string.Empty,
-                DefaultProductCode = _fixture.IsConfigured ? _fixture.Config.DefaultProductCode : _v2ProductCode,
+                ApiUrl            = _v2ApiUrl,
+                UseV2Api          = true,
+                OAuthClientId     = _v2ClientId,
+                OAuthClientSecret = _v2ClientSecret,
 
-                // V2 fields
-                UseV2Api     = true,
-                ApiUrlV2     = _v2ApiUrl,
-                ClientId     = _v2ClientId,
-                ClientSecret = _v2ClientSecret,
+                // Default 72h (Constants.ApiV2.DefaultSyncLookbackHours) is always added on top
+                // of lastSync — on a busy shared sandbox that makes an un-narrowed delta sync
+                // slow, since every issued row costs a live certificate download (issues/0022's
+                // "V2 sync per-row download cost" note). Narrow via syncLookbackHours in tests
+                // that don't need the full margin.
+                V2SyncLookbackHours = syncLookbackHours ?? Constants.ApiV2.DefaultSyncLookbackHours,
 
                 RequestorName         = _fixture.IsConfigured ? _fixture.Config.RequestorName : "Keyfactor Test",
                 RequestorEmail        = _fixture.IsConfigured ? _fixture.Config.RequestorEmail : "test@example.com",
@@ -180,9 +186,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// v3.3-only three-arg test constructor, so <c>EnrollV2Async</c> /
         /// <c>GetSingleRecordV2Async</c> can drive DCV inline.
         /// </summary>
-        private CERTInextCAPlugin BuildV2DcvPlugin(bool dcvEnabled = true, int propagationDelaySeconds = 5, int? pageSize = null)
+        private CERTInextCAPlugin BuildV2DcvPlugin(
+            bool dcvEnabled = true, int propagationDelaySeconds = 5, int? pageSize = null, int? syncLookbackHours = null)
         {
-            var config = BuildV2Config(dcvEnabled, propagationDelaySeconds, pageSize);
+            var config = BuildV2Config(dcvEnabled, propagationDelaySeconds, pageSize, syncLookbackHours);
             var client = new CERTInextClient(config);
             return new CERTInextCAPlugin(client, BuildV2DnsFactory(), config);
         }
@@ -516,7 +523,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             int parallel = int.TryParse(Environment.GetEnvironmentVariable("CERTINEXT_V2_BULK_TEST_PARALLEL"), out int p) ? p : 5;
 
             // PageSize=100 ensures the 101st order forces a second page during Synchronize.
-            var plugin = BuildV2DcvPlugin(dcvEnabled: true, propagationDelaySeconds: 5, pageSize: 100);
+            // Since this plugin is UseV2Api=true, Synchronize now pages through V2
+            // /reports/orders (ListOrdersV2Async, issues/0022) rather than V1 GetOrderReport —
+            // this is the live pagination proof for that path, not just the WireMock-based
+            // client unit tests.
+            // syncLookbackHours narrowed to 2h: the default 72h margin would otherwise re-download
+            // every issued cert in a multi-day window on EACH of the (up to 8) sync passes below
+            // — issues/0022's "V2 sync per-row download cost" note, compounded by the retry loop.
+            var plugin = BuildV2DcvPlugin(dcvEnabled: true, propagationDelaySeconds: 5, pageSize: 100, syncLookbackHours: 2);
 
             var enrolled = new ConcurrentBag<(int idx, string cn, EnrollmentResult result)>();
             var failures = new ConcurrentBag<(int idx, string error)>();

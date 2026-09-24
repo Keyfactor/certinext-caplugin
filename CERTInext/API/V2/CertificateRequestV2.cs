@@ -20,7 +20,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     // ---------------------------------------------------------------------------
     // V2 REST API — Request DTOs
     //
-    // Auth: POST {ApiUrlV2}/oauth/token (form-encoded client_credentials)
+    // Auth: POST {ApiUrl}/oauth/token (form-encoded client_credentials; ApiUrl is the V2 base
+    // URL when UseV2Api=true — issues/0022 config consolidation)
     // Product code: X-Product-Code header (not in body)
     // Idempotency: Idempotency-Key header required on all unsafe POSTs
     // ---------------------------------------------------------------------------

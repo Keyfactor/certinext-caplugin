@@ -404,39 +404,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 [Constants.ConfigV2.UseV2Api] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: When true, the plugin routes Enroll / GetSingleRecord / Revoke through the " +
-                               "CERTInext V2 REST API (/api/certinext/v2/). Requires ApiUrlV2, ClientId, and ClientSecret. " +
-                               "Synchronize continues to use the V1 GetOrderReport until the V2 reports endpoint ships. " +
-                               "Default: false (V1 API).",
+                    Comments = "OPTIONAL: When true, the plugin routes Enroll / GetSingleRecord / Revoke / Synchronize " +
+                               "through the CERTInext V2 REST API (/api/certinext/v2/), including V2 " +
+                               "/reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode) " +
+                               "plus OAuthClientId and OAuthClientSecret. V1 credentials (ApiKey/AccountNumber/AuthMode) " +
+                               "are not required when this is true. Default: false (V1 API).",
                     Hidden = false,
                     DefaultValue = false,
                     Type = "Boolean"
                 },
-                [Constants.ConfigV2.ApiUrlV2] = new PropertyConfigInfo
+                [Constants.Config.V2SyncLookbackHours] = new PropertyConfigInfo
                 {
-                    Comments = "REQUIRED when UseV2Api is true: CERTInext V2 API base URL " +
-                               "(e.g. https://sandbox-us-api.certinext.io). No trailing slash or path suffix. " +
-                               "V2 is hosted on a different endpoint than V1; both must be configured separately.",
+                    Comments = "OPTIONAL (V2 mode only): during an incremental Synchronize, the plugin queries V2 " +
+                               "/reports/orders with a 'from' date of (lastSync minus this many hours) rather than " +
+                               "exactly lastSync. Live probing could not confirm whether the API's from/to filter " +
+                               "brackets order-placement date or issuance date (issues/0022); a lookback window " +
+                               "ensures an order created before lastSync but issued afterward (e.g. a slow DCV order) " +
+                               $"still surfaces on the next incremental pass. Ignored when UseV2Api is false. Default: {Constants.ApiV2.DefaultSyncLookbackHours}.",
                     Hidden = false,
-                    DefaultValue = string.Empty,
-                    Type = "String"
-                },
-                [Constants.ConfigV2.ClientId] = new PropertyConfigInfo
-                {
-                    Comments = "REQUIRED when UseV2Api is true: OAuth2 client ID for V2 API authentication. " +
-                               "Provisioned separately from V1 AccessKey credentials — obtain from the CERTInext " +
-                               "portal under Integration → REST APIs → OAuth2.",
-                    Hidden = false,
-                    DefaultValue = string.Empty,
-                    Type = "String"
-                },
-                [Constants.ConfigV2.ClientSecret] = new PropertyConfigInfo
-                {
-                    Comments = "REQUIRED when UseV2Api is true: OAuth2 client secret for V2 API authentication. " +
-                               "Stored as a secret — never transmitted outside the gateway's encrypted config store.",
-                    Hidden = true,
-                    DefaultValue = string.Empty,
-                    Type = "String"
+                    DefaultValue = Constants.ApiV2.DefaultSyncLookbackHours,
+                    Type = "Number"
                 }
             };
         }
@@ -887,33 +874,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // -----------------------------------------------------------------------
 
         /// <summary>
-        /// When true, Enroll / GetSingleRecord / Revoke use the CERTInext V2 REST API.
-        /// Synchronize continues to use the V1 GetOrderReport endpoint.
-        /// Default: false.
+        /// When true, Enroll / GetSingleRecord / Revoke / Synchronize use the CERTInext V2 REST
+        /// API. In this mode <see cref="ApiUrl"/> is the V2 base URL (e.g.
+        /// https://sandbox-us-api.certinext.io, no trailing path suffix) and V2 OAuth2 auth reuses
+        /// <see cref="OAuthClientId"/> / <see cref="OAuthClientSecret"/>. V1-only credentials
+        /// (<see cref="ApiKey"/>, <see cref="AccountNumber"/>, <see cref="AuthMode"/>) are not
+        /// required when this is true. Default: false.
         /// </summary>
         [JsonPropertyName("UseV2Api")]
         public bool UseV2Api { get; set; } = false;
 
         /// <summary>
-        /// Base URL for the V2 API (e.g. https://sandbox-us-api.certinext.io).
-        /// Required when UseV2Api is true. No trailing slash or path suffix.
+        /// V2 mode only: during an incremental Synchronize, query V2 /reports/orders with a
+        /// 'from' date of (lastSync minus this many hours) rather than exactly lastSync — see
+        /// <see cref="Constants.ApiV2.DefaultSyncLookbackHours"/> and issues/0022 for why (the
+        /// from/to filter's order-date-vs-issue-date semantics could not be confirmed live).
+        /// Ignored when <see cref="UseV2Api"/> is false. Default: 72.
         /// </summary>
-        [JsonPropertyName("ApiUrlV2")]
-        public string ApiUrlV2 { get; set; } = string.Empty;
-
-        /// <summary>
-        /// OAuth2 client ID for V2 API authentication.
-        /// Required when UseV2Api is true. Separate from the V1 AccessKey credential.
-        /// </summary>
-        [JsonPropertyName("ClientId")]
-        public string ClientId { get; set; } = string.Empty;
-
-        /// <summary>
-        /// OAuth2 client secret for V2 API authentication.
-        /// Required when UseV2Api is true. NEVER logged or transmitted in plaintext.
-        /// </summary>
-        [JsonPropertyName("ClientSecret")]
-        public string ClientSecret { get; set; } = string.Empty;
+        [JsonPropertyName("V2SyncLookbackHours")]
+        public int V2SyncLookbackHours { get; set; } = Constants.ApiV2.DefaultSyncLookbackHours;
 
         /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the

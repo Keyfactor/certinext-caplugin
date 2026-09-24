@@ -5,7 +5,8 @@
 - feat(v2): V2 enrollment handles all three `EnrollmentType` values (New/Reissue/RenewOrReissue) via a single V2 order placement; issued orders download the certificate immediately.
 - feat(v2): V2 revocation probes SSL → PrivatePKI → Signature families to locate and revoke an order by its `ord_` ID.
 - feat(v2): V2 `GetSingleRecord` resolves order status across all three V2 product families without touching the V1 path.
-- feat(v2): Synchronization continues to use V1 `GetOrderReport` (V2 `/reports/orders` returns 501); a warning is logged when `UseV2Api` is true to document this.
+- feat(v2): Synchronize now uses V2 `/reports/orders` when `UseV2Api` is true, with an incremental lookback window (`V2SyncLookbackHours`, default 72h) — V1 credentials are no longer required in V2 mode.
+- feat(v2): Consolidated V2 config onto the existing `ApiUrl`/`OAuthClientId`/`OAuthClientSecret` fields; the never-shipped `ApiUrlV2`/`ClientId`/`ClientSecret` fields are removed.
 - **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly and returns the certificate in the same request when it issues fast, instead of always waiting for the next sync. Configurable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s). Orders that don't issue in time (e.g. OV/EV) return pending and are picked up by the next sync, as before.
 
 ## Bug Fixes

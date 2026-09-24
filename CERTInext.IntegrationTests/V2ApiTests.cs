@@ -15,7 +15,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -55,8 +54,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     ///   <item><c>CERTINEXT_PRODUCT_CODE</c>  — product code for lifecycle test (e.g. 842)</item>
     ///   <item><c>CERTINEXT_DCV_DOMAIN</c>    — domain for lifecycle test (e.g. dcv-test.example.com)</item>
     /// </list>
-    /// V1 variables (<c>CERTINEXT_API_URL</c>, <c>CERTINEXT_ACCESS_KEY</c>, etc.) must remain
-    /// configured because Synchronize continues to use the V1 GetOrderReport endpoint.
+    /// V1 variables (<c>CERTINEXT_API_URL</c>, <c>CERTINEXT_ACCESS_KEY</c>, etc.) are NOT required
+    /// for V2-mode tests — Synchronize now uses V2 <c>/reports/orders</c> when UseV2Api is true
+    /// (issues/0022), and V1 credentials are optional in that mode.
     /// </summary>
     public class V2ApiTests : IClassFixture<IntegrationTestFixture>
     {
@@ -78,36 +78,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _fixture = fixture;
             _output  = output;
 
-            // Load ~/.env_certinext_v2 if present.  V2 file values take priority
-            // over process env because IntegrationTestFixture may have already
-            // promoted the V1 CERTINEXT_API_URL (with /emSignHub-API suffix) into
-            // process env, and the V2 base URL is different.
-            string v2Path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".env_certinext_v2");
-            var (env, fileKeys) = LoadEnvFile(v2Path);
+            // Load ~/.env_certinext_v2 via the shared helper (issues/0017, gap G14 — one env
+            // loader, not a private copy per test class). V2 file values take priority over
+            // process env because IntegrationTestFixture may have already promoted the V1
+            // CERTINEXT_API_URL (with /emSignHub-API suffix) into process env, and the V2 base
+            // URL is different.
+            var env = V2EnvHelper.LoadAndPromote();
 
-            // Force-promote V2-file-defined keys into process env so they override
-            // any V1 values the fixture already set.
-            foreach (string key in fileKeys)
-                if (env.TryGetValue(key, out string fv))
-                    Environment.SetEnvironmentVariable(key, fv);
+            _v2ApiUrl       = V2EnvHelper.GetEnv(env, "CERTINEXT_API_URL");
+            _v2ClientId     = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_ID");
+            _v2ClientSecret = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_SECRET");
+            _v2ProductCode  = V2EnvHelper.GetEnv(env, "CERTINEXT_PRODUCT_CODE", "842");
+            _v2Domain       = V2EnvHelper.GetEnv(env, "CERTINEXT_DCV_DOMAIN", "test.example.com");
+            _cfApiToken     = V2EnvHelper.GetEnv(env, "CERTINEXT_CF_API_TOKEN");
+            _cfZoneId       = V2EnvHelper.GetEnv(env, "CERTINEXT_CF_ZONE_ID");
+            _issuedOrderId  = V2EnvHelper.GetEnv(env, "CERTINEXT_V2_ISSUED_ORDER_ID");
 
-            // Promote remaining keys that aren't already in process env
-            foreach (var kv in env)
-                if (Environment.GetEnvironmentVariable(kv.Key) == null)
-                    Environment.SetEnvironmentVariable(kv.Key, kv.Value);
-
-            _v2ApiUrl       = GetEnv(env, "CERTINEXT_API_URL");
-            _v2ClientId     = GetEnv(env, "CERTINEXT_CLIENT_ID");
-            _v2ClientSecret = GetEnv(env, "CERTINEXT_CLIENT_SECRET");
-            _v2ProductCode  = GetEnv(env, "CERTINEXT_PRODUCT_CODE", "842");
-            _v2Domain       = GetEnv(env, "CERTINEXT_DCV_DOMAIN", "test.example.com");
-            _cfApiToken     = GetEnv(env, "CERTINEXT_CF_API_TOKEN");
-            _cfZoneId       = GetEnv(env, "CERTINEXT_CF_ZONE_ID");
-            _issuedOrderId  = GetEnv(env, "CERTINEXT_V2_ISSUED_ORDER_ID");
-
-            _v2Enabled = !string.IsNullOrWhiteSpace(GetEnv(env, "CERTINEXT_USE_V2_API"))
+            _v2Enabled = !string.IsNullOrWhiteSpace(V2EnvHelper.GetEnv(env, "CERTINEXT_USE_V2_API"))
                          && !string.IsNullOrWhiteSpace(_v2ApiUrl)
                          && !string.IsNullOrWhiteSpace(_v2ClientId)
                          && !string.IsNullOrWhiteSpace(_v2ClientSecret);
@@ -182,53 +169,62 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Synchronize still uses V1 when UseV2Api=true
+        // Synchronize uses V2 /reports/orders when UseV2Api=true (issues/0022)
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Verifies that Synchronize calls the V1 GetOrderReport (not V2 /reports/orders)
-        /// even when UseV2Api=true.
-        /// Skips when V1 credentials are absent.
+        /// Verifies that Synchronize calls V2 <c>/reports/orders</c> (not V1 GetOrderReport)
+        /// when <c>UseV2Api=true</c>, and succeeds with ZERO V1 credentials configured at all —
+        /// the hard acceptance criterion from the Phase 4 parent plan. A single
+        /// <see cref="CERTInextConfig.ApiUrl"/> now serves both modes (issues/0022 config
+        /// consolidation), so the V1-only fields (ApiKey/AccountNumber/AuthMode) below are
+        /// simply never set.
         /// </summary>
         [SkippableFact]
-        public async Task Sync_UsesV1_WhenV2Enabled()
+        public async Task Sync_UsesV2_WithZeroV1Credentials()
         {
-            Skip.If(!_fixture.IsConfigured || !_v2Enabled,
-                "V1 credentials or V2 opt-in (CERTINEXT_USE_V2_API) not configured — skipping.");
+            Skip.If(!_v2Enabled, "V2 opt-in (CERTINEXT_USE_V2_API) or V2 credentials not configured — skipping.");
 
-            // Build a V2-enabled config that still has V1 creds for sync
             var config = new CERTInextConfig
             {
-                // V1 creds (required for sync)
-                ApiUrl          = _fixture.Config.ApiUrl,
-                AuthMode        = "AccessKey",
-                ApiKey          = _fixture.Config.ApiKey,
-                AccountNumber   = _fixture.Config.AccountNumber,
-                // V2 creds (only used for enroll/revoke)
-                UseV2Api        = true,
-                ApiUrlV2        = _v2Enabled ? _v2ApiUrl  : "https://placeholder.certinext.io",
-                ClientId        = _v2Enabled ? _v2ClientId : "placeholder-client",
-                ClientSecret    = _v2Enabled ? _v2ClientSecret : "placeholder-secret",
-                RequestorName   = _fixture.Config.RequestorName,
-                RequestorEmail  = _fixture.Config.RequestorEmail,
-                PageSize        = 10    // small page — we just want to confirm sync runs via V1
+                ApiUrl            = _v2ApiUrl,
+                UseV2Api          = true,
+                OAuthClientId     = _v2ClientId,
+                OAuthClientSecret = _v2ClientSecret,
+                RequestorName     = "Keyfactor Test",
+                RequestorEmail    = "test@example.com",
+                SignerPlace       = "Gateway Lab",
+                SignerIp          = "127.0.0.1",
+                PageSize          = 10,
+                // A small lookback keeps this test's live API call volume bounded — every
+                // issued row in the window needs a live certificate download (the report
+                // carries no body), and ResolveAndDownloadCertificateV2Async re-resolves the
+                // product family via a sequential TrackOrder probe when it isn't already known.
+                // The DEFAULT 72h lookback margin (Constants.ApiV2.DefaultSyncLookbackHours) is
+                // always added on top of lastSync regardless of how recent lastSync is, so on a
+                // busy shared sandbox account even a "last hour" delta sync still touches
+                // several days of orders unless this is overridden. See issues/0022's "V2 sync
+                // per-row download cost" note — this is a real, currently-unbounded cost on the
+                // live path, not just a test-tuning artifact.
+                V2SyncLookbackHours = 1
+                // Deliberately NOT set: ApiKey, AccountNumber, AuthMode, OAuthTokenUrl — all
+                // V1-only fields. Proving Synchronize succeeds without them is the point of
+                // this test.
             };
 
             using var client = new CERTInextClient(config);
             var plugin = new CERTInextCAPlugin(client, config);
 
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(1000);
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            // 300s: this shared sandbox has been observed to return 100+ orders even within a
+            // narrow ~1-2h window (heavy ongoing test activity), and each issued row costs a
+            // live download plus (when family isn't already known) a family-probe TrackOrder
+            // call — real, measured durations for comparable scope elsewhere in this class are
+            // 3-4.5 minutes. See issues/0022's "V2 sync per-row download cost" note — this is a
+            // genuine current performance characteristic of the live path, not a test artifact.
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(300));
 
-            Exception caughtEx = null;
-            try
-            {
-                await plugin.Synchronize(buffer, DateTime.UtcNow.AddDays(-1), false, cts.Token);
-            }
-            catch (Exception ex)
-            {
-                caughtEx = ex;
-            }
+            await plugin.Synchronize(buffer, DateTime.UtcNow.AddHours(-1), false, cts.Token);
             if (!buffer.IsAddingCompleted)
                 buffer.CompleteAdding();
 
@@ -236,25 +232,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             foreach (var record in buffer.GetConsumingEnumerable())
                 records.Add(record);
 
-            // Sync must call V1 GetOrderReport, not V2 endpoints.
-            // A V2-routing bug would throw KeyNotFoundException with "not found in any V2 product family".
-            // A V1 API error (wrong creds / URL mismatch) is acceptable here — it proves the V1 path ran.
-            if (caughtEx != null)
-            {
-                caughtEx.Message.Should().NotContain("V2 product family",
-                    "sync must use V1 GetOrderReport, not V2 product-family routing");
-            }
-            else
-            {
-                // Success path must actually prove something: the delta sync window is a day,
-                // so a healthy V1 account is expected to return at least one record. An empty,
-                // silent success here would be exactly as uninformative as the old "only check
-                // the exception message" assertion (see gap G6).
-                records.Should().NotBeEmpty(
-                    "Synchronize must return records via V1 GetOrderReport when it succeeds with UseV2Api=true " +
-                    "(an empty result here proves nothing about which code path actually ran)");
-                _output.WriteLine($"Sync_UsesV1_WhenV2Enabled: {records.Count} record(s) returned via V1.");
-            }
+            // The delta sync window is narrow (see V2SyncLookbackHours above), so this only
+            // proves correctness (zero V1 creds, records returned, shape is sane) — not sync
+            // performance at scale, which issues/0022 flags as a separate, real concern.
+            records.Should().NotBeEmpty(
+                "Synchronize must return records via V2 /reports/orders when UseV2Api=true, with zero V1 " +
+                "credentials configured — an empty result here proves nothing about which code path ran");
+            records.Should().OnlyContain(r => !string.IsNullOrWhiteSpace(r.CARequestID));
+
+            _output.WriteLine(
+                $"Sync_UsesV2_WithZeroV1Credentials: {records.Count} record(s) returned via V2 /reports/orders, " +
+                "with no ApiKey/AccountNumber/AuthMode configured.");
         }
 
         // ---------------------------------------------------------------------------
@@ -593,16 +581,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             return new CERTInextClient(new CERTInextConfig
             {
-                // V1 fields (still needed for Synchronize)
-                ApiUrl        = _fixture.IsConfigured ? _fixture.Config.ApiUrl : "https://v1-placeholder.certinext.io",
-                AuthMode      = "AccessKey",
-                ApiKey        = _fixture.IsConfigured ? _fixture.Config.ApiKey : "placeholder",
-                AccountNumber = _fixture.IsConfigured ? _fixture.Config.AccountNumber : "0",
-                // V2 fields
-                UseV2Api      = true,
-                ApiUrlV2      = _v2ApiUrl,
-                ClientId      = _v2ClientId,
-                ClientSecret  = _v2ClientSecret,
+                // A single ApiUrl now serves V2 (issues/0022 config consolidation) — no V1-only
+                // fields are set here.
+                ApiUrl            = _v2ApiUrl,
+                UseV2Api          = true,
+                OAuthClientId     = _v2ClientId,
+                OAuthClientSecret = _v2ClientSecret,
                 RequestorName  = _fixture.IsConfigured ? _fixture.Config.RequestorName : "Test",
                 RequestorEmail = _fixture.IsConfigured ? _fixture.Config.RequestorEmail : "test@example.com",
                 SignerIp       = "127.0.0.1",
@@ -675,49 +659,5 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             throw new KeyNotFoundException($"Order '{orderId}' not found in any V2 product family.");
         }
 
-        /// <summary>
-        /// Loads a KEY=VALUE env file and merges with process env vars.
-        /// V2 file values take priority over process env because the fixture
-        /// may have already promoted V1 values (e.g. CERTINEXT_API_URL with
-        /// /emSignHub-API suffix) into process env, and the V2 base URL differs.
-        /// Returns the merged dict and the set of keys defined in the file.
-        /// </summary>
-        private static (Dictionary<string, string> env, HashSet<string> fileKeys) LoadEnvFile(string path)
-        {
-            var fileKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-            // Seed with process env vars first
-            foreach (System.Collections.DictionaryEntry de in Environment.GetEnvironmentVariables())
-            {
-                string k = de.Key?.ToString();
-                string v = de.Value?.ToString();
-                if (!string.IsNullOrEmpty(k)) result[k] = v ?? string.Empty;
-            }
-
-            // V2 env-file values override process env for any key they define.
-            // This is the correct priority: the V2 file is a targeted overlay.
-            if (File.Exists(path))
-            {
-                foreach (string rawLine in File.ReadAllLines(path))
-                {
-                    string line = rawLine.Trim();
-                    if (string.IsNullOrEmpty(line) || line.StartsWith("#")) continue;
-
-                    int idx = line.IndexOf('=');
-                    if (idx <= 0) continue;
-
-                    string key = line.Substring(0, idx).Trim();
-                    string val = line.Substring(idx + 1).Trim().Trim('"').Trim('\'');
-                    result[key] = val;
-                    fileKeys.Add(key);
-                }
-            }
-
-            return (result, fileKeys);
-        }
-
-        private static string GetEnv(Dictionary<string, string> env, string key, string defaultValue = "")
-            => env.TryGetValue(key, out string v) && !string.IsNullOrWhiteSpace(v) ? v : defaultValue;
     }
 }

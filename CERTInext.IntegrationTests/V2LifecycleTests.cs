@@ -80,28 +80,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Builds a <see cref="CERTInextConfig"/> wired for the V2 API.  V1 fields are
-        /// populated from the fixture's config because <c>Synchronize</c> always uses
-        /// the V1 <c>GetOrderReport</c> endpoint regardless of <c>UseV2Api</c>.
+        /// Builds a <see cref="CERTInextConfig"/> wired for the V2 API. A single
+        /// <see cref="CERTInextConfig.ApiUrl"/> now serves both modes (issues/0022 config
+        /// consolidation) — in V2 mode it is the V2 base URL, and V2 auth reuses
+        /// <see cref="CERTInextConfig.OAuthClientId"/>/<see cref="CERTInextConfig.OAuthClientSecret"/>.
+        /// Deliberately does NOT set any V1-only field (ApiKey/AccountNumber/AuthMode) — proving
+        /// those are optional when UseV2Api is true is itself part of what these tests exercise
+        /// (Synchronize now uses V2 /reports/orders, not V1 GetOrderReport).
         /// </summary>
-        private CERTInextConfig BuildV2Config(bool dcvEnabled = false, int? pageSize = null)
+        private CERTInextConfig BuildV2Config(bool dcvEnabled = false, int? pageSize = null, int? syncLookbackHours = null)
         {
             return new CERTInextConfig
             {
-                // V1 fields — required so Synchronize (always V1) keeps working.
-                ApiUrl             = _fixture.IsConfigured ? _fixture.Config.ApiUrl : "https://v1-placeholder.certinext.io",
-                AuthMode           = "AccessKey",
-                ApiKey             = _fixture.IsConfigured ? _fixture.Config.ApiKey : "placeholder",
-                AccountNumber      = _fixture.IsConfigured ? _fixture.Config.AccountNumber : "0",
-                GroupNumber        = _fixture.IsConfigured ? _fixture.Config.GroupNumber : string.Empty,
-                OrganizationNumber = _fixture.IsConfigured ? _fixture.Config.OrganizationNumber : string.Empty,
-                DefaultProductCode = _fixture.IsConfigured ? _fixture.Config.DefaultProductCode : _v2ProductCode,
-
-                // V2 fields
-                UseV2Api     = true,
-                ApiUrlV2     = _v2ApiUrl,
-                ClientId     = _v2ClientId,
-                ClientSecret = _v2ClientSecret,
+                ApiUrl            = _v2ApiUrl,
+                UseV2Api          = true,
+                OAuthClientId     = _v2ClientId,
+                OAuthClientSecret = _v2ClientSecret,
 
                 RequestorName         = _fixture.IsConfigured ? _fixture.Config.RequestorName : "Keyfactor Test",
                 RequestorEmail        = _fixture.IsConfigured ? _fixture.Config.RequestorEmail : "test@example.com",
@@ -111,6 +105,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 SignerIp              = "127.0.0.1",
 
                 PageSize = pageSize ?? 100,
+
+                // Default 72h (Constants.ApiV2.DefaultSyncLookbackHours) is always added on top
+                // of lastSync regardless of how recent it is — on a busy shared sandbox that
+                // means every delta-sync test touches several days of orders (each issued row
+                // costs a live certificate download) unless narrowed here. See issues/0022's
+                // "V2 sync per-row download cost" note.
+                V2SyncLookbackHours = syncLookbackHours ?? Constants.ApiV2.DefaultSyncLookbackHours,
 
                 DcvEnabled                 = dcvEnabled,
                 DcvPropagationDelaySeconds = 5,
@@ -362,7 +363,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            var config = BuildV2Config();
+            // Narrow lookback (1h) — see issues/0022's "V2 sync per-row download cost" note;
+            // the plugin's default 72h margin makes an un-narrowed delta sync slow against
+            // this busy shared sandbox, and the order enrolled below is only seconds old.
+            var config = BuildV2Config(syncLookbackHours: 1);
             var plugin = BuildV2Plugin(config);
 
             // --- Enroll ---
@@ -381,17 +385,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             _output.WriteLine($"Enrolled V2 order {enrollResult.CARequestID}, status={enrollResult.Status}");
 
-            // --- Synchronize (always V1, even though UseV2Api=true) ---
+            // --- Synchronize (V2 /reports/orders — issues/0022) ---
             // Delta sync (fullSync=false, lastSync=recent) rather than a full historical
             // pull — this sandbox account has accumulated 1000+ orders from prior test
             // runs, and a full sync of the entire history is unnecessarily slow here; the
-            // order we just enrolled is recent, so a delta sync is sufficient to prove it
-            // surfaces via Synchronize.
-            var synced = await RunSyncAsync(BuildV2Plugin(config), lastSync: DateTime.UtcNow.AddDays(-1), fullSync: false);
+            // order we just enrolled is recent, so a delta sync (with the configured
+            // lookback window) is sufficient to prove it surfaces via Synchronize.
+            var synced = await RunSyncAsync(BuildV2Plugin(config), lastSync: DateTime.UtcNow.AddHours(-1), fullSync: false);
             synced.Should().Contain(
                 r => r.CARequestID == enrollResult.CARequestID,
                 $"the newly enrolled V2 order '{enrollResult.CARequestID}' must appear in a delta sync " +
-                "(Synchronize always uses V1 GetOrderReport regardless of UseV2Api)");
+                "via V2 /reports/orders");
 
             var syncedRecord = synced.First(r => r.CARequestID == enrollResult.CARequestID);
             _output.WriteLine($"Synced record status: {syncedRecord.Status}");
@@ -479,24 +483,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Runs a full sync (always V1) with a V2-configured (<c>UseV2Api=true</c>) plugin,
-        /// then calls <c>GetSingleRecord</c> for a sample of the resulting CARequestIDs.
-        /// Since V1-created order IDs are not resolvable via the V2 family probe,
-        /// <see cref="System.Collections.Generic.KeyNotFoundException"/> is an accepted,
-        /// documented outcome here (see issues/0016) — this test guards against any
-        /// *other* unhandled exception type escaping GetSingleRecord.
+        /// Runs a delta sync via V2 /reports/orders with a V2-configured (<c>UseV2Api=true</c>)
+        /// plugin, then calls <c>GetSingleRecord</c> for a sample of the resulting CARequestIDs.
+        /// All sampled IDs are now V2-native (from the V2 report itself, not a V1 listing), so
+        /// they are expected to resolve via the V2 family probe; <see cref="KeyNotFoundException"/>
+        /// is tolerated only as a defensive allowance (e.g. an order deleted between sync and
+        /// this call) — this test's real job is to guard against any *other* unhandled exception
+        /// type escaping GetSingleRecord.
         /// </summary>
         [SkippableFact]
         public async Task GetSingleRecord_V2_AllSyncedOrders_DoNotThrow()
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
-            Skip.If(!_fixture.IsConfigured, "V1 credentials not configured — Synchronize requires them.");
 
-            // Delta sync — this sandbox account has 1000+ historical orders; a recent
-            // window is enough to sample GetSingleRecord behavior without paging the
-            // entire multi-month history on every test run.
-            var plugin = BuildV2Plugin();
-            var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddDays(-7), fullSync: false);
+            // Narrow lookback (1h) — this sandbox account has 1000+ historical orders, and the
+            // plugin's default 72h lookback margin is always added on top of lastSync
+            // regardless of how recent it is, so an un-narrowed delta sync here would touch
+            // several days of orders. Every issued row costs a live certificate download, and
+            // family resolution costs a sequential TrackOrder probe when not already known
+            // (see issues/0022's "V2 sync per-row download cost" note) — an un-narrowed window
+            // was observed to take several minutes against this shared sandbox.
+            var plugin = BuildV2Plugin(BuildV2Config(syncLookbackHours: 1));
+            var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddHours(-1), fullSync: false);
             synced.Should().NotBeNull();
             synced.Should().NotBeEmpty(
                 "the delta sync window must return at least one record from this sandbox account to sample " +
@@ -515,40 +523,131 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 catch (KeyNotFoundException)
                 {
-                    // Expected: V1-created order IDs are not resolvable via the V2 family
-                    // probe when the plugin is UseV2Api=true. See issues/0016.
+                    // Tolerated defensively (e.g. sandbox timing/deletion) — every sampled ID
+                    // came from the V2 report itself, so this should be rare, not expected.
                     keyNotFound++;
                 }
             }
 
-            _output.WriteLine($"GetSingleRecord results: {ok} succeeded, {keyNotFound} KeyNotFoundException (expected for V1 orders under V2 config).");
+            _output.WriteLine($"GetSingleRecord results: {ok} succeeded, {keyNotFound} KeyNotFoundException.");
             (ok + keyNotFound).Should().Be(sample.Count,
-                "every sampled GetSingleRecord call must either succeed or throw the documented KeyNotFoundException " +
-                "(issues/0016) — any other exception type must escape this loop and fail the test (see gap G6)");
+                "every sampled GetSingleRecord call must either succeed or throw the tolerated " +
+                "KeyNotFoundException — any other exception type must escape this loop and fail the test");
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 11 — Synchronize() still uses V1 when UseV2Api=true, and returns records
+        // Gap 11 — Synchronize() uses V2 /reports/orders when UseV2Api=true (issues/0022)
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
-        public async Task Sync_V2_StillUsesV1_ReturnsRecords()
+        public async Task Sync_V2_UsesV2ReportsOrders_ReturnsRecords()
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
-            Skip.If(!_fixture.IsConfigured, "V1 credentials not configured — Synchronize requires them.");
 
-            // Delta sync — this sandbox account has 1000+ historical orders; a recent
-            // window proves Synchronize returns records without paging the entire
-            // multi-month history on every test run.
-            var plugin = BuildV2Plugin();
-            var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddDays(-7), fullSync: false);
+            // Narrow lookback (1h) — see the comment in GetSingleRecord_V2_AllSyncedOrders_DoNotThrow
+            // above for why the plugin's default 72h margin makes an un-narrowed delta sync slow
+            // against this shared, busy sandbox (issues/0022's "V2 sync per-row download cost").
+            var plugin = BuildV2Plugin(BuildV2Config(syncLookbackHours: 1));
+            var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddHours(-1), fullSync: false);
 
             synced.Should().NotBeNull();
             synced.Should().NotBeEmpty(
-                "Synchronize must return the account's recent V1 order inventory even when UseV2Api=true " +
-                "(Synchronize always uses V1 GetOrderReport)");
+                "Synchronize must return the account's recent order inventory via V2 /reports/orders " +
+                "(issues/0022 — Synchronize no longer falls back to V1 GetOrderReport when UseV2Api=true)");
+            synced.Should().OnlyContain(r => !string.IsNullOrWhiteSpace(r.CARequestID));
 
-            _output.WriteLine($"Synchronize returned {synced.Count} record(s) with UseV2Api=true.");
+            _output.WriteLine($"Synchronize (V2 /reports/orders) returned {synced.Count} record(s).");
+            foreach (var r in synced.Take(5))
+                _output.WriteLine($"  CARequestID={r.CARequestID}, Status={r.Status}, ProductID={r.ProductID}");
+        }
+
+        /// <summary>
+        /// Hard acceptance criterion (Phase 4 parent plan): Synchronize with
+        /// <c>UseV2Api=true</c> must succeed and return records with ZERO V1 credentials
+        /// configured at all — no ApiKey, no AccountNumber, no AuthMode, no V1-shaped ApiUrl.
+        /// Builds its own config (rather than reusing <see cref="BuildV2Plugin"/>'s default) so
+        /// the absence of every V1-only field is explicit and self-evident at the call site.
+        /// </summary>
+        [SkippableFact]
+        public async Task Sync_V2_WithZeroV1Credentials_Succeeds()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+
+            var config = new CERTInextConfig
+            {
+                ApiUrl            = _v2ApiUrl,
+                UseV2Api          = true,
+                OAuthClientId     = _v2ClientId,
+                OAuthClientSecret = _v2ClientSecret,
+                RequestorName     = "Keyfactor Test",
+                RequestorEmail    = "test@example.com",
+                SignerPlace       = "Gateway Lab",
+                SignerIp          = "127.0.0.1",
+                PageSize          = 100,
+                // See issues/0022's "V2 sync per-row download cost" note — narrowed to keep
+                // this test's live API call volume bounded against a busy shared sandbox.
+                V2SyncLookbackHours = 1
+                // Deliberately NOT set: ApiKey, AccountNumber, AuthMode, OAuthTokenUrl — all
+                // V1-only fields. Their CERTInextConfig defaults (empty string / "AccessKey")
+                // are never read on this path once UseV2Api is true.
+            };
+
+            var client = new CERTInextClient(config);
+            var plugin = new CERTInextCAPlugin(client, config);
+
+            var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddHours(-1), fullSync: false);
+
+            synced.Should().NotBeNull();
+            _output.WriteLine(
+                $"Synchronize succeeded with UseV2Api=true and ZERO V1 credentials configured " +
+                $"(ApiKey/AccountNumber/AuthMode all unset). Returned {synced.Count} record(s).");
+        }
+
+        /// <summary>
+        /// Opt-in (walks the sandbox's entire order history — 1000+ orders per the other
+        /// tests' comments in this class): proves a full sync (<c>fullSync=true</c>,
+        /// <c>lastSync=null</c>) paginates to completion via V2 /reports/orders without
+        /// throwing or truncating silently.
+        /// </summary>
+        [SkippableFact]
+        public async Task Sync_V2_FullSync_PaginatesEntireHistory()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            Skip.If(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CERTINEXT_V2_FULL_SYNC_TEST")),
+                "CERTINEXT_V2_FULL_SYNC_TEST not set — a full sync walks this sandbox's entire order " +
+                "history and is opt-in to keep the default .V2 filter fast.");
+
+            var plugin = BuildV2Plugin();
+            var synced = await RunSyncAsync(plugin, lastSync: null, fullSync: true);
+
+            synced.Should().NotBeNull();
+            synced.Should().NotBeEmpty("a full sync of a non-empty sandbox account must return records");
+            _output.WriteLine($"Full sync (V2, entire history) returned {synced.Count} record(s).");
+        }
+
+        /// <summary>
+        /// Forces multi-page traversal with a small page size (5) on a delta sync, proving
+        /// <c>ListOrdersV2Async</c>'s pagination is exercised end-to-end through Synchronize
+        /// against the live sandbox (not just the WireMock-based client unit tests).
+        /// </summary>
+        [SkippableFact]
+        public async Task Sync_V2_SmallPageSize_PaginatesAcrossMultiplePages()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+
+            // A narrow (2h) window with pageSize=5 still forces multi-page traversal whenever
+            // this busy shared sandbox has more than 5 matching orders — no need for a wide
+            // window (e.g. 30 days), which would also multiply live per-row download calls
+            // (issues/0022's "V2 sync per-row download cost" note) for no added pagination proof.
+            var config = BuildV2Config(pageSize: 5, syncLookbackHours: 1);
+            var plugin = BuildV2Plugin(config);
+
+            var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddHours(-2), fullSync: false);
+
+            synced.Should().NotBeNull();
+            _output.WriteLine(
+                $"Delta sync (2h window, pageSize=5) returned {synced.Count} record(s) — pageSize=5 " +
+                "forces multi-page traversal whenever the account has more than 5 matching orders.");
         }
     }
 

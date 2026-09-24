@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,10 +47,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             new CERTInextCAPlugin(client, factory, new CERTInextConfig
             {
                 UseV2Api        = true,
-                ApiUrlV2        = "https://v2.certinext.io",
-                ClientId        = "my-client",
-                ClientSecret    = "my-secret",
-                ApiUrl          = "https://v1.certinext.io",
+                ApiUrl          = "https://v2.certinext.io",
+                OAuthClientId     = "my-client",
+                OAuthClientSecret = "my-secret",
                 AccountNumber   = "12345",
                 AuthMode        = "AccessKey",
                 ApiKey          = "v1-key",
@@ -208,6 +209,107 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             validator.StagedRecords.Should().ContainSingle();
             validator.CleanedUpKeys.Should().ContainSingle(
                 "staged records are always cleaned up, including on the EMS-1080 verify path");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Synchronize (V2, issues/0022) — DCV-during-sync age-window / per-pass-cap gating.
+        // Reuses EvaluateDcvSyncEligibility/DcvSyncDecision — same bounds V1 sync uses (issue
+        // 0002), applied to the V2 /reports/orders path.
+        // ---------------------------------------------------------------------------
+
+        private static async IAsyncEnumerable<T> AsyncEnumerable<T>(params T[] items)
+        {
+            foreach (var item in items)
+                yield return item;
+            await Task.CompletedTask;
+        }
+
+        private static OrderReportEntryV2 PendingDcvRow(string orderNumber, DateTime orderDateUtc) =>
+            new OrderReportEntryV2
+            {
+                OrderNumber       = orderNumber,
+                OrderStatus       = "Order Accepted",
+                CertificateStatus = "Pending for Approver",
+                DomainName        = "example.com",
+                OrderDate         = orderDateUtc.ToString("o")
+            };
+
+        [Fact]
+        public async Task SynchronizeV2_PendingDcvOrder_AgedOutOfWindow_SkipsDcv_EmitsPendingWithoutResolvingFamily()
+        {
+            var mock = NewMock();
+            var oldRow = PendingDcvRow("ord_old_001", DateTime.UtcNow.AddHours(-48));
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(oldRow));
+
+            // Age window of 1h — the 48h-old order above is well outside it.
+            var config = new CERTInextConfig
+            {
+                UseV2Api = true, ApiUrl = "https://v2.certinext.io",
+                OAuthClientId = "c", OAuthClientSecret = "s",
+                DcvEnabled = true, DcvTimeoutMinutes = 1, DcvPropagationDelaySeconds = 1,
+                DcvSyncMaxOrderAgeHours = 1, DcvSyncMaxPerPass = 0
+            };
+            var plugin = new CERTInextCAPlugin(mock.Object, new FakeDomainValidatorFactory(new FakeDomainValidator()), config);
+
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+            await plugin.Synchronize(buffer, DateTime.UtcNow.AddDays(-1), true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle(r => r.CARequestID == "ord_old_001"
+                && r.Status == (int)EndEntityStatus.EXTERNALVALIDATION);
+
+            // Aged-out rows must not even resolve a family — that's the point of the age gate.
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.GetDcvV2Async(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task SynchronizeV2_PendingDcvOrders_ExceedingPerPassCap_OnlyAttemptsUpToCap()
+        {
+            var mock = NewMock();
+            var row1 = PendingDcvRow("ord_cap_001", DateTime.UtcNow.AddMinutes(-30));
+            var row2 = PendingDcvRow("ord_cap_002", DateTime.UtcNow.AddMinutes(-20));
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row1, row2));
+
+            // Only the first (cap=1) row should ever have its family resolved.
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_cap_001", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = "ord_cap_001", Status = "pending-dcv", Domain = "example.com"
+                }));
+
+            // Fail fast at GetDcv so PerformDcvV2IfNeededAsync returns false quickly without
+            // needing the full staging/verify chain mocked — the point of this test is the cap
+            // gate, not the DCV flow itself.
+            mock.Setup(c => c.GetDcvV2Async("ord_cap_001", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("simulated transient GetDcv failure"));
+
+            var config = new CERTInextConfig
+            {
+                UseV2Api = true, ApiUrl = "https://v2.certinext.io",
+                OAuthClientId = "c", OAuthClientSecret = "s",
+                DcvEnabled = true, DcvTimeoutMinutes = 1, DcvPropagationDelaySeconds = 1,
+                DcvSyncMaxOrderAgeHours = 0, DcvSyncMaxPerPass = 1
+            };
+            var plugin = new CERTInextCAPlugin(mock.Object, new FakeDomainValidatorFactory(new FakeDomainValidator()), config);
+
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().HaveCount(2);
+            records.Should().OnlyContain(r => r.Status == (int)EndEntityStatus.EXTERNALVALIDATION);
+
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_cap_001", It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_cap_002", It.IsAny<CancellationToken>()), Times.Never);
         }
     }
 }

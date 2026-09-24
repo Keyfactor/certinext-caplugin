@@ -284,5 +284,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// GET /api/certinext/v2/catalog/products
         /// </summary>
         Task<List<ProductDetail>> GetProductDetailsV2Async(CancellationToken ct = default);
+
+        /// <summary>
+        /// Pages through all orders via GET /api/certinext/v2/reports/orders. Used for V2-mode
+        /// Synchronize (issues/0022). Paging is 1-based; <paramref name="pageSize"/> is clamped
+        /// to <see cref="Constants.ApiV2.OrdersReportMaxPageSize"/> (100) server-side.
+        /// </summary>
+        /// <param name="from">Optional inclusive start date filter (YYYY-MM-DD).</param>
+        /// <param name="to">Optional inclusive end date filter (YYYY-MM-DD).</param>
+        /// <param name="pageSize">Page size requested; server clamps to 100.</param>
+        IAsyncEnumerable<OrderReportEntryV2> ListOrdersV2Async(
+            string from = null,
+            string to = null,
+            int pageSize = Constants.Api.DefaultPageSize,
+            CancellationToken ct = default);
     }
 }

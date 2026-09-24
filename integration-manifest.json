@@ -27,7 +27,7 @@
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
-                    "description": "REQUIRED: CERTInext API base URL. Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ \u2014 Production (US): https://us-api.certinext.io/emSignHub-API/ \u2014 Production (Global/India): https://api.certinext.io/emSignHub-API/"
+                    "description": "REQUIRED: CERTInext API base URL. Its meaning follows UseV2Api. V1 (default): Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ \u2014 Production (US): https://us-api.certinext.io/emSignHub-API/ \u2014 Production (Global/India): https://api.certinext.io/emSignHub-API/. V2 (UseV2Api=true): the bare V2 host, e.g. https://sandbox-us-api.certinext.io, no trailing slash or path suffix \u2014 V1 and V2 are hosted differently, so this value changes when UseV2Api is toggled."
                 },
                 {
                     "name": "AccountNumber",
@@ -71,11 +71,11 @@
                 },
                 {
                     "name": "OAuthClientId",
-                    "description": "OAuth client ID. Required when AuthMode is 'OAuth'."
+                    "description": "OAuth client ID. Required when AuthMode is 'OAuth' (V1). Also required, and reused, when UseV2Api is true — V2 authenticates with these same OAuthClientId/OAuthClientSecret fields via client_credentials against {ApiUrl}/oauth/token, rather than separate V2-only credentials."
                 },
                 {
                     "name": "OAuthClientSecret",
-                    "description": "OAuth client secret. Required when AuthMode is 'OAuth'."
+                    "description": "OAuth client secret. Required when AuthMode is 'OAuth' (V1). Also required, and reused, when UseV2Api is true (see OAuthClientId)."
                 },
                 {
                     "name": "RequestorName",
@@ -172,6 +172,14 @@
                 {
                     "name": "DcvSyncMaxPerPass",
                     "description": "OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; remaining pending orders are reported as-is and picked up on a later pass (the per-minute incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: 50."
+                },
+                {
+                    "name": "UseV2Api",
+                    "description": "OPTIONAL: When true, the plugin routes Enroll / GetSingleRecord / Revoke / Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 /reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode) plus OAuthClientId and OAuthClientSecret. V1 credentials (ApiKey/AccountNumber/AuthMode) are not required when this is true. Default: false (V1 API)."
+                },
+                {
+                    "name": "V2SyncLookbackHours",
+                    "description": "OPTIONAL (V2 mode only): during an incremental Synchronize, the plugin queries V2 /reports/orders with a 'from' date of (lastSync minus this many hours) rather than exactly lastSync, since live probing could not confirm whether the API's from/to filter brackets order-placement date or issuance date. A lookback window ensures an order created before lastSync but issued afterward (e.g. a slow DCV order) still surfaces on the next incremental pass. Ignored when UseV2Api is false. Default: 72."
                 }
             ],
             "enrollment_config": [
