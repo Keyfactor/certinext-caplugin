@@ -264,12 +264,84 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             products.Should().NotBeNull("V2 catalog/products must return a non-null list");
             products.Should().NotBeEmpty("V2 catalog/products must return at least one product");
 
-            // Best-effort structural check: this sandbox's catalog/products entries have been
-            // observed to carry null ProductCode/ProductName/ProductType (see issues/0016), so
-            // we log rather than hard-fail — the regression we actually guard against is an
-            // empty/null list, asserted above.
-            int withCode = products.Count(p => !string.IsNullOrWhiteSpace(p.ProductCode));
-            _output.WriteLine($"{withCode}/{products.Count} catalog products carry a non-empty ProductCode.");
+            // Hard assertion restored (issues/0016 item 1, fixed by issues/0025): the live
+            // catalog/products response is a nested category envelope, the same shape V1's
+            // GetProductDetails returns. ParseProductDetailsV2Response now flattens it, so
+            // every parsed product must carry a non-empty ProductCode.
+            products.Should().OnlyContain(p => !string.IsNullOrWhiteSpace(p.ProductCode),
+                "ParseProductDetailsV2Response must flatten the nested category envelope into ProductCode-bearing rows");
+            _output.WriteLine($"{products.Count}/{products.Count} catalog products carry a non-empty ProductCode.");
+        }
+
+        /// <summary>
+        /// Drives <see cref="CERTInextCAPlugin.ValidateProductInfo"/> (not just the client
+        /// method) end-to-end in V2 mode against the configured product code — the regression
+        /// test for issue 0025. Read-only.
+        /// </summary>
+        [SkippableFact]
+        public async Task ValidateProductInfo_V2_AcceptsConfiguredProductCode()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+
+            var plugin = new CERTInextCAPlugin();
+            var connectionInfo = BuildV2ConnectionInfo();
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = "ssl",
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = _v2ProductCode }
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connectionInfo);
+
+            await act.Should().NotThrowAsync(
+                $"ProductCode '{_v2ProductCode}' should be present in the live V2 catalog");
+        }
+
+        /// <summary>
+        /// Same as <see cref="ValidateProductInfo_V2_AcceptsConfiguredProductCode"/> but with a
+        /// product code that should never exist, asserting the same "not found" failure mode
+        /// V1 has always had. Read-only — no order is placed.
+        /// </summary>
+        [SkippableFact]
+        public async Task ValidateProductInfo_V2_RejectsUnknownProductCode()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+
+            var plugin = new CERTInextCAPlugin();
+            var connectionInfo = BuildV2ConnectionInfo();
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = "ssl",
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = "999999" }
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connectionInfo);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*not found*");
+        }
+
+        /// <summary>
+        /// <see cref="CERTInextCAPlugin.ValidateProductInfo"/> ignores the constructor-injected
+        /// client/config and builds its own from <c>connectionInfo</c>, so integration tests
+        /// must pass a real dictionary — <c>UseV2Api</c> is a bool, not a string
+        /// (CERTInextCAPluginConfig.cs, CERTInextCAPlugin.cs's <c>is bool</c> check).
+        /// </summary>
+        private Dictionary<string, object> BuildV2ConnectionInfo()
+        {
+            var info = new Dictionary<string, object>
+            {
+                ["UseV2Api"] = true,
+                ["ApiUrl"] = _v2ApiUrl,
+                ["OAuthClientId"] = _v2ClientId,
+                ["OAuthClientSecret"] = _v2ClientSecret
+            };
+
+            string groupNumber = _fixture.IsConfigured ? _fixture.GroupNumber : null;
+            if (!string.IsNullOrWhiteSpace(groupNumber))
+                info["GroupNumber"] = groupNumber;
+
+            return info;
         }
 
         // ---------------------------------------------------------------------------
