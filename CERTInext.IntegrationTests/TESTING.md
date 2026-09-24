@@ -154,6 +154,7 @@ Verifies product discovery.
 | Test | What it checks |
 |------|---------------|
 | `GetProductDetails_ReturnsProducts` | Calls `GetProductDetails`; asserts the call succeeds without throwing; when products are returned, asserts the expected product code from `CERTINEXT_PRODUCT_CODE` is among them |
+| `ValidateProductInfo_V1_AcceptsConfiguredProductCode` | (issue 0025) Drives `CERTInextCAPlugin.ValidateProductInfo` (not just the client) in V1 mode with `CERTINEXT_PRODUCT_CODE`; asserts no throw. Skips if not configured or `CERTINEXT_PRODUCT_CODE` unset |
 
 Note: some CERTInext accounts return an empty list from `GetProductDetails` even though
 orders using those product codes are visible in `GetOrderReport`.  An empty list is

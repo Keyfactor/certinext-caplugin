@@ -158,6 +158,34 @@ CERTInext has no dedicated renewal endpoint. `RenewCertificateAsync` submits a n
 | `GetProfilesAsync_ReturnsProfiles_WhenServerResponds` | `POST /GetProductDetails` → two products in nested category envelope | Result has 2 items; `ProfileIdTls` and `ProfileIdClient` present; all `Active == true` |
 | `GetProfilesAsync_ReturnsEmptyList_WhenNoProductsReturned` | `POST /GetProductDetails` → empty `productDetails` array | Result is empty |
 
+### GetProductDetailsV2Async — GET /api/certinext/v2/catalog/products (issue 0025 / 0016, `CERTInextClientV2Tests`)
+
+The live sandbox account returns the SAME nested category envelope as V1's `GetProductDetails`
+(confirmed 2026-09-24), just under a top-level `"products"` key. `ParseProductDetailsV2Response`
+flattens each shape into `ProductDetail`; the flat `productId`/bare-array shapes are kept as
+fallback branches for other accounts/API versions.
+
+| Test | Stub | Assertion |
+|------|------|-----------|
+| `GetProductDetailsV2Async_NestedCategoryEnvelope_FlattensProducts` | `GET catalog/products` → nested category envelope | 2 products; `ProductCode`/`ProductName`/`ProductType` populated, `Active == true` |
+| `GetProductDetailsV2Async_FlatProductIdRows_MapsToProductCode` | `GET catalog/products` → flat `productId` rows | `productId` mapped to `ProductCode` |
+| `GetProductDetailsV2Async_BareArray_Parses` | `GET catalog/products` → bare JSON array | Parses without a wrapper object |
+| `GetProductDetailsV2Async_EmptyCatalog_ReturnsEmptyList` | `GET catalog/products` → `{"products":[]}` | Returns an empty list (no throw) |
+
+### ValidateProductInfo — `CERTInextCAPluginTests` (V1) / `CERTInextCAPluginV2Tests` (V2), issue 0025
+
+`ValidateProductInfo` builds its own `CERTInextClient` from `connectionInfo` (ignoring the
+Moq-injected client), so these tests use a real WireMock server as `ApiUrl`.
+
+| Test | Mode | Stub | Assertion |
+|------|------|------|-----------|
+| `ValidateProductInfo_V1_Succeeds_WhenProductCodePresent` | V1 | `POST /GetProductDetails` → nested envelope containing the code | Does not throw |
+| `ValidateProductInfo_V1_Throws_WhenProductCodeAbsent` | V1 | Same stub, unknown code | Throws `AnyCAValidationException` `*not found*` |
+| `ValidateProductInfo_V2_Succeeds_WhenProductCodeInCatalog` | V2 | `GET catalog/products` → nested envelope containing the code | Does not throw; no request ever hits `/GetProductDetails` |
+| `ValidateProductInfo_V2_Throws_WhenProductCodeNotInCatalog` | V2 | Same stub, unknown code | Throws `AnyCAValidationException` `*not found*` |
+| `ValidateProductInfo_V2_Throws_WhenCatalogEmpty` | V2 | `GET catalog/products` → `{"products":[]}` | Throws `*not found*` — no soft-accept, matches V1 |
+| `ValidateProductInfo_V2_Throws_WhenCatalogReturnsError` | V2 | `GET catalog/products` → HTTP 500 | Throws `*Unable to validate*`; message excludes the response body |
+
 ### DCV endpoints
 
 | Test | Stub | Assertion |
@@ -359,6 +387,10 @@ block with `status: "1"` (success) or `status: "0"` (failure).
 | `OrderReportEmptyJson()` | `POST /GetOrderReport` | Empty `ordersArray`, `noOfPages=0` |
 | `GetProductDetailsJson()` | `POST /GetProductDetails` | Nested category envelope with two products |
 | `GetProductDetailsEmptyJson()` | `POST /GetProductDetails` | Empty `productDetails` array |
+| `GetCatalogProductsV2NestedJson()` | `GET catalog/products` | Nested category envelope (live sandbox shape, confirmed 2026-09-24) |
+| `GetCatalogProductsV2FlatJson()` | `GET catalog/products` | Flat `productId` rows (Postman spec example shape, fallback branch) |
+| `GetCatalogProductsV2BareArrayJson()` | `GET catalog/products` | Bare JSON array, no wrapper object |
+| `GetCatalogProductsV2EmptyJson()` | `GET catalog/products` | `{"products":[]}` |
 | `ApiFailureJson(code, msg)` | Any endpoint | Generic `meta.status="0"` failure |
 | `GetDcvSuccessJson(token)` | `POST /GetDcv` | `dcvDetails.token` |
 | `GetDcvFailureJson(code, msg)` | `POST /GetDcv` | Failure meta |

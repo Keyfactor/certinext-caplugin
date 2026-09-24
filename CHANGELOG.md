@@ -19,6 +19,8 @@
 - **V2 revocation no longer fails with HTTP 400 for most reasons.** Reasons are now sent in the kebab-case form the API requires.
 - **V2 revocation now reports "not found or not revokable" instead of a misleading product-family error.**
 - **V2 DCV now treats an already-verified domain (EMS-1080) as satisfied instead of deferring.**
+- fix(config): `ValidateProductInfo` now validates template `ProductCode` against the V2 catalog when `UseV2Api=true`, instead of always calling the V1-only `GetProductDetails` (0025).
+- fix(client): `ParseProductDetailsV2Response` now flattens the nested category envelope the live V2 catalog actually returns, instead of misreading it as flat rows (0016).
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).
@@ -28,6 +30,7 @@
 - chore(tests): Unit tests for V2 `ValidateCAConnectionInfo`.
 - chore(tests): Unit tests for V2 token caching and expiry (`refresh_token` grant never sent).
 - chore(tests): DCV cleanup-concurrency test now checks peak concurrency instead of wall-clock time.
+- chore(tests): `ValidateProductInfo` coverage in V1 and V2 modes, plus V2 catalog-parser unit and live-integration tests (0025).
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 
