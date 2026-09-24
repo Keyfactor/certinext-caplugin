@@ -841,6 +841,130 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // ValidateProductInfo — V2 (issue 0025). ValidateProductInfo builds its own
+        // CERTInextClient from connectionInfo rather than using the Moq-injected client (like
+        // ValidateCAConnectionInfo), so these tests use a real WireMock server as ApiUrl.
+        // ---------------------------------------------------------------------------
+
+        private static void StubV2TokenAndAuthMe(WireMockServer server)
+        {
+            server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TokenResponseJson()));
+        }
+
+        private static Dictionary<string, object> BuildV2ConnectionInfo(string apiUrl) => new Dictionary<string, object>
+        {
+            ["UseV2Api"] = true,
+            ["ApiUrl"] = apiUrl,
+            ["OAuthClientId"] = "my-client",
+            ["OAuthClientSecret"] = "my-secret"
+        };
+
+        private static EnrollmentProductInfo BuildProductInfo(string productCode) => new EnrollmentProductInfo
+        {
+            ProductID = "ssl",
+            ProductParameters = new Dictionary<string, string> { ["ProductCode"] = productCode }
+        };
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Succeeds_WhenProductCodeInCatalog()
+        {
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
+            var productInfo = BuildProductInfo(MockCertificateData.ProfileIdTls);
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().NotThrowAsync();
+
+            // Regression guard for issue 0025: in V2 mode this must go through the V2 catalog,
+            // never the V1-only GetProductDetails endpoint.
+            server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/GetProductDetails");
+            server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/api/certinext/v2/catalog/products");
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Throws_WhenProductCodeNotInCatalog()
+        {
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
+            var productInfo = BuildProductInfo("999999");
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*not found*");
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Throws_WhenCatalogEmpty()
+        {
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2EmptyJson()));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
+            var productInfo = BuildProductInfo(MockCertificateData.ProfileIdTls);
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            // No soft-accept on an empty/unusable catalog — must match V1's strict behaviour.
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*not found*");
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Throws_WhenCatalogReturnsError()
+        {
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(500)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"secretApiKeyLeak\":\"should-not-appear-in-message\"}"));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
+            var productInfo = BuildProductInfo(MockCertificateData.ProfileIdTls);
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            var ex = await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*Unable to validate*");
+            ex.Which.Message.Should().NotContain("secretApiKeyLeak");
+        }
+
+        // ---------------------------------------------------------------------------
         // Helpers
         // ---------------------------------------------------------------------------
 

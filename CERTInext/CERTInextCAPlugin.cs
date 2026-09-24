@@ -543,7 +543,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.MethodEntry(LogLevel.Debug);
 
             string rawConfig = JsonSerializer.Serialize(connectionInfo);
-            var tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig);
+            var tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig)
+                ?? throw new InvalidOperationException("Failed to deserialize connection info.");
+            bool useV2 = tempConfig.UseV2Api;
 
             var params_ = new EnrollmentParams(productInfo);
             string profileId = params_.ProfileId;
@@ -558,25 +560,43 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             _logger.LogInformation(
-                "Product/profile validation attempt started. ProfileId={ProfileId}, ProductID={ProductID}",
-                profileId, productInfo?.ProductID);
+                "Product/profile validation attempt started. ProfileId={ProfileId}, ProductID={ProductID}, UseV2Api={UseV2Api}",
+                profileId, productInfo?.ProductID, useV2);
 
             var tempClient = new CERTInextClient(tempConfig);
 
             try
             {
-                var profiles = await tempClient.GetProfilesAsync();
-                bool found = profiles.Any(p =>
-                    string.Equals(p.Id, profileId, StringComparison.OrdinalIgnoreCase));
+                // V2 catalog validation mirrors ValidateCAConnectionInfo's UseV2Api branch
+                // (issues/0025): GetProfilesAsync/GetProductDetailsAsync are V1-only and 404
+                // against a V2-shaped ApiUrl. There is no soft-accept difference between modes
+                // — an empty/unusable catalog is treated as "not found", same as V1.
+                List<string> availableIds;
+                bool found;
+
+                if (useV2)
+                {
+                    var products = await tempClient.GetProductDetailsV2Async();
+                    availableIds = products.Select(p => p.ProductCode).ToList();
+                    found = products.Any(p =>
+                        string.Equals(p.ProductCode, profileId, StringComparison.OrdinalIgnoreCase));
+                }
+                else
+                {
+                    var profiles = await tempClient.GetProfilesAsync();
+                    availableIds = profiles.Select(p => p.Id).ToList();
+                    found = profiles.Any(p =>
+                        string.Equals(p.Id, profileId, StringComparison.OrdinalIgnoreCase));
+                }
 
                 if (!found)
                 {
-                    var available = string.Join(", ", profiles.Select(p => p.Id));
+                    var available = string.Join(", ", availableIds);
                     // SOC2 CC7.2: log profile probe misses at Warning to support anomaly detection.
                     _logger.LogWarning(
                         "Product/profile validation failed — ProfileId not found in CERTInext. " +
-                        "ProfileId={ProfileId}, AvailableCount={AvailableCount}",
-                        profileId, profiles.Count);
+                        "ProfileId={ProfileId}, AvailableCount={AvailableCount}, UseV2Api={UseV2Api}",
+                        profileId, availableIds.Count, useV2);
                     throw new AnyCAValidationException(
                         $"Profile '{profileId}' was not found in CERTInext. " +
                         $"Available profiles: {available}");
@@ -610,7 +630,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 tempClient?.Dispose();
             }
 
-            _logger.LogInformation("Product/profile validation succeeded. ProfileId={ProfileId}", profileId);
+            _logger.LogInformation(
+                "Product/profile validation succeeded. ProfileId={ProfileId}, UseV2Api={UseV2Api}",
+                profileId, useV2);
             _logger.MethodExit(LogLevel.Debug);
         }
 

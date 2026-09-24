@@ -17,6 +17,9 @@ using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.PKI.Enums.EJBCA;
 using Moq;
+using WireMock.RequestBuilders;
+using WireMock.ResponseBuilders;
+using WireMock.Server;
 using Xunit;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
@@ -299,6 +302,71 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().ThrowAsync<AnyCAValidationException>()
                 .WithMessage("*ProfileId*required*");
+        }
+
+        // ValidateProductInfo builds its own CERTInextClient from connectionInfo (like
+        // ValidateCAConnectionInfo) rather than using the Moq-injected client, so these tests
+        // need a real WireMock server as ApiUrl (issue 0025 plan, correction 3).
+
+        [Fact]
+        public async Task ValidateProductInfo_V1_Succeeds_WhenProductCodePresent()
+        {
+            using var server = WireMockServer.Start();
+            server
+                .Given(Request.Create().WithPath("/GetProductDetails").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetProductDetailsJson()));
+
+            var plugin = BuildPlugin(NewMock().Object);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = "ssl",
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = MockCertificateData.ProfileIdTls }
+            };
+            var connInfo = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = server.Urls[0],
+                ["AuthMode"] = "AccessKey",
+                ["ApiKey"] = "key",
+                ["AccountNumber"] = "12345"
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().NotThrowAsync();
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V1_Throws_WhenProductCodeAbsent()
+        {
+            using var server = WireMockServer.Start();
+            server
+                .Given(Request.Create().WithPath("/GetProductDetails").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetProductDetailsJson()));
+
+            var plugin = BuildPlugin(NewMock().Object);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = "ssl",
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = "999999" }
+            };
+            var connInfo = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = server.Urls[0],
+                ["AuthMode"] = "AccessKey",
+                ["ApiKey"] = "key",
+                ["AccountNumber"] = "12345"
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*not found*");
         }
 
         // ---------------------------------------------------------------------------
