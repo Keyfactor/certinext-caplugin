@@ -1654,8 +1654,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Parses the GET /api/certinext/v2/catalog/products response into a flat
         /// <see cref="ProductDetail"/> list.  The endpoint may return a bare JSON array
         /// or a JSON object that wraps the list under a known property name
-        /// ("products", "data", "items", or "catalog").  Both shapes are handled so
-        /// the method stays resilient as the API evolves.
+        /// ("products", "data", "items", or "catalog"). Confirmed live 2026-09-24
+        /// (issues/0025 step 0, issues/0016): the sandbox account returns the SAME nested
+        /// category-envelope shape as V1's GetProductDetails — each top-level array element
+        /// is a category ("categoryName"/"categoryID"/"currencyType") containing its own
+        /// nested "products" array of {productCode, productName, productTypeID, ...}. The
+        /// Postman spec's flat "productId" example is also handled as a fallback in case a
+        /// different account/API version returns it. Per-element, not per-response, so a
+        /// mixed response (unlikely but not contractually excluded) is still flattened.
         /// </summary>
         private List<ProductDetail> ParseProductDetailsV2Response(string content)
         {
@@ -1665,38 +1671,98 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             using var doc = JsonDocument.Parse(content);
             var root = doc.RootElement;
 
+            JsonElement arr;
             if (root.ValueKind == JsonValueKind.Array)
             {
-                return JsonSerializer.Deserialize<List<ProductDetail>>(content, GetJsonOptions())
-                       ?? new List<ProductDetail>();
+                arr = root;
             }
-
-            if (root.ValueKind == JsonValueKind.Object)
+            else if (root.ValueKind == JsonValueKind.Object)
             {
                 // Log the top-level property names so the actual schema is visible in test output.
                 var keys = string.Join(", ", root.EnumerateObject().Select(p => p.Name));
                 Logger.LogInformation(
                     "GetProductDetailsV2Async: response is a JSON object with top-level keys: [{Keys}]", keys);
 
-                // Try known wrapper property names in order of likelihood.
+                JsonElement? found = null;
                 foreach (string candidate in new[] { "products", "data", "items", "catalog" })
                 {
-                    if (root.TryGetProperty(candidate, out JsonElement arr) && arr.ValueKind == JsonValueKind.Array)
+                    if (root.TryGetProperty(candidate, out JsonElement candidateArr) && candidateArr.ValueKind == JsonValueKind.Array)
                     {
-                        return JsonSerializer.Deserialize<List<ProductDetail>>(arr.GetRawText(), GetJsonOptions())
-                               ?? new List<ProductDetail>();
+                        found = candidateArr;
+                        break;
                     }
                 }
 
-                // No recognised array property found — surface the object keys in the exception
-                // so the caller/test can see the actual schema and create a proper DTO.
+                if (found == null)
+                {
+                    // No recognised array property found — surface the object keys in the exception
+                    // so the caller/test can see the actual schema and create a proper DTO.
+                    throw new InvalidOperationException(
+                        $"V2 catalog/products returned an unexpected JSON object. Top-level keys: [{keys}]. " +
+                        "Update ParseProductDetailsV2Response with the correct property name.");
+                }
+
+                arr = found.Value;
+            }
+            else
+            {
                 throw new InvalidOperationException(
-                    $"V2 catalog/products returned an unexpected JSON object. Top-level keys: [{keys}]. " +
-                    "Update ParseProductDetailsV2Response with the correct property name.");
+                    $"V2 catalog/products returned unexpected JSON kind: {root.ValueKind}.");
             }
 
-            throw new InvalidOperationException(
-                $"V2 catalog/products returned unexpected JSON kind: {root.ValueKind}.");
+            var result = new List<ProductDetail>();
+            foreach (var element in arr.EnumerateArray())
+            {
+                if (element.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                if (element.TryGetProperty("products", out JsonElement nestedProducts)
+                    && nestedProducts.ValueKind == JsonValueKind.Array)
+                {
+                    // Nested category envelope — mirror V1's GetProductDetailsResponse.FlattenProducts().
+                    string categoryName = element.TryGetProperty("categoryName", out var cn) && cn.ValueKind == JsonValueKind.String
+                        ? cn.GetString()
+                        : null;
+
+                    foreach (var product in nestedProducts.EnumerateArray())
+                    {
+                        if (product.ValueKind != JsonValueKind.Object)
+                            continue;
+
+                        result.Add(new ProductDetail
+                        {
+                            ProductCode = product.TryGetProperty("productCode", out var pc) && pc.ValueKind == JsonValueKind.String ? pc.GetString() : null,
+                            ProductName = product.TryGetProperty("productName", out var pn) && pn.ValueKind == JsonValueKind.String ? pn.GetString() : null,
+                            ProductType = categoryName,
+                            Active = true // the API only returns products available on the account
+                        });
+                    }
+                }
+                else if (element.TryGetProperty("productCode", out _))
+                {
+                    // Flat row already shaped like ProductDetail.
+                    result.Add(JsonSerializer.Deserialize<ProductDetail>(element.GetRawText(), GetJsonOptions()));
+                }
+                else if (element.TryGetProperty("productId", out var pid))
+                {
+                    // Flat row using the Postman example's "productId" key instead of "productCode".
+                    result.Add(new ProductDetail
+                    {
+                        ProductCode = pid.ValueKind == JsonValueKind.String ? pid.GetString() : pid.ToString(),
+                        ProductName = element.TryGetProperty("productName", out var pn2) && pn2.ValueKind == JsonValueKind.String ? pn2.GetString() : null,
+                        ProductType = element.TryGetProperty("masterProductName", out var mpn) && mpn.ValueKind == JsonValueKind.String ? mpn.GetString() : null,
+                        Active = true
+                    });
+                }
+                else
+                {
+                    Logger.LogWarning(
+                        "GetProductDetailsV2Async: skipping catalog element with unrecognised shape. Keys: [{Keys}]",
+                        string.Join(", ", element.EnumerateObject().Select(p => p.Name)));
+                }
+            }
+
+            return result;
         }
 
         private void EnsureV2Client()

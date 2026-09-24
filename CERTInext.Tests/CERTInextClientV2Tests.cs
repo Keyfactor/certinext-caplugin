@@ -18,6 +18,7 @@ using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using FluentAssertions;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using WireMock.RequestBuilders;
@@ -966,6 +967,84 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             };
 
             await act.Should().ThrowAsync<Exception>().WithMessage("*V2 list orders*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // GetProductDetailsV2Async / ParseProductDetailsV2Response (issue 0025 / 0016)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_NestedCategoryEnvelope_FlattensProducts()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().HaveCount(2);
+            products.Should().ContainSingle(p => p.ProductCode == MockCertificateData.ProfileIdTls
+                                                  && p.ProductName == "TLS Server"
+                                                  && p.ProductType == "SSL/TLS Certificates"
+                                                  && p.Active);
+            products.Should().ContainSingle(p => p.ProductCode == MockCertificateData.ProfileIdClient);
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_FlatProductIdRows_MapsToProductCode()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2FlatJson()));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().HaveCount(2);
+            products.Should().Contain(p => p.ProductCode == MockCertificateData.ProfileIdTls && p.Active);
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_BareArray_Parses()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2BareArrayJson()));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().ContainSingle(p => p.ProductCode == MockCertificateData.ProfileIdTls);
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_EmptyCatalog_ReturnsEmptyList()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2EmptyJson()));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().BeEmpty();
         }
     }
 }

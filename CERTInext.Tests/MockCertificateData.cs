@@ -232,6 +232,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public static string GetProductDetailsEmptyJson() =>
             $@"{{""meta"":{SuccessMetaJson()},""productDetails"":[]}}";
 
+        // GET /api/certinext/v2/catalog/products — nested category envelope, the shape
+        // confirmed live against the sandbox account 2026-09-24 (issue 0025 step 0 / issue
+        // 0016). Same structure as the V1 GetProductDetails category envelope, just under a
+        // top-level "products" key instead of "productDetails".
+        public static string GetCatalogProductsV2NestedJson() =>
+            $@"{{
+  ""products"":[
+    {{
+      ""currencyType"":""USD"",
+      ""categoryName"":""SSL/TLS Certificates"",
+      ""categoryID"":""3"",
+      ""products"":[
+        {{""productCode"":""{ProfileIdTls}"",""productName"":""TLS Server"",""productTypeID"":""13""}},
+        {{""productCode"":""{ProfileIdClient}"",""productName"":""Client Authentication"",""productTypeID"":""14""}}
+      ]
+    }}
+  ]
+}}";
+
+        // Flat shape documented in the Postman "List Products" saved 200 example — kept as a
+        // fallback branch in the parser even though the live account returns the nested shape.
+        public static string GetCatalogProductsV2FlatJson() =>
+            $@"{{
+  ""products"":[
+    {{""productId"":""{ProfileIdTls}"",""productName"":""TLS Server"",""masterProductName"":""TLS Server""}},
+    {{""productId"":""{ProfileIdClient}"",""productName"":""Client Authentication"",""masterProductName"":""Client Authentication""}}
+  ]
+}}";
+
+        // Bare-array shape (no wrapper object) — legacy branch already handled by
+        // ParseProductDetailsV2Response.
+        public static string GetCatalogProductsV2BareArrayJson() =>
+            $@"[
+    {{""productCode"":""{ProfileIdTls}"",""productName"":""TLS Server"",""productType"":""SSL/TLS Certificates"",""active"":true}}
+]";
+
+        public static string GetCatalogProductsV2EmptyJson() =>
+            $@"{{""products"":[]}}";
+
         // Generic API failure body (meta.status = "0")
         public static string ApiFailureJson(string errorCode = "EMS-100", string errorMessage = "An error occurred") =>
             $@"{{""meta"":{FailureMetaJson(errorCode, errorMessage)}}}";
