@@ -117,6 +117,35 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
+    /// Technical point-of-contact block for V2 orders. Per the V2 spec's field table (SSL/TLS
+    /// Certificates folder description — confirmed identical for the Document Signer and
+    /// Private PKI folders, though those product families are not yet wired through
+    /// <c>EnrollV2Async</c>; see issue 0033), all four subfields are documented Optional. Unlike
+    /// V1's <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.API.TechnicalPointOfContact"/>,
+    /// which sends ISD code and mobile number as two separate fields
+    /// (<c>tpcIsdCode</c>/<c>tpcMobileNumber</c>), the V2 shape has a single <c>phone</c> field —
+    /// composed from the connector's ISD-code + mobile-number config pair by
+    /// <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin.ComposeV2Phone"/>.
+    /// Despite being spec-Optional, <c>EnrollV2Async</c> always populates this block (never omits
+    /// it), mirroring V1's fallback-to-Requestor* defaulting so a blank connector config never
+    /// results in a silently-blank contact. See issues/0030-v2-technical-contact-not-sent.md.
+    /// </summary>
+    public class V2TechnicalPointOfContact
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
+
+        [JsonPropertyName("email")]
+        public string Email { get; set; }
+
+        [JsonPropertyName("phone")]
+        public string Phone { get; set; }
+
+        [JsonPropertyName("designation")]
+        public string Designation { get; set; }
+    }
+
+    /// <summary>
     /// Subscriber agreement block required for V2 SSL orders.
     /// </summary>
     public class V2AgreementParams
@@ -171,6 +200,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         [JsonPropertyName("agreement")]
         public V2AgreementParams Agreement { get; set; }
+
+        /// <summary>
+        /// Optional per spec, but always populated by <c>EnrollV2Async</c> — see
+        /// <see cref="V2TechnicalPointOfContact"/> for the fallback/composition rules.
+        /// </summary>
+        [JsonPropertyName("technicalPointOfContact")]
+        public V2TechnicalPointOfContact TechnicalPointOfContact { get; set; }
 
         [JsonPropertyName("remarks")]
         public string Remarks { get; set; }

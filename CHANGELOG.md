@@ -28,6 +28,7 @@
 - fix(enroll): V2 OV/EV orders now send an `organization` block from `OrganizationNumber`; CERTInext previously hard-rejected every V2 OV/EV enrollment with HTTP 422 `EMS-1180` (0028).
 - fix(v2): V2 enroll and `ValidateProductInfo` now resolve/validate the product code from the live catalog by `productTypeID` instead of the V1-only `DefaultProductCodes` table, which could silently order the wrong assurance-level product (0036).
 - fix(v2): V2 order create, catalog, and orders-report calls now send `GroupNumber` when configured, instead of always billing/scoping to the account's default group (0029).
+- fix(v2): V2 SSL order create now sends a `technicalPointOfContact` block from the connector's `TechnicalContact*` config (falling back to `Requestor*` when blank), instead of never sending one (0030).
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).

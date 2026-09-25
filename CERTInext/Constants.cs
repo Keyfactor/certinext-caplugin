@@ -433,6 +433,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string ProductVariantOv = "ov";
             public const string ProductVariantEv = "ev";
 
+            // Fixed designation sent on technicalPointOfContact.designation (issue 0030). The
+            // spec documents this as free text with no enum (examples: "Technical Contact",
+            // "IT Administrator", "PKI Manager", "Authorized Signer") and there is no connector
+            // config field for it — same gap already noted for requestor.designation (issue 0027,
+            // hardcoded "IT Administrator" in EnrollV2Async). No existing generic
+            // designation/title config field was found to reuse, so this is a new fixed default.
+            public const string DefaultTechnicalContactDesignation = "Technical Contact";
+
             // UCC (multi-SAN) product family detection — from the live Catalog response's
             // productTypeID field: 15=DV SSL UCC, 18=OV SSL UCC, 20=EV SSL UCC,
             // 21=DV SSL Wildcard UCC, 22=OV SSL Wildcard UCC (issues/f3-v2-multi-san-limitation.md).

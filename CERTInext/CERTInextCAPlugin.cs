@@ -1270,6 +1270,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // ---------------------------------------------------------------------------
 
         /// <summary>
+        /// Composes a single E.164-style phone value from separate ISD-code + mobile-number
+        /// config fields, for V2 request shapes that carry one <c>phone</c> field (e.g.
+        /// <see cref="V2TechnicalPointOfContact"/>) rather than V1's separate
+        /// <c>IsdCode</c>/<c>MobileNumber</c> pair. Returns an empty string when
+        /// <paramref name="mobileNumber"/> is blank (nothing to compose); returns the bare
+        /// mobile number when <paramref name="isdCode"/> is blank (never invents a code).
+        /// Internal + static for direct unit testing (no live precedent existed for this exact
+        /// composition to mirror — see issues/0030-v2-technical-contact-not-sent.md).
+        /// </summary>
+        internal static string ComposeV2Phone(string isdCode, string mobileNumber)
+        {
+            if (string.IsNullOrWhiteSpace(mobileNumber))
+                return string.Empty;
+            if (string.IsNullOrWhiteSpace(isdCode))
+                return mobileNumber.Trim();
+
+            return "+" + isdCode.Trim().TrimStart('+') + mobileNumber.Trim();
+        }
+
+        /// <summary>
         /// Dispatches all enrollment types through the V2 REST API.
         /// </summary>
         private async Task<EnrollmentResult> EnrollV2Async(
@@ -1507,6 +1527,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int validityYears     = ep.ValidityYears > 0 ? ep.ValidityYears
                                   : (int.TryParse(_config.SubscriptionValidityYears, out int cfgYears) && cfgYears > 0 ? cfgYears : 1);
 
+            // requestorIsd/requestorMobile are the same Requestor* defaults V1 falls back to for
+            // its own TechnicalPointOfContact (CERTInextClient.cs BuildOrderRequestFromLegacyEnrollRequest).
+            // Note: unlike this TPoC block, V2's own Requestor.Phone (below) does NOT combine these
+            // two — it sends the raw mobile number only, a pre-existing, separately-tracked gap
+            // (issue 0027). That is left untouched here; ComposeV2Phone is new, used only for TPoC.
+            string requestorIsd    = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
+            string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
+
+            // technicalPointOfContact — each field falls back to the requestor default when its
+            // TechnicalContact* counterpart is blank, mirroring V1's BuildOrderRequestFromLegacyEnrollRequest
+            // (CERTInextClient.cs:2335-2341). See issues/0030-v2-technical-contact-not-sent.md.
+            string technicalContactName   = string.IsNullOrWhiteSpace(_config.TechnicalContactName)         ? requestorName   : _config.TechnicalContactName;
+            string technicalContactEmail  = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail)        ? requestorEmail  : _config.TechnicalContactEmail;
+            string technicalContactIsd    = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode)      ? requestorIsd    : _config.TechnicalContactIsdCode;
+            string technicalContactMobile = string.IsNullOrWhiteSpace(_config.TechnicalContactMobileNumber) ? requestorMobile : _config.TechnicalContactMobileNumber;
+
             var orderReq = new V2CreateSslOrderRequest
             {
                 ProductVariant    = ep.ProductVariant,
@@ -1537,6 +1573,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     SignerIp    = string.IsNullOrWhiteSpace(signerIp)    ? null : signerIp,
                     SignerPlace = string.IsNullOrWhiteSpace(signerPlace)  ? null : signerPlace,
                     Accepted    = true
+                },
+                // Always populated (never omitted), even though the spec marks every subfield
+                // Optional — mirrors V1's fallback-to-Requestor* TechnicalPointOfContact
+                // defaulting rather than leaving the block blank. See issue 0030.
+                TechnicalPointOfContact = new V2TechnicalPointOfContact
+                {
+                    Name        = technicalContactName,
+                    Email       = technicalContactEmail,
+                    Phone       = ComposeV2Phone(technicalContactIsd, technicalContactMobile),
+                    Designation = Constants.ApiV2.DefaultTechnicalContactDesignation
                 },
                 Remarks = "Issued via Keyfactor Command AnyCA REST Gateway.",
                 // Mirrors V1's DelegationInformation.GroupNumber — omit when unconfigured so the
