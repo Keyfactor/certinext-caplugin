@@ -339,6 +339,25 @@ sequenceDiagram
 
 **Audit trail:** The revocation intent is written to the gateway log *before* the API call is made. This ensures that the intent is captured even if the API call subsequently fails, satisfying SOX audit requirements.
 
+**Reason code fallback (V2 only):** CERTInext's V2 revoke endpoint only accepts 5 of the 9 RFC 5280
+reason values its own API spec documents as valid — `key-compromise`, `affiliation-changed`,
+`superseded`, `cessation-of-operation`, and `privilege-withdrawn` succeed; `unspecified`,
+`ca-compromise`, `certificate-hold`, and `aa-compromise` all return a 422 "Invalid Revoke Reason ID",
+confirmed live against the sandbox independent of this plugin. Since Keyfactor Command defaults to
+`unspecified` (CRL reason 0) when no explicit reason is given — by far the most common revoke case —
+the plugin retries once with `cessation-of-operation` whenever CERTInext rejects `unspecified` this
+way. `cessation-of-operation` was chosen over V1's existing `key-compromise` fallback because
+`key-compromise` carries the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation, which would
+misrepresent a revoke that was never actually a key compromise. Only the exact "unspecified" +
+"Invalid Revoke Reason ID" combination triggers the retry; any other revoke failure (including the
+other 3 rejected reason values, if a caller ever sends one directly) is surfaced as-is. See
+`issues/0026` for the full reason-value test matrix and the open question to CERTInext support about
+whether the documented 9-value enum is intentional.
+
+**Note field quirk:** CERTInext's revoke `note` (audit remarks) field rejects a semicolon (`;`) with a
+separate 422, "Invalid Revoke Remarks." — confirmed live that comma, period, slash, and parentheses are
+all accepted; only `;` triggers it. The retry note above avoids semicolons for this reason.
+
 ---
 
 ## Connector Validation

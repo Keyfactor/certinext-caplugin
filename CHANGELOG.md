@@ -8,6 +8,7 @@
 - feat(v2): Synchronize now uses V2 `/reports/orders` when `UseV2Api` is true, with an incremental lookback window (`V2SyncLookbackHours`, default 72h) — V1 credentials are no longer required in V2 mode.
 - feat(v2): Consolidated V2 config onto the existing `ApiUrl`/`OAuthClientId`/`OAuthClientSecret` fields; the never-shipped `ApiUrlV2`/`ClientId`/`ClientSecret` fields are removed.
 - **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly and returns the certificate in the same request when it issues fast, instead of always waiting for the next sync. Configurable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s). Orders that don't issue in time (e.g. OV/EV) return pending and are picked up by the next sync, as before.
+- feat(v2): V2 enrollment now supports multi-SAN (UCC) certificates. UCC products are detected from the live Catalog's `productTypeID`, and the SAN set is sent via `additionalDomains`; DCV for the extra SANs is not yet automated (see 0042) (F3).
 
 ## Bug Fixes
 - **UCC certificates no longer come back with only the common name.** The gateway sends SANs under the key `dnsname`, which the plugin didn't recognize, so orders went out with an empty domain list. SANs are now read from every key the gateway sends, plus from the CSR itself.
@@ -17,10 +18,13 @@
 - **V2 OAuth errors now name the right cause.** 401 means a bad ClientId/ClientSecret; 403 means the key wasn't created in OAuth mode.
 - **V2 error messages now include CERTInext's per-field validation errors.**
 - **V2 revocation no longer fails with HTTP 400 for most reasons.** Reasons are now sent in the kebab-case form the API requires.
+- **V2 revocation no longer fails when Command supplies no specific reason.** CERTInext rejects the "unspecified" reason value; the plugin now retries once with "cessation-of-operation" (0026).
 - **V2 revocation now reports "not found or not revokable" instead of a misleading product-family error.**
 - **V2 DCV now treats an already-verified domain (EMS-1080) as satisfied instead of deferring.**
 - fix(config): `ValidateProductInfo` now validates template `ProductCode` against the V2 catalog when `UseV2Api=true`, instead of always calling the V1-only `GetProductDetails` (0025).
 - fix(client): `ParseProductDetailsV2Response` now flattens the nested category envelope the live V2 catalog actually returns, instead of misreading it as flat rows (0016).
+- fix(sync): `V2StatusToRequestDisposition` now maps all 11 V2 order statuses; OV/EV/DV orders in `pending-organization-verification`, `pending-documents`, or `pending-approval` no longer get misreported to Command as FAILED (0031).
+- fix(enroll): V2 OV/EV orders now send an `organization` block from `OrganizationNumber`; CERTInext previously hard-rejected every V2 OV/EV enrollment with HTTP 422 `EMS-1180` (0028).
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).
@@ -31,6 +35,7 @@
 - chore(tests): Unit tests for V2 token caching and expiry (`refresh_token` grant never sent).
 - chore(tests): DCV cleanup-concurrency test now checks peak concurrency instead of wall-clock time.
 - chore(tests): `ValidateProductInfo` coverage in V1 and V2 modes, plus V2 catalog-parser unit and live-integration tests (0025).
+- chore(tests): regression tests for the V2 `organization` block (populated for OV/EV, omitted for DV, fail-fast without `OrganizationNumber`); live acceptance against the sandbox confirmed CERTInext accepts the fixed request (0028).
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 
