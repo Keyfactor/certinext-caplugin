@@ -508,17 +508,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     return;
                 }
                 dcvResp.Should().NotBeNull();
-                dcvResp.FileNameContent.Should().NotBeNullOrEmpty(
-                    "GetDcvV2Async must return a TXT token in FileNameContent");
+                dcvResp.Token.Should().NotBeNullOrEmpty(
+                    "GetDcvV2Async must return a TXT token in Token");
 
-                string domainName = string.IsNullOrWhiteSpace(dcvResp.DomainName)
-                    ? _v2Domain
-                    : dcvResp.DomainName;
+                // The live response has no domainName field (issues/0037) — the domain is
+                // already known locally from the order-placement request.
+                string domainName = _v2Domain;
 
                 // 3. Publish TXT record
                 txtKey = $"_emudhra-challenge.{domainName}";
-                _output.WriteLine($"Publishing TXT {txtKey} = {dcvResp.FileNameContent}");
-                var staged = await dns.StageValidation(txtKey, dcvResp.FileNameContent, CancellationToken.None);
+                _output.WriteLine($"Publishing TXT {txtKey} = {dcvResp.Token}");
+                var staged = await dns.StageValidation(txtKey, dcvResp.Token, CancellationToken.None);
                 staged.Success.Should().BeTrue($"Cloudflare TXT record creation must succeed: {staged.ErrorMessage}");
 
                 // Brief propagation pause

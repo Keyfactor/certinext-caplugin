@@ -182,24 +182,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
     /// <summary>
     /// Response body for GET /api/certinext/v2/ssl-certificates/{orderId}/dcv.
-    /// Returns the DCV challenge details needed to publish a DNS TXT record.
-    /// dcvMethod: "2" = DNS-TXT, "1" = HTTP file.
+    /// Returns the DCV challenge token needed to publish a DNS TXT record.
+    ///
+    /// Confirmed live shape (issues/0037, live probe 2026-09-25): exactly two fields —
+    /// <c>{"tokenExpiryDate": "...", "token": "..."}</c>. This matches neither the spec's
+    /// own worked example for this endpoint (<c>orderNumber</c>/<c>domainName</c>/
+    /// <c>dcvMethod</c>/<c>fileNameContent</c>, which this DTO originally modeled) nor the
+    /// spec's prose for the same endpoint (<c>method</c>/<c>txtToken</c>). There is no
+    /// <c>orderNumber</c>, <c>domainName</c>, or method field on the wire, so none are
+    /// modeled here:
+    ///   - order id and domain name are already known from the local order-placement
+    ///     context before DCV is ever attempted (see call sites of
+    ///     <see cref="CERTInextCAPlugin.PerformDcvV2IfNeededAsync"/>), so they don't need
+    ///     to be echoed back by this response.
+    ///   - the V2 DCV path only ever performs DNS-TXT validation — the hostname
+    ///     (<c>_emudhra-challenge.{domain}</c>) and validator ("dns-01") are both hardcoded
+    ///     in <see cref="CERTInextCAPlugin.PerformDcvV2IfNeededAsync"/>, which never reads a
+    ///     method from this response even in the pre-fix DTO — so no method field is needed.
     /// </summary>
     public class V2DcvChallengeResponse
     {
-        [JsonPropertyName("orderNumber")]
-        public string OrderNumber { get; set; }
-
-        [JsonPropertyName("domainName")]
-        public string DomainName { get; set; }
-
-        /// <summary>"2" = DNS-TXT, "1" = HTTP file.</summary>
-        [JsonPropertyName("dcvMethod")]
-        public string DcvMethod { get; set; }
-
-        /// <summary>Value to publish as the DNS TXT record (the token).</summary>
-        [JsonPropertyName("fileNameContent")]
-        public string FileNameContent { get; set; }
+        /// <summary>Value to publish as the DNS TXT record.</summary>
+        [JsonPropertyName("token")]
+        public string Token { get; set; }
 
         [JsonPropertyName("tokenExpiryDate")]
         public string TokenExpiryDate { get; set; }

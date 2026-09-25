@@ -3015,7 +3015,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Mirrors <see cref="PerformDcvIfNeededAsync"/> for the V2 API path.
         ///
         /// Flow:
-        ///   1. GET /ssl-certificates/{orderId}/dcv → retrieve token (<c>fileNameContent</c>)
+        ///   1. GET /ssl-certificates/{orderId}/dcv → retrieve token (<c>token</c>)
         ///   2. Publish TXT record at <c>_emudhra-challenge.{domain}</c> via <see cref="IDomainValidator"/>
         ///   3. POST /ssl-certificates/{orderId}/dcv/verify → trigger CA-side verification
         ///   4. Poll <see cref="ICERTInextClient.TrackOrderV2Async"/> until status != "pending-dcv"
@@ -3091,7 +3091,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             if (!dcvAlreadySatisfied)
             {
-                token = challenge?.FileNameContent;
+                token = challenge?.Token;
                 if (string.IsNullOrWhiteSpace(token))
                 {
                     _dcvInFlight.TryRemove(orderId, out _);

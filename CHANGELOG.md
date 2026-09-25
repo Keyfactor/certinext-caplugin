@@ -21,6 +21,7 @@
 - **V2 revocation no longer fails when Command supplies no specific reason.** CERTInext rejects the "unspecified" reason value; the plugin now retries once with "cessation-of-operation" (0026).
 - **V2 revocation now reports "not found or not revokable" instead of a misleading product-family error.**
 - **V2 DCV now treats an already-verified domain (EMS-1080) as satisfied instead of deferring.**
+- **V2 DCV now reads the live `token` field instead of the never-populated `fileNameContent` field**, so fresh-domain DV orders no longer get stuck at EXTERNALVALIDATION forever (0037).
 - fix(config): `ValidateProductInfo` now validates template `ProductCode` against the V2 catalog when `UseV2Api=true`, instead of always calling the V1-only `GetProductDetails` (0025).
 - fix(client): `ParseProductDetailsV2Response` now flattens the nested category envelope the live V2 catalog actually returns, instead of misreading it as flat rows (0016).
 - fix(sync): `V2StatusToRequestDisposition` now maps all 11 V2 order statuses; OV/EV/DV orders in `pending-organization-verification`, `pending-documents`, or `pending-approval` no longer get misreported to Command as FAILED (0031).
