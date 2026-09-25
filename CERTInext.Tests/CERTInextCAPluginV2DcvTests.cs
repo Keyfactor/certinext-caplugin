@@ -112,6 +112,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task PerformDcvV2_GetDcvReturnsEms1080_TreatedAsSatisfied_NoStagingAndProceedsToTracking()
         {
             var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } // non-UCC
+                });
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
@@ -162,6 +167,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task PerformDcvV2_VerifyDcvReturnsEms1080_TreatedAsSatisfied_ProceedsToTracking()
         {
             var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } // non-UCC
+                });
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))

@@ -210,6 +210,73 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // V2CertificateParams.AdditionalDomains wire serialization (issues/f3-v2-multi-san-limitation.md)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task PlaceOrderV2Async_UccOrder_IncludesAdditionalDomainsInWireBody()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/ssl-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, "844",
+                new V2CreateSslOrderRequest
+                {
+                    ProductVariant = "dv",
+                    Requestor      = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
+                    Certificate    = new V2CertificateParams
+                    {
+                        Domain            = "example.com",
+                        AdditionalDomains = new List<string> { "san1.example.com", "san2.example.com" }
+                    },
+                    Subscription = new V2SubscriptionParams(),
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                });
+
+            string requestBody = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates")
+                .RequestMessage.Body;
+            requestBody.Should().Contain("\"additionalDomains\"");
+            requestBody.Should().Contain("san1.example.com");
+            requestBody.Should().Contain("san2.example.com");
+        }
+
+        [Fact]
+        public async Task PlaceOrderV2Async_SingleDomainOrder_OmitsAdditionalDomainsFromWireBody()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/ssl-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, "842",
+                new V2CreateSslOrderRequest
+                {
+                    ProductVariant = "dv",
+                    Requestor      = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
+                    Certificate    = new V2CertificateParams { Domain = "example.com" }, // AdditionalDomains left null
+                    Subscription   = new V2SubscriptionParams(),
+                    Agreement      = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                });
+
+            string requestBody = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates")
+                .RequestMessage.Body;
+            requestBody.Should().NotContain("additionalDomains",
+                "single-domain orders must not send additionalDomains at all — preserves the pre-fix wire shape");
+        }
+
+        // ---------------------------------------------------------------------------
         // TrackOrderV2Async
         // ---------------------------------------------------------------------------
 
@@ -991,8 +1058,84 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             products.Should().ContainSingle(p => p.ProductCode == MockCertificateData.ProfileIdTls
                                                   && p.ProductName == "TLS Server"
                                                   && p.ProductType == "SSL/TLS Certificates"
+                                                  && p.ProductTypeId == "13"
                                                   && p.Active);
             products.Should().ContainSingle(p => p.ProductCode == MockCertificateData.ProfileIdClient);
+        }
+
+        // ---------------------------------------------------------------------------
+        // ProductTypeId flattening (issues/f3-v2-multi-san-limitation.md): productTypeID
+        // must survive every catalog response shape so EnrollV2Async can detect UCC products.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_NestedCategoryEnvelope_UccProductTypeId_Preserved()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{
+  ""products"":[
+    { ""categoryName"":""SSL/TLS Certificates"", ""categoryID"":""1"", ""currencyType"":""USD"",
+      ""products"":[
+        {""productCode"":""844"",""productName"":""DV SSL Certificate UCC"",""productTypeID"":""15""},
+        {""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13""}
+      ]
+    }
+  ]
+}"));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().ContainSingle(p => p.ProductCode == "844" && p.ProductTypeId == "15",
+                "UCC product's productTypeID must survive the nested-category flattening");
+            products.Should().ContainSingle(p => p.ProductCode == "842" && p.ProductTypeId == "13");
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_FlatProductIdRow_UccProductTypeId_Preserved()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{
+  ""products"":[
+    {""productId"":""845"",""productName"":""DV SSL Certificate Wildcard UCC"",""masterProductName"":""DV SSL Certificate Wildcard UCC"",""productTypeID"":""21""}
+  ]
+}"));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().ContainSingle(p => p.ProductCode == "845" && p.ProductTypeId == "21",
+                "UCC product's productTypeID must survive the flat productId row shape");
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_FlatProductCodeRow_UccProductTypeId_Preserved()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[
+    {""productCode"":""851"",""productName"":""EV SSL Certificate UCC"",""productType"":""SSL/TLS Certificates"",""productTypeID"":""20"",""active"":true}
+]"));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().ContainSingle(p => p.ProductCode == "851" && p.ProductTypeId == "20",
+                "UCC product's productTypeID must survive the flat productCode row shape (direct DTO deserialize)");
         }
 
         [Fact]

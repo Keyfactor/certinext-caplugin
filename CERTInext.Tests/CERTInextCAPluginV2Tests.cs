@@ -81,6 +81,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             };
         }
 
+        /// <summary>
+        /// Stubs <see cref="ICERTInextClient.GetProductDetailsV2Async"/> — every V2 enrollment now
+        /// resolves the requested product's <c>productTypeID</c> from the live Catalog to decide
+        /// UCC-ness (issues/f3-v2-multi-san-limitation.md), so any Strict-mock enroll test must
+        /// stub this call regardless of whether the test cares about UCC behavior.
+        /// </summary>
+        private static void StubCatalog(Mock<ICERTInextClient> mock, string productCode, string productTypeId) =>
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = productCode, ProductTypeId = productTypeId, Active = true }
+                });
+
         // ---------------------------------------------------------------------------
         // Ping routes to V2
         // ---------------------------------------------------------------------------
@@ -119,6 +132,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Enroll_V2Enabled_PlacesV2Order_PendingResult()
         {
             var mock = NewMock();
+            StubCatalog(mock, "842", "13"); // non-UCC (DV SSL)
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
@@ -154,6 +168,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Enroll_V2Enabled_IssuedImmediately_DownloadsCert()
         {
             var mock = NewMock();
+            StubCatalog(mock, "842", "13"); // non-UCC (DV SSL)
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
@@ -198,6 +213,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Enroll_V2Enabled_RenewOrReissue_AlsoUsesV2()
         {
             var mock = NewMock();
+            StubCatalog(mock, "842", "13"); // non-UCC (DV SSL)
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
@@ -326,6 +342,77 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             mock.Verify(c => c.RevokeCertificateAsync(
                 It.IsAny<string>(), It.IsAny<RevokeCertificateRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Reason code fallback (issues/0026): CERTInext rejects the spec-documented
+        // "unspecified" reason value (422 "Invalid Revoke Reason ID"), confirmed live.
+        // Command defaults to CRL reason 0 (unspecified) when no reason is given, so
+        // the plugin retries once with "cessation-of-operation" for that specific case.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Revoke_V2Enabled_UnspecifiedReasonRejected_RetriesWithCessationOfOperation()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = MockCertificateData.V2OrderId1,
+                    Status  = "issued"
+                }));
+
+            var seenReasons = new List<string>();
+            mock.Setup(c => c.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1,
+                    It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()))
+                .Returns((string family, string orderId, V2RevokeRequest req, CancellationToken ct) =>
+                {
+                    seenReasons.Add(req.Reason);
+                    if (req.Reason == Constants.RevocationReasonV2.Unspecified)
+                        throw new InvalidOperationException("V2 revoke rejected. Unprocessable Entity: Invalid Revoke Reason ID");
+                    return Task.CompletedTask;
+                });
+
+            var plugin = BuildV2Plugin(mock.Object);
+            // Reason code 0 (unspecified) is Command's default when no explicit reason is given.
+            var status = await plugin.Revoke(MockCertificateData.V2OrderId1, "AABB", 0u);
+
+            status.Should().Be((int)EndEntityStatus.REVOKED);
+            seenReasons.Should().Equal(
+                Constants.RevocationReasonV2.Unspecified,
+                Constants.RevocationReasonV2.CessationOfOperation);
+        }
+
+        [Fact]
+        public async Task Revoke_V2Enabled_NonUnspecifiedReasonRejected_DoesNotRetry()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = MockCertificateData.V2OrderId1,
+                    Status  = "issued"
+                }));
+
+            // CRL reason 6 (certificateHold) maps to "certificate-hold", which is also
+            // rejected live (issues/0026) — but since it isn't "unspecified", the plugin
+            // must surface the failure as-is rather than retry.
+            mock.Setup(c => c.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1,
+                    It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new InvalidOperationException("V2 revoke rejected. Unprocessable Entity: Invalid Revoke Reason ID"));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => plugin.Revoke(MockCertificateData.V2OrderId1, "AABB", 6u));
+
+            ex.Message.Should().Contain("Invalid Revoke Reason ID");
+            mock.Verify(c => c.RevokeOrderV2Async(
+                Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1,
+                It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()), Times.Once);
         }
 
         // ---------------------------------------------------------------------------
@@ -577,6 +664,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Enroll_V2_WithChainPem_ConcatenatesLeafAndIntermediate()
         {
             var mock = NewMock();
+            StubCatalog(mock, "842", "13"); // non-UCC (DV SSL)
 
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
@@ -634,6 +722,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Enroll_V2_WithoutChainPem_ReturnsCertificatePemOnly()
         {
             var mock = NewMock();
+            StubCatalog(mock, "842", "13"); // non-UCC (DV SSL)
 
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
