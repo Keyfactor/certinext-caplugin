@@ -247,6 +247,115 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // V2 product code resolution when no explicit ProductCode is configured (issue 0036).
+        // ProductVariant is deliberately left at its "dv" default in these two tests even though
+        // ProductID selects OV/EV SSL — ProductVariant and ProductID are independent enrollment
+        // parameters (see issue 0036's own note on this), and using "dv" keeps the OV/EV
+        // organization-block guard (issue 0028) out of scope so the test isolates product-code
+        // resolution specifically.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Enroll_V2_NoExplicitProductCode_ResolvesLiveCodeFromCatalog_NotStaleV1Table()
+        {
+            // ProductID "OV SSL" with NO ProductCode/ProfileId override. Pre-fix, this would have
+            // fallen back to Constants.Products.DefaultProductCodes["OV SSL"] = "842" and sent that
+            // on the wire — which the live catalog (per this stub) actually maps to DV SSL, not OV
+            // SSL (issue 0036's silent-misissuance scenario). Post-fix, the code must be resolved
+            // from the catalog entry whose productTypeID matches OV SSL ("16") — "846" in this
+            // stub — a different value than the stale table's "842".
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }, // DV SSL
+                    new ProductDetail { ProductCode = "846", ProductTypeId = "16", Active = true }, // OV SSL
+                });
+
+            string capturedProductCode = null;
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>(
+                    (_, code, __, ___) => capturedProductCode = code)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_resolve_001", Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_resolve_001", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_resolve_001", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_resolve_001", Status = "pending-dcv" });
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.OvSsl,
+                ProductParameters = new Dictionary<string, string>
+                {
+                    ["ProductFamily"]  = "ssl",
+                    ["ProductVariant"] = "dv",
+                    ["DomainName"]     = "example.com"
+                }
+            };
+
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem,
+                "CN=example.com, O=Acme",
+                new Dictionary<string, string[]>(),
+                productInfo,
+                RequestFormat.PKCS10,
+                EnrollmentType.New);
+
+            result.CARequestID.Should().Be("ord_resolve_001");
+            capturedProductCode.Should().Be("846",
+                "the resolved code must come from the catalog's OV SSL entry (productTypeID 16), not " +
+                "Constants.Products.DefaultProductCodes[\"OV SSL\"] (\"842\"), which the live catalog in " +
+                "this stub actually maps to DV SSL");
+            mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Once,
+                "the catalog fetched for code resolution must be the same call reused for UCC detection, not a second fetch");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_NoExplicitProductCode_NoMatchingCatalogEntry_FailsFastInsteadOfSilentlyProceeding()
+        {
+            // No override configured, and the live catalog (stubbed here) has no entry with the
+            // productTypeID expected for EV SSL ("19") — must fail loudly with a clear message
+            // rather than silently falling back to a wrong/stale code or ordering an unintended
+            // product.
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }, // DV SSL only
+                });
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.EvSsl,
+                ProductParameters = new Dictionary<string, string>
+                {
+                    ["ProductFamily"]  = "ssl",
+                    ["ProductVariant"] = "dv",
+                    ["DomainName"]     = "example.com"
+                }
+            };
+
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem,
+                "CN=example.com, O=Acme",
+                new Dictionary<string, string[]>(),
+                productInfo,
+                RequestFormat.PKCS10,
+                EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().Contain("could not resolve a live product code");
+            mock.Verify(c => c.PlaceOrderV2Async(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        // ---------------------------------------------------------------------------
         // GetSingleRecord routes to V2
         // ---------------------------------------------------------------------------
 
@@ -1051,6 +1160,99 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var ex = await act.Should().ThrowAsync<AnyCAValidationException>()
                 .WithMessage("*Unable to validate*");
             ex.Which.Message.Should().NotContain("secretApiKeyLeak");
+        }
+
+        // ---------------------------------------------------------------------------
+        // productTypeID correctness check (issue 0036) — catches a code that exists in the
+        // catalog but means a different product than the one selected, for both the
+        // explicit-override case and the no-override/fallback case. Pre-fix, ValidateProductInfo
+        // only checked catalog-existence and would have passed all of these.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Throws_WhenProductCodeExistsButProductTypeIdMismatchesSelectedProduct()
+        {
+            // Template selects "OV SSL" (expects productTypeID "16") but overrides ProductCode to
+            // "842", which the live catalog (stubbed here) resolves to productTypeID "13" = DV
+            // SSL. The code exists — a pure existence check would pass this — but it means a
+            // different product than the one selected.
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[{""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13""}]"));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.OvSsl,
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = "842" }
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*does not correspond to the selected product*");
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Succeeds_WhenNoExplicitProductCode_ResolvesByProductTypeId()
+        {
+            // No ProductCode/ProfileId override configured — must validate via the live catalog's
+            // productTypeID for the selected ProductId, not via Constants.Products.DefaultProductCodes
+            // (V1-only; wrong numbering for V2).
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[{""productCode"":""846"",""productName"":""OV SSL Certificate"",""productTypeID"":""16""}]"));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.OvSsl,
+                ProductParameters = new Dictionary<string, string>()
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().NotThrowAsync();
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Throws_WhenNoExplicitProductCode_AndCatalogHasNoMatchingProductTypeId()
+        {
+            // No override configured, and the live catalog has no entry with the productTypeID
+            // expected for EV SSL ("19") — must fail loudly rather than silently pass.
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[{""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13""}]"));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.EvSsl,
+                ProductParameters = new Dictionary<string, string>()
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*Could not find a CERTInext V2 catalog entry*");
         }
 
         // ---------------------------------------------------------------------------
