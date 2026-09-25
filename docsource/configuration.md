@@ -356,9 +356,18 @@ V2 status strings map to Keyfactor enrollment statuses as follows:
 | `pending-dcv` | Pending External Validation | Order is awaiting domain control validation. |
 | `pending-csr` | Pending External Validation | Order is awaiting CSR submission or processing. |
 | `pending-agreement` | Pending External Validation | Order requires subscriber agreement acceptance. |
+| `pending-organization-verification` | Pending External Validation | OV/EV order is awaiting organization verification. |
+| `pending-documents` | Pending External Validation | Order is awaiting supporting document submission. |
+| `pending-approval` | Pending External Validation | Order is awaiting final CA/LRA approval before issuance. |
 | `revoked` | Revoked | Order has been revoked. |
 | `cancelled` | Failed | Order was cancelled; a new enrollment is required. |
+| `rejected` | Failed | Order was rejected by the CA/LRA; a new enrollment is required. |
+| `expired` | Failed | Order expired before completion; a new enrollment is required. |
+
+Any V2 status not in this table (e.g. a value CERTInext adds in the future) also maps to Failed, but the
+plugin logs a warning distinguishing "unmapped status" from the statuses above that are deliberately
+mapped to Failed — see the gateway trace log if certificates unexpectedly show as failed.
 
 Because V2 has no distinct renewal endpoint, all three enrollment types (New, Reissue, RenewOrReissue) place a fresh V2 order.
 
-{% include 'architecture.md' %}
+{% include 'migration-v1-to-v2.md' %}

@@ -390,6 +390,48 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
+        // Probe 8 (triage 0031): does this account's real order history ever contain
+        // any of the V2 statuses StatusMapper.V2StatusToRequestDisposition does NOT map
+        // (pending-organization-verification, pending-documents, pending-approval,
+        // rejected, expired)? Read-only: uses /reports/orders?status=<value>&size=1 and
+        // reads only totalElements — never lists or touches order content. Added purely
+        // for issues/0031 triage; not part of the normal V2 report-probe discovery set.
+        // ---------------------------------------------------------------------------
+
+        [SkippableFact]
+        public async Task Probe8_StatusFilter_UnmappedStatusCounts()
+        {
+            Skip.IfNot(_probeEnabled, "CERTINEXT_V2_REPORT_PROBE not set (or V2 not enabled) — skipping status-filter probe.");
+
+            using var client = BuildV2Client();
+            _output.WriteLine("=== Probe 8 (issues/0031 triage): totalElements per V2 order status, this account ===");
+
+            // The 6 statuses StatusMapper.V2StatusToRequestDisposition maps today, plus
+            // the 5 spec-documented statuses (docs/reference/specs/CERTInext API
+            // v2.postman_collection (1).json, "Orders Report" query param "status") that
+            // fall through its default arm to FAILED.
+            string[] mapped = { "issued", "pending-dcv", "pending-csr", "pending-agreement", "revoked", "cancelled" };
+            string[] unmapped = { "pending-organization-verification", "pending-documents", "pending-approval", "rejected", "expired" };
+
+            foreach (string status in mapped.Concat(unmapped))
+            {
+                var (httpStatus, _, content) = await client.ProbeV2GetAsync(
+                    $"/api/certinext/v2/reports/orders?status={Uri.EscapeDataString(status)}&page=1&size=1");
+
+                long total = -1;
+                if (httpStatus == 200 && !string.IsNullOrWhiteSpace(content))
+                {
+                    using var doc = JsonDocument.Parse(content);
+                    if (doc.RootElement.TryGetProperty("totalElements", out var te))
+                        total = te.GetInt64();
+                }
+
+                string category = unmapped.Contains(status) ? "UNMAPPED (defaults to FAILED today)" : "mapped";
+                _output.WriteLine($"FINDING: status={status,-36} HTTP={httpStatus,-3} totalElements={total,-6} [{category}]");
+            }
+        }
+
+        // ---------------------------------------------------------------------------
         // Probe 6: List Domains
         // ---------------------------------------------------------------------------
 

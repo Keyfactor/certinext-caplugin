@@ -29,20 +29,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // V2StatusToRequestDisposition
         // ---------------------------------------------------------------------------
 
+        // All 11 status values documented by the V2 spec's `/reports/orders` `status`
+        // filter (issues/0031) — every one must map explicitly, not fall through the
+        // "unmapped" default arm, even where the resulting disposition (FAILED) is the
+        // same as the default's. `unknown-future`/empty/null exercise the true default
+        // arm below.
         [Theory]
-        [InlineData("issued",             (int)EndEntityStatus.GENERATED)]
-        [InlineData("ISSUED",             (int)EndEntityStatus.GENERATED)]  // case-insensitive
-        [InlineData("pending-dcv",        (int)EndEntityStatus.EXTERNALVALIDATION)]
-        [InlineData("pending-csr",        (int)EndEntityStatus.EXTERNALVALIDATION)]
-        [InlineData("pending-agreement",  (int)EndEntityStatus.EXTERNALVALIDATION)]
-        [InlineData("revoked",            (int)EndEntityStatus.REVOKED)]
-        [InlineData("cancelled",          (int)EndEntityStatus.FAILED)]
-        [InlineData("unknown-future",     (int)EndEntityStatus.FAILED)]
-        [InlineData("",                   (int)EndEntityStatus.FAILED)]
-        [InlineData(null,                 (int)EndEntityStatus.FAILED)]
+        [InlineData("issued",                             (int)EndEntityStatus.GENERATED)]
+        [InlineData("ISSUED",                              (int)EndEntityStatus.GENERATED)]  // case-insensitive
+        [InlineData("pending-dcv",                         (int)EndEntityStatus.EXTERNALVALIDATION)]
+        [InlineData("pending-csr",                         (int)EndEntityStatus.EXTERNALVALIDATION)]
+        [InlineData("pending-agreement",                   (int)EndEntityStatus.EXTERNALVALIDATION)]
+        [InlineData("pending-organization-verification",   (int)EndEntityStatus.EXTERNALVALIDATION)]
+        [InlineData("pending-documents",                   (int)EndEntityStatus.EXTERNALVALIDATION)]
+        [InlineData("pending-approval",                    (int)EndEntityStatus.EXTERNALVALIDATION)]
+        [InlineData("revoked",                              (int)EndEntityStatus.REVOKED)]
+        [InlineData("cancelled",                             (int)EndEntityStatus.FAILED)]
+        [InlineData("rejected",                              (int)EndEntityStatus.FAILED)]
+        [InlineData("expired",                               (int)EndEntityStatus.FAILED)]
         public void V2StatusToRequestDisposition_MapsCorrectly(string v2Status, int expectedDisposition)
         {
             StatusMapper.V2StatusToRequestDisposition(v2Status).Should().Be(expectedDisposition);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Regression (issues/0031): a status string that is NOT one of the 11 spec
+        // values must still degrade gracefully to FAILED via the default arm, rather
+        // than throwing or being silently treated as "still pending". This is the
+        // "truly unrecognized" case, distinct from the deliberate FAILED mappings
+        // (cancelled/rejected/expired) tested above.
+        // ---------------------------------------------------------------------------
+
+        [Theory]
+        [InlineData("unknown-future")]
+        [InlineData("")]
+        [InlineData(null)]
+        public void V2StatusToRequestDisposition_UnrecognizedStatus_DefaultsToFailed(string v2Status)
+        {
+            StatusMapper.V2StatusToRequestDisposition(v2Status).Should().Be((int)EndEntityStatus.FAILED);
         }
 
         // ---------------------------------------------------------------------------
