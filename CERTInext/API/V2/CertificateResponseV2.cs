@@ -127,13 +127,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("_links")]
         public V2Links Links { get; set; }
 
-        // These fields are unconfirmed in the V2 spec (OQ-1). They are included as
-        // nullable so a live response that does include them deserializes correctly.
-        [JsonPropertyName("revocationReason")]
-        public string RevocationReason { get; set; }
-
-        [JsonPropertyName("revocationDate")]
-        public DateTime? RevocationDate { get; set; }
+        /// <summary>
+        /// Populated only when <see cref="Status"/> is "revoked" (issues/0034 — confirmed live
+        /// against a real revoked SSL order, 2026-09-25). Absent entirely from the wire — not
+        /// present-but-null — when the order has never been revoked, which
+        /// <c>System.Text.Json</c> deserializes as a null <see cref="V2RevocationDetails"/>
+        /// reference with no special handling required.
+        /// </summary>
+        [JsonPropertyName("revocation")]
+        public V2RevocationDetails Revocation { get; set; }
 
         /// <summary>ISO 8601 timestamp when the certificate was issued. Present when status = "issued".</summary>
         [JsonPropertyName("issuedAt")]
@@ -142,6 +144,36 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         /// <summary>ISO 8601 timestamp when the certificate expires. Present when status = "issued".</summary>
         [JsonPropertyName("expiresAt")]
         public string ExpiresAt { get; set; }
+    }
+
+    /// <summary>
+    /// Nested <c>revocation</c> object on the V2 Track Order response (issues/0034). Confirmed
+    /// live against a real revoked SSL order (2026-09-25):
+    /// <c>{"status":"Certificate Revoked","reason":"cessation-of-operation","processedAt":"2026-09-24T20:44:41Z"}</c>
+    /// </summary>
+    public class V2RevocationDetails
+    {
+        /// <summary>
+        /// Human-readable revocation engine status (e.g. "Certificate Revoked"), mirroring the
+        /// outer <c>certificateState</c> field on the same response. Not a distinct enum worth
+        /// modeling separately from <see cref="Reason"/>.
+        /// </summary>
+        [JsonPropertyName("status")]
+        public string Status { get; set; }
+
+        /// <summary>
+        /// RFC 5280 reason name, hyphenated on the wire (e.g. "cessation-of-operation",
+        /// "key-compromise") — NOT V1's camelCase convention. See
+        /// <see cref="Constants.RevocationReasonV2"/> for the known values and
+        /// <c>Models.StatusMapper.V2RevocationReasonToCrlCode</c> for the reverse mapping back
+        /// to an RFC 5280 CRL reason code.
+        /// </summary>
+        [JsonPropertyName("reason")]
+        public string Reason { get; set; }
+
+        /// <summary>Effective revocation time (CA-recorded). RFC 3339 / ISO 8601 UTC.</summary>
+        [JsonPropertyName("processedAt")]
+        public DateTime? ProcessedAt { get; set; }
     }
 
     /// <summary>

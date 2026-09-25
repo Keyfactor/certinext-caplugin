@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -277,6 +277,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
                 10 => Constants.RevocationReasonV2.AACompromise,        // RFC: aACompromise
                 _  => Constants.RevocationReasonV2.Unspecified
             };
+
+        /// <summary>
+        /// Converts a V2 API revocation reason string (the CERTInext V2 spec's kebab-case
+        /// <c>reason</c> enum on the Track Order response's nested <c>revocation</c> object,
+        /// e.g. "cessation-of-operation") back to the RFC 5280 CRL reason code for storage in
+        /// the Keyfactor Command database (issues/0034). Inverse of
+        /// <see cref="ToV2RevocationReason"/>. Unrecognized or null input (including the
+        /// not-revoked case, where the caller should not invoke this at all) falls back to 0
+        /// (unspecified), mirroring <see cref="ToRevocationReason"/>'s V1 default.
+        /// </summary>
+        /// <param name="v2Reason">Raw <c>revocation.reason</c> string from the V2 Track Order response.</param>
+        public static int V2RevocationReasonToCrlCode(string v2Reason)
+        {
+            switch (v2Reason?.ToLowerInvariant())
+            {
+                case Constants.RevocationReasonV2.KeyCompromise: return 1;
+                case Constants.RevocationReasonV2.CACompromise: return 2;
+                case Constants.RevocationReasonV2.AffiliationChanged: return 3;
+                case Constants.RevocationReasonV2.Superseded: return 4;
+                case Constants.RevocationReasonV2.CessationOfOperation: return 5;
+                case Constants.RevocationReasonV2.CertificateHold: return 6;
+                case Constants.RevocationReasonV2.PrivilegeWithdrawn: return 9;
+                case Constants.RevocationReasonV2.AACompromise: return 10;
+                default: return 0;
+            }
+        }
 
         /// <summary>
         /// Converts a CERTInext <c>revokeReasonId</c> integer back to the RFC 5280 CRL

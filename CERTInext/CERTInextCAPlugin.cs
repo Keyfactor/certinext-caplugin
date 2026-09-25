@@ -1769,7 +1769,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     CARequestID = caRequestID,
                     Certificate = certPem,
                     Status      = disposition,
-                    ProductID   = statusResp.ProductVariant ?? string.Empty
+                    ProductID   = statusResp.ProductVariant ?? string.Empty,
+                    RevocationDate = statusResp.Revocation?.ProcessedAt,
+                    RevocationReason = statusResp.Revocation != null
+                        ? StatusMapper.V2RevocationReasonToCrlCode(statusResp.Revocation.Reason)
+                        : 0
                 };
             }
             catch (KeyNotFoundException)
@@ -1951,6 +1955,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         }
 #endif
 
+                        // Report rows carry no revocation reason/date (OrderReportEntryV2 has no
+                        // such fields, issues/0034) — only a live TrackOrder response's nested
+                        // `revocation` object does. Resolve lazily, mirroring the DCV branch's
+                        // "only for rows that actually need it" pattern above: this extra call is
+                        // scoped to revoked rows whose disposition came from the report's display
+                        // strings alone. trackedStatus is already populated (with .Revocation, if
+                        // any) when disposition instead came from the unresolved-status fallback.
+                        if (disposition == (int)EndEntityStatus.REVOKED && trackedStatus == null)
+                        {
+                            try
+                            {
+                                (resolvedFamily, trackedStatus) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(
+                                    row.OrderNumber, cancelToken);
+                            }
+                            catch (Exception revEx)
+                            {
+                                _logger.LogWarning(revEx,
+                                    "V2 sync: failed to fetch revocation detail for revoked order '{Id}' — " +
+                                    "emitting without RevocationDate/RevocationReason.", row.OrderNumber);
+                            }
+                        }
+
                         string certPem = null;
                         if (disposition == (int)EndEntityStatus.GENERATED)
                         {
@@ -1972,7 +1998,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             CARequestID = row.OrderNumber,
                             Certificate = certPem,
                             Status      = disposition.Value,
-                            ProductID   = row.ProductCode ?? string.Empty
+                            ProductID   = row.ProductCode ?? string.Empty,
+                            RevocationDate = trackedStatus?.Revocation?.ProcessedAt,
+                            RevocationReason = trackedStatus?.Revocation != null
+                                ? StatusMapper.V2RevocationReasonToCrlCode(trackedStatus.Revocation.Reason)
+                                : 0
                         };
 
                         bool recordHasBody = !string.IsNullOrWhiteSpace(record.Certificate);
