@@ -41,6 +41,7 @@
 - chore(tests): regression tests for the V2 `organization` block (populated for OV/EV, omitted for DV, fail-fast without `OrganizationNumber`); live acceptance against the sandbox confirmed CERTInext accepts the fixed request (0028).
 - chore(tests): regression coverage pinning the live V2 DCV response shape (`token`/`tokenExpiryDate` only) against both the client deserializer and the plugin's DCV staging path (0037).
 - chore(tests): regression coverage for V2 `productTypeID`-based product code resolution/validation and the V1-fallback-unaffected guarantee (0036).
+- chore(tests): regression coverage for `GroupNumber` on V2 order create, catalog, and orders-report calls (0029).
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 

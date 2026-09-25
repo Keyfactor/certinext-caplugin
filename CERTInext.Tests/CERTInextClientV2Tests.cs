@@ -50,7 +50,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // Helpers
         // ---------------------------------------------------------------------------
 
-        private CERTInextClient BuildV2Client() =>
+        private CERTInextClient BuildV2Client(string groupNumber = null) =>
             new CERTInextClient(new CERTInextConfig
             {
                 // A single ApiUrl now serves both V1 and V2 (issues/0022 config consolidation).
@@ -63,7 +63,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 OAuthClientSecret = "my-v2-secret",
                 RequestorName  = "Test User",
                 RequestorEmail = "test@example.com",
-                PageSize       = 100
+                PageSize       = 100,
+                // Unset by default (matches CERTInextConfig.GroupNumber's own default of
+                // string.Empty) — issues/0029 test cases override this explicitly.
+                GroupNumber    = groupNumber ?? string.Empty
             });
 
         private void StubV2Token(int expiresIn = 3600)
@@ -1024,6 +1027,62 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             results.Should().BeEmpty();
         }
 
+        // ---------------------------------------------------------------------------
+        // ListOrdersV2Async — GroupNumber query param (issues/0029)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ListOrdersV2Async_GroupNumberConfigured_PassesGroupNumberQueryParam()
+        {
+            StubV2Token();
+            // Only matches if groupNumber was actually sent as a query param — if the client
+            // dropped it, WireMock's default (unmatched) 404 response would make
+            // ThrowOnV2Failure throw, and the test would fail.
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("groupNumber", "GRP-555")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client(groupNumber: "GRP-555");
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async())
+                results.Add(row);
+
+            results.Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_GroupNumberBlank_OmitsGroupNumberQueryParam()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client(groupNumber: string.Empty);
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async())
+                results.Add(row);
+
+            results.Should().BeEmpty();
+
+            string rawQuery = _server.LogEntries
+                .Last(e => e.RequestMessage.Path == "/api/certinext/v2/reports/orders")
+                .RequestMessage.RawQuery ?? string.Empty;
+            rawQuery.Should().NotContain("groupNumber",
+                "an unconfigured GroupNumber must not appear on the orders-report query string");
+        }
+
         [Fact]
         public async Task ListOrdersV2Async_PageSizeOver100_ClampedServerRequest()
         {
@@ -1093,6 +1152,58 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                                                   && p.ProductTypeId == "13"
                                                   && p.Active);
             products.Should().ContainSingle(p => p.ProductCode == MockCertificateData.ProfileIdClient);
+        }
+
+        // ---------------------------------------------------------------------------
+        // GetProductDetailsV2Async — GroupNumber query param (issues/0029)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_GroupNumberConfigured_PassesGroupNumberQueryParam()
+        {
+            StubV2Token();
+            // Only matches if groupNumber was actually sent as a query param — if the client
+            // dropped it, WireMock's default (unmatched) 404 response would make
+            // ThrowOnV2Failure throw, and the test would fail.
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/catalog/products")
+                    .WithParam("groupNumber", "GRP-555")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
+
+            using var client = BuildV2Client(groupNumber: "GRP-555");
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().HaveCount(2);
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_GroupNumberBlank_OmitsGroupNumberQueryParam()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/catalog/products")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
+
+            using var client = BuildV2Client(groupNumber: string.Empty);
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().HaveCount(2);
+
+            string rawQuery = _server.LogEntries
+                .Last(e => e.RequestMessage.Path == "/api/certinext/v2/catalog/products")
+                .RequestMessage.RawQuery ?? string.Empty;
+            rawQuery.Should().NotContain("groupNumber",
+                "an unconfigured GroupNumber must not appear on the catalog query string");
         }
 
         // ---------------------------------------------------------------------------
