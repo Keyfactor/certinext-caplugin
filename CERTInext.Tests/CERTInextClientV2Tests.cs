@@ -549,15 +549,47 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .RespondWith(Response.Create()
                     .WithStatusCode(200)
                     .WithHeader("Content-Type", "application/json")
-                    .WithBody(MockCertificateData.V2DcvChallengeJson(MockCertificateData.V2OrderId1, "example.com", "my-dcv-token")));
+                    .WithBody(MockCertificateData.V2DcvChallengeJson("my-dcv-token")));
 
             using var client = BuildV2Client();
             var result = await client.GetDcvV2Async(MockCertificateData.V2OrderId1, Constants.ApiV2.FamilySsl);
 
-            result.OrderNumber.Should().Be(MockCertificateData.V2OrderId1);
-            result.DomainName.Should().Be("example.com");
-            result.DcvMethod.Should().Be("2");
-            result.FileNameContent.Should().Be("my-dcv-token");
+            result.Token.Should().Be("my-dcv-token");
+            result.TokenExpiryDate.Should().Be("2026-12-31 23:59:59");
+        }
+
+        /// <summary>
+        /// Regression (issues/0037): the live GetDcv response on a fresh-domain order came
+        /// back as exactly <c>{"tokenExpiryDate":"...","token":"..."}</c> — a shape that
+        /// matches neither the spec's worked example (<c>orderNumber</c>/<c>domainName</c>/
+        /// <c>dcvMethod</c>/<c>fileNameContent</c>, the shape the DTO originally modeled) nor
+        /// the spec's prose (<c>method</c>/<c>txtToken</c>). Before the fix, deserializing this
+        /// body left <c>FileNameContent</c> null (unmapped JSON properties are silently
+        /// ignored), which drove the plugin's null-token guard and stranded the order at
+        /// EXTERNALVALIDATION forever. This pins the real field name (<c>token</c>) against
+        /// the exact live body captured in issues/0037, verbatim.
+        /// </summary>
+        [Fact]
+        public async Task GetDcvV2Async_LiveShape_DeserializesTokenField_NotFileNameContent()
+        {
+            StubV2Token();
+            const string liveBody = @"{""tokenExpiryDate"":""2026-09-27 15:27:00"",""token"":""D6026954B9EB7D31E3FE8B2194F07087""}";
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(liveBody));
+
+            using var client = BuildV2Client();
+            var result = await client.GetDcvV2Async(MockCertificateData.V2OrderId1, Constants.ApiV2.FamilySsl);
+
+            result.Should().NotBeNull();
+            result.Token.Should().Be("D6026954B9EB7D31E3FE8B2194F07087",
+                "the live wire field is 'token', not 'fileNameContent' (issues/0037)");
+            result.TokenExpiryDate.Should().Be("2026-09-27 15:27:00");
         }
 
         [Fact]

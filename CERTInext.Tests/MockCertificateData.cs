@@ -575,9 +575,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public static string V2ProblemDetailsJson(int status = 403, string title = "Forbidden", string detail = "OAuth2 not enabled", string type = "EMS-2022") =>
             $@"{{""type"":""{type}"",""title"":""{title}"",""status"":{status},""detail"":""{detail}"",""instance"":null}}";
 
-        /// <summary>V2 DCV challenge response (DNS-TXT method).</summary>
-        public static string V2DcvChallengeJson(string orderId = "ord_abc001", string domain = "example.com", string token = "emudhra-dcv-abc123") =>
-            $@"{{""orderNumber"":""{orderId}"",""domainName"":""{domain}"",""dcvMethod"":""2"",""fileNameContent"":""{token}"",""tokenExpiryDate"":""2026-12-31 23:59:59""}}";
+        /// <summary>
+        /// V2 DCV challenge response. Matches the confirmed live shape (issues/0037, live
+        /// probe 2026-09-25): exactly <c>token</c> and <c>tokenExpiryDate</c> — no
+        /// <c>orderNumber</c>/<c>domainName</c>/<c>dcvMethod</c>/<c>fileNameContent</c>.
+        /// </summary>
+        public static string V2DcvChallengeJson(string token = "emudhra-dcv-abc123", string tokenExpiryDate = "2026-12-31 23:59:59") =>
+            $@"{{""tokenExpiryDate"":""{tokenExpiryDate}"",""token"":""{token}""}}";
 
         /// <summary>V2 DCV verify response (success).</summary>
         public static string V2DcvVerifySuccessJson(string domain = "example.com") =>

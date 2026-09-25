@@ -190,10 +190,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetDcvV2Async(OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2DcvChallengeResponse
                 {
-                    OrderNumber     = OrderId,
-                    DomainName      = "example.com",
-                    DcvMethod       = "2",
-                    FileNameContent = "dcv-token-abc123"
+                    Token           = "dcv-token-abc123",
+                    TokenExpiryDate = "2026-12-31 23:59:59"
                 });
 
             // ...but by the time VerifyDcv is called, the domain became already-verified.
@@ -219,6 +217,81 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             validator.StagedRecords.Should().ContainSingle();
             validator.CleanedUpKeys.Should().ContainSingle(
                 "staged records are always cleaned up, including on the EMS-1080 verify path");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Regression (issues/0037): live GetDcv response shape has no fileNameContent
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Regression (issues/0037): a live fresh-domain GetDcv challenge response was
+        /// captured as exactly <c>{"tokenExpiryDate":"...","token":"..."}</c> — no
+        /// <c>orderNumber</c>/<c>domainName</c>/<c>dcvMethod</c>/<c>fileNameContent</c>.
+        /// Before the fix, <see cref="V2DcvChallengeResponse"/> modeled <c>fileNameContent</c>
+        /// instead of <c>token</c>, so this shape deserialized with a null token, which drove
+        /// <c>PerformDcvV2IfNeededAsync</c>'s null-token guard and left the order stuck at
+        /// EXTERNALVALIDATION forever (no TXT ever staged, no exception, just a returned
+        /// <c>false</c>). This constructs the response exactly as the fixed DTO now
+        /// deserializes the real live body, and proves the plugin extracts and publishes the
+        /// token instead of deferring.
+        /// </summary>
+        [Fact]
+        public async Task PerformDcvV2_LiveShapeTokenOnly_StagesTxtRecord_DoesNotHitNullTokenGuard()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } // non-UCC
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PendingDcvStatus())
+                .ReturnsAsync(IssuedStatus())
+                .ReturnsAsync(IssuedStatus());
+
+            // Real live shape (issues/0037 probe, 2026-09-25): only Token/TokenExpiryDate are
+            // ever populated — no OrderNumber/DomainName/DcvMethod exist on the DTO anymore.
+            const string liveToken = "D6026954B9EB7D31E3FE8B2194F07087";
+            mock.Setup(c => c.GetDcvV2Async(OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse
+                {
+                    Token           = liveToken,
+                    TokenExpiryDate = "2026-09-27 15:27:00"
+                });
+
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, "example.com", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            mock.Setup(c => c.DownloadCertificateV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DownloadResponse());
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "the live token-only shape must be extracted and published, not deferred by " +
+                "the null-token guard");
+
+            validator.StagedRecords.Should().ContainSingle(
+                "GetDcv returned a real token, so a TXT record must be staged from it")
+                .Which.Should().Be(("_emudhra-challenge.example.com", liveToken),
+                    "the staged value must come from the new Token property, not the removed " +
+                    "FileNameContent property");
+
+            mock.Verify(c => c.VerifyDcvV2Async(
+                OrderId, "example.com", It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Once);
         }
 
         // ---------------------------------------------------------------------------
