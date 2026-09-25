@@ -578,8 +578,80 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     var products = await tempClient.GetProductDetailsV2Async();
                     availableIds = products.Select(p => p.ProductCode).ToList();
-                    found = products.Any(p =>
-                        string.Equals(p.ProductCode, profileId, StringComparison.OrdinalIgnoreCase));
+
+                    if (params_.HasExplicitProductCode)
+                    {
+                        // Explicit override: the code must exist in the catalog AND the matched
+                        // catalog entry's productTypeID must actually correspond to the selected
+                        // ProductId — not just "does this code exist as *some* product" (issue
+                        // 0036: a code can exist and still mean a different, wrong-assurance-level
+                        // product than the one the administrator selected).
+                        var matchedProduct = products.FirstOrDefault(p =>
+                            string.Equals(p.ProductCode, profileId, StringComparison.OrdinalIgnoreCase));
+
+                        if (matchedProduct == null)
+                        {
+                            var available = string.Join(", ", availableIds);
+                            _logger.LogWarning(
+                                "Product/profile validation failed — configured ProductCode '{ProfileId}' was not " +
+                                "found in the CERTInext V2 catalog. ProductID={ProductID}, AvailableCount={AvailableCount}",
+                                profileId, params_.ProductId, availableIds.Count);
+                            throw new AnyCAValidationException(
+                                $"ProductCode '{profileId}' was not found in the CERTInext V2 catalog. " +
+                                $"Available codes: {available}");
+                        }
+
+                        if (Constants.Products.ProductTypeIdsV2.TryGetValue(params_.ProductId ?? string.Empty, out string expectedTypeId)
+                            && !string.Equals(matchedProduct.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogWarning(
+                                "Product/profile validation failed — configured ProductCode '{ProfileId}' exists in " +
+                                "the CERTInext V2 catalog, but its catalog productTypeID ('{ActualTypeId}') does not " +
+                                "match the selected ProductID '{ProductID}' (expected productTypeID '{ExpectedTypeId}'). " +
+                                "This template would order a different product than the one selected.",
+                                profileId, matchedProduct.ProductTypeId, params_.ProductId, expectedTypeId);
+                            throw new AnyCAValidationException(
+                                $"ProductCode '{profileId}' exists in the CERTInext catalog, but it does not " +
+                                $"correspond to the selected product '{params_.ProductId}'. Verify the ProductCode " +
+                                "override is correct for this product, or remove the override to let the plugin " +
+                                "resolve it automatically from the catalog.");
+                        }
+
+                        found = true;
+                    }
+                    else
+                    {
+                        // No explicit override: resolve/validate by matching the live catalog's
+                        // productTypeID for the selected ProductId — do NOT fall back to
+                        // Constants.Products.DefaultProductCodes (V1-era numbering that does not
+                        // match the live V2 catalog, issue 0036).
+                        if (!Constants.Products.ProductTypeIdsV2.TryGetValue(params_.ProductId ?? string.Empty, out string expectedTypeId))
+                        {
+                            _logger.LogWarning(
+                                "Product/profile validation failed — no productTypeID mapping is defined for " +
+                                "ProductID '{ProductID}'.", params_.ProductId);
+                            throw new AnyCAValidationException(
+                                $"No V2 productTypeID mapping is defined for ProductID '{params_.ProductId}'. " +
+                                "Set the ProductCode template parameter explicitly, or contact support to add a " +
+                                "mapping for this product.");
+                        }
+
+                        bool matched = products.Any(p =>
+                            string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase));
+                        if (!matched)
+                        {
+                            _logger.LogWarning(
+                                "Product/profile validation failed — no CERTInext V2 catalog entry has " +
+                                "productTypeID '{ExpectedTypeId}' for ProductID '{ProductID}'. AvailableCount={AvailableCount}",
+                                expectedTypeId, params_.ProductId, availableIds.Count);
+                            throw new AnyCAValidationException(
+                                $"Could not find a CERTInext V2 catalog entry for product '{params_.ProductId}' " +
+                                $"(expected productTypeID '{expectedTypeId}'). Verify the account is entitled to " +
+                                "this product.");
+                        }
+
+                        found = true;
+                    }
                 }
                 else
                 {
@@ -1209,8 +1281,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             _logger.MethodEntry(LogLevel.Debug);
             _logger.LogInformation(
-                "EnrollV2Async started. EnrollmentType={EnrollmentType}, ProductFamily={Family}, ProductVariant={Variant}, ProductCode={Code}",
-                enrollmentType, ep.ProductFamilySlug, ep.ProductVariant, ep.ProductCode);
+                "EnrollV2Async started. EnrollmentType={EnrollmentType}, ProductFamily={Family}, ProductVariant={Variant}, " +
+                "ProductId={ProductId}, HasExplicitProductCode={HasExplicit}, ConfiguredProductCode={Code}",
+                enrollmentType, ep.ProductFamilySlug, ep.ProductVariant, ep.ProductId, ep.HasExplicitProductCode,
+                ep.HasExplicitProductCode ? ep.ProductCode : "(resolved from catalog)");
 
             // Derive the primary domain from subject CN
             string domain = ep.DomainName;
@@ -1295,29 +1369,98 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 };
             }
 
-            // UCC (multi-SAN) detection: resolve the requested product's productTypeID from the
-            // live Catalog and check it against the known UCC-family values (15/18/20/21/22).
-            // Deliberately NOT derived from Constants.Products.DefaultProductCodes, whose numbering
-            // disagrees with the live/spec numbering (issue 0036). A catalog lookup failure must
-            // not block enrollment — fall back to non-UCC (single-domain) behavior, which is the
-            // strictly-safer failure mode: the CSR-SAN-count guard above already ensures the CSR
-            // itself never carries surplus SANs. See issues/f3-v2-multi-san-limitation.md.
+            // Resolve the real V2 product code (and UCC-ness) from the live Catalog response.
+            // Fetched once here and reused for both purposes — no second catalog call.
+            //
+            // Explicit override (ProductCode/ProfileId set on the template): trust the
+            // administrator's value as-is; the catalog is only consulted for UCC detection, and a
+            // catalog lookup failure there must not block enrollment — fall back to non-UCC
+            // (single-domain) behavior, the strictly-safer failure mode, since the CSR-SAN-count
+            // guard above already ensures the CSR itself never carries surplus SANs. See
+            // issues/f3-v2-multi-san-limitation.md.
+            //
+            // No explicit override: the code must NOT fall back to
+            // Constants.Products.DefaultProductCodes (V1-era numbering that does not match the
+            // live V2 catalog — issue 0036, e.g. its "842" is OV SSL but the live V2 catalog's
+            // "842" is DV SSL). Instead resolve the live product code by matching the catalog
+            // entry whose productTypeID equals the stable numeric type ID for ep.ProductId
+            // (Constants.Products.ProductTypeIdsV2) — productTypeID is a small CERTInext-documented
+            // enum, unlike productCode (wrong table) or productName (spelling varies by
+            // account/catalog version — see issue 0036 triage). Here, a catalog failure or an
+            // unresolvable mapping MUST fail the enrollment loudly: there is no safe fallback code
+            // to send on the wire.
+            string productCode;
             bool isUccProduct = false;
+            List<ProductDetail> catalog = null;
             try
             {
-                var catalog = await _client.GetProductDetailsV2Async();
-                var matchedProduct = catalog?.FirstOrDefault(p =>
-                    string.Equals(p.ProductCode, ep.ProductCode, StringComparison.OrdinalIgnoreCase));
-                isUccProduct = matchedProduct != null
-                    && !string.IsNullOrWhiteSpace(matchedProduct.ProductTypeId)
-                    && Constants.ApiV2.UccProductTypeIds.Contains(matchedProduct.ProductTypeId);
+                catalog = await _client.GetProductDetailsV2Async();
             }
             catch (Exception catalogEx)
             {
                 _logger.LogWarning(catalogEx,
-                    "EnrollV2Async: could not resolve product catalog details for ProductCode={ProductCode}; " +
-                    "treating as non-UCC (single-domain only) rather than failing the enrollment.",
-                    ep.ProductCode);
+                    "EnrollV2Async: could not fetch the live V2 product catalog. ProductId={ProductId}, " +
+                    "HasExplicitProductCode={HasExplicit}", ep.ProductId, ep.HasExplicitProductCode);
+            }
+
+            if (ep.HasExplicitProductCode)
+            {
+                productCode = ep.ProductCode;
+
+                var matchedProduct = catalog?.FirstOrDefault(p =>
+                    string.Equals(p.ProductCode, productCode, StringComparison.OrdinalIgnoreCase));
+                isUccProduct = matchedProduct != null
+                    && !string.IsNullOrWhiteSpace(matchedProduct.ProductTypeId)
+                    && Constants.ApiV2.UccProductTypeIds.Contains(matchedProduct.ProductTypeId);
+            }
+            else
+            {
+                if (!Constants.Products.ProductTypeIdsV2.TryGetValue(ep.ProductId ?? string.Empty, out string expectedTypeId))
+                {
+                    _logger.LogError(
+                        "EnrollV2Async rejected an order for ProductId={ProductId} — no productTypeID mapping " +
+                        "is defined for this product name, and no explicit ProductCode override is configured.",
+                        ep.ProductId);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: no productTypeID mapping is defined for " +
+                                        $"ProductID '{ep.ProductId}'. Set the ProductCode template parameter " +
+                                        "explicitly, or contact support to add a mapping for this product."
+                    };
+                }
+
+                var matchedProduct = catalog?.FirstOrDefault(p =>
+                    string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase));
+                if (matchedProduct == null || string.IsNullOrWhiteSpace(matchedProduct.ProductCode))
+                {
+                    _logger.LogError(
+                        "EnrollV2Async: could not resolve a live V2 product code for ProductId={ProductId} " +
+                        "(expected catalog productTypeID='{ExpectedTypeId}'). CatalogFetchSucceeded={CatalogOk}",
+                        ep.ProductId, expectedTypeId, catalog != null);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: could not resolve a live product code for " +
+                                        $"ProductID '{ep.ProductId}' from the CERTInext catalog (expected " +
+                                        $"productTypeID '{expectedTypeId}'). Verify the account is entitled to " +
+                                        "this product, or set the ProductCode template parameter explicitly."
+                    };
+                }
+
+                productCode = matchedProduct.ProductCode;
+                isUccProduct = Constants.ApiV2.UccProductTypeIds.Contains(expectedTypeId);
+
+                _logger.LogInformation(
+                    "EnrollV2Async: resolved V2 product code from live catalog. ProductId={ProductId}, " +
+                    "ProductTypeId={ProductTypeId}, ResolvedProductCode={ProductCode}",
+                    ep.ProductId, expectedTypeId, productCode);
             }
 
             // For UCC products, additionalDomains is populated from the same SAN source the V1
@@ -1353,7 +1496,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 _logger.LogInformation(
                     "EnrollV2Async: resolved UCC product. ProductCode={ProductCode}, AdditionalDomainCount={Count}",
-                    ep.ProductCode, additionalDomains?.Count ?? 0);
+                    productCode, additionalDomains?.Count ?? 0);
             }
 
             string requestorName  = string.IsNullOrWhiteSpace(ep.RequesterName)  ? _config.RequestorName  : ep.RequesterName;
@@ -1398,7 +1541,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Remarks = "Issued via Keyfactor Command AnyCA REST Gateway."
             };
 
-            var createResp = await _client.PlaceOrderV2Async(ep.ProductFamilySlug, ep.ProductCode, orderReq);
+            var createResp = await _client.PlaceOrderV2Async(ep.ProductFamilySlug, productCode, orderReq);
             string orderId = createResp.OrderId;
 
             _logger.LogInformation(

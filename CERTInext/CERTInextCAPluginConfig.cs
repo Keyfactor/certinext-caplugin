@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -439,8 +439,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.EnrollmentParam.ProductCode] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Override the numeric CERTInext product code for this template. " +
-                               "When omitted, the default production code for the selected product is used automatically " +
-                               "(e.g. DV SSL → 838). Set this explicitly when targeting sandbox or a non-standard code.",
+                               "When omitted: on the V1 API, the default production code for the selected product " +
+                               "is used automatically; on the V2 API, the code is instead resolved live from the " +
+                               "CERTInext product catalog by matching the selected product, so it stays correct " +
+                               "even though V2 catalog numbering varies by account. Set this explicitly when " +
+                               "targeting sandbox or a non-standard code.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"

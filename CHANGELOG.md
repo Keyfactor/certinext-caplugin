@@ -26,6 +26,7 @@
 - fix(client): `ParseProductDetailsV2Response` now flattens the nested category envelope the live V2 catalog actually returns, instead of misreading it as flat rows (0016).
 - fix(sync): `V2StatusToRequestDisposition` now maps all 11 V2 order statuses; OV/EV/DV orders in `pending-organization-verification`, `pending-documents`, or `pending-approval` no longer get misreported to Command as FAILED (0031).
 - fix(enroll): V2 OV/EV orders now send an `organization` block from `OrganizationNumber`; CERTInext previously hard-rejected every V2 OV/EV enrollment with HTTP 422 `EMS-1180` (0028).
+- fix(v2): V2 enroll and `ValidateProductInfo` now resolve/validate the product code from the live catalog by `productTypeID` instead of the V1-only `DefaultProductCodes` table, which could silently order the wrong assurance-level product (0036).
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).
@@ -38,6 +39,7 @@
 - chore(tests): `ValidateProductInfo` coverage in V1 and V2 modes, plus V2 catalog-parser unit and live-integration tests (0025).
 - chore(tests): regression tests for the V2 `organization` block (populated for OV/EV, omitted for DV, fail-fast without `OrganizationNumber`); live acceptance against the sandbox confirmed CERTInext accepts the fixed request (0028).
 - chore(tests): regression coverage pinning the live V2 DCV response shape (`token`/`tokenExpiryDate` only) against both the client deserializer and the plugin's DCV staging path (0037).
+- chore(tests): regression coverage for V2 `productTypeID`-based product code resolution/validation and the V1-fallback-unaffected guarantee (0036).
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 

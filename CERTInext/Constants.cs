@@ -144,9 +144,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string EvSsl                = "EV SSL";
             public const string EvSslUcc             = "EV SSL Multi-Domain (UCC)";
 
-            // Default production numeric codes. These are the standard codes for the
-            // CERTInext production environment. Sandbox codes differ — set ProductCode
-            // explicitly on the template to override when targeting sandbox.
+            // V1-ONLY. Default production numeric codes for the CERTInext V1 (legacy) API.
+            // These are the standard codes for the CERTInext production environment under V1.
+            // Sandbox codes differ — set ProductCode explicitly on the template to override
+            // when targeting sandbox.
+            //
+            // Do NOT reuse this table for V2 dispatch: its numbering does not match the live
+            // V2 catalog (issue 0036 — e.g. this table's "842" is OV SSL, but the live V2
+            // catalog's "842" is DV SSL, a flat +4 offset across all 10 codes). V2 resolves the
+            // product code live from the Catalog response instead — see ProductTypeIdsV2 below
+            // and EnrollV2Async/ValidateProductInfo in CERTInextCAPlugin.cs.
             public static readonly System.Collections.Generic.Dictionary<string, string> DefaultProductCodes =
                 new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
                 {
@@ -160,6 +167,38 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     [OvSslWildcardUcc]  = "845",
                     [EvSsl]             = "846",
                     [EvSslUcc]          = "847",
+                };
+
+            // V2-ONLY. Maps each product name (ProductId, as advertised by GetProductIds()) to
+            // the CERTInext V2 catalog's stable numeric productTypeID value (spec:
+            // docs/reference/specs/CERTInext API v2.postman_collection (1).json, "Get Product
+            // Details" field vocabulary). productTypeID is the CA's own documented mechanism
+            // for "programmatic routing" (its docs explicitly say productName is "for display"
+            // only) — unlike productCode (V1-era table above, wrong numbering for V2) or
+            // productName (varies by account/catalog version: the live catalog, the V1 Postman
+            // table, and the V2 Postman table each use different spellings/suffixes for the same
+            // product — see issue 0036), productTypeID is a small, stable, CERTInext-documented
+            // enum. F3 independently reached the same conclusion for UCC detection and
+            // live-verified 15/18/20/21/22 against the real V2 sandbox catalog
+            // (issues/f3-v2-multi-san-limitation.md); the other five (13/14/16/17/19) are
+            // spec-documented but not yet independently live-probed.
+            //
+            // Used by EnrollV2Async/ValidateProductInfo to resolve/validate the real V2 product
+            // code from the live catalog when no explicit ProductCode override is configured.
+            // Never used for V1.
+            public static readonly System.Collections.Generic.Dictionary<string, string> ProductTypeIdsV2 =
+                new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    [DvSsl]             = "13",
+                    [DvSslWildcard]     = "14",
+                    [DvSslUcc]          = "15",
+                    [DvSslWildcardUcc]  = "21",
+                    [OvSsl]             = "16",
+                    [OvSslWildcard]     = "17",
+                    [OvSslUcc]          = "18",
+                    [OvSslWildcardUcc]  = "22",
+                    [EvSsl]             = "19",
+                    [EvSslUcc]          = "20",
                 };
         }
 

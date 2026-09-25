@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -33,14 +33,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// Resolution order:
         ///   1. ProductCode template parameter (explicit override — use for sandbox or non-standard codes)
         ///   2. ProfileId template parameter (deprecated alias for ProductCode)
-        ///   3. Default production code looked up from the selected product name (ProductId)
+        ///   3. V1-ONLY fallback: default production code looked up from the selected product
+        ///      name (ProductId) via Constants.Products.DefaultProductCodes.
+        /// V2 callers must check <see cref="HasExplicitProductCode"/> before using this value:
+        /// when false, this getter's fallback (step 3) is the V1-era table, whose numbering does
+        /// not match the live V2 catalog (issue 0036) — resolve the V2 code from the live catalog
+        /// by ProductTypeId instead (see EnrollV2Async / ValidateProductInfo).
         /// </summary>
         public string ProductCode
         {
             get
             {
-                var explicit_ = GetString(Constants.EnrollmentParam.ProductCode,
-                    GetString(Constants.EnrollmentParam.ProfileId, string.Empty));
+                var explicit_ = GetExplicitProductCode();
                 if (!string.IsNullOrEmpty(explicit_))
                     return explicit_;
 
@@ -51,6 +55,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 
         /// <summary>Alias for ProductCode — kept for backward compat.</summary>
         public string ProfileId => ProductCode;
+
+        /// <summary>
+        /// True when an explicit ProductCode or ProfileId override was configured on the
+        /// template. False means <see cref="ProductCode"/>'s getter falls back to the V1-only
+        /// Constants.Products.DefaultProductCodes table — V2 callers must not use that fallback
+        /// value (issue 0036); resolve the code from the live catalog by ProductTypeId instead.
+        /// </summary>
+        public bool HasExplicitProductCode => !string.IsNullOrEmpty(GetExplicitProductCode());
+
+        private string GetExplicitProductCode()
+        {
+            return GetString(Constants.EnrollmentParam.ProductCode,
+                GetString(Constants.EnrollmentParam.ProfileId, string.Empty));
+        }
 
         /// <summary>Requested subscription validity in years (1, 2, or 3). Takes precedence over ValidityDays.</summary>
         public int ValidityYears => GetInt(Constants.EnrollmentParam.ValidityYears, 0);
