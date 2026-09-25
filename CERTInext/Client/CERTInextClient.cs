@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -1734,6 +1734,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             ProductCode = product.TryGetProperty("productCode", out var pc) && pc.ValueKind == JsonValueKind.String ? pc.GetString() : null,
                             ProductName = product.TryGetProperty("productName", out var pn) && pn.ValueKind == JsonValueKind.String ? pn.GetString() : null,
                             ProductType = categoryName,
+                            ProductTypeId = product.TryGetProperty("productTypeID", out var pt)
+                                ? (pt.ValueKind == JsonValueKind.String ? pt.GetString() : pt.ToString())
+                                : null,
                             Active = true // the API only returns products available on the account
                         });
                     }
@@ -1751,6 +1754,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         ProductCode = pid.ValueKind == JsonValueKind.String ? pid.GetString() : pid.ToString(),
                         ProductName = element.TryGetProperty("productName", out var pn2) && pn2.ValueKind == JsonValueKind.String ? pn2.GetString() : null,
                         ProductType = element.TryGetProperty("masterProductName", out var mpn) && mpn.ValueKind == JsonValueKind.String ? mpn.GetString() : null,
+                        ProductTypeId = element.TryGetProperty("productTypeID", out var pt2)
+                            ? (pt2.ValueKind == JsonValueKind.String ? pt2.GetString() : pt2.ToString())
+                            : null,
                         Active = true
                     });
                 }

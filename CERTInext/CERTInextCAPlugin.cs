@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -1255,6 +1255,107 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
             }
 
+            // organization is "Conditional — Mandatory for OV / EV" per the V2 spec's SSL field
+            // table; every OV/EV create example in the spec sends it, and it is omitted entirely
+            // for DV. CERTInext hard-rejects an OV/EV order with no organization block (HTTP 422
+            // EMS-1180 "Organization Name cannot be empty" — confirmed live), so fail fast with a
+            // clear message here — before any catalog/order-placement call, mirroring the
+            // CSR-SAN-count guard above — rather than sending an incomplete block and letting the
+            // CA surface that opaque error. See issues/0028-v2-organizationnumber-not-sent.md.
+            bool isOvOrEv = string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantOv, StringComparison.OrdinalIgnoreCase)
+                         || string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase);
+
+            V2OrganizationParams organization = null;
+            if (isOvOrEv)
+            {
+                if (string.IsNullOrWhiteSpace(_config.OrganizationNumber))
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async rejected a '{Variant}' order for domain '{Domain}' — the CA " +
+                        "connector's OrganizationNumber is not configured, but an organization block is " +
+                        "mandatory for OV/EV orders under the V2 API.",
+                        ep.ProductVariant, LogSanitizer.Strip(domain));
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: product variant '{ep.ProductVariant}' requires " +
+                                        "a pre-vetted organization, but the CA connector's OrganizationNumber " +
+                                        "setting is empty. Set OrganizationNumber on the CA connector before " +
+                                        "enrolling OV/EV certificates via the V2 API."
+                    };
+                }
+
+                organization = new V2OrganizationParams
+                {
+                    OrganizationNumber = _config.OrganizationNumber,
+                    PreVetted          = true
+                };
+            }
+
+            // UCC (multi-SAN) detection: resolve the requested product's productTypeID from the
+            // live Catalog and check it against the known UCC-family values (15/18/20/21/22).
+            // Deliberately NOT derived from Constants.Products.DefaultProductCodes, whose numbering
+            // disagrees with the live/spec numbering (issue 0036). A catalog lookup failure must
+            // not block enrollment — fall back to non-UCC (single-domain) behavior, which is the
+            // strictly-safer failure mode: the CSR-SAN-count guard above already ensures the CSR
+            // itself never carries surplus SANs. See issues/f3-v2-multi-san-limitation.md.
+            bool isUccProduct = false;
+            try
+            {
+                var catalog = await _client.GetProductDetailsV2Async();
+                var matchedProduct = catalog?.FirstOrDefault(p =>
+                    string.Equals(p.ProductCode, ep.ProductCode, StringComparison.OrdinalIgnoreCase));
+                isUccProduct = matchedProduct != null
+                    && !string.IsNullOrWhiteSpace(matchedProduct.ProductTypeId)
+                    && Constants.ApiV2.UccProductTypeIds.Contains(matchedProduct.ProductTypeId);
+            }
+            catch (Exception catalogEx)
+            {
+                _logger.LogWarning(catalogEx,
+                    "EnrollV2Async: could not resolve product catalog details for ProductCode={ProductCode}; " +
+                    "treating as non-UCC (single-domain only) rather than failing the enrollment.",
+                    ep.ProductCode);
+            }
+
+            // For UCC products, additionalDomains is populated from the same SAN source the V1
+            // path uses for BuildAdditionalDomains (CERTInextClient.cs) — the gateway-supplied SAN
+            // dictionary, falling back to CSR SANs only when Command supplied no SAN dictionary at
+            // all (BuildSanList's own fallback rule). additionalDomains is a domain-name-only field
+            // per the V2 spec, so non-DNS SAN types are excluded (and logged) rather than submitted.
+            List<string> additionalDomains = null;
+            if (isUccProduct)
+            {
+                var resolvedSans = BuildSanList(san, csr, subject);
+                var nonDnsSans = resolvedSans?
+                    .Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (nonDnsSans != null && nonDnsSans.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async: {Count} requested SAN(s) are not DNS names and cannot be " +
+                        "submitted via V2 additionalDomains (FQDNs only) — they will NOT appear on the " +
+                        "issued certificate. Types=[{Types}]",
+                        nonDnsSans.Count, string.Join(", ", nonDnsSans.Select(s => s.Type)));
+                }
+
+                additionalDomains = resolvedSans?
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .Select(s => s.Value?.Trim())
+                    .Where(v => !string.IsNullOrWhiteSpace(v))
+                    .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (additionalDomains != null && additionalDomains.Count == 0)
+                    additionalDomains = null;
+
+                _logger.LogInformation(
+                    "EnrollV2Async: resolved UCC product. ProductCode={ProductCode}, AdditionalDomainCount={Count}",
+                    ep.ProductCode, additionalDomains?.Count ?? 0);
+            }
+
             string requestorName  = string.IsNullOrWhiteSpace(ep.RequesterName)  ? _config.RequestorName  : ep.RequesterName;
             string requestorEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? _config.RequestorEmail : ep.RequesterEmail;
             string signerName     = string.IsNullOrWhiteSpace(ep.SignerName)     ? requestorName          : ep.SignerName;
@@ -1274,10 +1375,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Phone       = _config.RequestorMobileNumber ?? string.Empty,
                     Designation = "IT Administrator"
                 },
+                Organization = organization,
                 Certificate = new V2CertificateParams
                 {
-                    Domain        = domain,
-                    AutoSecureWww = _config.AutoSecureWww == "1"
+                    Domain            = domain,
+                    AutoSecureWww     = _config.AutoSecureWww == "1",
+                    AdditionalDomains = additionalDomains
                 },
                 Subscription = new V2SubscriptionParams
                 {
@@ -1866,7 +1969,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Revokes a certificate via the V2 REST API.
+        /// Revokes a certificate via the V2 REST API. If Command supplies no specific
+        /// reason (CRL reason 0, "unspecified"), and CERTInext rejects that value with its
+        /// "Invalid Revoke Reason ID" 422, retries once with "cessation-of-operation" —
+        /// see issues/0026 for why that value and not V1's "key-compromise" fallback.
         /// </summary>
         private async Task<int> RevokeV2Async(string caRequestID, string hexSerialNumber, uint revocationReason)
         {
@@ -1923,6 +2029,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Note   = $"Revoked via Keyfactor Command. CRL reason code: {revocationReason} ({v2Reason})."
             };
 
+            bool retriedAsCessationOfOperation = false;
             try
             {
                 await _client.RevokeOrderV2Async(resolvedFamily, caRequestID, revokeReq);
@@ -1937,10 +2044,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     $"V2 order '{caRequestID}' (family '{resolvedFamily}') could not be revoked: " +
                     $"CERTInext reports it as not found or not in a revokable state. {knf.Message}");
             }
+            catch (InvalidOperationException ioe) when (
+                v2Reason == Constants.RevocationReasonV2.Unspecified &&
+                ioe.Message.IndexOf("Invalid Revoke Reason ID", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                // CERTInext's V2 API rejects the spec-documented "unspecified" reason value
+                // outright (422 "Invalid Revoke Reason ID") — confirmed live against a
+                // directly-placed sandbox order, independent of this plugin (issues/0026).
+                // Only 5 of the 9 spec-documented reason strings are actually accepted:
+                // key-compromise, affiliation-changed, superseded, cessation-of-operation,
+                // privilege-withdrawn — the same restriction V1's ToRevocationReasonId has
+                // always been documented against. "Unspecified" (CRL reason 0) is Command's
+                // default when no real reason is supplied, so failing outright here would
+                // break the single most common revoke case. Retry once with
+                // "cessation-of-operation" rather than "key-compromise" (V1's fallback):
+                // key-compromise carries the spec's own BR 4.9.1.1 24-hour CRL-turnaround
+                // obligation, which would misrepresent a revoke that was never actually a
+                // key compromise.
+                _logger.LogWarning(
+                    "V2 revoke rejected reason 'unspecified' as invalid (CARequestID={Id}); " +
+                    "retrying once with 'cessation-of-operation' per issues/0026.",
+                    caRequestID);
+                v2Reason = Constants.RevocationReasonV2.CessationOfOperation;
+                revokeReq = new V2RevokeRequest
+                {
+                    // CERTInext's "note" field silently rejects a semicolon with the same
+                    // "Invalid Revoke Remarks" 422 (found live while building this retry —
+                    // comma/period/slash/parens are all fine; only ';' triggers it — see
+                    // issues/0026). Avoid semicolons in this string.
+                    Reason = v2Reason,
+                    Note = "Revoked via Command, reason unspecified, retried as cessation-of-operation (see issues/0026)."
+                };
+                retriedAsCessationOfOperation = true;
+                await _client.RevokeOrderV2Async(resolvedFamily, caRequestID, revokeReq);
+            }
 
             _logger.LogInformation(
-                "V2 revocation complete. CARequestID={Id}, HexSerialNumber={Serial}, V2Reason={V2Reason}, Family={Family}",
-                caRequestID, hexSerialNumber, v2Reason, resolvedFamily);
+                "V2 revocation complete. CARequestID={Id}, HexSerialNumber={Serial}, V2Reason={V2Reason}, " +
+                "Family={Family}, RetriedFromUnspecified={Retried}",
+                caRequestID, hexSerialNumber, v2Reason, resolvedFamily, retriedAsCessationOfOperation);
             _logger.MethodExit(LogLevel.Debug);
             return (int)EndEntityStatus.REVOKED;
         }

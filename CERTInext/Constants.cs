@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -372,17 +372,35 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string CatalogProductsPath        = "/api/certinext/v2/catalog/products";
 
             // Order status strings (V2 REST — NOT numeric IDs)
-            public const string StatusPendingDcv       = "pending-dcv";
-            public const string StatusPendingCsr       = "pending-csr";
-            public const string StatusPendingAgreement = "pending-agreement";
-            public const string StatusIssued           = "issued";
-            public const string StatusCancelled        = "cancelled";
-            public const string StatusRevoked          = "revoked";
+            public const string StatusPendingDcv                     = "pending-dcv";
+            public const string StatusPendingCsr                     = "pending-csr";
+            public const string StatusPendingAgreement               = "pending-agreement";
+            public const string StatusPendingOrganizationVerification = "pending-organization-verification";
+            public const string StatusPendingDocuments                = "pending-documents";
+            public const string StatusPendingApproval                 = "pending-approval";
+            public const string StatusIssued                          = "issued";
+            public const string StatusCancelled                       = "cancelled";
+            public const string StatusRevoked                         = "revoked";
+            public const string StatusRejected                        = "rejected";
+            public const string StatusExpired                         = "expired";
 
             // Product-family slugs (used as URL path segments)
             public const string FamilySsl        = "ssl-certificates";
             public const string FamilyPrivatePki = "private-pki-certificates";
             public const string FamilySignature  = "signature-certificates";
+
+            // productVariant values that require an organization block (issue 0028) — every
+            // other value (dv and its wildcard/UCC combinations) omits it entirely.
+            public const string ProductVariantOv = "ov";
+            public const string ProductVariantEv = "ev";
+
+            // UCC (multi-SAN) product family detection — from the live Catalog response's
+            // productTypeID field: 15=DV SSL UCC, 18=OV SSL UCC, 20=EV SSL UCC,
+            // 21=DV SSL Wildcard UCC, 22=OV SSL Wildcard UCC (issues/f3-v2-multi-san-limitation.md).
+            // Deliberately NOT derived from Constants.Products.DefaultProductCodes — that table's
+            // numbering disagrees with the live/spec numbering (issue 0036).
+            public static readonly System.Collections.Generic.HashSet<string> UccProductTypeIds =
+                new System.Collections.Generic.HashSet<string> { "15", "18", "20", "21", "22" };
 
             // Orders report (Synchronize, V2 mode) — GET /api/certinext/v2/reports/orders.
             // Spring-style page envelope: content/page/size/totalPages/totalElements.

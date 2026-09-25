@@ -54,6 +54,51 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         [JsonPropertyName("autoSecureWww")]
         public bool AutoSecureWww { get; set; } = false;
+
+        /// <summary>
+        /// SAN list for UCC (multi-SAN) product variants — DV/OV/EV UCC and DV/OV Wildcard UCC
+        /// (Catalog <c>productTypeID</c> 15/18/20/21/22). Each entry must be a valid FQDN
+        /// (wildcards allowed only for the Wildcard UCC variants). Per the V2 spec's Submit CSR
+        /// guidance, these SANs come from the order, not the CSR — the CSR must carry only the
+        /// primary domain in CN for UCC orders. Omitted from the wire body for non-UCC products
+        /// (single-domain orders are unaffected). See issues/f3-v2-multi-san-limitation.md.
+        /// </summary>
+        [JsonPropertyName("additionalDomains")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public System.Collections.Generic.List<string> AdditionalDomains { get; set; }
+    }
+
+    /// <summary>
+    /// Organization block for V2 SSL orders. Per the V2 spec's field table (SSL/TLS
+    /// Certificates folder description), this block is "Conditional — Mandatory for OV / EV"
+    /// and every OV/EV create example in the spec sends exactly these three fields. Live-
+    /// confirmed (issue 0028): submitting an OV order with no <c>organization</c> block gets
+    /// HTTP 422 <c>[EMS-1180] Organization Name cannot be empty</c> — CERTInext resolves the
+    /// certificate's organization name server-side from <c>organizationNumber</c>, so an
+    /// absent/empty block leaves it with nothing to resolve. There is no separate
+    /// "organization name" field to send; supplying a valid, pre-vetted
+    /// <c>organizationNumber</c> is what the CA needs.
+    /// </summary>
+    public class V2OrganizationParams
+    {
+        [JsonPropertyName("organizationNumber")]
+        public string OrganizationNumber { get; set; }
+
+        /// <summary>
+        /// Re-uses an existing vetted organization instead of queuing the order for manual
+        /// vetting. Mirrors the V1 <c>OrganizationDetails.PreVetting="1"</c> semantics — sent
+        /// as JSON <c>true</c> whenever <c>OrganizationNumber</c> is configured.
+        /// </summary>
+        [JsonPropertyName("preVetted")]
+        public bool PreVetted { get; set; } = true;
+
+        /// <summary>
+        /// Optional per spec (re-vetting flow token). Not currently surfaced as plugin config;
+        /// omitted from the wire body when null/empty.
+        /// </summary>
+        [JsonPropertyName("preVettingToken")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string PreVettingToken { get; set; }
     }
 
     /// <summary>
@@ -107,6 +152,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         [JsonPropertyName("requestor")]
         public V2Requestor Requestor { get; set; }
+
+        /// <summary>
+        /// Mandatory for OV/EV, omitted entirely for DV (per spec, "Conditional — Mandatory
+        /// for OV / EV"). <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin.EnrollV2Async"/>
+        /// leaves this null for DV orders rather than sending an empty/placeholder block that
+        /// could itself trigger a different validation error.
+        /// </summary>
+        [JsonPropertyName("organization")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public V2OrganizationParams Organization { get; set; }
 
         [JsonPropertyName("certificate")]
         public V2CertificateParams Certificate { get; set; }

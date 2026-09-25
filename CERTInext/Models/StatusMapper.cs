@@ -5,7 +5,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions
 // and limitations under the License.
 
+using Keyfactor.Logging;
 using Keyfactor.PKI.Enums.EJBCA;
+using Microsoft.Extensions.Logging;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 {
@@ -19,6 +21,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
     /// </summary>
     internal static class StatusMapper
     {
+        private static readonly ILogger Logger = LogHandler.GetClassLogger(typeof(StatusMapper));
+
         // -----------------------------------------------------------------------
         // Certificate status ID mapping (TrackOrder.orderDetails.certificateStatusId)
         // -----------------------------------------------------------------------
@@ -198,19 +202,58 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <summary>
         /// Maps a V2 REST API order status string to the Keyfactor
         /// <see cref="EndEntityStatus"/> integer code expected by the gateway.
+        ///
+        /// Covers all 11 status values documented by the V2 spec's <c>/reports/orders</c>
+        /// <c>status</c> filter (issues/0031). <c>pending-organization-verification</c>,
+        /// <c>pending-documents</c>, and <c>pending-approval</c> join the existing
+        /// pending-* values as EXTERNALVALIDATION — they are OV/EV/DV orders still
+        /// actively progressing toward issuance, not failures. <c>rejected</c> and
+        /// <c>expired</c> are terminal negative outcomes mapped to FAILED deliberately,
+        /// same as the pre-existing <c>cancelled</c>. Any value not in this list falls
+        /// through to the default arm, which also returns FAILED but logs a warning —
+        /// see issues/0031 for why "deliberately FAILED" and "unmapped, degrading to
+        /// FAILED" are kept distinguishable in the logs even though the return value
+        /// is the same today.
         /// </summary>
         /// <param name="v2Status">Status string from the V2 order response.</param>
-        public static int V2StatusToRequestDisposition(string v2Status) =>
-            v2Status?.ToLowerInvariant() switch
+        public static int V2StatusToRequestDisposition(string v2Status)
+        {
+            switch (v2Status?.ToLowerInvariant())
             {
-                Constants.ApiV2.StatusIssued           => (int)EndEntityStatus.GENERATED,
-                Constants.ApiV2.StatusPendingDcv       => (int)EndEntityStatus.EXTERNALVALIDATION,
-                Constants.ApiV2.StatusPendingCsr       => (int)EndEntityStatus.EXTERNALVALIDATION,
-                Constants.ApiV2.StatusPendingAgreement => (int)EndEntityStatus.EXTERNALVALIDATION,
-                Constants.ApiV2.StatusRevoked          => (int)EndEntityStatus.REVOKED,
-                Constants.ApiV2.StatusCancelled        => (int)EndEntityStatus.FAILED,
-                _                                      => (int)EndEntityStatus.FAILED
-            };
+                case Constants.ApiV2.StatusIssued:
+                    return (int)EndEntityStatus.GENERATED;
+
+                case Constants.ApiV2.StatusPendingDcv:
+                case Constants.ApiV2.StatusPendingCsr:
+                case Constants.ApiV2.StatusPendingAgreement:
+                case Constants.ApiV2.StatusPendingOrganizationVerification:
+                case Constants.ApiV2.StatusPendingDocuments:
+                case Constants.ApiV2.StatusPendingApproval:
+                    return (int)EndEntityStatus.EXTERNALVALIDATION;
+
+                case Constants.ApiV2.StatusRevoked:
+                    return (int)EndEntityStatus.REVOKED;
+
+                case Constants.ApiV2.StatusCancelled:
+                case Constants.ApiV2.StatusRejected:
+                case Constants.ApiV2.StatusExpired:
+                    return (int)EndEntityStatus.FAILED;
+
+                default:
+                    // Distinct from the deliberate cancelled/rejected/expired -> FAILED
+                    // mappings above: this status string isn't recognized at all. Log so
+                    // an operator (or issues/0031-style audit) can tell "legitimately
+                    // failed" apart from "gateway doesn't know this status yet" — degrade
+                    // to FAILED rather than guessing EXTERNALVALIDATION, since an
+                    // unrecognized value could just as easily be a new terminal state.
+                    Logger.LogWarning(
+                        "V2StatusToRequestDisposition: unmapped V2 order status '{V2Status}' — " +
+                        "defaulting to FAILED. This is not one of the V2 spec's documented status " +
+                        "values; if CERTInext has added a new status, StatusMapper needs updating.",
+                        v2Status);
+                    return (int)EndEntityStatus.FAILED;
+            }
+        }
 
         /// <summary>
         /// Converts an RFC 5280 CRL reason code to the V2 API revocation reason string.
