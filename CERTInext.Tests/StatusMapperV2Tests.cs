@@ -150,5 +150,49 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 $"CRL reason code {crlReason} mapped to '{v2Reason}', which is not one of the V2 spec's " +
                 "kebab-case reason values — sending it would get HTTP 400 (issues/0019).");
         }
+
+        // ---------------------------------------------------------------------------
+        // V2RevocationReasonToCrlCode (issues/0034) — the inverse of ToV2RevocationReason,
+        // used to populate AnyCAPluginCertificate.RevocationReason from a Track Order
+        // response's nested revocation.reason string.
+        // ---------------------------------------------------------------------------
+
+        [Theory]
+        [InlineData(Constants.RevocationReasonV2.Unspecified, 0)]
+        [InlineData(Constants.RevocationReasonV2.KeyCompromise, 1)]
+        [InlineData(Constants.RevocationReasonV2.CACompromise, 2)]
+        [InlineData(Constants.RevocationReasonV2.AffiliationChanged, 3)]
+        [InlineData(Constants.RevocationReasonV2.Superseded, 4)]
+        [InlineData(Constants.RevocationReasonV2.CessationOfOperation, 5)]
+        [InlineData(Constants.RevocationReasonV2.CertificateHold, 6)]
+        [InlineData(Constants.RevocationReasonV2.PrivilegeWithdrawn, 9)]
+        [InlineData(Constants.RevocationReasonV2.AACompromise, 10)]
+        [InlineData("KEY-COMPROMISE", 1)] // case-insensitive
+        [InlineData("not-a-real-reason", 0)] // unrecognized → unspecified
+        [InlineData(null, 0)] // absent/null → unspecified
+        public void V2RevocationReasonToCrlCode_MapsCorrectly(string v2Reason, int expectedCrlCode)
+        {
+            StatusMapper.V2RevocationReasonToCrlCode(v2Reason).Should().Be(expectedCrlCode);
+        }
+
+        // Round-trip: every CRL code ToV2RevocationReason can produce must map back to the
+        // same code through V2RevocationReasonToCrlCode (the codes ToV2RevocationReason never
+        // emits — 7, and CRL-only 8 — are out of scope, matching ToV2RevocationReason's own
+        // documented behavior of mapping "no V2 equivalent" codes to "unspecified").
+        [Theory]
+        [InlineData(0u)]
+        [InlineData(1u)]
+        [InlineData(2u)]
+        [InlineData(3u)]
+        [InlineData(4u)]
+        [InlineData(5u)]
+        [InlineData(6u)]
+        [InlineData(9u)]
+        [InlineData(10u)]
+        public void V2RevocationReasonToCrlCode_RoundTripsWithToV2RevocationReason(uint crlReason)
+        {
+            string v2Reason = StatusMapper.ToV2RevocationReason(crlReason);
+            StatusMapper.V2RevocationReasonToCrlCode(v2Reason).Should().Be((int)crlReason);
+        }
     }
 }

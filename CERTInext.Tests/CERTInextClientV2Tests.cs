@@ -319,6 +319,60 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // TrackOrderV2Async — nested `revocation` object (issues/0034)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task TrackOrderV2Async_Revoked_DeserializesNestedRevocationObject()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TrackOrderRevokedJson(
+                        MockCertificateData.V2OrderId1,
+                        reason: "cessation-of-operation",
+                        processedAt: "2026-09-24T20:44:41Z")));
+
+            using var client = BuildV2Client();
+            var result = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            result.Status.Should().Be("revoked");
+            // issues/0034: `revocation` is a nested object — not flat top-level
+            // revocationReason/revocationDate properties.
+            result.Revocation.Should().NotBeNull();
+            result.Revocation!.Status.Should().Be("Certificate Revoked");
+            result.Revocation.Reason.Should().Be("cessation-of-operation");
+            result.Revocation.ProcessedAt.Should().Be(
+                new DateTime(2026, 9, 24, 20, 44, 41, DateTimeKind.Utc));
+        }
+
+        [Fact]
+        public async Task TrackOrderV2Async_NotRevoked_RevocationIsNull()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TrackOrderIssuedJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            // issues/0034: the `revocation` key is absent entirely (not present-but-null) on
+            // an order that has never been revoked.
+            result.Revocation.Should().BeNull();
+        }
+
+        // ---------------------------------------------------------------------------
         // DownloadCertificateV2Async
         // ---------------------------------------------------------------------------
 

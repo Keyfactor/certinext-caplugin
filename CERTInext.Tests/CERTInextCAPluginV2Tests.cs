@@ -407,6 +407,66 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // GetSingleRecord — RevocationDate/RevocationReason (issues/0034)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetSingleRecord_V2Enabled_Revoked_PopulatesRevocationDateAndReason()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId        = MockCertificateData.V2OrderId1,
+                    Status         = "revoked",
+                    ProductVariant = "dv",
+                    Revocation = new V2RevocationDetails
+                    {
+                        Status      = "Certificate Revoked",
+                        Reason      = "cessation-of-operation",
+                        ProcessedAt = new DateTime(2026, 9, 24, 20, 44, 41, DateTimeKind.Utc)
+                    }
+                }));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var record = await plugin.GetSingleRecord(MockCertificateData.V2OrderId1);
+
+            record.Status.Should().Be((int)EndEntityStatus.REVOKED);
+            record.RevocationDate.Should().Be(new DateTime(2026, 9, 24, 20, 44, 41, DateTimeKind.Utc));
+            record.RevocationReason.Should().Be(5); // cessation-of-operation
+        }
+
+        [Fact]
+        public async Task GetSingleRecord_V2Enabled_NotRevoked_RevocationFieldsDefault()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId        = MockCertificateData.V2OrderId1,
+                    Status         = "issued",
+                    ProductVariant = "dv"
+                }));
+
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = MockCertificateData.V2OrderId1,
+                    SerialNumber   = "AABB",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var record = await plugin.GetSingleRecord(MockCertificateData.V2OrderId1);
+
+            record.RevocationDate.Should().BeNull();
+            record.RevocationReason.Should().Be(0);
+        }
+
+        // ---------------------------------------------------------------------------
         // Revoke routes to V2
         // ---------------------------------------------------------------------------
 
@@ -701,6 +761,129 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             // Revoked rows have no body to download.
             mock.Verify(c => c.ResolveAndDownloadCertificateV2Async(
+                It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Synchronize — RevocationDate/RevocationReason (issues/0034). OrderReportEntryV2
+        // carries no revocation reason/date of its own — only a live TrackOrder response's
+        // nested `revocation` object does, so these fields require a resolved
+        // V2OrderStatusResponse regardless of which code path got there.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_RevokedRow_ViaDisplayString_PopulatesRevocationDetails()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            // "Revoked"/"Certificate Revoked" resolve via the report's own display-string
+            // vocabulary (TryMapV2ReportDisplayStatus) with no live track call — the revocation
+            // detail must be fetched lazily, on top of that, specifically for this row.
+            var row = ReportRow("ord_v2sync_004", "Revoked", "Certificate Revoked");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_v2sync_004", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = "ord_v2sync_004",
+                    Status  = "revoked",
+                    Revocation = new V2RevocationDetails
+                    {
+                        Status      = "Certificate Revoked",
+                        Reason      = "key-compromise",
+                        ProcessedAt = new System.DateTime(2026, 9, 24, 20, 44, 41, System.DateTimeKind.Utc)
+                    }
+                }));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].Status.Should().Be((int)EndEntityStatus.REVOKED);
+            records[0].RevocationDate.Should().Be(new System.DateTime(2026, 9, 24, 20, 44, 41, System.DateTimeKind.Utc));
+            records[0].RevocationReason.Should().Be(1); // key-compromise
+
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                "ord_v2sync_004", It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_RevokedRow_ViaUnresolvedFallback_PopulatesRevocationDetails()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            // Deliberately unrecognized display strings so disposition resolves via the
+            // unresolved-status fallback, which already performs a live TrackOrder call —
+            // trackedStatus (and its Revocation) is already populated before the
+            // revocation-specific lazy-fetch in Synchronize would otherwise need to run one.
+            var row = ReportRow("ord_v2sync_005", "Something New", "Also New");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_v2sync_005", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = "ord_v2sync_005",
+                    Status  = "revoked",
+                    Revocation = new V2RevocationDetails
+                    {
+                        Status      = "Certificate Revoked",
+                        Reason      = "superseded",
+                        ProcessedAt = new System.DateTime(2026, 1, 2, 3, 4, 5, System.DateTimeKind.Utc)
+                    }
+                }));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].RevocationDate.Should().Be(new System.DateTime(2026, 1, 2, 3, 4, 5, System.DateTimeKind.Utc));
+            records[0].RevocationReason.Should().Be(4); // superseded
+
+            // Only the one fallback call — the revocation-specific lazy-fetch must not
+            // double-call when trackedStatus is already populated.
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                "ord_v2sync_005", It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_NotRevokedRow_RevocationFieldsDefault()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_v2sync_006", "Order Fulfilled", "Certificate Downloaded");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_006", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_v2sync_006",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].RevocationDate.Should().BeNull();
+            records[0].RevocationReason.Should().Be(0);
+
+            // Not revoked — must not incur the revocation-detail lazy-fetch at all.
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
                 It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         }
 

@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -559,9 +559,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public static string V2TrackOrderIssuedJson(string orderId = "ord_abc001") =>
             $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""issued"",""productVariant"":""dv"",""domain"":""example.com"",""_links"":{{""certificate"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}/certificate""}}}}}}";
 
-        /// <summary>V2 track order response — revoked.</summary>
-        public static string V2TrackOrderRevokedJson(string orderId = "ord_abc001") =>
-            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""revoked"",""productVariant"":""dv"",""domain"":""example.com"",""revocationReason"":""superseded"",""_links"":{{}}}}";
+        /// <summary>
+        /// V2 track order response — revoked. Nested <c>revocation</c> object shape confirmed
+        /// live against a real revoked order (issues/0034, 2026-09-25) — NOT the flat
+        /// <c>revocationReason</c>/<c>revocationDate</c> shape this fixture previously encoded.
+        /// </summary>
+        public static string V2TrackOrderRevokedJson(
+            string orderId = "ord_abc001",
+            string reason = "cessation-of-operation",
+            string processedAt = "2026-09-24T20:44:41Z") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""revoked"",""productVariant"":""dv"",""domain"":""example.com"",""revocation"":{{""status"":""Certificate Revoked"",""reason"":""{reason}"",""processedAt"":""{processedAt}""}},""_links"":{{}}}}";
 
         /// <summary>V2 certificate download response (leaf PEM only).</summary>
         public static string V2CertificateDownloadJson(string orderId = "ord_abc001") =>
