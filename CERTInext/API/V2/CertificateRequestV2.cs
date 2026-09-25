@@ -174,6 +174,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         [JsonPropertyName("remarks")]
         public string Remarks { get; set; }
+
+        /// <summary>
+        /// Optional billing group to attribute this order to. Mirrors V1's
+        /// <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.API.DelegationInformation.GroupNumber"/> —
+        /// omitted entirely (rather than sent empty) when the connector has no
+        /// <c>GroupNumber</c> configured, so the order falls back to the account's default group.
+        /// </summary>
+        [JsonPropertyName("groupNumber")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string GroupNumber { get; set; }
     }
 
     /// <summary>

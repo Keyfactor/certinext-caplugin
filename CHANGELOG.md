@@ -27,6 +27,7 @@
 - fix(sync): `V2StatusToRequestDisposition` now maps all 11 V2 order statuses; OV/EV/DV orders in `pending-organization-verification`, `pending-documents`, or `pending-approval` no longer get misreported to Command as FAILED (0031).
 - fix(enroll): V2 OV/EV orders now send an `organization` block from `OrganizationNumber`; CERTInext previously hard-rejected every V2 OV/EV enrollment with HTTP 422 `EMS-1180` (0028).
 - fix(v2): V2 enroll and `ValidateProductInfo` now resolve/validate the product code from the live catalog by `productTypeID` instead of the V1-only `DefaultProductCodes` table, which could silently order the wrong assurance-level product (0036).
+- fix(v2): V2 order create, catalog, and orders-report calls now send `GroupNumber` when configured, instead of always billing/scoping to the account's default group (0029).
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).

@@ -1545,7 +1545,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             Logger.MethodEntry(LogLevel.Trace);
             EnsureV2Client();
-            var req = await BuildV2RequestAsync(Constants.ApiV2.CatalogProductsPath, Method.Get, ct);
+
+            // Scope the catalog to the connector's configured billing group, mirroring V1's
+            // GetProductDetailsAsync (ProductDetailsFilter.GroupNumber). Omitted entirely when
+            // unconfigured so the account's default group is used, same as V1 (issue 0029).
+            string path = Constants.ApiV2.CatalogProductsPath;
+            if (!string.IsNullOrWhiteSpace(_config.GroupNumber))
+                path += "?groupNumber=" + Uri.EscapeDataString(_config.GroupNumber);
+
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
             var resp = await _httpV2.ExecuteAsync(req, ct);
             Logger.LogInformation(
                 "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
@@ -1587,6 +1595,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     query.Append("&from=").Append(Uri.EscapeDataString(from));
                 if (!string.IsNullOrWhiteSpace(to))
                     query.Append("&to=").Append(Uri.EscapeDataString(to));
+                // Scope the orders report to the connector's configured billing group, mirroring
+                // V1's DelegationInformation.GroupNumber. Omitted entirely when unconfigured so
+                // the account's default group is used, same as V1 (issue 0029).
+                if (!string.IsNullOrWhiteSpace(_config.GroupNumber))
+                    query.Append("&groupNumber=").Append(Uri.EscapeDataString(_config.GroupNumber));
 
                 var req = await BuildV2RequestAsync(query.ToString(), Method.Get, ct);
 

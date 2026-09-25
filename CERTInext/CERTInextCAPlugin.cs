@@ -1538,7 +1538,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     SignerPlace = string.IsNullOrWhiteSpace(signerPlace)  ? null : signerPlace,
                     Accepted    = true
                 },
-                Remarks = "Issued via Keyfactor Command AnyCA REST Gateway."
+                Remarks = "Issued via Keyfactor Command AnyCA REST Gateway.",
+                // Mirrors V1's DelegationInformation.GroupNumber — omit when unconfigured so the
+                // order falls back to the account's default billing group (issue 0029).
+                GroupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber
             };
 
             var createResp = await _client.PlaceOrderV2Async(ep.ProductFamilySlug, productCode, orderReq);
