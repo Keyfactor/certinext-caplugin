@@ -395,8 +395,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// V2 REST API constants — all paths, status strings, and family slugs for the
-        /// <c>/api/certinext/v2/</c> surface. Auth is OAuth2 client_credentials; every
-        /// unsafe call requires an <c>Idempotency-Key</c> header.
+        /// <c>/api/certinext/v2/</c> surface. Auth is OAuth2 client_credentials. The plugin sends
+        /// an <c>Idempotency-Key</c> header on order-create/revoke, but the spec only documents
+        /// this header (as "parsed today, enforced in a future release") on Verify DCV and Domains
+        /// endpoints, not order-create/revoke — see issue 0032.
         /// </summary>
         public static class ApiV2
         {

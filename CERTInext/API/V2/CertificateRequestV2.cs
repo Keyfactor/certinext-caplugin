@@ -23,7 +23,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     // Auth: POST {ApiUrl}/oauth/token (form-encoded client_credentials; ApiUrl is the V2 base
     // URL when UseV2Api=true — issues/0022 config consolidation)
     // Product code: X-Product-Code header (not in body)
-    // Idempotency: Idempotency-Key header required on all unsafe POSTs
+    // Idempotency: Idempotency-Key header sent on order-create/revoke, but the spec doesn't
+    // document it for those endpoints and only says "parsed today, enforced in a future release"
+    // for the endpoints (Verify DCV, Domains) it does document it on — see issue 0032.
     // ---------------------------------------------------------------------------
 
     /// <summary>
