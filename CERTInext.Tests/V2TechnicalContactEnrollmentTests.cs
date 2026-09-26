@@ -203,6 +203,55 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Requestor.Phone — ISD-code + mobile-number composition (issues/0027 item 5b).
+        // Before the fix, Requestor.Phone sent the raw RequestorMobileNumber only, with
+        // RequestorIsdCode never combined in — unlike TechnicalPointOfContact.Phone above,
+        // which already used ComposeV2Phone. Requestor.Phone must compose the same way.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Enroll_V2_RequestorPhone_ComposesIsdAndMobile()
+        {
+            var config = BaseConfig();
+            // BaseConfig: RequestorIsdCode="1", RequestorMobileNumber="5550000000".
+
+            var captured = await RunEnrollAndCaptureOrderAsync(config, orderId: "ord_req_phone_001");
+
+            captured.Requestor.Should().NotBeNull();
+            captured.Requestor.Phone.Should().Be("+15550000000",
+                "Requestor.Phone must combine RequestorIsdCode and RequestorMobileNumber the same " +
+                "way TechnicalPointOfContact.Phone already does, via ComposeV2Phone");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_RequestorPhone_UsesConfiguredIsdCode_NotDefault()
+        {
+            var config = BaseConfig();
+            config.RequestorIsdCode      = "44";
+            config.RequestorMobileNumber = "7911123456";
+
+            var captured = await RunEnrollAndCaptureOrderAsync(config, orderId: "ord_req_phone_002");
+
+            captured.Requestor.Phone.Should().Be("+447911123456",
+                "a non-default RequestorIsdCode must be reflected in Requestor.Phone, not just " +
+                "the TechnicalPointOfContact fallback path");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_RequestorPhone_BlankIsdCode_FallsBackToDefault()
+        {
+            var config = BaseConfig();
+            config.RequestorIsdCode      = "";
+            config.RequestorMobileNumber = "5550000000";
+
+            var captured = await RunEnrollAndCaptureOrderAsync(config, orderId: "ord_req_phone_003");
+
+            captured.Requestor.Phone.Should().Be("+15550000000",
+                "a blank RequestorIsdCode must fall back to the same default ('1') used " +
+                "elsewhere in EnrollV2Async, not an unprefixed raw mobile number");
+        }
+
+        // ---------------------------------------------------------------------------
         // DTO serialization — technicalPointOfContact key/shape on the wire
         // ---------------------------------------------------------------------------
 

@@ -43,7 +43,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             new Mock<ICERTInextClient>(MockBehavior.Strict);
 
         private static CERTInextCAPlugin BuildV2DcvPlugin(
-            ICERTInextClient client, IDomainValidatorFactory factory) =>
+            ICERTInextClient client, IDomainValidatorFactory factory, string dcvTxtRecordTemplate = null) =>
             new CERTInextCAPlugin(client, factory, new CERTInextConfig
             {
                 UseV2Api        = true,
@@ -60,7 +60,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 PickupRetries   = 0,
                 DcvEnabled                 = true,
                 DcvTimeoutMinutes          = 1,
-                DcvPropagationDelaySeconds = 1
+                DcvPropagationDelaySeconds = 1,
+                DcvTxtRecordTemplate       = dcvTxtRecordTemplate
             });
 
         private static EnrollmentProductInfo MakeV2ProductInfo() =>
@@ -285,13 +286,113 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             validator.StagedRecords.Should().ContainSingle(
                 "GetDcv returned a real token, so a TXT record must be staged from it")
-                .Which.Should().Be(("_emudhra-challenge.example.com", liveToken),
+                .Which.Should().Be(("_emsign-validation.example.com", liveToken),
                     "the staged value must come from the new Token property, not the removed " +
-                    "FileNameContent property");
+                    "FileNameContent property; the hostname uses the default " +
+                    "DcvTxtRecordTemplate (issues/0027 item 5a) since none is configured here");
 
             mock.Verify(c => c.VerifyDcvV2Async(
                 OrderId, "example.com", It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.Once);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Regression (issues/0027 item 5a): DcvTxtRecordTemplate must be honored by the V2
+        // DCV path, not hardcoded to "_emudhra-challenge.{domain}" — mirrors V1's
+        // PerformDcvIfNeededAsync (config value if set, else Constants.Dcv.DefaultTxtRecordTemplate).
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task PerformDcvV2_ConfiguredTxtRecordTemplate_IsHonored()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } // non-UCC
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PendingDcvStatus())
+                .ReturnsAsync(IssuedStatus())
+                .ReturnsAsync(IssuedStatus());
+
+            const string token = "configured-template-token";
+            mock.Setup(c => c.GetDcvV2Async(OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = token, TokenExpiryDate = "2026-12-31 23:59:59" });
+
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, "example.com", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            mock.Setup(c => c.DownloadCertificateV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DownloadResponse());
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(
+                mock.Object, new FakeDomainValidatorFactory(validator),
+                dcvTxtRecordTemplate: "_custom-dcv-check.{0}");
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            validator.StagedRecords.Should().ContainSingle()
+                .Which.Should().Be(("_custom-dcv-check.example.com", token),
+                    "the configured DcvTxtRecordTemplate must be used to build the TXT " +
+                    "hostname, not the old hardcoded '_emudhra-challenge' label");
+        }
+
+        [Fact]
+        public async Task PerformDcvV2_UnconfiguredTxtRecordTemplate_UsesV1Default()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } // non-UCC
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PendingDcvStatus())
+                .ReturnsAsync(IssuedStatus())
+                .ReturnsAsync(IssuedStatus());
+
+            const string token = "default-template-token";
+            mock.Setup(c => c.GetDcvV2Async(OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = token, TokenExpiryDate = "2026-12-31 23:59:59" });
+
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, "example.com", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            mock.Setup(c => c.DownloadCertificateV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DownloadResponse());
+
+            var validator = new FakeDomainValidator();
+            // No dcvTxtRecordTemplate override — must fall back to the same default V1 uses.
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            await Enroll(plugin);
+
+            validator.StagedRecords.Should().ContainSingle()
+                .Which.Should().Be(("_emsign-validation.example.com", token),
+                    "with no DcvTxtRecordTemplate configured, V2 must fall back to " +
+                    "Constants.Dcv.DefaultTxtRecordTemplate (the same default V1 uses) rather " +
+                    "than a separate, hardcoded V2 literal");
         }
 
         // ---------------------------------------------------------------------------

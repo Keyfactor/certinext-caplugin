@@ -45,7 +45,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private static Mock<ICERTInextClient> NewMock() =>
             new Mock<ICERTInextClient>(MockBehavior.Strict);
 
-        private static CERTInextCAPlugin BuildV2Plugin(ICERTInextClient client) =>
+        private static CERTInextCAPlugin BuildV2Plugin(
+            ICERTInextClient client,
+            bool ignoreExpired = false,
+            string dcvTxtRecordTemplate = null,
+            string requestorIsdCode = null,
+            string requestorMobileNumber = null) =>
             new CERTInextCAPlugin(client, new CERTInextConfig
             {
                 UseV2Api        = true,
@@ -59,7 +64,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 RequestorEmail  = "test@example.com",
                 SignerIp        = "1.2.3.4",
                 SignerPlace     = "New York",
-                PickupRetries   = 0
+                PickupRetries   = 0,
+                IgnoreExpired   = ignoreExpired,
+                DcvTxtRecordTemplate  = dcvTxtRecordTemplate,
+                RequestorIsdCode      = requestorIsdCode,
+                RequestorMobileNumber = requestorMobileNumber
             });
 
         private static EnrollmentProductInfo MakeV2ProductInfo(
@@ -634,15 +643,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         private static OrderReportEntryV2 ReportRow(
             string orderNumber, string orderStatus, string certificateStatus,
-            string domainName = "example.com", string productCode = "842") =>
+            string domainName = "example.com", string productCode = "842",
+            string certificateExpiryDate = null) =>
             new OrderReportEntryV2
             {
-                OrderNumber       = orderNumber,
-                OrderStatus       = orderStatus,
-                CertificateStatus = certificateStatus,
-                DomainName        = domainName,
-                ProductCode       = productCode,
-                OrderDate         = System.DateTime.UtcNow.AddHours(-1).ToString("o")
+                OrderNumber           = orderNumber,
+                OrderStatus           = orderStatus,
+                CertificateStatus     = certificateStatus,
+                DomainName            = domainName,
+                ProductCode           = productCode,
+                OrderDate             = System.DateTime.UtcNow.AddHours(-1).ToString("o"),
+                CertificateExpiryDate = certificateExpiryDate
             };
 
         [Fact]
@@ -1085,6 +1096,159 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             await plugin.Synchronize(buffer, System.DateTime.UtcNow, fullSync: true, CancellationToken.None);
 
             capturedFrom.Should().BeNull("a full sync requests the entire order history, not a bounded window");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Synchronize — IgnoreExpired (issues/0027 item 3). V1's Synchronize skips expired
+        // certs when IgnoreExpired is configured; SynchronizeV2Async had no equivalent check
+        // even though the report row (OrderReportEntryV2.CertificateExpiryDate) carries the
+        // data needed. CertificateExpiryDate is a string whose format isn't confirmed live,
+        // so an unparseable/missing value must NOT be skipped.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_IgnoreExpired_ExpiredCert_Skipped()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow(
+                "ord_v2sync_expired_001", "Order Fulfilled", "Certificate Downloaded",
+                certificateExpiryDate: System.DateTime.UtcNow.AddDays(-30).ToString("o"));
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            var plugin = BuildV2Plugin(mock.Object, ignoreExpired: true);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().BeEmpty(
+                "an expired certificate must be skipped entirely when IgnoreExpired=true");
+
+            // Skipped before any status/download work — no live calls should be made for this row.
+            mock.Verify(c => c.ResolveAndDownloadCertificateV2Async(
+                It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_IgnoreExpired_NonExpiredCert_Kept()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow(
+                "ord_v2sync_expired_002", "Order Fulfilled", "Certificate Downloaded",
+                certificateExpiryDate: System.DateTime.UtcNow.AddDays(30).ToString("o"));
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_expired_002", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_v2sync_expired_002",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var plugin = BuildV2Plugin(mock.Object, ignoreExpired: true);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle(
+                "a certificate that has not yet expired must still be emitted even with " +
+                "IgnoreExpired=true");
+            records[0].CARequestID.Should().Be("ord_v2sync_expired_002");
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_IgnoreExpired_UnparseableExpiryDate_NotSkipped()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow(
+                "ord_v2sync_expired_003", "Order Fulfilled", "Certificate Downloaded",
+                certificateExpiryDate: "not-a-real-date");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_expired_003", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_v2sync_expired_003",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var plugin = BuildV2Plugin(mock.Object, ignoreExpired: true);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().ContainSingle(
+                "an unparseable CertificateExpiryDate must not be treated as expired — the row " +
+                "should be emitted, not silently dropped");
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_IgnoreExpired_MissingExpiryDate_NotSkipped()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow(
+                "ord_v2sync_expired_004", "Order Fulfilled", "Certificate Downloaded",
+                certificateExpiryDate: null);
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_expired_004", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_v2sync_expired_004",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var plugin = BuildV2Plugin(mock.Object, ignoreExpired: true);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().ContainSingle(
+                "a missing CertificateExpiryDate (empty until issuance per the DTO's doc " +
+                "comment) must not be treated as expired");
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_IgnoreExpiredFalse_ExpiredCert_NotSkipped()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow(
+                "ord_v2sync_expired_005", "Order Fulfilled", "Certificate Downloaded",
+                certificateExpiryDate: System.DateTime.UtcNow.AddDays(-30).ToString("o"));
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_expired_005", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_v2sync_expired_005",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            // IgnoreExpired defaults to false — the filter must be opt-in.
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().ContainSingle(
+                "with IgnoreExpired left at its default (false), expired certs must still be emitted");
         }
 
         // ---------------------------------------------------------------------------
