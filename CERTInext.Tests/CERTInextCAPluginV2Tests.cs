@@ -887,6 +887,145 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         }
 
+        // ---------------------------------------------------------------------------
+        // Synchronize — ProductID preference: report row's ProductCode vs. a lazily-
+        // fetched trackedStatus.ProductVariant (issues/0035). No new live call is added
+        // by this preference — it only reads whatever trackedStatus already exists in
+        // local scope from one of the three pre-existing lazy-fetch branches (unresolved-
+        // status fallback, DCV attempt, revoked-row lookup).
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_ProductId_PrefersReportRowProductCode_OverTrackedStatus()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            // Unrecognised display strings force the unresolved-status fallback, which
+            // populates trackedStatus (with a *different* ProductVariant) — the report
+            // row's own non-empty ProductCode must still win.
+            var row = ReportRow("ord_v2sync_035a", "Something New", "Also New", productCode: "842");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_v2sync_035a", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId        = "ord_v2sync_035a",
+                    Status         = "revoked",
+                    ProductVariant = "ov-ucc"
+                }));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].ProductID.Should().Be("842", "the report row's own ProductCode must be " +
+                "preferred over trackedStatus.ProductVariant whenever it is present");
+
+            // No extra call beyond the fallback the unresolved status already required.
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                "ord_v2sync_035a", It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_ProductId_FallsBackToTrackedStatusProductVariant_WhenReportRowEmpty()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_v2sync_035b", "Something New", "Also New", productCode: "");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_v2sync_035b", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId        = "ord_v2sync_035b",
+                    Status         = "revoked",
+                    ProductVariant = "ov-ucc"
+                }));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].ProductID.Should().Be("ov-ucc", "when the report row's ProductCode is " +
+                "empty, an already-populated trackedStatus.ProductVariant must be used instead " +
+                "of leaving the field empty");
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_ProductId_EmptyWhenReportRowEmptyAndNoTrackedStatusFetched()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            // Recognised display strings resolve disposition without any live track call,
+            // so trackedStatus is never populated for this row.
+            var row = ReportRow("ord_v2sync_035c", "Order Fulfilled", "Certificate Downloaded", productCode: "");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_035c", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_v2sync_035c",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].ProductID.Should().Be(string.Empty, "with no ProductCode and no " +
+                "trackedStatus fetched for this row, ProductID must stay empty rather than " +
+                "crash or guess a value");
+
+            // Confirms trackedStatus really is null here — no fetch was ever made for this row.
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_ProductId_EmptyWhenTrackedStatusProductVariantAlsoEmpty()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_v2sync_035d", "Something New", "Also New", productCode: "");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_v2sync_035d", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId        = "ord_v2sync_035d",
+                    Status         = "revoked",
+                    ProductVariant = null
+                }));
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle();
+            records[0].ProductID.Should().Be(string.Empty, "when both the report row's " +
+                "ProductCode and trackedStatus.ProductVariant are empty/null, ProductID must " +
+                "stay empty rather than guess a value");
+        }
+
         [Fact]
         public async Task Synchronize_V2Enabled_TerminalStatus_SkippedNotEmitted()
         {

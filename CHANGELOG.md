@@ -47,6 +47,7 @@
 - chore(tests): regression coverage for `GroupNumber` on V2 order create, catalog, and orders-report calls (0029).
 - chore(tests): regression coverage for `technicalPointOfContact` (configured, blank-fallback, and per-field-fallback) on V2 SSL orders (0030).
 - chore(tests): regression coverage for the nested V2 `revocation` DTO shape and `RevocationDate`/`RevocationReason` population in `GetSingleRecord`/`Synchronize` (0034).
+- chore(tests): regression coverage for `Synchronize`'s ProductID preference order — report row's `ProductCode` first, then a lazily-fetched `productVariant`, then empty (0035).
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 
