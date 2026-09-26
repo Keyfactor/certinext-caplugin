@@ -1993,12 +1993,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             }
                         }
 
+                        // Prefer the report row's own ProductCode (matches V1's "trust the
+                        // listing" precedent, MapToAnyCAPluginCertificate). Only when that's
+                        // empty (issue 0016), fall back to whatever trackedStatus already exists
+                        // in local scope from one of the lazy TrackOrder fetches above
+                        // (unresolved-status fallback, DCV attempt, or revoked-row lookup) — never
+                        // fetch just to backfill this field (issue 0035).
+                        string productId = !string.IsNullOrWhiteSpace(row.ProductCode)
+                            ? row.ProductCode
+                            : (trackedStatus?.ProductVariant ?? string.Empty);
+
                         var record = new AnyCAPluginCertificate
                         {
                             CARequestID = row.OrderNumber,
                             Certificate = certPem,
                             Status      = disposition.Value,
-                            ProductID   = row.ProductCode ?? string.Empty,
+                            ProductID   = productId,
                             RevocationDate = trackedStatus?.Revocation?.ProcessedAt,
                             RevocationReason = trackedStatus?.Revocation != null
                                 ? StatusMapper.V2RevocationReasonToCrlCode(trackedStatus.Revocation.Reason)
