@@ -31,6 +31,9 @@
 - fix(v2): V2 SSL order create now sends a `technicalPointOfContact` block from the connector's `TechnicalContact*` config (falling back to `Requestor*` when blank), instead of never sending one (0030).
 - fix(v2): V2 `GetSingleRecord`/`Synchronize` now populate `RevocationDate`/`RevocationReason` from the Track Order response's nested `revocation` object, instead of a flat DTO shape that never matched the live API and was never read anyway (0034).
 - fix(sync): V2 `Synchronize` now falls back to an already-fetched Track Order `productVariant` when the orders-report row's `ProductCode` is empty, instead of always leaving `ProductID` blank in that case (0035).
+- fix(sync): V2 `Synchronize` now honors `IgnoreExpired`, instead of always including expired certificates (0027).
+- fix(v2): V2 DCV TXT record hostname now uses the configured `DcvTxtRecordTemplate` (falling back to the same default V1 uses), instead of a hardcoded `_emudhra-challenge` label (0027).
+- fix(v2): V2 SSL order create now combines `RequestorIsdCode` with the mobile number for `Requestor.Phone`, instead of sending the bare mobile number (0027).
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).

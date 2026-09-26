@@ -1529,9 +1529,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // requestorIsd/requestorMobile are the same Requestor* defaults V1 falls back to for
             // its own TechnicalPointOfContact (CERTInextClient.cs BuildOrderRequestFromLegacyEnrollRequest).
-            // Note: unlike this TPoC block, V2's own Requestor.Phone (below) does NOT combine these
-            // two — it sends the raw mobile number only, a pre-existing, separately-tracked gap
-            // (issue 0027). That is left untouched here; ComposeV2Phone is new, used only for TPoC.
+            // Also used directly for this order's own Requestor.Phone (below) via ComposeV2Phone —
+            // issue 0027 item 5b: Requestor.Phone previously sent the raw mobile number only, with
+            // RequestorIsdCode never combined in. Fixed to reuse the same ComposeV2Phone helper
+            // TechnicalPointOfContact.Phone already uses (issue 0030).
             string requestorIsd    = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
             string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
 
@@ -1551,7 +1552,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Name        = requestorName,
                     Email       = requestorEmail,
-                    Phone       = _config.RequestorMobileNumber ?? string.Empty,
+                    Phone       = ComposeV2Phone(requestorIsd, requestorMobile),
                     Designation = "IT Administrator"
                 },
                 Organization = organization,
@@ -1851,6 +1852,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
                                 out DateTime parsedOrderDate))
                             orderDateUtc = parsedOrderDate;
+
+                        // Skip expired certificates when IgnoreExpired is configured — mirrors the
+                        // V1 check above (issues/0027, item 3). CertificateExpiryDate is a string
+                        // whose format isn't confirmed live (OrderReportEntryV2 doc comment), so an
+                        // unparseable or missing value must NOT be skipped — only a value that
+                        // parses cleanly and is actually in the past is treated as expired.
+                        DateTime? certExpiryUtc = null;
+                        if (!string.IsNullOrWhiteSpace(row.CertificateExpiryDate)
+                            && DateTime.TryParse(
+                                row.CertificateExpiryDate, System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+                                out DateTime parsedExpiry))
+                            certExpiryUtc = parsedExpiry;
+
+                        if (_config.IgnoreExpired
+                            && certExpiryUtc.HasValue
+                            && certExpiryUtc.Value < DateTime.UtcNow)
+                        {
+                            _logger.LogTrace(
+                                "V2 sync: skipping expired certificate '{Id}' (expires {ExpiresAt:u}).",
+                                row.OrderNumber, certExpiryUtc.Value);
+                            skipped++;
+                            continue;
+                        }
 
                         int? disposition = MapV2ReportStatusToDisposition(row.OrderStatus, row.CertificateStatus);
                         string resolvedFamily = null;
@@ -3248,7 +3273,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///
         /// Flow:
         ///   1. GET /ssl-certificates/{orderId}/dcv → retrieve token (<c>token</c>)
-        ///   2. Publish TXT record at <c>_emudhra-challenge.{domain}</c> via <see cref="IDomainValidator"/>
+        ///   2. Publish TXT record at the configured <c>DcvTxtRecordTemplate</c> hostname
+        ///      (default <c>Constants.Dcv.DefaultTxtRecordTemplate</c>) via <see cref="IDomainValidator"/>
         ///   3. POST /ssl-certificates/{orderId}/dcv/verify → trigger CA-side verification
         ///   4. Poll <see cref="ICERTInextClient.TrackOrderV2Async"/> until status != "pending-dcv"
         ///   5. Clean up TXT record
@@ -3332,8 +3358,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     return false;
                 }
 
-                // V2 TXT record name uses the _emudhra-challenge prefix
-                hostname = $"_emudhra-challenge.{domain}";
+                // TXT record hostname template — config-driven, mirroring V1's
+                // PerformDcvIfNeededAsync (issues/0027, item 5a). Falls back to the same
+                // Constants.Dcv.DefaultTxtRecordTemplate default V1 uses when unconfigured;
+                // {0} is substituted with the bare domain name via string.Format, same as V1.
+                string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
+                    ? Constants.Dcv.DefaultTxtRecordTemplate
+                    : _config.DcvTxtRecordTemplate;
+                hostname = string.Format(template, domain);
 
                 validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
                 if (validator == null)
