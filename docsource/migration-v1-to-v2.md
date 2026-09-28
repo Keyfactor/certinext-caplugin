@@ -57,8 +57,8 @@ behavior without disrupting V1 traffic.
 | `GroupNumber` | **Not carried into V2 orders.** V1 sends this in `delegationInformation` on every order; the V2 order body has no equivalent field. If your account routes orders by group, confirm with eMudhra how group routing is handled on the V2 API before relying on it. |
 | `OrganizationNumber` | **Required for OV/EV, otherwise unused.** V2 OV/EV orders now send `organization.organizationNumber` (with `preVetted=true`) from this setting — CERTInext hard-rejects an OV/EV order with no organization data (HTTP 422 `EMS-1180`), so `OrganizationNumber` must be set on the connector before enrolling OV/EV certificates via V2. DV orders never send an organization block, so this setting has no effect for DV. |
 | `AccountingModel` | Not used by V2 order placement. |
-| `EmailNotifications` | **Not honored.** V2 orders are always placed with `emailNotifications: "all"`, regardless of this connector setting. If you rely on `EmailNotifications=0` to keep CERTInext's lifecycle emails silent, V2 will not preserve that. |
-| `SubscriptionAutoRenew` / `SubscriptionRenewCriteriaDays` | Not used. V2 orders are always placed with auto-renew disabled and a hardcoded 30-day renew-criteria value that has no effect since auto-renew is off. |
+| `EmailNotifications` | **Honored, with one default-value difference from V1.** `1` maps to `emailNotifications: "all"`; `0` maps to `"0"` (confirmed live 2026-09-28 to suppress order-creation emails, same as V1). Blank/unset is omitted on V2 (the CA's own default of `"all"` applies) rather than sent as `"0"` the way V1's own fallback does — set `EmailNotifications=0` explicitly if you want V2 orders silent. Any other value fails the V2 enrollment before any CA call. |
+| `SubscriptionAutoRenew` / `SubscriptionRenewCriteriaDays` | Honored. `SubscriptionAutoRenew=1` sets `subscription.autoRenew=true`; `SubscriptionRenewCriteriaDays` sets `subscription.renewBeforeDays` (blank omits the field, so the CA's documented default of 30 applies). An unparseable or negative `SubscriptionRenewCriteriaDays` fails the enrollment before any CA call. |
 | `DefaultProductCode` | Not used for V2 renewals (see [Renewals](#renewals-and-reissuance) below) — V2 has no separate renewal call to fall back to a default code for. |
 | `TechnicalContactName` / `Email` / `IsdCode` / `MobileNumber` | Not used. The V2 order body has no technical-point-of-contact field. |
 | `IgnoreExpired` | **Not honored during V2 Synchronize.** Expired certificates are always included in the V2 sync result set. |
@@ -154,9 +154,9 @@ mind rather than discover them after cutting over:
   observed vetting-queue speedup has not been independently confirmed for V2; if your account was
   relying on `OrganizationNumber` to fast-path DV issuance under V1, note that DV orders under V2
   never send an organization block, so that specific benefit does not carry over.
-- **`EmailNotifications`, `AccountingModel`, `SubscriptionAutoRenew`/`RenewCriteriaDays`, and the
-  technical-point-of-contact fields have no V2 effect** — V2 orders always request all lifecycle
-  emails and never enable CERTInext-side auto-renew.
+- **`AccountingModel` and the technical-point-of-contact fields have no V2 effect on billing/contact
+  behavior beyond what's noted in the table above** — see the table for `EmailNotifications` and
+  `SubscriptionAutoRenew`/`RenewCriteriaDays`, both of which are now honored on V2.
 - **`IgnoreExpired` is not honored during V2 Synchronize** — expired certificates always come back in
   the V2 sync result set.
 - **V2 `TrackOrder` responses omit `_links`** — a spec-shape discrepancy observed live; no functional

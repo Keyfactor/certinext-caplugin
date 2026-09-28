@@ -36,6 +36,7 @@
 - fix(v2): V2 SSL order create now combines `RequestorIsdCode` with the mobile number for `Requestor.Phone`, instead of sending the bare mobile number (0027).
 - fix(v2): V2 SSL order create now sends `Subscription.AutoRenew`/`RenewBeforeDays` from `SubscriptionAutoRenew`/`SubscriptionRenewCriteriaDays` config, instead of hardcoding `false`/`30` (0027).
 - fix(config): `requestor.designation` (V2) and `requestorInformation.requestorDesignation` (V1) are now sourced from a new `RequestorDesignation` config field, instead of a hardcoded `"IT Administrator"` (V2) or never being sent at all (V1) (0027).
+- fix(v2): V2 SSL order create now honors the connector's `EmailNotifications` setting (`"1"`→`"all"`, `"0"`→`"0"`, blank→omitted) instead of always sending `"all"`; V2 orders now default to `"0"` (reduced notifications), matching V1 (0027).
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).

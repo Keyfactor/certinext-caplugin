@@ -1423,6 +1423,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 subscriptionRenewBeforeDays = parsedRenewDays;
             }
 
+            // EmailNotifications — issue 0027 item 1a: previously hardcoded "all" on every V2
+            // order, ignoring the connector's EmailNotifications config entirely. The connector
+            // field uses V1's "0"/"1" vocabulary and defaults to "0". A real-inbox probe
+            // (2026-09-28, see issue 0027) confirmed V2 honors "0" by suppressing the
+            // order-creation emails — it does not silently coerce back to "all" — so the mapping
+            // below is user-decided, not a guess: "1" -> "all" (full notification set), "0" ->
+            // "0" (silent, matching V1's own wire vocabulary), blank/unset -> null (omitted; the
+            // client's global WhenWritingNull option drops the key and the CA falls back to its
+            // documented default of "all", NOT silent — this is the one place V1 and V2 defaults
+            // diverge for a blank config value, since V1's own fallback always sends "0"). Any
+            // other value fails fast, before any CA call, mirroring the
+            // SubscriptionRenewCriteriaDays check above.
+            string emailNotifications;
+            string configEmailNotifications = _config.EmailNotifications?.Trim();
+            if (string.IsNullOrEmpty(configEmailNotifications))
+            {
+                emailNotifications = null;
+            }
+            else if (configEmailNotifications == "1")
+            {
+                emailNotifications = "all";
+            }
+            else if (configEmailNotifications == "0")
+            {
+                emailNotifications = "0";
+            }
+            else
+            {
+                _logger.LogError(
+                    "EnrollV2Async rejected an order — the CA connector's EmailNotifications value " +
+                    "('{Value}') is not one of the supported values.",
+                    _config.EmailNotifications);
+                _logger.MethodExit(LogLevel.Debug);
+                return new EnrollmentResult
+                {
+                    CARequestID   = string.Empty,
+                    Certificate   = null,
+                    Status        = (int)EndEntityStatus.FAILED,
+                    StatusMessage = $"V2 enrollment rejected: the CA connector's EmailNotifications " +
+                                    $"setting ('{_config.EmailNotifications}') must be \"0\", \"1\", or " +
+                                    "blank. Fix the CA connector configuration and retry."
+                };
+            }
+
             // Resolve the real V2 product code (and UCC-ness) from the live Catalog response.
             // Fetched once here and reused for both purposes — no second catalog call.
             //
@@ -1591,7 +1635,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var orderReq = new V2CreateSslOrderRequest
             {
                 ProductVariant    = ep.ProductVariant,
-                EmailNotifications = "all",
+                EmailNotifications = emailNotifications,
                 Requestor = new V2Requestor
                 {
                     Name        = requestorName,

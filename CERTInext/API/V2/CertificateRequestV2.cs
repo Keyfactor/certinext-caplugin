@@ -189,8 +189,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("productVariant")]
         public string ProductVariant { get; set; } = "dv";
 
+        /// <summary>
+        /// "all" = full notification set, "0" = silent, null = omitted (CA defaults to "all").
+        /// See <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin.EnrollV2Async"/>
+        /// for the connector config mapping (issue 0027 item 1a). No default here — relies solely
+        /// on the client's global <c>DefaultIgnoreCondition = WhenWritingNull</c> serializer option
+        /// to omit the key when null, the same pattern <see cref="V2SubscriptionParams.RenewBeforeDays"/>
+        /// uses.
+        /// </summary>
         [JsonPropertyName("emailNotifications")]
-        public string EmailNotifications { get; set; } = "all";
+        public string EmailNotifications { get; set; }
 
         [JsonPropertyName("requestor")]
         public V2Requestor Requestor { get; set; }

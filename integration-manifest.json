@@ -115,7 +115,7 @@
                 },
                 {
                     "name": "EmailNotifications",
-                    "description": "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. \"1\" = enabled, \"0\" = silent (recommended for gateway-driven orders so end users aren't surprised by CA emails). Default: \"0\"."
+                    "description": "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. \"1\" = full notification set (V1 sends it as-is; V2 maps it to \"all\"). \"0\" = silent on both V1 and V2 (V2 confirmed live 2026-09-28). Blank/unset stays silent on V1 (sent as \"0\") but is omitted on V2, so the CA's own default (\"all\", not silent) applies instead. Any other value fails V2 enrollment before any CA call. Default: \"0\" — V2 orders are now silent by default, matching V1 (previously V2 always sent \"all\")."
                 },
                 {
                     "name": "SubscriptionValidityYears",

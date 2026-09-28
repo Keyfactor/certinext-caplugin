@@ -219,8 +219,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.Config.EmailNotifications] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. " +
-                               "\"1\" = enabled, \"0\" = silent (recommended for gateway-driven orders so end users " +
-                               "aren't surprised by CA emails). Default: \"0\".",
+                               "\"1\" = full notification set (V1 sends it as-is; V2 maps it to \"all\"). " +
+                               "\"0\" = silent on both V1 and V2 (V2 confirmed live 2026-09-28). Blank/unset " +
+                               "stays silent on V1 (sent as \"0\") but is omitted on V2, so the CA's own " +
+                               "default (\"all\", not silent) applies instead. Any other value fails V2 " +
+                               "enrollment before any CA call. Default: \"0\" — V2 orders are now silent by " +
+                               "default, matching V1 (previously V2 always sent \"all\").",
                     Hidden = false,
                     DefaultValue = "0",
                     Type = "String"
@@ -749,7 +753,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("AccountingModel")]
         public string AccountingModel { get; set; } = "2";
 
-        /// <summary>"1" = enable lifecycle emails to requestor, "0" = silent (default).</summary>
+        /// <summary>
+        /// "1" = full notification set (V1 sends it as-is; V2 maps to "all"). "0" = silent on
+        /// both V1 and V2 (default; V2 confirmed live 2026-09-28). Blank stays silent on V1 (sent
+        /// as "0") but is omitted on V2, letting the CA's own default ("all") apply instead. Any
+        /// other value fails V2 enrollment before any CA call. See issue 0027 item 1a.
+        /// </summary>
         [JsonPropertyName("EmailNotifications")]
         public string EmailNotifications { get; set; } = "0";
 
