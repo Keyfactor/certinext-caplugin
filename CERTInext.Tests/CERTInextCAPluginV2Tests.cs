@@ -236,8 +236,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.Certificate.Should().StartWith("-----BEGIN CERTIFICATE-----");
         }
 
+        // By design (0021): V2 has no distinct renewal endpoint the plugin uses — CERTInext's
+        // `/reissue` endpoint exists but is intentionally not called. RenewOrReissue places a
+        // brand-new order via the same PlaceOrderV2Async path as a fresh enrollment; the prior
+        // order/certificate is left issued rather than revoked or reused.
         [Fact]
-        public async Task Enroll_V2Enabled_RenewOrReissue_AlsoUsesV2()
+        public async Task Enroll_V2Enabled_RenewOrReissue_PlacesNewOrderByDesign()
         {
             var mock = NewMock();
             StubCatalog(mock, "842", "13"); // non-UCC (DV SSL)
