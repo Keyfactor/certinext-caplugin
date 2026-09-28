@@ -39,6 +39,7 @@
 - fix(v2): V2 SSL order create now honors the connector's `EmailNotifications` setting (`"1"`→`"all"`, `"0"`→`"0"`, blank→omitted) instead of always sending `"all"`; V2 orders now default to `"0"` (reduced notifications), matching V1 (0027).
 - fix(enroll): the V2 single-domain CSR-SAN-count guard now exempts UCC products, instead of rejecting every UCC CSR enrollment before it could reach the UCC path (0047).
 - fix(audit): the "Enrollment complete" audit log now records the leaf serial for V2 chain PEMs instead of `(parse-error)` (0050).
+- fix(sync): V2 `Synchronize`/`GetSingleRecord` no longer emit a body-less REVOKED record unless the gateway already holds a certificate body for that order, preventing a poisoned gateway row that broke every future Command scan of the CA (0049).
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).
@@ -59,6 +60,7 @@
 - chore(tests): regression coverage for `IgnoreExpired` in V2 `Synchronize`, the configurable V2 DCV TXT record template, and ISD-code composition for `Requestor.Phone` (0027).
 - chore(tests): regression coverage for `EmailNotifications` mapping (`"1"`/`"0"`/blank/invalid) on V2 order create (0027).
 - chore(tests): regression coverage for the V2 CSR-SAN-count guard through `Enroll` for both UCC (order placed, SANs as `additionalDomains`) and non-UCC (FAILED, no order placed) products (0047).
+- chore(tests): regression coverage for the V2 bodyless-REVOKED guard — gateway-holds-body, no-body, no-row, reader-failure, and GENERATED-unaffected cases, in both `Synchronize` and `GetSingleRecord` (0049).
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 

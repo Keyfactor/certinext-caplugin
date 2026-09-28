@@ -133,13 +133,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Internal test-injection constructor — pass a mock <see cref="ICERTInextClient"/>
         /// and a specific <see cref="CERTInextConfig"/> for tests that need to override
-        /// configuration fields such as <c>IgnoreExpired</c>.
+        /// configuration fields such as <c>IgnoreExpired</c>. <paramref name="certDataReader"/>
+        /// is optional (defaults to <c>null</c>) and lets V2 tests exercise the issue-0049
+        /// bodyless-REVOKED guard, which consults <see cref="ICertificateDataReader"/>.
         /// </summary>
-        internal CERTInextCAPlugin(ICERTInextClient client, CERTInextConfig config)
+        internal CERTInextCAPlugin(ICERTInextClient client, CERTInextConfig config, ICertificateDataReader certDataReader = null)
         {
             _client = client;
             _clientWasInjected = true;
             _config = config ?? new CERTInextConfig();
+            _certificateDataReader = certDataReader;
         }
 
         /// <summary>
@@ -1798,6 +1801,87 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// Outcome of <see cref="DecideBodylessRevokedRecord"/> — what a V2 caller should do
+        /// with a REVOKED disposition that has no downloadable certificate body (issue 0049).
+        /// </summary>
+        private enum BodylessRevokedDecision
+        {
+            /// <summary>Gateway already holds a body for this order — emit REVOKED with no
+            /// body, exactly as before (this is how out-of-band CA revokes propagate).</summary>
+            EmitRevoked,
+            /// <summary>Gateway has a row but no body — downgrade to FAILED so the gateway
+            /// never persists a REVOKED row with <c>Certificate = null</c>.</summary>
+            EmitFailed,
+            /// <summary>Gateway has no row at all (or the reader can't be consulted) —
+            /// the caller should not create a brand-new poisoned row.</summary>
+            Skip
+        }
+
+        /// <summary>
+        /// Issue 0049: the CERTInext V2 CA refuses to serve a revoked certificate's body
+        /// (422 EMS-1165), so a V2 order whose first gateway sighting is already revoked has
+        /// no body to attach. Emitting that as a body-less REVOKED record is what poisons the
+        /// gateway: it persists the row with <c>RevocationDate</c> set and <c>Certificate =
+        /// null</c>, never clears the date afterward, and its own revoked-certificate search
+        /// then calls <c>FromDER(null)</c> on every future scan of this CA — a 500 that blocks
+        /// *all* Command sync for the CA, not just this record.
+        ///
+        /// A body-less REVOKED record is safe — and required, to propagate out-of-band CA
+        /// revokes — only when the gateway already holds a certificate body for this
+        /// CARequestID (confirmed live, issue 0049 evidence log: the gateway keeps the stored
+        /// body and applies status/date/reason on top of it). <see
+        /// cref="ICertificateDataReader.GetExpirationDateByRequestId"/> is the per-order probe
+        /// for that: it returns the stored cert's NotAfter when a body is held, <c>null</c> when
+        /// the row exists but has no body, and throws <see cref="ArgumentException"/> when there
+        /// is no row at all.
+        /// </summary>
+        private BodylessRevokedDecision DecideBodylessRevokedRecord(string caRequestId)
+        {
+            if (_certificateDataReader == null)
+            {
+                _logger.LogWarning(
+                    "V2: no ICertificateDataReader available to check whether the gateway holds a " +
+                    "certificate body for revoked order '{Id}' — skipping this cycle rather than risk " +
+                    "poisoning a fresh gateway row with a body-less REVOKED record.", caRequestId);
+                return BodylessRevokedDecision.Skip;
+            }
+
+            try
+            {
+                DateTime? expiry = _certificateDataReader.GetExpirationDateByRequestId(caRequestId);
+                if (expiry.HasValue)
+                {
+                    _logger.LogDebug(
+                        "V2: gateway already holds a certificate body for revoked order '{Id}' " +
+                        "(expires {Expiry:O}) — emitting body-less REVOKED to propagate the revocation.",
+                        caRequestId, expiry.Value);
+                    return BodylessRevokedDecision.EmitRevoked;
+                }
+
+                _logger.LogInformation(
+                    "V2: gateway has a row for revoked order '{Id}' with no certificate body — " +
+                    "emitting FAILED instead of a body-less REVOKED record to avoid poisoning the " +
+                    "gateway's revoked-certificate search.", caRequestId);
+                return BodylessRevokedDecision.EmitFailed;
+            }
+            catch (ArgumentException)
+            {
+                _logger.LogInformation(
+                    "V2: gateway has no row at all for revoked order '{Id}' — skipping rather than " +
+                    "create a body-less REVOKED row the gateway can never un-poison.", caRequestId);
+                return BodylessRevokedDecision.Skip;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2: failed to determine whether the gateway holds a certificate body for revoked " +
+                    "order '{Id}' — skipping this cycle rather than risk emitting a body-less REVOKED " +
+                    "record. The revocation will be retried on a later sync/single-record call.", caRequestId);
+                return BodylessRevokedDecision.Skip;
+            }
+        }
+
+        /// <summary>
         /// Retrieves a single certificate record via the V2 REST API.
         /// </summary>
         private async Task<AnyCAPluginCertificate> GetSingleRecordV2Async(string caRequestID)
@@ -1859,21 +1943,40 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                 }
 
+                // Issue 0049: a REVOKED disposition with no certificate body must never be
+                // returned as-is unless the gateway already holds a body for this order — see
+                // DecideBodylessRevokedRecord. GetSingleRecord can't skip (it must return
+                // something), so both the no-row and can't-tell cases fall through to FAILED.
+                int effectiveDisposition = disposition;
+                DateTime? effectiveRevocationDate = statusResp.Revocation?.ProcessedAt;
+                int effectiveRevocationReason = statusResp.Revocation != null
+                    ? StatusMapper.V2RevocationReasonToCrlCode(statusResp.Revocation.Reason)
+                    : 0;
+
+                if (disposition == (int)EndEntityStatus.REVOKED && string.IsNullOrWhiteSpace(certPem))
+                {
+                    var decision = DecideBodylessRevokedRecord(caRequestID);
+                    if (decision != BodylessRevokedDecision.EmitRevoked)
+                    {
+                        effectiveDisposition = (int)EndEntityStatus.FAILED;
+                        effectiveRevocationDate = null;
+                        effectiveRevocationReason = 0;
+                    }
+                }
+
                 _logger.LogInformation(
                     "GetSingleRecordV2 complete. CARequestID={Id}, V2Status={Status}, Disposition={Disposition}",
-                    caRequestID, statusResp.Status, disposition);
+                    caRequestID, statusResp.Status, effectiveDisposition);
                 _logger.MethodExit(LogLevel.Debug);
 
                 return new AnyCAPluginCertificate
                 {
                     CARequestID = caRequestID,
                     Certificate = certPem,
-                    Status      = disposition,
+                    Status      = effectiveDisposition,
                     ProductID   = statusResp.ProductVariant ?? string.Empty,
-                    RevocationDate = statusResp.Revocation?.ProcessedAt,
-                    RevocationReason = statusResp.Revocation != null
-                        ? StatusMapper.V2RevocationReasonToCrlCode(statusResp.Revocation.Reason)
-                        : 0
+                    RevocationDate = effectiveRevocationDate,
+                    RevocationReason = effectiveRevocationReason
                 };
             }
             catch (KeyNotFoundException)
@@ -1929,6 +2032,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // Emit-side accounting (mirrors the V1 path, issue 0003).
             int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
+            // Issue 0049: bodyless-REVOKED guard decisions — see DecideBodylessRevokedRecord.
+            int emittedFailedFromBodylessRevoked = 0, skippedBodylessRevoked = 0;
 
 #if SUPPORTS_DCV
             bool dcvOperational = _config.DcvEnabled && _domainValidatorFactory != null;
@@ -2140,6 +2245,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         };
 
                         bool recordHasBody = !string.IsNullOrWhiteSpace(record.Certificate);
+
+                        // Issue 0049: never hand the gateway buffer a REVOKED record with no
+                        // certificate body unless the gateway already holds one for this order —
+                        // see DecideBodylessRevokedRecord's doc comment. "Skip" means this row is
+                        // dropped entirely (not added to blockingBuffer) rather than risk creating
+                        // a row the gateway can never un-poison.
+                        if (record.Status == (int)EndEntityStatus.REVOKED && !recordHasBody)
+                        {
+                            var decision = DecideBodylessRevokedRecord(record.CARequestID);
+                            if (decision == BodylessRevokedDecision.Skip)
+                            {
+                                skipped++;
+                                skippedBodylessRevoked++;
+                                continue;
+                            }
+                            if (decision == BodylessRevokedDecision.EmitFailed)
+                            {
+                                record.Status = (int)EndEntityStatus.FAILED;
+                                record.RevocationDate = null;
+                                record.RevocationReason = 0;
+                                emittedFailedFromBodylessRevoked++;
+                            }
+                            // EmitRevoked falls through — record stays REVOKED with no body,
+                            // exactly as before (propagates an out-of-band CA revoke).
+                        }
+
                         if (record.Status == (int)EndEntityStatus.GENERATED)
                         {
                             if (recordHasBody) emittedGeneratedWithBody++; else emittedGeneratedNoBody++;
@@ -2203,9 +2334,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogInformation(
                     "CERTInext V2 synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}, " +
                     "UnresolvedStatusFallbacks={Fallbacks}. Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
-                    "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}. {DcvClause}",
+                    "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
+                    "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
+                    "BodylessRevokedSkipped={BodylessRevokedSkipped} (issue 0049 guard). {DcvClause}",
                     synced, skipped, errors, unresolvedStatusFallbacks,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
+                    emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
                     dcvClause);
             }
             catch (OperationCanceledException)
