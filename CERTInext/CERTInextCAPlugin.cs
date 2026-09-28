@@ -1570,6 +1570,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string requestorIsd    = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
             string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
 
+            // Requestor.Designation — issue 0027 item 5e: previously hardcoded "IT Administrator"
+            // (the V2 spec's own example value for this Optional free-text field). Now sourced from
+            // the RequestorDesignation config field; blank/unset leaves this null so the property is
+            // omitted from the wire JSON entirely (relies on the client's global
+            // DefaultIgnoreCondition = WhenWritingNull, CERTInextClient.GetJsonOptions()), rather than
+            // sending any default designation value.
+            string requestorDesignation = string.IsNullOrWhiteSpace(_config.RequestorDesignation)
+                ? null
+                : _config.RequestorDesignation.Trim();
+
             // technicalPointOfContact — each field falls back to the requestor default when its
             // TechnicalContact* counterpart is blank, mirroring V1's BuildOrderRequestFromLegacyEnrollRequest
             // (CERTInextClient.cs:2335-2341). See issues/0030-v2-technical-contact-not-sent.md.
@@ -1587,7 +1597,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Name        = requestorName,
                     Email       = requestorEmail,
                     Phone       = ComposeV2Phone(requestorIsd, requestorMobile),
-                    Designation = "IT Administrator"
+                    Designation = requestorDesignation
                 },
                 Organization = organization,
                 Certificate = new V2CertificateParams

@@ -175,6 +175,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
+                [Constants.Config.RequestorDesignation] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Job title / role of the requestor (e.g. 'IT Administrator'). " +
+                               "Sent in V2 orders' `requestor.designation` field. Free text with no CA-side " +
+                               "enum. Left blank by default, in which case the field is omitted entirely " +
+                               "from the order rather than sent with a default value.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
                 [Constants.Config.SignerPlace] = new PropertyConfigInfo
                 {
                     Comments = "City or location of the subscriber agreement signer. Required by CERTInext for all orders.",
@@ -685,6 +695,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>Default requestor mobile number.</summary>
         [JsonPropertyName("RequestorMobileNumber")]
         public string RequestorMobileNumber { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Default requestor job title / role. Blank by default; when blank, the V2 order's
+        /// <c>requestor.designation</c> field is omitted rather than sent with any default value
+        /// (see issues/0027-v2-request-builder-drops-config-fields.md item 5e).
+        /// </summary>
+        [JsonPropertyName("RequestorDesignation")]
+        public string RequestorDesignation { get; set; } = string.Empty;
 
         /// <summary>Subscriber agreement signer place (city/location). Required by CERTInext.</summary>
         [JsonPropertyName("SignerPlace")]

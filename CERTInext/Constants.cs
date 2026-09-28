@@ -36,6 +36,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string RequestorEmail = "RequestorEmail";
             public const string RequestorIsdCode = "RequestorIsdCode";
             public const string RequestorMobileNumber = "RequestorMobileNumber";
+            public const string RequestorDesignation = "RequestorDesignation";
             public const string SignerPlace = "SignerPlace";
             public const string SignerIp = "SignerIp";
 
@@ -438,9 +439,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Fixed designation sent on technicalPointOfContact.designation (issue 0030). The
             // spec documents this as free text with no enum (examples: "Technical Contact",
             // "IT Administrator", "PKI Manager", "Authorized Signer") and there is no connector
-            // config field for it — same gap already noted for requestor.designation (issue 0027,
-            // hardcoded "IT Administrator" in EnrollV2Async). No existing generic
-            // designation/title config field was found to reuse, so this is a new fixed default.
+            // config field for it — deliberately out of scope for issue 0027 item 5e's
+            // RequestorDesignation fix (Config.RequestorDesignation), which only covers
+            // requestor.designation. No existing generic designation/title config field was
+            // found to reuse for this one, so this remains a fixed default.
             public const string DefaultTechnicalContactDesignation = "Technical Contact";
 
             // UCC (multi-SAN) product family detection — from the live Catalog response's

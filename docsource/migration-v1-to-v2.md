@@ -64,7 +64,7 @@ behavior without disrupting V1 traffic.
 | `IgnoreExpired` | **Not honored during V2 Synchronize.** Expired certificates are always included in the V2 sync result set. |
 | `SubmitNonDnsSans` | Not applicable — see the single-domain limitation above; non-DNS SANs were never part of this concern for V2, DNS SANs beyond the primary domain already fail outright. |
 | `PageSize` | Still used, now against V2's `/reports/orders` paging. |
-| `RequestorName` / `RequestorEmail` / `RequestorMobileNumber` | Still used — carried into the V2 order's `requestor` block. |
+| `RequestorName` / `RequestorEmail` / `RequestorMobileNumber` / `RequestorDesignation` | Still used — carried into the V2 order's `requestor` block. `RequestorDesignation` is omitted from the order when blank (the default) rather than sent with any value. |
 | `SignerPlace` / `SignerIp` | Still used — carried into the V2 order's `agreement` block. |
 | `SubscriptionValidityYears` | Still used as the fallback validity when the template's `ValidityYears` parameter is not set. |
 | `AutoSecureWww` | Still used — controls whether V2 adds the `www.` variant. |

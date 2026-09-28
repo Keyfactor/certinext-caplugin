@@ -863,7 +863,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         RequestorName = request.RequesterName ?? _config.RequestorName,
                         RequestorEmail = request.RequesterEmail ?? _config.RequestorEmail,
                         RequestorIsdCode = _config.RequestorIsdCode ?? "1",
-                        RequestorMobileNumber = _config.RequestorMobileNumber ?? string.Empty
+                        RequestorMobileNumber = _config.RequestorMobileNumber ?? string.Empty,
+                        RequestorDesignation = string.IsNullOrWhiteSpace(_config.RequestorDesignation) ? null : _config.RequestorDesignation.Trim()
                     },
                     TechnicalPointOfContact = new TechnicalPointOfContact
                     {
@@ -2315,7 +2316,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         RequestorName = requestorName,
                         RequestorEmail = requestorEmail,
                         RequestorIsdCode = requestorIsd,
-                        RequestorMobileNumber = requestorMobile
+                        RequestorMobileNumber = requestorMobile,
+                        RequestorDesignation = string.IsNullOrWhiteSpace(_config.RequestorDesignation) ? null : _config.RequestorDesignation.Trim()
                     },
                     SubscriptionDetails = new SubscriptionDetails
                     {

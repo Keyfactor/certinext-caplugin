@@ -94,6 +94,10 @@
                     "description": "Requestor mobile number (digits only, no country code)."
                 },
                 {
+                    "name": "RequestorDesignation",
+                    "description": "OPTIONAL: Job title / role of the requestor (e.g. 'IT Administrator'). Sent in V2 orders' `requestor.designation` field. Free text with no CA-side enum. Left blank by default, in which case the field is omitted entirely from the order rather than sent with a default value."
+                },
+                {
                     "name": "SignerPlace",
                     "description": "City or location of the subscriber agreement signer. Required by CERTInext for all orders."
                 },
