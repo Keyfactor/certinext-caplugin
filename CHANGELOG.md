@@ -38,6 +38,7 @@
 - fix(config): `requestor.designation` (V2) and `requestorInformation.requestorDesignation` (V1) are now sourced from a new `RequestorDesignation` config field, instead of a hardcoded `"IT Administrator"` (V2) or never being sent at all (V1) (0027).
 - fix(v2): V2 SSL order create now honors the connector's `EmailNotifications` setting (`"1"`→`"all"`, `"0"`→`"0"`, blank→omitted) instead of always sending `"all"`; V2 orders now default to `"0"` (reduced notifications), matching V1 (0027).
 - fix(enroll): the V2 single-domain CSR-SAN-count guard now exempts UCC products, instead of rejecting every UCC CSR enrollment before it could reach the UCC path (0047).
+- fix(audit): the "Enrollment complete" audit log now records the leaf serial for V2 chain PEMs instead of `(parse-error)` (0050).
 
 ## Chores
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).
