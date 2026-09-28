@@ -4418,9 +4418,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Extracts the X.509 serial number from a PEM-encoded certificate for inclusion
-        /// in audit log entries.  Returns "(parse-error)" rather than throwing, so that a
-        /// logging failure never suppresses an audit record.
+        /// Extracts the X.509 serial number of the *leaf* (first) certificate from a
+        /// PEM-encoded certificate — or from a PEM chain — for inclusion in audit log
+        /// entries.  Returns "(parse-error)" rather than throwing, so that a logging
+        /// failure never suppresses an audit record.
+        ///
+        /// V2 enrollment/sync pass this a full chain PEM (<see cref="AssembleV2CertChain"/>:
+        /// leaf followed by intermediate blocks). Decoding that as a single base64 blob is
+        /// wrong on two counts: each PEM block carries its own base64 padding, so a '='
+        /// from the leaf block lands mid-string once concatenated (Convert.FromBase64String
+        /// throws FormatException), and even if it didn't, the leaf and intermediate DER
+        /// would be mashed into one invalid ASN.1 structure. Reading block-by-block via
+        /// BouncyCastle's PemReader and stopping after the first block sidesteps both:
+        /// it returns exactly the leaf block's own decoded DER bytes, ignoring the rest.
         ///
         /// Implemented with BouncyCastle (per the project's crypto policy: all certificate
         /// and key handling goes through BouncyCastle, never BCL System.Security.Cryptography).
@@ -4429,20 +4439,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             try
             {
-                // Strip PEM headers and decode the DER bytes
-                string b64 = pem
-                    .Replace("-----BEGIN CERTIFICATE-----", string.Empty)
-                    .Replace("-----END CERTIFICATE-----", string.Empty)
-                    .Replace("\r", string.Empty)
-                    .Replace("\n", string.Empty)
-                    .Trim();
-
-                if (string.IsNullOrWhiteSpace(b64))
+                if (string.IsNullOrWhiteSpace(pem))
                     return "(empty-pem)";
 
-                byte[] der = Convert.FromBase64String(b64);
+                using var stringReader = new System.IO.StringReader(pem);
+                var pemReader = new Org.BouncyCastle.Utilities.IO.Pem.PemReader(stringReader);
+                var pemObject = pemReader.ReadPemObject();
+                if (pemObject == null)
+                    return "(parse-error)"; // no "-----BEGIN"/"-----END" block found at all
+                if (pemObject.Content == null || pemObject.Content.Length == 0)
+                    return "(empty-pem)"; // block markers present but body is empty
+
                 var parser = new Org.BouncyCastle.X509.X509CertificateParser();
-                var cert = parser.ReadCertificate(der);
+                var cert = parser.ReadCertificate(pemObject.Content);
                 if (cert == null)
                     return "(parse-error)";
                 // Match X509Certificate2.SerialNumber's format precisely: uppercase hex,
