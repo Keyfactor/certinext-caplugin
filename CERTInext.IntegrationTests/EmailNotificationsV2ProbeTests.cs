@@ -57,12 +57,76 @@
 // blindly after a timeout is exactly how this authoring session ended up with two live OV
 // orders (1815749817, 2743834762 — both since cancelled) instead of the single order this
 // probe is meant to place.
+//
+// --- Phase 2 (added 2026-09-28): real-inbox test, for the same open question this file's
+// original probe above could not resolve ---
+//
+// The API-only probe above could not distinguish "CERTInext honors emailNotifications='0'"
+// from "CERTInext silently coerces it back to 'all'" — the field is never echoed back in any
+// response, create or Track Order. The user's chosen resolution (issues/
+// V2_AUDIT_TRIAGE_HANDOFF.md, "EmailNotifications' open decision") is the strongest test
+// available short of asking CERTInext directly: place two real V2 DV SSL orders, two minutes
+// apart, one with emailNotifications="all" (baseline) and one with emailNotifications="0"
+// (test), and have a human compare what actually arrives in the requestor's real inbox for
+// each. Product: DV SSL, non-UCC, catalog code 842 — verified against the live catalog's
+// productTypeID ("13" = DV SSL, non-UCC; see ProductDetail.ProductTypeId's own doc comment)
+// before either order is placed, matched on productTypeID only, never productName (catalog
+// productName strings are unstable across account/catalog-version — see this repo's Gotchas
+// in issues/V2_AUDIT_TRIAGE_HANDOFF.md). No CSR is submitted and DCV is never invoked for
+// either order.
+//
+// Both orders deliberately omit requestor.designation — the JSON key itself is absent, not
+// null/empty, via the same global `DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull`
+// serializer setting this file already relies on for other optional fields — which is also an
+// (unplanned, incidental) live-answer opportunity for issue 0027 item 5e's still-open
+// "requestor.designation hardcoded, no config field" design question: if either create call
+// is rejected with a 4xx that mentions "designation", that rejection is logged verbatim as a
+// live answer to 5e. The probe is not designed around that outcome, but it is free
+// information if it happens. technicalPointOfContact is omitted entirely, matching this
+// file's existing EmailNotifications_V2_NonAllValue_ObservesCaResponse probe above (which also
+// never sets it). No delegation/recipientEmails field is set either (the DTO has none).
+//
+// Split into two [SkippableFact] tests, both gated behind a NEW flag,
+// CERTINEXT_PROBE_EMAIL_NOTIFICATIONS_INBOX=1 — deliberately distinct from
+// CERTINEXT_PROBE_EMAIL_NOTIFICATIONS above, since this test places two real orders and
+// requires a human to manually check a real inbox afterward, a materially bigger commitment
+// than the existing single-order, API-only probe. Not armed by default in ~/.env_certinext or
+// ~/.env_certinext_v2.
+//
+//   Phase 1 — EmailNotifications_V2_RealInboxTest_PlaceOrders: verifies the catalog product
+//   code resolves to productTypeID "13" (aborts before placing anything if it does not),
+//   places the baseline ("all") order, waits 2 minutes, places the test ("0") order. Exactly
+//   one create call per run — no retry path of any kind. A timeout or any non-2xx response on
+//   either call logs the domain/timestamp/error, prints "STOP — check the orders report for
+//   this domain before re-running" (per this file's own timeout gotcha above — a client-side
+//   timeout does not mean the CA never processed the request), and skips placing the second
+//   order. Never cancels either order in this phase — they are meant to sit open long enough
+//   for notification emails to actually arrive. Ends with an ACTION REQUIRED block naming both
+//   order IDs/domains and instructing the operator to check the inbox (including spam) at the
+//   5- and 30-minute marks, recording subject/sender/time for every email that arrives, for
+//   each run.
+//
+//   Phase 2 — EmailNotifications_V2_RealInboxTest_CancelOrders: run only after the human has
+//   finished checking the inbox. Gated behind the same flag plus
+//   CERTINEXT_INBOX_TEST_BASELINE_ORDER_ID / CERTINEXT_INBOX_TEST_ORDER_ID (the two order IDs
+//   phase 1 printed in its ACTION REQUIRED block). Skips entirely if neither is set; if only
+//   one is set (phase 1 stopped early after placing the baseline order but before the test
+//   order), cancels only that one rather than requiring both. Cancels via this file's existing
+//   CancelOrderRawAsync, then confirms cancellation via a follow-up read-only Track Order call
+//   (orderState == "Order Cancelled").
+//
+// Like the probe above, this makes NO live API calls of any kind unless
+// CERTINEXT_PROBE_EMAIL_NOTIFICATIONS_INBOX=1 is explicitly set.
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
+using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using RestSharp;
 using Xunit;
 using Xunit.Abstractions;
@@ -77,7 +141,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private readonly string _v2ClientId;
         private readonly string _v2ClientSecret;
         private readonly string _v2OvProductCode;
+        private readonly string _dcvDomainBase;
+        private readonly string _inboxTestEmail;
         private readonly bool _v2Enabled;
+
+        /// <summary>
+        /// Catalog product code for the phase 1/2 real-inbox probe — V2 DV SSL, non-UCC.
+        /// Deliberately a fixed constant (not read from CERTINEXT_PRODUCT_CODE/
+        /// CERTINEXT_OV_PRODUCT_CODE) per the approved design: this probe's product choice is
+        /// locked in independently of whatever other env-configured product code a given shell
+        /// session happens to have set for unrelated tests. Verified against the live catalog's
+        /// productTypeID ("13") at the start of phase 1 before any order is placed — see
+        /// <see cref="EmailNotifications_V2_RealInboxTest_PlaceOrders"/>.
+        /// </summary>
+        private const string InboxProbeProductCode = "842";
 
         public EmailNotificationsV2ProbeTests(IntegrationTestFixture fixture, ITestOutputHelper output)
         {
@@ -90,11 +167,35 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _v2ClientId = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_ID");
             _v2ClientSecret = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_SECRET");
             _v2OvProductCode = V2EnvHelper.GetEnv(env, "CERTINEXT_OV_PRODUCT_CODE", "846");
+            _dcvDomainBase = V2EnvHelper.GetEnv(env, "CERTINEXT_DCV_DOMAIN", "example.com");
+            _inboxTestEmail = Environment.GetEnvironmentVariable("CERTINEXT_INBOX_TEST_EMAIL")?.Trim();
 
             _v2Enabled = !string.IsNullOrWhiteSpace(V2EnvHelper.GetEnv(env, "CERTINEXT_USE_V2_API"))
                          && !string.IsNullOrWhiteSpace(_v2ApiUrl)
                          && !string.IsNullOrWhiteSpace(_v2ClientId)
                          && !string.IsNullOrWhiteSpace(_v2ClientSecret);
+        }
+
+        /// <summary>
+        /// Builds a typed <see cref="CERTInextClient"/> against the V2 API — needed only for
+        /// <see cref="CERTInextClient.GetProductDetailsV2Async"/>'s catalog lookup (phase 1's
+        /// productTypeID guard), which has no raw-HTTP equivalent already in this file. Mirrors
+        /// <c>OrganizationBlockV2ProbeTests.BuildV2Client</c> exactly.
+        /// </summary>
+        private CERTInextClient BuildV2Client()
+        {
+            return new CERTInextClient(new CERTInextConfig
+            {
+                ApiUrl = _v2ApiUrl,
+                UseV2Api = true,
+                OAuthClientId = _v2ClientId,
+                OAuthClientSecret = _v2ClientSecret,
+                RequestorName = _fixture.IsConfigured ? _fixture.Config.RequestorName : "Test",
+                RequestorEmail = _fixture.IsConfigured ? _fixture.Config.RequestorEmail : "test@example.com",
+                SignerIp = "127.0.0.1",
+                SignerPlace = "Gateway Lab",
+                PageSize = 100
+            });
         }
 
         /// <summary>
@@ -249,6 +350,167 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
+        // Phase 1/2 real-inbox probe (issue 0027 item 1b) — see this file's header comment
+        // for the full design. Both phases share InboxProbeProductCode/_dcvDomainBase and the
+        // CERTINEXT_PROBE_EMAIL_NOTIFICATIONS_INBOX gate.
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Phase 1 of the EmailNotifications real-inbox probe (issue 0027 item 1b). Verifies
+        /// the catalog resolves <see cref="InboxProbeProductCode"/> to productTypeID "13" (DV
+        /// SSL, non-UCC) — matched on productTypeID only, never productName — and aborts
+        /// before placing any order if it does not. Places the baseline
+        /// (<c>emailNotifications="all"</c>) order, waits 2 minutes, then places the test
+        /// (<c>emailNotifications="0"</c>) order. Exactly one create call per run; no retry
+        /// path of any kind. A timeout or any non-2xx response on either call stops the run
+        /// (and, for the baseline call, skips the test order entirely) — see
+        /// <see cref="RunInboxProbeOrderAsync"/>. Neither order is cancelled by this phase; run
+        /// <see cref="EmailNotifications_V2_RealInboxTest_CancelOrders"/> after the human
+        /// inbox-check window has elapsed.
+        ///
+        /// Opt-in: requires CERTINEXT_PROBE_EMAIL_NOTIFICATIONS_INBOX=1. Not armed by default
+        /// in ~/.env_certinext or ~/.env_certinext_v2 — this places two real, potentially
+        /// cost-bearing V2 DV SSL orders and requires a human to manually check a real inbox
+        /// afterward, which cannot be automated or concluded by an agent.
+        /// </summary>
+        [SkippableFact]
+        public async Task EmailNotifications_V2_RealInboxTest_PlaceOrders()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+
+            string probeFlag = Environment.GetEnvironmentVariable("CERTINEXT_PROBE_EMAIL_NOTIFICATIONS_INBOX");
+            Skip.If(string.IsNullOrWhiteSpace(probeFlag) || probeFlag != "1",
+                "CERTINEXT_PROBE_EMAIL_NOTIFICATIONS_INBOX=1 not set — this probe places TWO real, " +
+                "potentially cost-bearing V2 DV SSL orders and requires a human to manually check a " +
+                "real inbox afterward. Opt-in only. Skipping.");
+
+            // The inbox must be one a human actually reads — the env files' CERTINEXT_REQUESTOR_EMAIL
+            // is a non-deliverable placeholder, so this probe never falls back to it.
+            Skip.If(string.IsNullOrWhiteSpace(_inboxTestEmail),
+                "CERTINEXT_INBOX_TEST_EMAIL not set — set it to the real mailbox that will be checked. Skipping.");
+
+            _output.WriteLine("=== Issue 0027 item 1b real-inbox probe — phase 1: place baseline + test orders ===");
+            _output.WriteLine($"Requestor email (inbox to check): {_inboxTestEmail}");
+
+            // Catalog guard — abort before placing anything if the pinned product code does
+            // not resolve to productTypeID "13" (DV SSL, non-UCC) on this account/catalog
+            // version. Matched on productTypeID only, never productName (catalog productName
+            // strings are unstable across account/catalog-version/spellings — see this
+            // repo's Gotchas in issues/V2_AUDIT_TRIAGE_HANDOFF.md).
+            using CERTInextClient catalogClient = BuildV2Client();
+            List<ProductDetail> catalog = await catalogClient.GetProductDetailsV2Async();
+            ProductDetail product = catalog.FirstOrDefault(p => p.ProductCode == InboxProbeProductCode);
+
+            Skip.If(product == null,
+                $"Catalog product code {InboxProbeProductCode} was not found in the live V2 catalog " +
+                "for this account — aborting before placing any order.");
+            Skip.If(product.ProductTypeId != "13",
+                $"Catalog product code {InboxProbeProductCode} has productTypeID=\"{product.ProductTypeId}\" " +
+                "(expected \"13\" for DV SSL, non-UCC) — aborting before placing any order.");
+
+            _output.WriteLine($"Catalog check OK: ProductCode={product.ProductCode} " +
+                               $"ProductTypeId={product.ProductTypeId} ProductName={product.ProductName}");
+
+            DateTime baselineTs = DateTime.UtcNow;
+            string baselineDomain = $"emailnotif-baseline-{baselineTs:yyyyMMddHHmmss}.{_dcvDomainBase}";
+
+            InboxProbeRunResult baselineResult =
+                await RunInboxProbeOrderAsync("BASELINE", baselineDomain, "all");
+
+            if (!baselineResult.Success)
+            {
+                // RunInboxProbeOrderAsync already logged the domain/timestamp/error and the
+                // STOP message (and the designation-answer block, if applicable). Per the
+                // approved design, a failed baseline call means the test order must not be
+                // placed at all.
+                return;
+            }
+
+            _output.WriteLine("");
+            _output.WriteLine("Waiting 2 minutes before placing the test (\"0\") order...");
+            await Task.Delay(TimeSpan.FromMinutes(2));
+
+            DateTime testTs = DateTime.UtcNow;
+            string testDomain = $"emailnotif-test0-{testTs:yyyyMMddHHmmss}.{_dcvDomainBase}";
+
+            InboxProbeRunResult testResult = await RunInboxProbeOrderAsync("TEST", testDomain, "0");
+
+            _output.WriteLine("");
+            _output.WriteLine("=== ACTION REQUIRED ===");
+            _output.WriteLine($"Baseline (\"all\") order: OrderId={baselineResult.OrderId ?? "<none parsed>"} " +
+                               $"Domain={baselineDomain}");
+            _output.WriteLine(testResult.Success
+                ? $"Test (\"0\") order: OrderId={testResult.OrderId ?? "<none parsed>"} Domain={testDomain}"
+                : $"Test (\"0\") order: FAILED — see STOP message above. Domain={testDomain}");
+            _output.WriteLine("");
+            _output.WriteLine(
+                "Check the requestor's real inbox (INCLUDING SPAM) at the 5-minute and 30-minute marks " +
+                "after each order above was placed. For EVERY email that arrives for either domain, " +
+                "record its subject, sender, and time received, and which run (baseline/test) it " +
+                "corresponds to. This step cannot be automated or concluded by an agent — a human must " +
+                "check the inbox and report back before issue 0027 item 1b can be closed.");
+            _output.WriteLine("");
+            _output.WriteLine(
+                "When the inbox-check window is done, set CERTINEXT_INBOX_TEST_BASELINE_ORDER_ID / " +
+                "CERTINEXT_INBOX_TEST_ORDER_ID to the order ID(s) above (whichever were placed) and run " +
+                $"{nameof(EmailNotifications_V2_RealInboxTest_CancelOrders)} to clean up.");
+        }
+
+        /// <summary>
+        /// Phase 2 of the EmailNotifications real-inbox probe (issue 0027 item 1b) — run only
+        /// after the human inbox-check window from phase 1 has elapsed. Cancels whichever
+        /// order ID(s) are supplied via CERTINEXT_INBOX_TEST_BASELINE_ORDER_ID /
+        /// CERTINEXT_INBOX_TEST_ORDER_ID, then confirms cancellation via a follow-up read-only
+        /// Track Order call (<c>orderState == "Order Cancelled"</c>).
+        ///
+        /// Opt-in: requires CERTINEXT_PROBE_EMAIL_NOTIFICATIONS_INBOX=1 (same flag as phase 1)
+        /// plus at least one of the two order-ID env vars. Skips entirely if neither is set.
+        /// If only one is set — e.g. phase 1 stopped early after the baseline order but before
+        /// the test order — this cancels only that one rather than requiring both, so a
+        /// partial phase 1 run is never stuck without a cleanup path.
+        /// </summary>
+        [SkippableFact]
+        public async Task EmailNotifications_V2_RealInboxTest_CancelOrders()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+
+            string probeFlag = Environment.GetEnvironmentVariable("CERTINEXT_PROBE_EMAIL_NOTIFICATIONS_INBOX");
+            Skip.If(string.IsNullOrWhiteSpace(probeFlag) || probeFlag != "1",
+                "CERTINEXT_PROBE_EMAIL_NOTIFICATIONS_INBOX=1 not set — skipping.");
+
+            string baselineOrderId = Environment.GetEnvironmentVariable("CERTINEXT_INBOX_TEST_BASELINE_ORDER_ID");
+            string testOrderId = Environment.GetEnvironmentVariable("CERTINEXT_INBOX_TEST_ORDER_ID");
+
+            Skip.If(string.IsNullOrWhiteSpace(baselineOrderId) && string.IsNullOrWhiteSpace(testOrderId),
+                "Neither CERTINEXT_INBOX_TEST_BASELINE_ORDER_ID nor CERTINEXT_INBOX_TEST_ORDER_ID is " +
+                "set — nothing to cancel. Skipping.");
+
+            _output.WriteLine("=== Issue 0027 item 1b real-inbox probe — phase 2: cancel + confirm ===");
+
+            if (!string.IsNullOrWhiteSpace(baselineOrderId))
+            {
+                await CancelAndConfirmInboxProbeOrderAsync(baselineOrderId, "baseline (\"all\")");
+            }
+            else
+            {
+                _output.WriteLine(
+                    "CERTINEXT_INBOX_TEST_BASELINE_ORDER_ID not set — skipping baseline-order cancel " +
+                    "(phase 1 apparently never placed it, or it is being handled separately).");
+            }
+
+            if (!string.IsNullOrWhiteSpace(testOrderId))
+            {
+                await CancelAndConfirmInboxProbeOrderAsync(testOrderId, "test (\"0\")");
+            }
+            else
+            {
+                _output.WriteLine(
+                    "CERTINEXT_INBOX_TEST_ORDER_ID not set — skipping test-order cancel " +
+                    "(phase 1 apparently stopped before placing it, or it is being handled separately).");
+            }
+        }
+
+        // ---------------------------------------------------------------------------
         // Private helpers — same raw-HTTP idiom as IdempotencyKeyV2ProbeTests /
         // OrganizationBlockV2ProbeTests (see those files' header comments for rationale).
         // ---------------------------------------------------------------------------
@@ -393,6 +655,189 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Best-effort extraction of a named top-level string field (e.g. <c>orderState</c>,
+        /// <c>certificateState</c>) from a raw Track Order JSON response body. Returns null
+        /// rather than throwing if the body is empty, malformed, or lacks the field.
+        /// </summary>
+        private static string TryExtractStringField(string body, string fieldName)
+        {
+            if (string.IsNullOrWhiteSpace(body))
+                return null;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                return doc.RootElement.TryGetProperty(fieldName, out var el) ? el.GetString() : null;
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
+
+        // ---------------------------------------------------------------------------
+        // Phase 1/2 real-inbox probe helpers (issue 0027 item 1b).
+        // ---------------------------------------------------------------------------
+
+        /// <summary>Outcome of a single create-order run inside <see cref="RunInboxProbeOrderAsync"/>.</summary>
+        private sealed class InboxProbeRunResult
+        {
+            public bool Success { get; set; }
+            public string OrderId { get; set; }
+            public bool MentionsDesignation { get; set; }
+        }
+
+        /// <summary>
+        /// Builds the request body for one baseline/test run — DV SSL, non-UCC, no CSR, no
+        /// DCV. Only <c>requestor.email</c>/<c>requestor.name</c> are populated (from the
+        /// fixture's requestor config); <c>requestor.phone</c> and, deliberately,
+        /// <c>requestor.designation</c> are left unset so the global
+        /// <c>DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull</c> serializer
+        /// option (<see cref="GetJsonOptions"/>) omits the JSON key entirely rather than
+        /// sending <c>null</c> or an empty string — issue 0027 item 5e's open design question.
+        /// <c>technicalPointOfContact</c> is left unset for the same reason, matching this
+        /// file's existing <see cref="EmailNotifications_V2_NonAllValue_ObservesCaResponse"/>
+        /// probe (which also never sets it). No <c>organization</c> block (DV never requires
+        /// one) and no delegation/recipientEmails field (the DTO has none).
+        /// </summary>
+        private V2CreateSslOrderRequest BuildInboxProbeOrderRequest(
+            string domain, string emailNotificationsValue, string runLabel) =>
+            new V2CreateSslOrderRequest
+            {
+                ProductVariant = "dv",
+                EmailNotifications = emailNotificationsValue,
+                Requestor = new V2Requestor
+                {
+                    Name = _fixture.IsConfigured ? _fixture.Config.RequestorName : "Keyfactor Test",
+                    Email = _inboxTestEmail
+                    // Phone and Designation deliberately left unset (null) — omitted from the
+                    // wire body entirely, not sent as null/empty.
+                },
+                Certificate = new V2CertificateParams
+                {
+                    Domain = domain,
+                    AutoSecureWww = false
+                },
+                Subscription = new V2SubscriptionParams
+                {
+                    ValidityYears = 1,
+                    AutoRenew = false,
+                    RenewBeforeDays = 30
+                },
+                Agreement = new V2AgreementParams
+                {
+                    SignerName = _fixture.IsConfigured ? _fixture.Config.RequestorName : "Keyfactor Test",
+                    SignerIp = "127.0.0.1",
+                    SignerPlace = "Gateway Lab",
+                    Accepted = true
+                },
+                // TechnicalPointOfContact deliberately left unset (null) — see doc comment above.
+                Remarks = $"Issue 0027 item 1b real-inbox probe — {runLabel} run, " +
+                          $"emailNotifications=\"{emailNotificationsValue}\", requestor.designation " +
+                          "omitted (issue 0027 item 5e). No CSR submitted, DCV never invoked."
+            };
+
+        /// <summary>
+        /// Runs one baseline/test create-order call for the phase 1 real-inbox probe: builds
+        /// and logs the request body (no token in it to redact), places EXACTLY one
+        /// create-order call (no retry of any kind), logs the HTTP status/full response
+        /// body/order ID, and — on success — a follow-up read-only Track Order status. On a
+        /// timeout or any non-2xx response, logs the domain/timestamp/error and prints "STOP —
+        /// check the orders report for this domain before re-running" (a client-side timeout
+        /// on this endpoint does not mean the CA never processed the request — see this file's
+        /// header comment). If the failing response body mentions "designation", that is
+        /// additionally logged verbatim as a live answer to issue 0027 item 5e.
+        /// </summary>
+        private async Task<InboxProbeRunResult> RunInboxProbeOrderAsync(
+            string runLabel, string domain, string emailNotificationsValue)
+        {
+            var orderReq = BuildInboxProbeOrderRequest(domain, emailNotificationsValue, runLabel);
+            string requestJson = JsonSerializer.Serialize(orderReq, GetJsonOptions());
+
+            _output.WriteLine("");
+            _output.WriteLine($"--- {runLabel} run: emailNotifications=\"{emailNotificationsValue}\", domain={domain} ---");
+            _output.WriteLine($"Request body: {requestJson}");
+
+            var createResp = await PlaceOrderRawAsync(InboxProbeProductCode, requestJson);
+            _output.WriteLine($"Create-order response ({runLabel}): HTTP {createResp.StatusCode}");
+            _output.WriteLine($"Body: {createResp.Body}");
+
+            var result = new InboxProbeRunResult();
+
+            if (!createResp.IsSuccessful)
+            {
+                result.Success = false;
+                result.MentionsDesignation =
+                    createResp.Body?.IndexOf("designation", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                _output.WriteLine("");
+                _output.WriteLine($"=== {runLabel} run FAILED at {DateTime.UtcNow:O} — Domain={domain} " +
+                                   $"HTTP {createResp.StatusCode}: {createResp.Body} ===");
+                _output.WriteLine("STOP — check the orders report for this domain before re-running.");
+
+                if (result.MentionsDesignation)
+                {
+                    _output.WriteLine("");
+                    _output.WriteLine(
+                        "=== DESIGNATION ANSWER (issue 0027 item 5e) — the create call was rejected and " +
+                        $"the error mentions \"designation\"; verbatim response: {createResp.Body} ===");
+                }
+
+                return result;
+            }
+
+            result.Success = true;
+            result.OrderId = TryExtractOrderId(createResp.Body);
+            _output.WriteLine($"OrderId={result.OrderId ?? "<none parsed>"}");
+
+            if (!string.IsNullOrWhiteSpace(result.OrderId))
+            {
+                try
+                {
+                    var trackResp = await TrackOrderRawAsync(result.OrderId);
+                    string orderState = TryExtractStringField(trackResp.Body, "orderState");
+                    string certState = TryExtractStringField(trackResp.Body, "certificateState");
+                    _output.WriteLine(
+                        $"Track Order ({runLabel}): HTTP {trackResp.StatusCode}, " +
+                        $"orderState={orderState ?? "<none>"}, certificateState={certState ?? "<none>"}");
+                }
+                catch (Exception trackEx)
+                {
+                    _output.WriteLine($"Track Order call failed for {runLabel} (non-fatal to this probe): {trackEx.Message}");
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Cancels one order from the real-inbox probe (phase 2) via the existing
+        /// <see cref="CancelOrderRawAsync"/> idiom, then confirms cancellation via a
+        /// follow-up read-only Track Order call, logging whether <c>orderState</c> came back
+        /// as <c>"Order Cancelled"</c>.
+        /// </summary>
+        private async Task CancelAndConfirmInboxProbeOrderAsync(string orderId, string label)
+        {
+            _output.WriteLine("");
+            _output.WriteLine($"--- Cancelling {label} order {orderId} ---");
+
+            var cancelResp = await CancelOrderRawAsync(orderId,
+                "Issue 0027 item 1b real-inbox probe — cleanup after the inbox-check window.");
+            _output.WriteLine($"Cancel response: HTTP {cancelResp.StatusCode}: {cancelResp.Body}");
+
+            var trackResp = await TrackOrderRawAsync(orderId);
+            _output.WriteLine($"Track Order (post-cancel) response: HTTP {trackResp.StatusCode}: {trackResp.Body}");
+
+            string orderState = TryExtractStringField(trackResp.Body, "orderState");
+            bool confirmed = string.Equals(orderState, "Order Cancelled", StringComparison.OrdinalIgnoreCase);
+
+            _output.WriteLine(confirmed
+                ? $"CONFIRMED: order {orderId} ({label}) orderState=\"Order Cancelled\"."
+                : $"NOT CONFIRMED: order {orderId} ({label}) orderState=\"{orderState ?? "<none parsed>"}\" " +
+                  "(expected \"Order Cancelled\"). Check manually in the CERTInext portal.");
         }
     }
 }
