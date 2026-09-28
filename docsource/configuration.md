@@ -369,6 +369,6 @@ Any V2 status not in this table (e.g. a value CERTInext adds in the future) also
 plugin logs a warning distinguishing "unmapped status" from the statuses above that are deliberately
 mapped to Failed — see the gateway trace log if certificates unexpectedly show as failed.
 
-Because V2 has no distinct renewal endpoint, all three enrollment types (New, Reissue, RenewOrReissue) place a fresh V2 order.
+V2 has no *renew* endpoint. CERTInext does document a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious`/`revokeReason`), but the plugin does not use it by design — all three enrollment types (New, Reissue, RenewOrReissue) place a fresh V2 order, and the prior order/certificate is left issued rather than auto-revoked.
 
 {% include 'migration-v1-to-v2.md' %}

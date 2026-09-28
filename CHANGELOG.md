@@ -42,6 +42,7 @@
 - fix(sync): V2 `Synchronize`/`GetSingleRecord` no longer emit a body-less REVOKED record unless the gateway already holds a certificate body for that order, preventing a poisoned gateway row that broke every future Command scan of the CA (0049).
 
 ## Chores
+- docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).
 - chore(tests): WireMock-based unit tests for all V2 client methods (token fetch, caching, PlaceOrder, TrackOrder, Download, Revoke, family resolution).
 - chore(tests): Moq-based unit tests verifying V2 dispatch in `CERTInextCAPlugin` (Ping, Enroll, GetSingleRecord, Revoke, Synchronize) with `Times.Never` assertions on V1 paths.
 - chore(tests): `StatusMapperV2Tests` covering all V2 status strings and CRL-to-V2-reason mappings.

@@ -117,13 +117,16 @@ pointing a production template at the V2 connector. At minimum, confirm:
 
 ### Renewals and Reissuance
 
-V2 has no distinct renewal endpoint in the current plugin implementation. **Every** Command
-`Renew`, `Reissue`, and `RenewOrReissue` enrollment places a brand-new V2 order — the same call path
-as a new enrollment — rather than reusing V1's renewal-window logic. If your CERTInext account is on
-a credit-based billing model, **each renewal under V2 consumes a new credit**, unlike V1 where a
-renewal inside the `RenewalWindowDays` window is billed as part of the existing subscription term.
-Factor this into your migration decision if you rely on CERTInext's free-renewal-within-subscription
-behavior.
+CERTInext V2 has no *renew* endpoint, but it does document a `/reissue` endpoint (`mode:
+rekey|update-sans`, with optional `revokePrevious`/`revokeReason`). The plugin intentionally does not
+use it.
+**Every** Command `Renew`, `Reissue`, and `RenewOrReissue` enrollment instead places a brand-new V2
+order — the same call path as a new enrollment — rather than reusing V1's renewal-window logic or the
+`/reissue` endpoint. The prior order and certificate are left issued, not auto-revoked; Command links
+the old and new certificates via history only. If your CERTInext account is on a credit-based billing
+model, **each renewal under V2 consumes a new credit**, unlike V1 where a renewal inside the
+`RenewalWindowDays` window is billed as part of the existing subscription term. Factor this into your
+migration decision if you rely on CERTInext's free-renewal-within-subscription behavior.
 
 ### Revocation Reason Codes
 
