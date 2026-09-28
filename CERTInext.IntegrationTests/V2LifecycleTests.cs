@@ -290,6 +290,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // Gap 2 — Revoke() via the plugin, V2 path
         // ---------------------------------------------------------------------------
 
+        /// <summary>
+        /// Opt-in cleanup/probe: revokes one explicit, already-issued order through the plugin's
+        /// V2 <c>Revoke</c> with reason superseded (4), outside Command. Used to clean up lab orders
+        /// Command never imported and to reproduce an out-of-band CA-side revoke (issues/0049).
+        /// Gated behind <c>CERTINEXT_REVOKE_ORDER_ID</c>; never retries.
+        /// </summary>
+        [SkippableFact]
+        public async Task Revoke_V2_ExplicitOrder_Superseded()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            string orderId = Environment.GetEnvironmentVariable("CERTINEXT_REVOKE_ORDER_ID");
+            Skip.If(string.IsNullOrWhiteSpace(orderId), "CERTINEXT_REVOKE_ORDER_ID not set — skipping.");
+
+            var plugin = BuildV2Plugin();
+            var before = await plugin.GetSingleRecord(orderId);
+            _output.WriteLine($"Before: CARequestID={orderId}, Status={before?.Status}");
+            Skip.If(before?.Status != (int)EndEntityStatus.GENERATED,
+                $"Order '{orderId}' is in status {before?.Status} (not GENERATED) — not revoking.");
+
+            int revokeResult = await plugin.Revoke(orderId, hexSerialNumber: string.Empty, revocationReason: 4 /* superseded */);
+            _output.WriteLine($"Revoke result: {revokeResult}");
+
+            var after = await plugin.GetSingleRecord(orderId);
+            _output.WriteLine($"After: Status={after?.Status}, RevocationDate={after?.RevocationDate:o}, RevocationReason={after?.RevocationReason}");
+            revokeResult.Should().Be((int)EndEntityStatus.REVOKED);
+        }
+
         [SkippableFact]
         public async Task Revoke_V2_IssuedOrder_ReturnsRevoked()
         {
