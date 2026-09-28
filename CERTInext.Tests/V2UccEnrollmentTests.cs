@@ -214,31 +214,85 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Enroll_V2_UccProduct_CsrCarriesExtraSans_StillFailsFast()
+        public async Task Enroll_V2_UccProduct_CsrCarriesExtraSans_OrderIsPlacedWithSansAsAdditionalDomains()
         {
-            // Strict mock with NOTHING stubbed: if the fail-fast guard did not fire before any
-            // catalog/order-placement call, this test fails on the first unstubbed call rather
-            // than on a business assertion — proving the guard is still unconditional (issue
-            // f3's explicit requirement: UCC-ness must not bypass the CSR-SAN-count guard).
+            // Issue 0047: the CSR-SAN-count guard used to run unconditionally before UCC
+            // detection, so a real UCC CSR enrollment (the CSR itself carries the extra DNS
+            // SANs, as Command actually builds it for CSR-based enrollments — confirmed live
+            // 2026-09-28) was always rejected before any CA order was placed. UCC products must
+            // now be exempt: the guard should not fire, and BuildSanList's own CSR fallback
+            // (triggered here via san: null) should carry those same CSR SANs into
+            // additionalDomains, exactly like the gateway-SAN-dictionary case already covered by
+            // Enroll_V2_UccProduct_PopulatesAdditionalDomainsFromGatewaySanDictionary above.
             var mock = NewMock();
+            StubCatalog(mock, "844", "15"); // DV SSL Certificate UCC
+
+            V2CreateSslOrderRequest captured = null;
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_ucc_002", Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_ucc_002", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_ucc_002", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_ucc_002", Status = "pending-dcv" });
+
             var plugin = BuildV2Plugin(mock.Object);
 
             var result = await plugin.Enroll(
-                csr: GenerateCsrPem("example.com", "example.com", "extra.example.com"),
+                csr: GenerateCsrPem("example.com", "example.com", "extra1.example.com", "extra2.example.com"),
                 subject: "CN=example.com",
-                san: null,
+                san: null, // no gateway SAN dictionary — BuildSanList falls back to the CSR's own SANs
                 productInfo: MakeV2ProductInfo("844"), // UCC product code
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
-            result.Status.Should().Be((int)EndEntityStatus.FAILED);
-            result.StatusMessage.Should().Contain("single-domain");
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "the order should proceed to CA placement rather than fail fast");
+            result.CARequestID.Should().Be("ord_ucc_002");
+            captured.Should().NotBeNull();
+            V2CreateSslOrderRequest req = captured!;
+            req.Certificate.Domain.Should().Be("example.com");
+            req.Certificate.AdditionalDomains.Should().BeEquivalentTo(
+                new[] { "extra1.example.com", "extra2.example.com" },
+                "a UCC product's CSR-embedded extra SANs must flow into additionalDomains instead of " +
+                "tripping the single-domain guard");
+        }
 
-            mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Never,
-                "the CSR-SAN-count guard must reject before any catalog lookup is attempted");
+        [Fact]
+        public async Task Enroll_V2_NonUccProduct_CsrCarriesExtraSans_StillFailsFastWithNoPlaceOrderCall()
+        {
+            // Counterpart to the UCC case above: a non-UCC product with the same multi-SAN CSR
+            // must keep the pre-0047 fail-fast behavior — FAILED, no order placed — even though
+            // the guard now necessarily runs after the (live) catalog lookup that determines
+            // UCC-ness, rather than before it.
+            var mock = NewMock();
+            StubCatalog(mock, "842", "13"); // DV SSL (non-UCC)
+
+            var plugin = BuildV2Plugin(mock.Object);
+
+            var result = await plugin.Enroll(
+                csr: GenerateCsrPem("example.com", "example.com", "extra1.example.com", "extra2.example.com"),
+                subject: "CN=example.com",
+                san: null,
+                productInfo: MakeV2ProductInfo("842"), // non-UCC product code
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().Contain("2 SAN(s) beyond");
+            result.StatusMessage.Should().Contain("single domain");
+            result.StatusMessage.Should().NotContain("The V2 API only supports single-domain certificates",
+                "the message must no longer claim V2 is single-domain-only in general — it's only true for non-UCC products");
+
+            mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Once,
+                "UCC-ness can only be known after the catalog lookup, so the guard now runs after it");
             mock.Verify(c => c.PlaceOrderV2Async(
                 It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never,
+                "a rejected non-UCC request must never reach order placement");
         }
 
         [Fact]
