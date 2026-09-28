@@ -104,7 +104,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// Subscription parameters block for V2 orders (validity, auto-renewal).
+    /// Subscription parameters block for V2 orders (validity, auto-renewal). Per the V2 spec,
+    /// omitting this block entirely defaults auto-renew to ON (1-year, 30-day window) at the CA,
+    /// so <c>EnrollV2Async</c> always sends it, driving <see cref="AutoRenew"/>/
+    /// <see cref="RenewBeforeDays"/> from the connector's SubscriptionAutoRenew/
+    /// SubscriptionRenewCriteriaDays config (issue 0027 item 2a/2b).
     /// </summary>
     public class V2SubscriptionParams
     {
@@ -114,8 +118,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("autoRenew")]
         public bool AutoRenew { get; set; } = false;
 
+        /// <summary>
+        /// Days before expiry CERTInext auto-renews; only meaningful when <see cref="AutoRenew"/>
+        /// is true. Null when the connector's SubscriptionRenewCriteriaDays is blank/unset — the
+        /// client's global JSON serializer options (<c>CERTInextClient.GetJsonOptions</c>,
+        /// <c>DefaultIgnoreCondition = WhenWritingNull</c>) omit the field from the wire in that
+        /// case, letting the CA fall back to its documented default of 30.
+        /// </summary>
         [JsonPropertyName("renewBeforeDays")]
-        public int RenewBeforeDays { get; set; } = 30;
+        public int? RenewBeforeDays { get; set; }
     }
 
     /// <summary>

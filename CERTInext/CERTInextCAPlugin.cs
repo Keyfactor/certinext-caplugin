@@ -1389,6 +1389,40 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 };
             }
 
+            // SubscriptionAutoRenew / SubscriptionRenewCriteriaDays — CA connector config that
+            // feeds the Subscription block below. AutoRenew uses the same bare "1"-means-true
+            // comparison AutoSecureWww already uses elsewhere in this method. RenewBeforeDays is
+            // validated up front — before any CA call — so a bad value fails the enrollment with
+            // a clear message rather than surfacing as an opaque CA-side error later, matching the
+            // fail-fast convention the OrganizationNumber check above already established. Blank/
+            // unset stays null (omitted on the wire; the client's global WhenWritingNull option
+            // means the CA falls back to its documented default of 30). See issue 0027 item 2a/2b.
+            bool subscriptionAutoRenew = _config.SubscriptionAutoRenew == "1";
+            int? subscriptionRenewBeforeDays = null;
+            if (!string.IsNullOrWhiteSpace(_config.SubscriptionRenewCriteriaDays))
+            {
+                if (!int.TryParse(_config.SubscriptionRenewCriteriaDays, out int parsedRenewDays) || parsedRenewDays < 0)
+                {
+                    _logger.LogError(
+                        "EnrollV2Async rejected an order — the CA connector's SubscriptionRenewCriteriaDays " +
+                        "value ('{Value}') is not a valid non-negative integer.",
+                        _config.SubscriptionRenewCriteriaDays);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: the CA connector's SubscriptionRenewCriteriaDays " +
+                                        $"setting ('{_config.SubscriptionRenewCriteriaDays}') must be a non-negative " +
+                                        "integer (or blank to use the CA's default of 30). Fix the CA connector " +
+                                        "configuration and retry."
+                    };
+                }
+
+                subscriptionRenewBeforeDays = parsedRenewDays;
+            }
+
             // Resolve the real V2 product code (and UCC-ness) from the live Catalog response.
             // Fetched once here and reused for both purposes — no second catalog call.
             //
@@ -1564,9 +1598,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 Subscription = new V2SubscriptionParams
                 {
-                    ValidityYears  = validityYears,
-                    AutoRenew      = false,
-                    RenewBeforeDays = 30
+                    ValidityYears   = validityYears,
+                    AutoRenew       = subscriptionAutoRenew,
+                    RenewBeforeDays = subscriptionRenewBeforeDays
                 },
                 Agreement = new V2AgreementParams
                 {
