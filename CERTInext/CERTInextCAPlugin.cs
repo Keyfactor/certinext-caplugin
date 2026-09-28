@@ -1313,49 +1313,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (string.IsNullOrWhiteSpace(domain))
                 throw new Exception("Cannot determine primary domain for V2 order — set the DomainName enrollment parameter or ensure the CSR subject has a CN.");
 
-            // V2 API only supports single-domain certificates. autoSecureWww covers the
-            // www.<domain> variant; any other DNS SAN in the CSR would be silently dropped
-            // or cause a CA-side rejection. Fail fast with a clear message rather than
-            // letting the CA return an opaque error. See issues/f3-v2-multi-san-limitation.md.
-            {
-                var sanEntries = ExtractSanEntriesFromCsr(csr, out _);
-                var extraSans = sanEntries
-                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
-                    .Select(s => s.Value?.ToLowerInvariant())
-                    .Where(v => !string.IsNullOrWhiteSpace(v))
-                    .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
-                    .Where(v => !string.Equals(v, "www." + domain, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-
-                if (extraSans.Count > 0)
-                {
-                    _logger.LogWarning(
-                        "EnrollV2Async rejected multi-SAN CSR for order on domain '{Domain}'. " +
-                        "V2 only supports single-domain certificates (autoSecureWww covers www.). " +
-                        "ExtraSans=[{ExtraSans}]",
-                        LogSanitizer.Strip(domain),
-                        LogSanitizer.Strip(string.Join(", ", extraSans)));
-                    _logger.MethodExit(LogLevel.Debug);
-                    return new EnrollmentResult
-                    {
-                        CARequestID   = string.Empty,
-                        Certificate   = null,
-                        Status        = (int)EndEntityStatus.FAILED,
-                        StatusMessage = $"V2 enrollment rejected: the CSR contains {extraSans.Count} SAN(s) beyond " +
-                                        $"the primary domain ('{domain}') and its www. variant. " +
-                                        "The V2 API only supports single-domain certificates. " +
-                                        "Resubmit with a single-domain CSR."
-                    };
-                }
-            }
-
             // organization is "Conditional — Mandatory for OV / EV" per the V2 spec's SSL field
             // table; every OV/EV create example in the spec sends it, and it is omitted entirely
             // for DV. CERTInext hard-rejects an OV/EV order with no organization block (HTTP 422
             // EMS-1180 "Organization Name cannot be empty" — confirmed live), so fail fast with a
-            // clear message here — before any catalog/order-placement call, mirroring the
-            // CSR-SAN-count guard above — rather than sending an incomplete block and letting the
-            // CA surface that opaque error. See issues/0028-v2-organizationnumber-not-sent.md.
+            // clear message here — before any catalog/order-placement call — rather than
+            // sending an incomplete block and letting the CA surface that opaque error. See
+            // issues/0028-v2-organizationnumber-not-sent.md.
             bool isOvOrEv = string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantOv, StringComparison.OrdinalIgnoreCase)
                          || string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase);
 
@@ -1473,9 +1437,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Explicit override (ProductCode/ProfileId set on the template): trust the
             // administrator's value as-is; the catalog is only consulted for UCC detection, and a
             // catalog lookup failure there must not block enrollment — fall back to non-UCC
-            // (single-domain) behavior, the strictly-safer failure mode, since the CSR-SAN-count
-            // guard above already ensures the CSR itself never carries surplus SANs. See
-            // issues/f3-v2-multi-san-limitation.md.
+            // (single-domain) behavior, the strictly-safer failure mode: the CSR-SAN-count guard
+            // below still runs against that non-UCC assumption, so a surplus-SAN CSR is rejected
+            // rather than silently accepted. See issues/f3-v2-multi-san-limitation.md and
+            // issues/0047-v2-multi-san-guard-blocks-ucc-orders.md.
             //
             // No explicit override: the code must NOT fall back to
             // Constants.Products.DefaultProductCodes (V1-era numbering that does not match the
@@ -1559,6 +1524,52 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "EnrollV2Async: resolved V2 product code from live catalog. ProductId={ProductId}, " +
                     "ProductTypeId={ProductTypeId}, ResolvedProductCode={ProductCode}",
                     ep.ProductId, expectedTypeId, productCode);
+            }
+
+            // Non-UCC V2 products support only a single domain plus autoSecureWww's www.<domain>
+            // variant; any other DNS SAN in the CSR would be silently dropped or cause a CA-side
+            // rejection, so fail fast with a clear message rather than letting the CA return an
+            // opaque error. UCC (multi-domain) products are exempt — their extra SANs are the
+            // expected input and are carried into additionalDomains below instead. This check
+            // necessarily runs after UCC detection above (which needs the live catalog lookup to
+            // know isUccProduct), not before it, but it still runs before PlaceOrderV2Async, so a
+            // rejected non-UCC request never places a CA order. See
+            // issues/f3-v2-multi-san-limitation.md and
+            // issues/0047-v2-multi-san-guard-blocks-ucc-orders.md.
+            if (!isUccProduct)
+            {
+                var sanEntries = ExtractSanEntriesFromCsr(csr, out _);
+                var extraSans = sanEntries
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .Select(s => s.Value?.ToLowerInvariant())
+                    .Where(v => !string.IsNullOrWhiteSpace(v))
+                    .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
+                    .Where(v => !string.Equals(v, "www." + domain, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                if (extraSans.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async rejected multi-SAN CSR for order on domain '{Domain}'. " +
+                        "This product does not support additional domains via the V2 API " +
+                        "(autoSecureWww covers www.); only UCC (multi-domain) products may carry " +
+                        "extra SANs. ExtraSans=[{ExtraSans}]",
+                        LogSanitizer.Strip(domain),
+                        LogSanitizer.Strip(string.Join(", ", extraSans)));
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: the CSR contains {extraSans.Count} SAN(s) beyond " +
+                                        $"the primary domain ('{domain}') and its www. variant. " +
+                                        "This product only supports a single domain via the V2 API " +
+                                        "(UCC/multi-domain products are the exception). " +
+                                        "Resubmit with a single-domain CSR, or enroll against a UCC " +
+                                        "product if additional domains are required."
+                    };
+                }
             }
 
             // For UCC products, additionalDomains is populated from the same SAN source the V1
