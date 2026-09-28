@@ -50,7 +50,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             bool ignoreExpired = false,
             string dcvTxtRecordTemplate = null,
             string requestorIsdCode = null,
-            string requestorMobileNumber = null) =>
+            string requestorMobileNumber = null,
+            ICertificateDataReader certDataReader = null) =>
             new CERTInextCAPlugin(client, new CERTInextConfig
             {
                 UseV2Api        = true,
@@ -69,7 +70,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 DcvTxtRecordTemplate  = dcvTxtRecordTemplate,
                 RequestorIsdCode      = requestorIsdCode,
                 RequestorMobileNumber = requestorMobileNumber
-            });
+            }, certDataReader);
+
+        /// <summary>
+        /// Issue 0049: a mock <see cref="ICertificateDataReader"/> whose
+        /// <see cref="ICertificateDataReader.GetExpirationDateByRequestId"/> returns a date,
+        /// simulating a gateway row that already holds a certificate body. Tests that exercise
+        /// revocation-detail/ProductId logic on a REVOKED-with-no-body record use this so the
+        /// bodyless-REVOKED guard (<see cref="CERTInextCAPlugin.DecideBodylessRevokedRecord"/>,
+        /// exercised directly in <c>Issue0049BodylessRevokedGuardTests</c>) lets the record
+        /// through unchanged, keeping these tests focused on their own concern.
+        /// </summary>
+        private static ICertificateDataReader GatewayHoldsBodyReader(DateTime? expiry = null)
+        {
+            var mock = new Mock<ICertificateDataReader>();
+            mock.Setup(r => r.GetExpirationDateByRequestId(It.IsAny<string>()))
+                .Returns(expiry ?? DateTime.UtcNow.AddDays(30));
+            return mock.Object;
+        }
 
         private static EnrollmentProductInfo MakeV2ProductInfo(
             string productCode = "842",
@@ -438,7 +456,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     }
                 }));
 
-            var plugin = BuildV2Plugin(mock.Object);
+            // Issue 0049: this record has no certificate body, so the bodyless-REVOKED guard
+            // would otherwise downgrade it to FAILED — a reader that reports the gateway
+            // already holds a body keeps this test focused on revocation-detail population.
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
             var record = await plugin.GetSingleRecord(MockCertificateData.V2OrderId1);
 
             record.Status.Should().Be((int)EndEntityStatus.REVOKED);
@@ -761,7 +782,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .Returns(AsyncEnumerable(row));
 
-            var plugin = BuildV2Plugin(mock.Object);
+            // Issue 0049: this row has no certificate body, so the bodyless-REVOKED guard would
+            // otherwise downgrade/skip it — a reader that reports the gateway already holds a
+            // body keeps this test focused on "revoked rows never attempt a download".
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
 
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
@@ -808,7 +832,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     }
                 }));
 
-            var plugin = BuildV2Plugin(mock.Object);
+            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // already holds a body keeps this test focused on revocation-detail population
+            // rather than the bodyless-REVOKED guard (covered separately).
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
 
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
@@ -850,7 +877,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     }
                 }));
 
-            var plugin = BuildV2Plugin(mock.Object);
+            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // already holds a body keeps this test focused on revocation-detail population
+            // rather than the bodyless-REVOKED guard (covered separately).
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
 
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
@@ -927,7 +957,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     ProductVariant = "ov-ucc"
                 }));
 
-            var plugin = BuildV2Plugin(mock.Object);
+            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // already holds a body keeps this test focused on ProductID preference rather than
+            // the bodyless-REVOKED guard (covered separately).
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
 
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
@@ -960,7 +993,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     ProductVariant = "ov-ucc"
                 }));
 
-            var plugin = BuildV2Plugin(mock.Object);
+            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // already holds a body keeps this test focused on ProductID preference rather than
+            // the bodyless-REVOKED guard (covered separately).
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
 
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
@@ -1025,7 +1061,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     ProductVariant = null
                 }));
 
-            var plugin = BuildV2Plugin(mock.Object);
+            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // already holds a body keeps this test focused on ProductID preference rather than
+            // the bodyless-REVOKED guard (covered separately).
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
 
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);
@@ -1739,6 +1778,345 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().ThrowAsync<AnyCAValidationException>()
                 .WithMessage("*Could not find a CERTInext V2 catalog entry*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0049 — bodyless-REVOKED guard. A V2 REVOKED record with no certificate
+        // body must never reach the gateway buffer / be returned as-is unless
+        // ICertificateDataReader.GetExpirationDateByRequestId confirms the gateway
+        // already holds a body for that CARequestID (DecideBodylessRevokedRecord).
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Synchronize_Issue0049_RevokedNoBody_GatewayHoldsBody_EmitsBodylessRevoked()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_0049_a", "Revoked", "Certificate Revoked");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            var readerMock = new Mock<ICertificateDataReader>();
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_a"))
+                .Returns(DateTime.UtcNow.AddDays(45));
+
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle(
+                    "the gateway already holds a body for this order, so the revoke must " +
+                    "still propagate as a bodyless REVOKED record")
+                .Which.Status.Should().Be((int)EndEntityStatus.REVOKED);
+            records[0].Certificate.Should().BeNullOrEmpty();
+
+            readerMock.Verify(r => r.GetExpirationDateByRequestId("ord_0049_a"), Times.Once);
+        }
+
+        [Fact]
+        public async Task Synchronize_Issue0049_RevokedNoBody_GatewayRowHasNoBody_EmitsFailedNotRevoked()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_0049_b", "Revoked", "Certificate Revoked");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            var readerMock = new Mock<ICertificateDataReader>();
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_b"))
+                .Returns((DateTime?)null); // row exists, but the gateway holds no body
+
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle(
+                    "a gateway row with no body must be downgraded to FAILED, never left as a " +
+                    "bodyless REVOKED record")
+                .Which.Status.Should().Be((int)EndEntityStatus.FAILED);
+            records[0].Certificate.Should().BeNullOrEmpty();
+            records[0].RevocationDate.Should().BeNull();
+            records[0].RevocationReason.Should().Be(0);
+        }
+
+        [Fact]
+        public async Task Synchronize_Issue0049_RevokedNoBody_NoGatewayRow_SkipsRecordEntirely()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_0049_c", "Revoked", "Certificate Revoked");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            var readerMock = new Mock<ICertificateDataReader>();
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_c"))
+                .Throws(new ArgumentException("No certificate/CA request exists for the specified request ID."));
+
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().BeEmpty(
+                "the gateway has never seen this order — creating a bodyless REVOKED row would " +
+                "poison it (RevocationDate is never cleared by the gateway)");
+        }
+
+        [Fact]
+        public async Task Synchronize_Issue0049_RevokedNoBody_ReaderThrowsUnexpectedException_SkipsRecord()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_0049_d", "Revoked", "Certificate Revoked");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            var readerMock = new Mock<ICertificateDataReader>();
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_d"))
+                .Throws(new InvalidOperationException("gateway database unavailable"));
+
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().BeEmpty(
+                "an unexpected reader failure must not risk emitting a bodyless REVOKED record — " +
+                "the revoke is only delayed to a later sync");
+        }
+
+        [Fact]
+        public async Task Synchronize_Issue0049_RevokedNoBody_NoCertificateDataReaderInjected_SkipsRecord()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_0049_e", "Revoked", "Certificate Revoked");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            // No certDataReader supplied — BuildV2Plugin defaults it to null.
+            var plugin = BuildV2Plugin(mock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().BeEmpty(
+                "with no reader available to consult, the plugin must not risk creating a " +
+                "poisoned gateway row");
+        }
+
+        [Fact]
+        public async Task Synchronize_Issue0049_GeneratedRow_NeverConsultsReader()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var row = ReportRow("ord_0049_f", "Order Fulfilled", "Certificate Downloaded");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_0049_f", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = "ord_0049_f",
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            // Strict with no setups — any call at all fails the test. Confirms the issue-0049
+            // guard is scoped to REVOKED-with-no-body and never touches the GENERATED path.
+            var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+            records.Should().ContainSingle()
+                .Which.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            records[0].Certificate.Should().StartWith("-----BEGIN CERTIFICATE-----");
+
+            readerMock.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task Synchronize_Issue0049_MixedBatch_NeverEmitsBodylessRevokedWithoutReaderConfirmation()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            var rowHoldsBody = ReportRow("ord_0049_mix_holds", "Revoked", "Certificate Revoked");
+            var rowNoBody    = ReportRow("ord_0049_mix_nobody", "Revoked", "Certificate Revoked");
+            var rowNoRow     = ReportRow("ord_0049_mix_norow", "Revoked", "Certificate Revoked");
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(rowHoldsBody, rowNoBody, rowNoRow));
+
+            var readerMock = new Mock<ICertificateDataReader>();
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_mix_holds"))
+                .Returns(DateTime.UtcNow.AddDays(60));
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_mix_nobody"))
+                .Returns((DateTime?)null);
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_mix_norow"))
+                .Throws(new ArgumentException("no such request id"));
+
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var records = buffer.ToArray();
+
+            // Core invariant (issue 0049): no record with Status=REVOKED and no certificate
+            // body may reach the gateway buffer unless the reader confirmed the gateway
+            // already holds a body for that specific CARequestID.
+            records.Should().NotContain(r =>
+                r.Status == (int)EndEntityStatus.REVOKED && string.IsNullOrEmpty(r.Certificate)
+                && r.CARequestID != "ord_0049_mix_holds");
+
+            records.Should().ContainSingle(r => r.CARequestID == "ord_0049_mix_holds")
+                .Which.Status.Should().Be((int)EndEntityStatus.REVOKED);
+            records.Should().ContainSingle(r => r.CARequestID == "ord_0049_mix_nobody")
+                .Which.Status.Should().Be((int)EndEntityStatus.FAILED);
+            records.Should().NotContain(r => r.CARequestID == "ord_0049_mix_norow");
+        }
+
+        [Fact]
+        public async Task GetSingleRecord_Issue0049_RevokedNoBody_GatewayHoldsBody_ReturnsRevoked()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId        = MockCertificateData.V2OrderId1,
+                    Status         = "revoked",
+                    ProductVariant = "dv"
+                }));
+
+            var readerMock = new Mock<ICertificateDataReader>();
+            readerMock.Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.V2OrderId1))
+                .Returns(DateTime.UtcNow.AddDays(10));
+
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+            var record = await plugin.GetSingleRecord(MockCertificateData.V2OrderId1);
+
+            record.Status.Should().Be((int)EndEntityStatus.REVOKED);
+            record.Certificate.Should().BeNullOrEmpty();
+        }
+
+        [Fact]
+        public async Task GetSingleRecord_Issue0049_RevokedNoBody_GatewayRowHasNoBody_ReturnsFailed()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId        = MockCertificateData.V2OrderId1,
+                    Status         = "revoked",
+                    ProductVariant = "dv",
+                    Revocation = new V2RevocationDetails
+                    {
+                        Status      = "Certificate Revoked",
+                        Reason      = "cessation-of-operation",
+                        ProcessedAt = DateTime.UtcNow
+                    }
+                }));
+
+            var readerMock = new Mock<ICertificateDataReader>();
+            readerMock.Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.V2OrderId1))
+                .Returns((DateTime?)null);
+
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+            var record = await plugin.GetSingleRecord(MockCertificateData.V2OrderId1);
+
+            record.Status.Should().Be((int)EndEntityStatus.FAILED);
+            record.Certificate.Should().BeNullOrEmpty();
+            record.RevocationDate.Should().BeNull();
+            record.RevocationReason.Should().Be(0);
+        }
+
+        [Fact]
+        public async Task GetSingleRecord_Issue0049_RevokedNoBody_NoGatewayRow_ReturnsFailed()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = MockCertificateData.V2OrderId1,
+                    Status  = "revoked"
+                }));
+
+            var readerMock = new Mock<ICertificateDataReader>();
+            readerMock.Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.V2OrderId1))
+                .Throws(new ArgumentException("no such request id"));
+
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+            var record = await plugin.GetSingleRecord(MockCertificateData.V2OrderId1);
+
+            record.Should().NotBeNull(
+                "GetSingleRecord cannot skip — it must return something even when the gateway " +
+                "has no row for this order");
+            record.Status.Should().Be((int)EndEntityStatus.FAILED);
+            record.Certificate.Should().BeNullOrEmpty();
+            record.RevocationDate.Should().BeNull();
+        }
+
+        [Fact]
+        public async Task GetSingleRecord_Issue0049_RevokedNoBody_NoCertificateDataReaderInjected_ReturnsFailed()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = MockCertificateData.V2OrderId1,
+                    Status  = "revoked"
+                }));
+
+            // No certDataReader supplied — BuildV2Plugin defaults it to null.
+            var plugin = BuildV2Plugin(mock.Object);
+            var record = await plugin.GetSingleRecord(MockCertificateData.V2OrderId1);
+
+            record.Status.Should().Be((int)EndEntityStatus.FAILED);
+        }
+
+        [Fact]
+        public async Task GetSingleRecord_Issue0049_GeneratedRecord_NeverConsultsReader()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId        = MockCertificateData.V2OrderId1,
+                    Status         = "issued",
+                    ProductVariant = "dv"
+                }));
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId        = MockCertificateData.V2OrderId1,
+                    CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            // Strict with no setups — confirms the issue-0049 guard never touches GENERATED.
+            var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
+            var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
+
+            var record = await plugin.GetSingleRecord(MockCertificateData.V2OrderId1);
+
+            record.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            readerMock.VerifyNoOtherCalls();
         }
 
         // ---------------------------------------------------------------------------
