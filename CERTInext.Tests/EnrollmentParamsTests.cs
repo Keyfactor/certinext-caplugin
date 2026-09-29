@@ -79,5 +79,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 ep.ProductCode.Should().Be(kvp.Value, $"ProductId '{kvp.Key}' must still resolve via the V1 table");
             }
         }
+
+        // Issue 0033: private-pki validation must tell "ProductVariant not set" apart from an
+        // explicit value, because the getter's SSL-only "dv" default masks the difference.
+        [Theory]
+        [InlineData(null, false, "dv")]
+        [InlineData("", false, "dv")]
+        [InlineData("   ", false, "dv")]
+        [InlineData("dv", true, "dv")]
+        [InlineData(" intranet-ssl ", true, "intranet-ssl")]
+        public void HasExplicitProductVariant_DistinguishesUnsetFromExplicit(string configured, bool expectedExplicit, string expectedVariant)
+        {
+            var parameters = new Dictionary<string, string>();
+            if (configured != null)
+                parameters[Constants.EnrollmentParam.ProductVariant] = configured;
+
+            var ep = new EnrollmentParams(MakeProductInfo(Constants.Products.DvSsl, parameters));
+
+            ep.HasExplicitProductVariant.Should().Be(expectedExplicit);
+            ep.ProductVariant.Should().Be(expectedVariant, "the ProductVariant getter's own default is unchanged");
+        }
     }
 }

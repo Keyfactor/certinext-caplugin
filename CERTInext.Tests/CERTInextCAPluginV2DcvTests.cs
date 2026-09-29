@@ -1035,5 +1035,132 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             verifiedPrimary.DcvMethod.Should().Be("dns-txt");
             verifiedPrimary.VerifiedAt.Should().Be("2026-09-29T00:46:09Z");
         }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0033 — DCV exists only for the SSL/TLS family. Spec: the DCV endpoints live
+        // under /ssl-certificates only; Private PKI: "No DCV - your CA trusts you"; Document
+        // Signer has no DCV step. PerformDcvV2IfNeededAsync's family gate must stop every caller
+        // (Enroll, GetSingleRecord, Synchronize) from hitting a nonexistent
+        // /{family}/{orderId}/dcv endpoint for a non-SSL order that is merely pending.
+        // ---------------------------------------------------------------------------
+
+        private static void SetupDcvCallsSoStrictMockDoesNotThrow(Mock<ICERTInextClient> mock)
+        {
+            // Set up (rather than leave unset) so a regression would be recorded as an invocation
+            // and caught by Verify(Times.Never), instead of throwing a MockException that
+            // PerformDcvV2IfNeededAsync's own error handling might swallow.
+            mock.Setup(c => c.GetDcvV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "should-never-be-fetched" });
+            mock.Setup(c => c.GetDcvV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "should-never-be-fetched" });
+            mock.Setup(c => c.VerifyDcvV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse());
+        }
+
+        private static void VerifyNoDcvCalls(Mock<ICERTInextClient> mock, FakeDomainValidator validator)
+        {
+            mock.Verify(c => c.GetDcvV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.GetDcvV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.VerifyDcvV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            validator.StagedRecords.Should().BeEmpty("no TXT record may be published for a non-SSL order");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_PrivatePki_PendingOrder_NeverAttemptsDcv_EvenWithDcvEnabled()
+        {
+            const string pkiOrderId = "ord_pki_dcv_001";
+            var mock = NewMock();
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<V2CreatePrivatePkiOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = pkiOrderId, Status = "pending-csr" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    Constants.ApiV2.FamilyPrivatePki, pkiOrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            // Even a (spec-impossible) pending-dcv status, with a domain block, must not trigger DCV.
+            mock.Setup(c => c.TrackOrderV2Async(Constants.ApiV2.FamilyPrivatePki, pkiOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(StatusWithDomains("pending-dcv", DomainEntry("intranet.acme.local", "PENDING")));
+            SetupDcvCallsSoStrictMockDoesNotThrow(mock);
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var result = await plugin.Enroll(
+                csr:            MockCertificateData.FakeCsrPem,
+                subject:        "CN=intranet.acme.local",
+                san:            new Dictionary<string, string[]> { ["dnsname"] = new[] { "intranet.acme.local" } },
+                productInfo:    new EnrollmentProductInfo
+                {
+                    ProductID = "DV SSL",
+                    ProductParameters = new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["ProductCode"]    = "149",
+                        ["ProductFamily"]  = "private-pki",
+                        ["ProductVariant"] = "intranet-ssl"
+                    }
+                },
+                requestFormat:  RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            result.CARequestID.Should().Be(pkiOrderId);
+            VerifyNoDcvCalls(mock, validator);
+        }
+
+        [Fact]
+        public async Task GetSingleRecord_V2_PrivatePkiOrder_PendingWithDomain_NeverAttemptsDcv()
+        {
+            const string pkiOrderId = "ord_pki_dcv_002";
+            var mock = NewMock();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(pkiOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilyPrivatePki, new V2OrderStatusResponse
+                {
+                    OrderId = pkiOrderId, Status = "pending-dcv", Domain = "intranet.acme.local"
+                }));
+            SetupDcvCallsSoStrictMockDoesNotThrow(mock);
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var record = await plugin.GetSingleRecord(pkiOrderId);
+
+            record.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            VerifyNoDcvCalls(mock, validator);
+        }
+
+        [Fact]
+        public async Task SynchronizeV2_PendingPrivatePkiOrder_ResolvedToPrivatePkiFamily_NeverAttemptsDcv()
+        {
+            // A private-pki order in pending-approval surfaces in /reports/orders exactly like a
+            // pending DV order ("Order Accepted" / "Pending for Approver", with a domainName) — so
+            // pre-0033 sync resolved its family and then called /private-pki-certificates/{id}/dcv.
+            var mock = NewMock();
+            var row = PendingDcvRow("ord_pki_sync_001", DateTime.UtcNow.AddMinutes(-10));
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_pki_sync_001", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilyPrivatePki, new V2OrderStatusResponse
+                {
+                    OrderId = "ord_pki_sync_001", Status = "pending-approval"
+                }));
+            SetupDcvCallsSoStrictMockDoesNotThrow(mock);
+
+            var validator = new FakeDomainValidator();
+            var config = new CERTInextConfig
+            {
+                UseV2Api = true, ApiUrl = "https://v2.certinext.io",
+                OAuthClientId = "c", OAuthClientSecret = "s",
+                DcvEnabled = true, DcvTimeoutMinutes = 1, DcvPropagationDelaySeconds = 1,
+                DcvSyncMaxOrderAgeHours = 0, DcvSyncMaxPerPass = 0
+            };
+            var plugin = new CERTInextCAPlugin(mock.Object, new FakeDomainValidatorFactory(validator), config);
+
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().ContainSingle(r => r.CARequestID == "ord_pki_sync_001"
+                && r.Status == (int)EndEntityStatus.EXTERNALVALIDATION);
+            VerifyNoDcvCalls(mock, validator);
+        }
     }
 }

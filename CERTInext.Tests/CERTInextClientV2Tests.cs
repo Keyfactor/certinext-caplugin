@@ -280,6 +280,107 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Issue 0033: family-specific PlaceOrderV2Async overloads
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task PlaceOrderV2Async_PrivatePki_PostsPrivatePkiBodyToPrivatePkiPath_WithProductCodeHeader()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/private-pki-certificates")
+                    .UsingPost()
+                    .WithHeader("X-Product-Code", "149"))
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"orderId\":\"ord_pki_001\",\"requestId\":\"req_1\",\"status\":\"pending-csr\"," +
+                              "\"variant\":\"intranet-ssl\",\"hostname\":\"intranet.acme.local\",\"resolvedProductCode\":\"149\"}"));
+
+            using var client = BuildV2Client();
+            var result = await client.PlaceOrderV2Async("149", new V2CreatePrivatePkiOrderRequest
+            {
+                Variant         = "intranet-ssl",
+                Hostname        = "intranet.acme.local",
+                AdditionalHosts = new List<string> { "portal.acme.local", "10.0.0.50" },
+                Requestor       = new V2Requestor { Name = "DevOps Team", Email = "devops@acme.com" },
+                Subscription    = new V2SubscriptionParams { ValidityYears = 1 }
+            });
+
+            result.OrderId.Should().Be("ord_pki_001");
+            result.Status.Should().Be("pending-csr");
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/private-pki-certificates");
+            entry.RequestMessage.Headers.Should().ContainKey("Idempotency-Key");
+            entry.RequestMessage.Body.Should().NotBeNullOrEmpty();
+            using var body = System.Text.Json.JsonDocument.Parse(entry.RequestMessage.Body ?? string.Empty);
+            body.RootElement.GetProperty("variant").GetString().Should().Be("intranet-ssl");
+            body.RootElement.GetProperty("hostname").GetString().Should().Be("intranet.acme.local");
+            body.RootElement.GetProperty("additionalHosts").EnumerateArray().Select(e => e.GetString())
+                .Should().Equal("portal.acme.local", "10.0.0.50");
+            body.RootElement.TryGetProperty("productVariant", out _).Should().BeFalse();
+            body.RootElement.TryGetProperty("certificate", out _).Should().BeFalse();
+            body.RootElement.TryGetProperty("agreement", out _).Should().BeFalse();
+            _server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates");
+        }
+
+        [Fact]
+        public async Task PlaceOrderV2Async_Signature_PostsSignatureBodyToSignaturePath_WithProductCodeHeader()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/signature-certificates")
+                    .UsingPost()
+                    .WithHeader("X-Product-Code", "819"))
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"orderId\":\"ord_sig_001\",\"requestId\":\"req_2\",\"status\":\"pending-documents\"," +
+                              "\"subjectType\":\"natural-person\",\"subjectDisplayName\":\"Sarah Johnson\",\"resolvedProductCode\":\"819\"}"));
+
+            using var client = BuildV2Client();
+            var result = await client.PlaceOrderV2Async("819", new V2CreateSignatureOrderRequest
+            {
+                SubjectType = "natural-person",
+                Requestor   = new V2Requestor { Name = "Sarah Johnson", Email = "sarah.johnson@example.com" },
+                Subject     = new V2SignatureSubject { FirstName = "Sarah", LastName = "Johnson", Email = "sarah.johnson@example.com" }
+            });
+
+            result.OrderId.Should().Be("ord_sig_001");
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/signature-certificates");
+            entry.RequestMessage.Body.Should().NotBeNullOrEmpty();
+            using var body = System.Text.Json.JsonDocument.Parse(entry.RequestMessage.Body ?? string.Empty);
+            body.RootElement.GetProperty("subjectType").GetString().Should().Be("natural-person");
+            body.RootElement.GetProperty("subject").GetProperty("email").GetString().Should().Be("sarah.johnson@example.com");
+        }
+
+        [Theory]
+        [InlineData(Constants.ApiV2.FamilyPrivatePki)]
+        [InlineData(Constants.ApiV2.FamilySignature)]
+        public async Task PlaceOrderV2Async_SslBody_ToNonSslFamily_Throws_AndSendsNothing(string family)
+        {
+            // Regression (issue 0033): the SSL overload used to substitute any slug into the URL,
+            // which is how a private-pki/signature template sent the SSL body to the wrong family.
+            StubV2Token();
+
+            using var client = BuildV2Client();
+            Func<Task> act = () => client.PlaceOrderV2Async(
+                family, "149",
+                new V2CreateSslOrderRequest
+                {
+                    Requestor   = new V2Requestor { Name = "T", Email = "t@t.com" },
+                    Certificate = new V2CertificateParams { Domain = "example.com" }
+                });
+
+            await act.Should().ThrowAsync<ArgumentException>().WithMessage($"*{family}*");
+            _server.LogEntries.Should().NotContain(e => e.RequestMessage.Path.StartsWith("/api/certinext/v2/"),
+                "no order request may be sent when the SSL body is aimed at another family");
+        }
+
+        // ---------------------------------------------------------------------------
         // TrackOrderV2Async
         // ---------------------------------------------------------------------------
 

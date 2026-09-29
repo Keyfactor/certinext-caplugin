@@ -385,5 +385,154 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             CERTInextClient.ApplyLoggingRedaction(input, logSensitiveRequestData: false).Should().Be(input);
             CERTInextClient.ApplyLoggingRedaction(input, logSensitiveRequestData: true).Should().Be(input);
         }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0033: V2 Private PKI and Document Signer (signature) order bodies. Built from the
+        // real DTOs so a JSON property rename that would silently defeat the redactor fails here.
+        // ---------------------------------------------------------------------------
+
+        // Values mirror the spec's "Create - Natural Person" example body.
+        private static string BuildV2SignatureOrderRequestJson()
+        {
+            var request = new V2CreateSignatureOrderRequest
+            {
+                SubjectType = "natural-person",
+                EmailNotifications = "all",
+                Requestor = new V2Requestor { Name = "Sarah Johnson", Email = "sarah.johnson@example.com", Phone = "+12025551234", Designation = "Document Signer" },
+                Subject = new V2SignatureSubject
+                {
+                    FirstName = "Sarah",
+                    LastName = "Johnson",
+                    Email = "sarah.johnson@example.com",
+                    Phone = "+12025551234",
+                    IdentityDocumentType = "passport",
+                    IdentificationNumber = "X12345678",
+                    StreetAddress1 = "1600 Pennsylvania Avenue NW",
+                    StreetAddress2 = "Apt 7",
+                    Locality = "Washington",
+                    State = "DC",
+                    PostalCode = "20500",
+                    CountryCode = "US"
+                },
+                Subscription = new V2SubscriptionParams { ValidityYears = 1, AutoRenew = false },
+                Agreement = new V2AgreementParams { SignerName = "Sarah Johnson", SignerPlace = "Washington, DC", Accepted = true },
+                Remarks = "Document Signer - Natural Person, US"
+            };
+            return JsonSerializer.Serialize(request, ClientEquivalentJsonOptions());
+        }
+
+        [Fact]
+        public void RedactPersonalData_V2SignatureOrderRequest_RemovesSubjectPersonFields()
+        {
+            string output = CERTInextClient.RedactPersonalData(BuildV2SignatureOrderRequestJson());
+
+            // Name, identity-document and street-address values must all be gone.
+            foreach (var raw in new[]
+                     {
+                         "Sarah", "Johnson", "+12025551234", "Document Signer\"", "passport", "X12345678",
+                         "1600 Pennsylvania Avenue NW", "Apt 7", "\"Washington\"", "20500", "Washington, DC"
+                     })
+            {
+                output.Should().NotContain(raw, $"'{raw}' is subject/requestor personal data (issue 0033)");
+            }
+
+            // subject.email and requestor.email are masked to their domain, not dropped.
+            output.Should().NotContain("sarah.johnson@");
+            output.Should().Contain("s***@example.com");
+        }
+
+        [Fact]
+        public void RedactPersonalData_V2SignatureOrderRequest_PreservesNonPersonalFields()
+        {
+            string output = CERTInextClient.RedactPersonalData(BuildV2SignatureOrderRequestJson());
+
+            // Deliberately-not-redacted keys: the discriminator, coarse location, and the
+            // agreement flag carry no personal identity on their own.
+            output.Should().Contain("\"subjectType\":\"natural-person\"");
+            output.Should().Contain("\"state\":\"DC\"");
+            output.Should().Contain("\"countryCode\":\"US\"");
+            output.Should().Contain("\"accepted\":true");
+        }
+
+        [Fact]
+        public void RedactPersonalData_V2SignatureCreateResponse_RedactsSubjectDisplayName()
+        {
+            // Spec "Create - Natural Person" response: subjectDisplayName is the full name for a
+            // natural / legal person. PlaceOrderV2Async logs this response body at Trace.
+            string input = "{\"orderId\":\"ord_sig_1\",\"status\":\"pending-documents\",\"subjectType\":\"natural-person\"," +
+                           "\"subjectDisplayName\":\"Sarah Johnson\",\"resolvedProductCode\":\"819\"}";
+
+            string output = CERTInextClient.RedactPersonalData(input);
+
+            output.Should().NotContain("Sarah Johnson");
+            output.Should().Contain("\"subjectDisplayName\":\"***REDACTED***\"");
+            output.Should().Contain("\"orderId\":\"ord_sig_1\"");
+            output.Should().Contain("\"resolvedProductCode\":\"819\"");
+        }
+
+        [Fact]
+        public void RedactPersonalData_LegalEntitySubject_KeepsOrganizationFields()
+        {
+            // Organization identity is not personal data, and "organizationName" is also a V1
+            // order/report key for an OV organization — deliberately excluded from the key set.
+            var request = new V2CreateSignatureOrderRequest
+            {
+                SubjectType = "legal-entity",
+                Requestor = new V2Requestor { Name = "Acme Corporation Compliance", Email = "pki-ops@acme.com" },
+                Subject = new V2SignatureSubject
+                {
+                    OrganizationName = "Acme Corporation",
+                    OrganizationUnit = "Compliance",
+                    BusinessCategory = "Business Entity",
+                    OrganizationIdentificationNumber = "EIN-12-3456789",
+                    Email = "pki-ops@acme.com"
+                }
+            };
+            string json = JsonSerializer.Serialize(request, ClientEquivalentJsonOptions());
+
+            string output = CERTInextClient.RedactPersonalData(json);
+
+            output.Should().Contain("\"organizationName\":\"Acme Corporation\"");
+            output.Should().Contain("\"organizationIdentificationNumber\":\"EIN-12-3456789\"");
+            output.Should().NotContain("Acme Corporation Compliance", "requestor.name is still personal/contact data");
+            output.Should().NotContain("pki-ops@");
+        }
+
+        [Fact]
+        public void ApplyLoggingRedaction_V2SignatureOrderRequest_FlagOn_LeavesSubjectInFull()
+        {
+            string output = CERTInextClient.ApplyLoggingRedaction(BuildV2SignatureOrderRequestJson(), logSensitiveRequestData: true);
+
+            output.Should().Contain("\"firstName\":\"Sarah\"");
+            output.Should().Contain("\"identificationNumber\":\"X12345678\"");
+            output.Should().Contain("sarah.johnson@example.com");
+        }
+
+        [Fact]
+        public void ApplyLoggingRedaction_V2PrivatePkiOrderRequest_FlagOff_RedactsRequestorAndContact_KeepsHosts()
+        {
+            // Private PKI adds no new personal keys (requestor / technicalPointOfContact reuse the
+            // bare name/email/phone/designation keys); hostname / additionalHosts are diagnostic
+            // host data and must survive redaction.
+            var request = new V2CreatePrivatePkiOrderRequest
+            {
+                Variant = "intranet-ssl",
+                Hostname = "intranet.acme.local",
+                AdditionalHosts = new System.Collections.Generic.List<string> { "portal.acme.local", "10.0.0.50" },
+                Requestor = new V2Requestor { Name = "DevOps Team", Email = "devops@acme.com", Phone = "+14155551234", Designation = "Platform Engineering" },
+                TechnicalPointOfContact = new V2TechnicalPointOfContact { Name = "Tech Person", Email = "tech@acme.com", Phone = "+14155550000", Designation = "Technical Contact" },
+                Subscription = new V2SubscriptionParams { ValidityYears = 1 }
+            };
+            string json = JsonSerializer.Serialize(request, ClientEquivalentJsonOptions());
+
+            string output = CERTInextClient.ApplyLoggingRedaction(json, logSensitiveRequestData: false);
+
+            foreach (var raw in new[] { "DevOps Team", "devops@", "+14155551234", "Platform Engineering", "Tech Person", "tech@", "+14155550000" })
+                output.Should().NotContain(raw);
+            output.Should().Contain("\"hostname\":\"intranet.acme.local\"");
+            output.Should().Contain("portal.acme.local");
+            output.Should().Contain("10.0.0.50");
+            output.Should().Contain("\"variant\":\"intranet-ssl\"");
+        }
     }
 }
