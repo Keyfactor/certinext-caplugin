@@ -8,7 +8,7 @@
 - feat(v2): Synchronize now uses V2 `/reports/orders` when `UseV2Api` is true, with an incremental lookback window (`V2SyncLookbackHours`, default 72h) — V1 credentials are no longer required in V2 mode.
 - feat(v2): Consolidated V2 config onto the existing `ApiUrl`/`OAuthClientId`/`OAuthClientSecret` fields; the never-shipped `ApiUrlV2`/`ClientId`/`ClientSecret` fields are removed.
 - **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly and returns the certificate in the same request when it issues fast, instead of always waiting for the next sync. Configurable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s). Orders that don't issue in time (e.g. OV/EV) return pending and are picked up by the next sync, as before.
-- feat(v2): V2 enrollment now supports multi-SAN (UCC) certificates. UCC products are detected from the live Catalog's `productTypeID`, and the SAN set is sent via `additionalDomains`; DCV for the extra SANs is not yet automated (see 0042) (F3).
+- feat(v2): V2 enrollment now supports multi-SAN (UCC) certificates. UCC products are detected from the live Catalog's `productTypeID`, and the SAN set is sent via `additionalDomains` (F3).
 
 ## Bug Fixes
 - **UCC certificates no longer come back with only the common name.** The gateway sends SANs under the key `dnsname`, which the plugin didn't recognize, so orders went out with an empty domain list. SANs are now read from every key the gateway sends, plus from the CSR itself.
@@ -39,6 +39,8 @@
 - fix(v2): V2 SSL order create now honors the connector's `EmailNotifications` setting (`"1"`→`"all"`, `"0"`→`"0"`, blank→omitted) instead of always sending `"all"`; V2 orders now default to `"0"` (reduced notifications), matching V1 (0027).
 - fix(enroll): the V2 single-domain CSR-SAN-count guard now exempts UCC products, instead of rejecting every UCC CSR enrollment before it could reach the UCC path (0047).
 - fix(audit): the "Enrollment complete" audit log now records the leaf serial for V2 chain PEMs instead of `(parse-error)` (0050).
+- fix(v2): V2 enrollment now runs the same short certificate-pickup poll as V1 instead of returning pending when the order hasn't issued yet at the post-CSR check (0051).
+- fix(v2): V2 DCV now runs for every SAN on a UCC order, not just the primary domain (0042).
 - fix(sync): V2 `Synchronize`/`GetSingleRecord` no longer emit a body-less REVOKED record unless the gateway already holds a certificate body for that order, preventing a poisoned gateway row that broke every future Command scan of the CA (0049).
 - fix(enroll): V2 `Enroll` no longer returns a body-less REVOKED result; a REVOKED disposition observed post-CSR-submit, post-DCV, or during the pickup poll is now reported as FAILED (0052).
 - fix(logging): requestor personal data (name, email, phone, org contact fields) and full CA request/response payloads are now redacted from gateway logs by default, gated behind a new opt-in `LogSensitiveRequestData` connector setting (0040).
