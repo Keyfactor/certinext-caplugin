@@ -268,7 +268,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "DcvEnabled={DcvEnabled}, DcvTxtRecordTemplate={DcvTxtRecordTemplate}, " +
                 "DcvPropagationDelaySeconds={DcvPropagationDelay}, DcvTimeoutMinutes={DcvTimeout}, " +
                 "DcvWaitForChallengeSeconds={DcvWaitChallenge}, DcvWaitForIssuanceSeconds={DcvWaitIssuance}, " +
-                "DomainValidatorFactoryInjected={FactoryInjected}",
+                "DomainValidatorFactoryInjected={FactoryInjected}, LogSensitiveRequestData={LogSensitiveRequestData}",
                 _config.ApiUrl, _config.AuthMode, _config.Enabled,
                 hasApiKey, hasUsername,
                 hasPassword, hasClientId,
@@ -287,7 +287,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _config.DcvEnabled, _config.DcvTxtRecordTemplate,
                 _config.DcvPropagationDelaySeconds, _config.DcvTimeoutMinutes,
                 _config.DcvWaitForChallengeSeconds, _config.DcvWaitForIssuanceSeconds,
-                _domainValidatorFactory != null);
+                _domainValidatorFactory != null, _config.LogSensitiveRequestData);
 
             // SOC2 CC7.1: surface silent functional downgrades. If DCV is enabled in
             // config but no factory was injected (e.g. v3.2 gateway host), DCV will be
@@ -301,6 +301,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "(see GitHub issue #7). Install a DNS provider plugin and upgrade to a " +
                     "gateway image that supplies the factory, or set DcvEnabled=false to clear " +
                     "this warning.");
+            }
+
+            // Issue 0040 audit trail: this is the one place that records sensitive-data logging
+            // was switched on, so a reviewer scanning gateway logs can see exactly when it started
+            // (and, from the absence of a corresponding line on a later restart, when it stopped).
+            if (_config.LogSensitiveRequestData)
+            {
+                _logger.LogWarning(
+                    "LogSensitiveRequestData=true — this CERTInext connector will write requestor " +
+                    "personal data (name, email, phone, and other organization contact details) and " +
+                    "full CA request/response payloads to the gateway logs. This is intended for " +
+                    "temporary use while verifying a new deployment; turn it back off once " +
+                    "verification is complete.");
             }
             _logger.MethodExit(LogLevel.Debug);
         }
@@ -735,14 +748,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     .Select(v => $"{kvp.Key}:{v}")))
                 : "(none)";
 
-            _logger.LogInformation(
-                "Enrollment attempt started. " +
-                "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
-                "ProfileId={ProfileId}, SANs={SANs}, " +
-                "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
-                enrollmentType, requestFormat, LogSanitizer.Strip(subject),
-                ep.ProfileId, LogSanitizer.Strip(sanSummary),
-                LogSanitizer.Strip(ep.RequesterName), LogSanitizer.Strip(ep.RequesterEmail));
+            // Issue 0040: RequesterName/RequesterEmail are personal data belonging to whoever
+            // placed the order. Off by default (LogSensitiveRequestData=false) — the name is
+            // dropped from the line entirely and the email is masked to keep only its domain.
+            // On, this is the pre-0040 behaviour: both fields logged in full, for deployment
+            // verification.
+            if (_config.LogSensitiveRequestData)
+            {
+                _logger.LogInformation(
+                    "Enrollment attempt started. " +
+                    "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
+                    "ProfileId={ProfileId}, SANs={SANs}, " +
+                    "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
+                    enrollmentType, requestFormat, LogSanitizer.Strip(subject),
+                    ep.ProfileId, LogSanitizer.Strip(sanSummary),
+                    LogSanitizer.Strip(ep.RequesterName), LogSanitizer.Strip(ep.RequesterEmail));
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Enrollment attempt started. " +
+                    "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
+                    "ProfileId={ProfileId}, SANs={SANs}, " +
+                    "RequesterEmail={RequesterEmail}",
+                    enrollmentType, requestFormat, LogSanitizer.Strip(subject),
+                    ep.ProfileId, LogSanitizer.Strip(sanSummary),
+                    LogSanitizer.MaskEmail(LogSanitizer.Strip(ep.RequesterEmail)));
+            }
 
             if (string.IsNullOrWhiteSpace(ep.ProfileId))
             {

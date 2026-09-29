@@ -23,6 +23,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SubmitNonDnsSans = "SubmitNonDnsSans";
             public const string PageSize = "PageSize";
 
+            // Diagnostic escape hatch — see CERTInextConfig.LogSensitiveRequestData. Off by
+            // default; only meant for temporary use while verifying a new deployment.
+            public const string LogSensitiveRequestData = "LogSensitiveRequestData";
+
             // Synchronous certificate pickup (parity with the legacy Sectigo connector).
             // After submitting an order, Enroll() polls GetCertificate up to PickupRetries
             // times, PickupDelay seconds apart (after a fixed initial delay), so a fast-issuing

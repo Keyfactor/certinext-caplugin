@@ -249,7 +249,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
                 var req = new RestRequest(Constants.Api.GenerateOrderSslPath, Method.Post);
                 string jsonBody = JsonSerializer.Serialize(request, GetJsonOptions());
-                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}", RedactCredentials(jsonBody));
+                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}",
+                    ApplyLoggingRedaction(jsonBody, _config.LogSensitiveRequestData));
                 req.AddJsonBody(jsonBody);
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -460,7 +461,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             var result = DeserializeOrThrow<TrackOrderResponse>(resp, $"track order {orderNumber}");
             Logger.LogTrace("TrackOrderAsync response payload (Order={OrderNumber}): {Payload}",
-                orderNumber, resp.Content);
+                orderNumber, ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
 
             // A meta status of "0" with errorCode EMS-913 or similar means the order was not found
             if (result.Meta != null && !result.Meta.IsSuccess)
@@ -1341,7 +1342,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
             req.AddHeader("X-Product-Code", productCode ?? string.Empty);
             string json = JsonSerializer.Serialize(request, GetJsonOptions());
-            Logger.LogTrace("PlaceOrderV2Async request payload: {Payload}", json);
+            Logger.LogTrace("PlaceOrderV2Async request payload: {Payload}",
+                ApplyLoggingRedaction(json, _config.LogSensitiveRequestData));
             req.AddJsonBody(json);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var resp = await _httpV2.ExecuteAsync(req, ct);
@@ -1349,7 +1351,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             Logger.LogInformation(
                 "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
                 path, (int)resp.StatusCode, sw.ElapsedMilliseconds);
-            Logger.LogTrace("PlaceOrderV2Async response: {Body}", resp.Content);
+            Logger.LogTrace("PlaceOrderV2Async response: {Body}",
+                ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
             ThrowOnV2Failure(resp, "V2 place order");
             var result = DeserializeV2OrThrow<V2CreateOrderResponse>(resp, "V2 place order");
             Logger.MethodExit(LogLevel.Trace);
@@ -1959,7 +1962,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Throws an appropriate exception for V2 API non-success responses.
         /// Handles RFC 7807 problem+json and plain HTTP errors.
         /// </summary>
-        private static void ThrowOnV2Failure(RestResponse resp, string operation)
+        // Instance (not static) — calls LogV2ApiFailure, which needs _config.LogSensitiveRequestData.
+        private void ThrowOnV2Failure(RestResponse resp, string operation)
         {
             if (resp.IsSuccessful) return;
 
@@ -1989,9 +1993,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Call immediately before throwing so the exception's "See gateway logs for details"
         /// message has a corresponding structured entry in the gateway log.
         /// </summary>
-        private static void LogV2ApiFailure(string operation, RestResponse resp, LogLevel level = LogLevel.Warning)
+        // Instance (not static) so it can read _config.LogSensitiveRequestData — see issue 0040.
+        private void LogV2ApiFailure(string operation, RestResponse resp, LogLevel level = LogLevel.Warning)
         {
-            string sanitizedBody = Truncate(RedactCredentials(resp?.Content) ?? "(empty)", LoggedResponseBodyCapBytes);
+            string sanitizedBody = Truncate(
+                ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)",
+                LoggedResponseBodyCapBytes);
             Logger.Log(
                 level,
                 "CERTInext V2 API non-success. Operation={Operation}, Method={Method}, Path={Path}, " +
@@ -2636,6 +2643,94 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return body;
         }
 
+        // Exact JSON key names that carry a person's email address across the V1 and V2 wire
+        // shapes (see CERTInext/API/CertificateRequest.cs and CERTInext/API/V2/CertificateRequestV2.cs).
+        // Every one of these is a full, exact key — never a substring of an unrelated key (e.g.
+        // "domainName"/"organizationName" do not end in a bare "email" key) — so matching the key
+        // by exact name cannot cross-contaminate unrelated fields.
+        private static readonly string[] PersonalEmailFieldNames =
+        {
+            "requestorEmail", "requesterEmail", "tpcEmail", "requestorEmailId", "dcvEmail", "email"
+        };
+
+        // Exact JSON key names carrying other person/contact data (name, phone/ISD/mobile,
+        // designation, signer place/IP). "name" is bare only inside the V2 requestor /
+        // technicalPointOfContact blocks in every currently-logged body — it is never used as an
+        // exact top-level key anywhere else on the CERTInext wire shapes this plugin logs raw.
+        private static readonly string[] PersonalOtherFieldNames =
+        {
+            "requestorName", "requesterName", "tpcName", "signerName", "name",
+            "requestorIsdCode", "requestorMobileNumber", "requestorDesignation",
+            "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signerip", "phone", "designation"
+        };
+
+        /// <summary>
+        /// Scrubs known person/contact-bearing keys out of a JSON-ish body before it goes into a
+        /// log line, when <c>LogSensitiveRequestData</c> is off (issue 0040). Covers the V1
+        /// <c>requestorInformation</c> / <c>technicalPointOfContact</c> / <c>agreementDetails</c>
+        /// shapes (<c>requestorName</c>, <c>requestorEmail</c>, <c>requestorIsdCode</c>,
+        /// <c>requestorMobileNumber</c>, <c>requestorDesignation</c>, <c>tpcName</c>,
+        /// <c>tpcEmail</c>, <c>tpcIsdCode</c>, <c>tpcMobileNumber</c>, <c>signerName</c>,
+        /// <c>signerPlace</c>, <c>signerIP</c>/<c>signerIp</c>, the legacy <c>requesterName</c>/
+        /// <c>requesterEmail</c> aliases, and the <c>requestorEmailId</c> search filter) and the
+        /// V2 nested <c>requestor</c> / <c>technicalPointOfContact</c> shapes (bare <c>name</c>/
+        /// <c>email</c>/<c>phone</c>/<c>designation</c>).
+        ///
+        /// Email values are masked via <see cref="LogSanitizer.MaskEmail"/> so the domain stays
+        /// visible (e.g. <c>"j***@example.com"</c>) while the local part is hidden. Every other
+        /// matched field is replaced outright with <c>"***REDACTED***"</c>. Fields that are
+        /// already blank/empty on the wire are left untouched — there is nothing to redact.
+        ///
+        /// Conservative substring/regex pass, same style as <see cref="RedactCredentials"/> —
+        /// tolerant of whitespace around the JSON <c>key : value</c> separator (including
+        /// pretty-printed bodies), and anchored on the opening/closing quote of the key so it
+        /// cannot match a key name as a substring of a longer one. Exposed <c>internal</c> for
+        /// unit testing.
+        /// </summary>
+        internal static string RedactPersonalData(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+
+            foreach (var key in PersonalEmailFieldNames)
+                body = RedactJsonField(body, key, LogSanitizer.MaskEmail);
+
+            foreach (var key in PersonalOtherFieldNames)
+                body = RedactJsonField(body, key, _ => "***REDACTED***");
+
+            return body;
+        }
+
+        /// <summary>
+        /// Replaces the value of every occurrence of a JSON string field named <paramref name="keyName"/>
+        /// (case-insensitive, exact key match) with <paramref name="transform"/> applied to the
+        /// original value. Leaves already-empty values untouched. Whitespace around the colon and
+        /// around the key's own quotes is tolerated.
+        /// </summary>
+        private static string RedactJsonField(string body, string keyName, Func<string, string> transform)
+        {
+            return System.Text.RegularExpressions.Regex.Replace(
+                body,
+                $@"(?i)(""{System.Text.RegularExpressions.Regex.Escape(keyName)}""\s*:\s*"")([^""]*)("")",
+                m => string.IsNullOrEmpty(m.Groups[2].Value)
+                    ? m.Value
+                    : m.Groups[1].Value + transform(m.Groups[2].Value) + m.Groups[3].Value);
+        }
+
+        /// <summary>
+        /// Applies the standard logging redaction pipeline to a request/response body before it
+        /// is written to a log line: credentials are always scrubbed via
+        /// <see cref="RedactCredentials"/>, and personal-data fields are additionally scrubbed via
+        /// <see cref="RedactPersonalData"/> unless <paramref name="logSensitiveRequestData"/> is
+        /// true (issue 0040). Centralizing this here keeps all six raw-body log sites in this
+        /// class (and <c>LogApiFailure</c>/<c>LogV2ApiFailure</c>) consistent and gives the on/off
+        /// behavior one place to unit-test.
+        /// </summary>
+        internal static string ApplyLoggingRedaction(string body, bool logSensitiveRequestData)
+        {
+            string redacted = RedactCredentials(body);
+            return logSensitiveRequestData ? redacted : RedactPersonalData(redacted);
+        }
+
         /// <summary>
         /// Writes a structured log capturing every diagnostic field available for a
         /// non-success CERTInext API response — HTTP status, the CERTInext-side error
@@ -2663,14 +2758,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <see cref="LogLevel.Error"/> so SOX-loggable authentication events match
         /// the SIEM-alert level convention.
         /// </summary>
-        private static void LogApiFailure(
+        // Instance (not static) so it can read _config.LogSensitiveRequestData — see issue 0040.
+        private void LogApiFailure(
             string operationContext,
             RestResponse resp,
             string errorCode = null,
             string errorMessage = null,
             LogLevel level = LogLevel.Warning)
         {
-            string sanitizedBody = RedactCredentials(resp?.Content) ?? "(empty)";
+            string sanitizedBody = ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)";
             Logger.Log(
                 level,
                 "CERTInext API non-success. Operation={Operation}, HttpStatus={HttpStatus}, " +

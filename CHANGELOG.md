@@ -41,6 +41,7 @@
 - fix(audit): the "Enrollment complete" audit log now records the leaf serial for V2 chain PEMs instead of `(parse-error)` (0050).
 - fix(sync): V2 `Synchronize`/`GetSingleRecord` no longer emit a body-less REVOKED record unless the gateway already holds a certificate body for that order, preventing a poisoned gateway row that broke every future Command scan of the CA (0049).
 - fix(enroll): V2 `Enroll` no longer returns a body-less REVOKED result; a REVOKED disposition observed post-CSR-submit, post-DCV, or during the pickup poll is now reported as FAILED (0052).
+- fix(logging): requestor personal data (name, email, phone, org contact fields) and full CA request/response payloads are now redacted from gateway logs by default, gated behind a new opt-in `LogSensitiveRequestData` connector setting (0040).
 
 ## Chores
 - docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).
@@ -64,6 +65,7 @@
 - chore(tests): regression coverage for the V2 CSR-SAN-count guard through `Enroll` for both UCC (order placed, SANs as `additionalDomains`) and non-UCC (FAILED, no order placed) products (0047).
 - chore(tests): regression coverage for the V2 bodyless-REVOKED guard — gateway-holds-body, no-body, no-row, reader-failure, and GENERATED-unaffected cases, in both `Synchronize` and `GetSingleRecord` (0049).
 - chore(tests): regression coverage for the V2 `Enroll` REVOKED→FAILED normalization — post-CSR-submit, mid-pickup-poll, post-DCV-recheck, and FAILED/GENERATED-unaffected cases (0052).
+- chore(tests): regression coverage for `RedactPersonalData`/`ApplyLoggingRedaction` against realistic V1/V2 order payloads, `LogSanitizer.MaskEmail`, the `LogSensitiveRequestData` config default/annotation, and the flag's on/off behavior in `Enroll`'s audit log line (0040).
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 

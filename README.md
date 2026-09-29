@@ -133,11 +133,12 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **RequestorEmail** - REQUIRED: Default requestor email submitted with all certificate orders. Must be a valid email address registered in your CERTInext account.
         * **RequestorIsdCode** - International dialing code for the requestor phone number (e.g. '1' for US). Default: '1'.
         * **RequestorMobileNumber** - Requestor mobile number (digits only, no country code).
+        * **RequestorDesignation** - OPTIONAL: Job title / role of the requestor (e.g. 'IT Administrator'). Sent in V2 orders' `requestor.designation` field. Free text with no CA-side enum. Left blank by default, in which case the field is omitted entirely from the order rather than sent with a default value.
         * **SignerPlace** - City or location of the subscriber agreement signer. Required by CERTInext for all orders.
         * **SignerIp** - IP address of the subscriber agreement signer. Required by CERTInext for all orders.
         * **DefaultProductCode** - OPTIONAL: Default numeric product code used when not specified at template level. Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). Retrieve available codes from Integrations → APIs → GetProductDetails.
         * **AccountingModel** - OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel`. "2" = credit-based (most accounts, default). "1" = cash model.
-        * **EmailNotifications** - OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. "1" = enabled, "0" = silent (recommended for gateway-driven orders so end users aren't surprised by CA emails). Default: "0".
+        * **EmailNotifications** - OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. "1" = full notification set (V1 sends it as-is; V2 maps it to "all"). "0" = silent on both V1 and V2 (V2 confirmed live 2026-09-28). Blank/unset stays silent on V1 (sent as "0") but is omitted on V2, so the CA's own default ("all", not silent) applies instead. Any other value fails V2 enrollment before any CA call. Default: "0" — V2 orders are now silent by default, matching V1 (previously V2 always sent "all").
         * **SubscriptionValidityYears** - OPTIONAL: Default validity in years for SSL orders. "1", "2", or "3". Override per template via the ValidityYears product parameter. Default: "1".
         * **SubscriptionAutoRenew** - OPTIONAL: Whether CERTInext should auto-renew certificates issued through this connector. "0" = disabled (recommended — renewal is driven by Keyfactor Command), "1" = enabled. Default: "0".
         * **SubscriptionRenewCriteriaDays** - OPTIONAL: Days before expiry at which CERTInext auto-renews (only honored when SubscriptionAutoRenew = "1"). Typical values: "30" or "60". Default: "30".
@@ -145,6 +146,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **IgnoreExpired** - If true, expired certificates will be skipped during synchronization. Default: false.
         * **PageSize** - Number of orders to fetch per page during synchronization. Default: 100, max: 500.
         * **Enabled** - Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true.
+        * **LogSensitiveRequestData** - OPTIONAL diagnostic escape hatch. When true, enabling it writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. Meant for temporary use while verifying a new deployment — confirming exactly what was sent to the CA and that the order succeeded — and should be turned back off once verification is complete. When false (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. 'j***@example.com') and the enrollment log line omits the requester name entirely. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: false.
         * **DcvEnabled** - OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false.
         * **DcvTxtRecordTemplate** - OPTIONAL: Format string for the DNS TXT record hostname used during DCV. {0} is replaced with the domain name being validated. Default: _emsign-validation.{0}
         * **DcvPropagationDelaySeconds** - OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: 30.
@@ -258,13 +260,14 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `RequestorEmail` | Required | Default email address for the requestor. Must be a valid email address associated with your CERTInext account. Sent in the `requestorInformation` block of every order request. | Use a monitored team inbox or the account holder's email. | `pki-admin@example.com` |
 | `RequestorIsdCode` | Optional | International dialing code for the requestor phone number (digits only, no `+` prefix). Default: `1` (United States). | N/A — use the country code for your requestor. | `1` |
 | `RequestorMobileNumber` | Optional | Requestor mobile number (digits only, no country code). Included in the `requestorInformation` block. | N/A | `5551234567` |
+| `RequestorDesignation` | Optional | Job title / role of the requestor (e.g. `IT Administrator`). Sent in the `requestorInformation` block (V1) and the `requestor.designation` field (V2 mode). Free text with no CA-side enum. Left blank by default, in which case the field is omitted from the order entirely rather than sent with a default value. | N/A | `IT Administrator` |
 | `SignerPlace` | Required | City or location of the person accepting the subscriber agreement on behalf of your organization. Required by CERTInext for all orders. | Use the physical city where the signer is located. | `Austin` |
 | `SignerIp` | Required | Public IP address of the host accepting the subscriber agreement. Required by CERTInext for all orders. | Use the outbound IP of the AnyCA Gateway host, or the IP of the workstation from which the agreement was accepted. | `203.0.113.10` |
 | `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in the `productDetails.groupNumber` field of `GetProductDetails` requests *and* in `delegationInformation.groupNumber` on every SSL order. Some sandbox accounts return an empty product list from `GetProductDetails` unless this field is included. Available in the CERTInext portal under **Delegation → Groups**. | Portal → **Delegation → Groups**. | `2345678901` |
 | `OrganizationNumber` | Optional, strongly recommended for OV/EV and faster DV | Numeric CERTInext organization number for a pre-vetted organization. When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and this number, telling CERTInext to skip its manual organization-vetting queue. Without it, orders may sit in `Pending System RA` for extended manual review (observed: tens of hours). | Portal → **Organizations → Pre-vetted Organizations**. | `1234567` |
 | `TechnicalContactName` / `TechnicalContactEmail` / `TechnicalContactIsdCode` / `TechnicalContactMobileNumber` | Optional | Populate `technicalPointOfContact` on every SSL order. Each defaults to the corresponding `Requestor*` field when blank. Some product configurations require a technical point of contact to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field. | N/A | *(defaults to Requestor fields)* |
 | `AccountingModel` | Optional | CERTInext billing model sent in `orderDetails.accountingModel`. `2` = credit-based (most accounts). `1` = cash model. Default: `2`. | N/A | `2` |
-| `EmailNotifications` | Optional | Whether CERTInext sends lifecycle-event emails to the requestor. `1` = enabled, `0` = silent (recommended for gateway-driven orders). Default: `0`. | N/A | `0` |
+| `EmailNotifications` | Optional | Whether CERTInext sends lifecycle-event emails to the requestor. `1` = full notification set (V1 sends it as-is; V2 maps it to `all`). `0` = silent on both V1 and V2 (V2 confirmed live 2026-09-28). Blank/unset stays silent on V1 (sent as `0`) but is omitted on V2, so the CA's own default (`all`, not silent) applies instead. Any other value fails V2 enrollment before any CA call. Default: `0` — V2 orders are now silent by default, matching V1 (previously V2 always sent `all`). | N/A | `0` |
 | `SubscriptionValidityYears` | Optional | Connector-level default validity in years for SSL orders (`1`, `2`, or `3`). Overridden per template by the `ValidityYears` enrollment parameter. Default: `1`. | N/A | `1` |
 | `SubscriptionAutoRenew` | Optional | Whether CERTInext should auto-renew certificates issued through this connector. `0` = disabled (recommended — renewal is driven by Keyfactor Command), `1` = enabled. Default: `0`. | N/A | `0` |
 | `SubscriptionRenewCriteriaDays` | Optional | Days before expiry at which CERTInext auto-renews. Only honored when `SubscriptionAutoRenew` is `1`. Default: `30`. | N/A | `30` |
@@ -274,6 +277,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `IgnoreExpired` | Optional | If `true`, expired certificates are skipped during synchronization and are not imported into Keyfactor Command. Default: `false`. | N/A | `false` |
 | `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500`. Reduce this value if synchronization requests time out. | N/A | `100` |
 | `Enabled` | Optional | Enables or disables the CA connector. Setting this to `false` allows the connector record to be created before all credentials are available, without triggering a live connectivity test. Default: `true`. | N/A | `true` |
+| `LogSensitiveRequestData` | Optional | **Diagnostic escape hatch — off by default.** When `true`, this writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. It's meant for temporary use while verifying a new deployment (confirming exactly what was sent to the CA and that the order succeeded) — turn it back off once verification is complete. When `false` (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. `j***@example.com`) and the enrollment log line omits the requester name entirely. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: `false`. | N/A | `false` |
 | `PickupRetries` | Optional | Number of times `Enroll` polls CERTInext for the certificate after a successful order submission, before returning pending and leaving pickup to the next sync. Set to `0` to disable the wait entirely. OV/EV orders validate asynchronously (minutes to hours) and typically exhaust this wait regardless of the value. Default: `5`. | N/A | `5` |
 | `PickupDelay` | Optional | Seconds between certificate-pickup retries. The total pickup budget is a fixed 5-second initial delay + (`PickupRetries` × `PickupDelay`), hard-capped at 180 seconds regardless of how the two values are set. Aim for well under ~90s total so the call doesn't run long enough to trip Command's own enrollment timeout. Default: `10` (a ~55s ceiling with default `PickupRetries`). | N/A | `10` |
 
@@ -432,7 +436,7 @@ Any V2 status not in this table (e.g. a value CERTInext adds in the future) also
 plugin logs a warning distinguishing "unmapped status" from the statuses above that are deliberately
 mapped to Failed — see the gateway trace log if certificates unexpectedly show as failed.
 
-Because V2 has no distinct renewal endpoint, all three enrollment types (New, Reissue, RenewOrReissue) place a fresh V2 order.
+V2 has no *renew* endpoint. CERTInext does document a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious`/`revokeReason`), but the plugin does not use it by design — all three enrollment types (New, Reissue, RenewOrReissue) place a fresh V2 order, and the prior order/certificate is left issued rather than auto-revoked.
 
 ## Migrating from V1 to V2
 
@@ -493,14 +497,14 @@ behavior without disrupting V1 traffic.
 | `GroupNumber` | **Not carried into V2 orders.** V1 sends this in `delegationInformation` on every order; the V2 order body has no equivalent field. If your account routes orders by group, confirm with eMudhra how group routing is handled on the V2 API before relying on it. |
 | `OrganizationNumber` | **Required for OV/EV, otherwise unused.** V2 OV/EV orders now send `organization.organizationNumber` (with `preVetted=true`) from this setting — CERTInext hard-rejects an OV/EV order with no organization data (HTTP 422 `EMS-1180`), so `OrganizationNumber` must be set on the connector before enrolling OV/EV certificates via V2. DV orders never send an organization block, so this setting has no effect for DV. |
 | `AccountingModel` | Not used by V2 order placement. |
-| `EmailNotifications` | **Not honored.** V2 orders are always placed with `emailNotifications: "all"`, regardless of this connector setting. If you rely on `EmailNotifications=0` to keep CERTInext's lifecycle emails silent, V2 will not preserve that. |
-| `SubscriptionAutoRenew` / `SubscriptionRenewCriteriaDays` | Not used. V2 orders are always placed with auto-renew disabled and a hardcoded 30-day renew-criteria value that has no effect since auto-renew is off. |
+| `EmailNotifications` | **Honored, with one default-value difference from V1.** `1` maps to `emailNotifications: "all"`; `0` maps to `"0"` (confirmed live 2026-09-28 to suppress order-creation emails, same as V1). Blank/unset is omitted on V2 (the CA's own default of `"all"` applies) rather than sent as `"0"` the way V1's own fallback does — set `EmailNotifications=0` explicitly if you want V2 orders silent. Any other value fails the V2 enrollment before any CA call. |
+| `SubscriptionAutoRenew` / `SubscriptionRenewCriteriaDays` | Honored. `SubscriptionAutoRenew=1` sets `subscription.autoRenew=true`; `SubscriptionRenewCriteriaDays` sets `subscription.renewBeforeDays` (blank omits the field, so the CA's documented default of 30 applies). An unparseable or negative `SubscriptionRenewCriteriaDays` fails the enrollment before any CA call. |
 | `DefaultProductCode` | Not used for V2 renewals (see [Renewals](#renewals-and-reissuance) below) — V2 has no separate renewal call to fall back to a default code for. |
 | `TechnicalContactName` / `Email` / `IsdCode` / `MobileNumber` | Not used. The V2 order body has no technical-point-of-contact field. |
 | `IgnoreExpired` | **Not honored during V2 Synchronize.** Expired certificates are always included in the V2 sync result set. |
 | `SubmitNonDnsSans` | Not applicable — see the single-domain limitation above; non-DNS SANs were never part of this concern for V2, DNS SANs beyond the primary domain already fail outright. |
 | `PageSize` | Still used, now against V2's `/reports/orders` paging. |
-| `RequestorName` / `RequestorEmail` / `RequestorMobileNumber` | Still used — carried into the V2 order's `requestor` block. |
+| `RequestorName` / `RequestorEmail` / `RequestorMobileNumber` / `RequestorDesignation` | Still used — carried into the V2 order's `requestor` block. `RequestorDesignation` is omitted from the order when blank (the default) rather than sent with any value. |
 | `SignerPlace` / `SignerIp` | Still used — carried into the V2 order's `agreement` block. |
 | `SubscriptionValidityYears` | Still used as the fallback validity when the template's `ValidityYears` parameter is not set. |
 | `AutoSecureWww` | Still used — controls whether V2 adds the `www.` variant. |
@@ -553,13 +557,16 @@ pointing a production template at the V2 connector. At minimum, confirm:
 
 ### Renewals and Reissuance
 
-V2 has no distinct renewal endpoint in the current plugin implementation. **Every** Command
-`Renew`, `Reissue`, and `RenewOrReissue` enrollment places a brand-new V2 order — the same call path
-as a new enrollment — rather than reusing V1's renewal-window logic. If your CERTInext account is on
-a credit-based billing model, **each renewal under V2 consumes a new credit**, unlike V1 where a
-renewal inside the `RenewalWindowDays` window is billed as part of the existing subscription term.
-Factor this into your migration decision if you rely on CERTInext's free-renewal-within-subscription
-behavior.
+CERTInext V2 has no *renew* endpoint, but it does document a `/reissue` endpoint (`mode:
+rekey|update-sans`, with optional `revokePrevious`/`revokeReason`). The plugin intentionally does not
+use it.
+**Every** Command `Renew`, `Reissue`, and `RenewOrReissue` enrollment instead places a brand-new V2
+order — the same call path as a new enrollment — rather than reusing V1's renewal-window logic or the
+`/reissue` endpoint. The prior order and certificate are left issued, not auto-revoked; Command links
+the old and new certificates via history only. If your CERTInext account is on a credit-based billing
+model, **each renewal under V2 consumes a new credit**, unlike V1 where a renewal inside the
+`RenewalWindowDays` window is billed as part of the existing subscription term. Factor this into your
+migration decision if you rely on CERTInext's free-renewal-within-subscription behavior.
 
 ### Revocation Reason Codes
 
@@ -590,9 +597,9 @@ mind rather than discover them after cutting over:
   observed vetting-queue speedup has not been independently confirmed for V2; if your account was
   relying on `OrganizationNumber` to fast-path DV issuance under V1, note that DV orders under V2
   never send an organization block, so that specific benefit does not carry over.
-- **`EmailNotifications`, `AccountingModel`, `SubscriptionAutoRenew`/`RenewCriteriaDays`, and the
-  technical-point-of-contact fields have no V2 effect** — V2 orders always request all lifecycle
-  emails and never enable CERTInext-side auto-renew.
+- **`AccountingModel` and the technical-point-of-contact fields have no V2 effect on billing/contact
+  behavior beyond what's noted in the table above** — see the table for `EmailNotifications` and
+  `SubscriptionAutoRenew`/`RenewCriteriaDays`, both of which are now honored on V2.
 - **`IgnoreExpired` is not honored during V2 Synchronize** — expired certificates always come back in
   the V2 sync result set.
 - **V2 `TrackOrder` responses omit `_links`** — a spec-shape discrepancy observed live; no functional

@@ -29,5 +29,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
                 .Replace("\n", "\\n")
                 .Replace("\t", "\\t");
         }
+
+        /// <summary>
+        /// Masks the local part of an email address for logging while preserving the domain
+        /// (e.g. <c>"j***@example.com"</c>), so an operator can still tell which organization
+        /// an order came from without seeing exactly who submitted it. Used by both
+        /// <c>CERTInextCAPlugin</c> and <c>Client.CERTInextClient</c> when
+        /// <c>LogSensitiveRequestData</c> is off (issue 0040). Values with no <c>@</c> (blank,
+        /// malformed, or not actually an email) fall back to a full <c>"***REDACTED***"</c>.
+        /// </summary>
+        internal static string MaskEmail(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            int at = value.IndexOf('@');
+            if (at <= 0) return "***REDACTED***";
+            string domain = value.Substring(at + 1);
+            return value.Substring(0, 1) + "***@" + domain;
+        }
     }
 }
