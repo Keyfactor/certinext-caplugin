@@ -221,9 +221,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 request.OrderDetails?.ProductCode,
                 LogSanitizer.Strip(certInfo?.DomainName),
                 certInfo?.AdditionalDomains?.Count ?? 0,
-                certInfo?.AdditionalDomains != null && certInfo.AdditionalDomains.Count > 0
-                    ? LogSanitizer.Strip(string.Join("; ", certInfo.AdditionalDomains))
-                    : "(none)");
+                // Untyped by now: an email SAN submitted here is masked unless
+                // LogSensitiveRequestData is on (issue 0040 follow-up).
+                LogSanitizer.FormatUntypedSans(certInfo?.AdditionalDomains, _config.LogSensitiveRequestData));
 
             GenerateOrderResponse result = null;
             RestResponse resp = null;

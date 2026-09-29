@@ -798,10 +798,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // SOX / SOC2 CC7.3: log the enrollment attempt with full identifying context
             // so the event is independently auditable before any API call is made.
-            string sanSummary = san != null && san.Count > 0
-                ? string.Join("; ", san.SelectMany(kvp => (kvp.Value ?? Array.Empty<string>())
-                    .Select(v => $"{kvp.Key}:{v}")))
-                : "(none)";
+            // Issue 0040 follow-up: email-type SAN values are personal data, masked unless
+            // LogSensitiveRequestData is on; DNS/IP/URI values stay verbatim as audit fields.
+            string sanSummary = LogSanitizer.FormatSans(san, _config.LogSensitiveRequestData);
 
             // Issue 0040: RequesterName/RequesterEmail are personal data belonging to whoever
             // placed the order. Off by default (LogSensitiveRequestData=false) — the name is
@@ -816,7 +815,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "ProfileId={ProfileId}, SANs={SANs}, " +
                     "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
                     enrollmentType, requestFormat, LogSanitizer.Strip(subject),
-                    ep.ProfileId, LogSanitizer.Strip(sanSummary),
+                    ep.ProfileId, sanSummary,
                     LogSanitizer.Strip(ep.RequesterName), LogSanitizer.Strip(ep.RequesterEmail));
             }
             else
@@ -827,7 +826,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "ProfileId={ProfileId}, SANs={SANs}, " +
                     "RequesterEmail={RequesterEmail}",
                     enrollmentType, requestFormat, LogSanitizer.Strip(subject),
-                    ep.ProfileId, LogSanitizer.Strip(sanSummary),
+                    ep.ProfileId, sanSummary,
                     LogSanitizer.MaskEmail(LogSanitizer.Strip(ep.RequesterEmail)));
             }
 
@@ -3520,7 +3519,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "[{Domains}]. They are skipped so the remaining {ValidCount} domain(s) can still be validated. " +
                     "This order cannot be issued by CERTInext until these are removed — they usually come from a " +
                     "non-DNS SAN (IP address, email, URI) that was requested on the enrollment.",
-                    invalidDomains.Count, orderNumber, LogSanitizer.Strip(string.Join(", ", invalidDomains)),
+                    // An email SAN submitted to V1 comes back verbatim as an order domain; mask it
+                    // unless LogSensitiveRequestData is on (issue 0040 follow-up).
+                    invalidDomains.Count, orderNumber,
+                    LogSanitizer.FormatUntypedSans(invalidDomains, _config.LogSensitiveRequestData, ", "),
                     validPendingDomains.Count);
             }
 
@@ -5269,8 +5271,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // possibly-filtered result is known (see below).
             var result = CollectRequestedSanEntries(san, csr, out var fromCsrKeys, out var skippedCsrTags);
 
+            // Issue 0040 follow-up: email SAN values masked unless LogSensitiveRequestData is on.
             string FormatSans(IEnumerable<SanEntry> sans) =>
-                LogSanitizer.Strip(string.Join("; ", sans.Select(s => $"{s.Type}:{s.Value}")));
+                LogSanitizer.FormatSans(sans, _config.LogSensitiveRequestData);
 
             if (skippedCsrTags.Count > 0)
             {
