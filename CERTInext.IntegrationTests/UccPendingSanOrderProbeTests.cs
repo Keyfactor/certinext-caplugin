@@ -74,6 +74,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     {
         private const string LiveEnrollFlag = "CERTINEXT_LIVE_UCC_ENROLL";
         private const string CancelOrderIdFlag = "CERTINEXT_CANCEL_ORDER_ID";
+        private const string CancelFamilyFlag  = "CERTINEXT_CANCEL_FAMILY";
 
         /// <summary>
         /// V2 catalog product code for "DV SSL Multi-Domain (UCC)" on this sandbox account, as
@@ -314,8 +315,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 before?.Status == (int)EndEntityStatus.GENERATED || before?.Status == (int)EndEntityStatus.REVOKED,
                 $"Order '{orderId}' is already terminal (status={before?.Status}) — Cancel Order does not apply; not cancelling.");
 
+            // Optional CERTINEXT_CANCEL_FAMILY (ssl | private-pki | signature, default ssl) selects
+            // the family's Cancel Order path — each family has its own /{family}/:orderId/cancel.
+            string family = Environment.GetEnvironmentVariable(CancelFamilyFlag)?.Trim().ToLowerInvariant();
+            string familyPath = family switch
+            {
+                null or "" or "ssl" => Constants.ApiV2.SslCertificatesPath,
+                "private-pki"       => Constants.ApiV2.PrivatePkiCertificatesPath,
+                "signature"         => Constants.ApiV2.SignatureCertificatesPath,
+                _ => throw new ArgumentException($"{CancelFamilyFlag} must be ssl, private-pki or signature (got '{family}').")
+            };
+            _output.WriteLine($"Cancel path: {familyPath}/{orderId}/cancel");
+
             var cancelResp = await CancelOrderRawAsync(
-                orderId, "Issue 0042 live probe cleanup — pending-SAN DCV wire shape captured.");
+                familyPath, orderId, "Keyfactor plugin live probe cleanup.");
 
             _output.WriteLine("");
             _output.WriteLine($"Cancel response: HTTP {cancelResp.StatusCode}, IsSuccessful={cancelResp.IsSuccessful}");
@@ -367,16 +380,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         /// <summary>
-        /// Raw HTTP POST to /api/certinext/v2/ssl-certificates/{orderId}/cancel. Returns the raw
+        /// Raw HTTP POST to {familyPath}/{orderId}/cancel. Returns the raw
         /// status/body instead of throwing on non-2xx, so a failed cancel can be reported without
         /// losing detail and without the caller needing to catch an exception to see it.
         /// </summary>
-        private async Task<RawApiResponse> CancelOrderRawAsync(string orderId, string reason)
+        private async Task<RawApiResponse> CancelOrderRawAsync(string familyPath, string orderId, string reason)
         {
             string accessToken = await GetV2AccessTokenAsync();
 
             using var apiClient = NewApiClient(_v2ApiUrl.TrimEnd('/'));
-            var cancelReq = new RestRequest($"{Constants.ApiV2.SslCertificatesPath}/{orderId}/cancel", Method.Post);
+            var cancelReq = new RestRequest($"{familyPath}/{orderId}/cancel", Method.Post);
             cancelReq.AddHeader("Authorization", $"Bearer {accessToken}");
             cancelReq.AddHeader("Accept", "application/json");
             cancelReq.AddJsonBody(new { reason });
