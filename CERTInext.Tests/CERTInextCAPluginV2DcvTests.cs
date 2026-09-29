@@ -43,7 +43,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             new Mock<ICERTInextClient>(MockBehavior.Strict);
 
         private static CERTInextCAPlugin BuildV2DcvPlugin(
-            ICERTInextClient client, IDomainValidatorFactory factory, string dcvTxtRecordTemplate = null) =>
+            ICERTInextClient client, IDomainValidatorFactory factory, string dcvTxtRecordTemplate = null,
+            int pickupRetries = 0) =>
             new CERTInextCAPlugin(client, factory, new CERTInextConfig
             {
                 UseV2Api        = true,
@@ -57,7 +58,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 RequestorEmail  = "test@example.com",
                 SignerIp        = "1.2.3.4",
                 SignerPlace     = "New York",
-                PickupRetries   = 0,
+                PickupRetries        = pickupRetries,
+                PickupDelayInSeconds = 1,
                 DcvEnabled                 = true,
                 DcvTimeoutMinutes          = 1,
                 DcvPropagationDelaySeconds = 1,
@@ -393,6 +395,62 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     "with no DcvTxtRecordTemplate configured, V2 must fall back to " +
                     "Constants.Dcv.DefaultTxtRecordTemplate (the same default V1 uses) rather " +
                     "than a separate, hardcoded V2 literal");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0051: the inline DCV path owns the in-call issuance wait — EnrollV2Async must
+        // not stack a second PickUpEnrolledCertificateV2Async poll on top of it.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task EnrollV2_DcvRan_SkipsPickupPoll_EvenThoughPickupIsEnabled()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } // non-UCC
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            // 1st call: post-CSR check (pending-dcv). 2nd: PerformDcvV2IfNeededAsync's own
+            // tracking poll (step 4) — moves to a *different* pending state so that inner loop
+            // breaks (DCV steps completed) without the order having actually issued. 3rd:
+            // EnrollV2Async's post-DCV re-check, observing the same still-pending state. If the
+            // pickup poll incorrectly ran afterward, a 4th TrackOrderV2Async call would occur.
+            mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PendingDcvStatus())
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "pending-organization-verification", Domain = "example.com" })
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "pending-organization-verification", Domain = "example.com" });
+
+            mock.Setup(c => c.GetDcvV2Async(OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "dcv-token-xyz", TokenExpiryDate = "2026-12-31 23:59:59" });
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, "example.com", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            var validator = new FakeDomainValidator();
+            // PickupRetries > 0 and clamped to a fast 1s delay — if the dcvV2Ran gate didn't
+            // work, this budget is easily enough for the pickup poll to run and this test would
+            // observe extra TrackOrderV2Async/DownloadCertificateV2Async calls.
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator), pickupRetries: 5);
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "the order never actually issued — DCV ran, but the order is still pending elsewhere");
+            result.CARequestID.Should().Be(OrderId);
+            mock.Verify(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()),
+                Times.Exactly(3),
+                "a pickup poll must not stack on top of the inline DCV wait — no 4th TrackOrderV2Async call");
+            mock.Verify(c => c.DownloadCertificateV2Async(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         }
 
         // ---------------------------------------------------------------------------
