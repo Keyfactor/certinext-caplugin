@@ -579,10 +579,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "Product/profile validation attempt started. ProfileId={ProfileId}, ProductID={ProductID}, UseV2Api={UseV2Api}",
                 profileId, productInfo?.ProductID, useV2);
 
+            bool isPrivatePki = useV2
+                && string.Equals(params_.ProductFamilySlug, Constants.ApiV2.FamilyPrivatePki, StringComparison.Ordinal);
+
             var tempClient = new CERTInextClient(tempConfig);
 
             try
             {
+                // Issue 0033: a V2 private-pki template needs a Private PKI ProductVariant and an
+                // explicit ProductCode — checked before any catalog call, with the same rules
+                // EnrollV2Async enforces, so a template that can never enroll is rejected at save
+                // time. Inside the try so the finally block's credential scrubbing still runs.
+                if (isPrivatePki)
+                {
+                    string pkiConfigError = ValidatePrivatePkiEnrollmentParams(params_, out _);
+                    if (pkiConfigError != null)
+                    {
+                        _logger.LogWarning(
+                            "Product/profile validation failed — {Reason} ProductID={ProductID}",
+                            pkiConfigError, params_.ProductId);
+                        throw new AnyCAValidationException(pkiConfigError);
+                    }
+                }
+
                 // V2 catalog validation mirrors ValidateCAConnectionInfo's UseV2Api branch
                 // (issues/0025): GetProfilesAsync/GetProductDetailsAsync are V1-only and 404
                 // against a V2-shaped ApiUrl. There is no soft-accept difference between modes
@@ -595,7 +614,43 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     var products = await tempClient.GetProductDetailsV2Async();
                     availableIds = products.Select(p => p.ProductCode).ToList();
 
-                    if (params_.HasExplicitProductCode)
+                    if (isPrivatePki)
+                    {
+                        // Issue 0033: the SSL ProductId -> productTypeID cross-check below would
+                        // always reject a Private PKI code (GetProductIds only advertises SSL/TLS
+                        // product names). Check the code against the spec's Private PKI
+                        // productTypeID instead ("39" | Private PKI | Private PKI (8)).
+                        var matchedProduct = products.FirstOrDefault(p =>
+                            string.Equals(p.ProductCode, profileId, StringComparison.OrdinalIgnoreCase));
+
+                        if (matchedProduct == null)
+                        {
+                            var available = string.Join(", ", availableIds);
+                            _logger.LogWarning(
+                                "Product/profile validation failed — configured private-pki ProductCode '{ProfileId}' " +
+                                "was not found in the CERTInext V2 catalog. AvailableCount={AvailableCount}",
+                                profileId, availableIds.Count);
+                            throw new AnyCAValidationException(
+                                $"ProductCode '{profileId}' was not found in the CERTInext V2 catalog. " +
+                                $"Available codes: {available}");
+                        }
+
+                        if (!string.Equals(matchedProduct.ProductTypeId, Constants.ApiV2.PrivatePkiProductTypeId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogWarning(
+                                "Product/profile validation failed — configured ProductCode '{ProfileId}' exists in the " +
+                                "CERTInext V2 catalog, but its productTypeID ('{ActualTypeId}') is not the Private PKI " +
+                                "productTypeID ('{ExpectedTypeId}') while ProductFamily is 'private-pki'.",
+                                profileId, matchedProduct.ProductTypeId, Constants.ApiV2.PrivatePkiProductTypeId);
+                            throw new AnyCAValidationException(
+                                $"ProductCode '{profileId}' exists in the CERTInext catalog, but it is not a Private PKI " +
+                                "product, and the template's ProductFamily is 'private-pki'. Set ProductCode to a Private " +
+                                "PKI product code from your account's catalog, or correct ProductFamily.");
+                        }
+
+                        found = true;
+                    }
+                    else if (params_.HasExplicitProductCode)
                     {
                         // Explicit override: the code must exist in the catalog AND the matched
                         // catalog entry's productTypeID must actually correspond to the selected
@@ -1325,6 +1380,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// Issue 0033: validates the template parameters a V2 <c>private-pki</c> order needs
+        /// beyond the SSL ones, before any CA call. Shared by <see cref="EnrollV2Async"/> (fail
+        /// fast with a FAILED result) and <see cref="ValidateProductInfo"/> (reject at template
+        /// save time). Returns <c>null</c> when valid, else an actionable message naming the field.
+        ///
+        /// - <c>ProductVariant</c> must be one of the spec's create-body <c>variant</c> values
+        ///   (<see cref="Constants.ApiV2.PrivatePkiVariants"/>). Its SSL-only "dv" default is
+        ///   rejected rather than silently mapped to a Private PKI variant.
+        /// - <c>ProductCode</c> must be set explicitly. <see cref="GetProductIds"/> only advertises
+        ///   SSL/TLS product names, so <see cref="Constants.Products.ProductTypeIdsV2"/> would
+        ///   resolve an SSL product code for a private-pki template; and per the spec's Product
+        ///   Codes reference, "Private PKI codes vary per customer catalog".
+        /// </summary>
+        internal static string ValidatePrivatePkiEnrollmentParams(EnrollmentParams ep, out string normalizedVariant)
+        {
+            normalizedVariant = null;
+
+            string variant = ep.ProductVariant?.Trim();
+            if (string.IsNullOrEmpty(variant) || !Constants.ApiV2.PrivatePkiVariants.Contains(variant))
+            {
+                string configured = ep.HasExplicitProductVariant ? $"'{variant}'" : "not set (defaults to the SSL-only 'dv')";
+                return $"ProductFamily 'private-pki' requires the '{Constants.EnrollmentParam.ProductVariant}' " +
+                       $"template parameter to be one of: {Constants.ApiV2.PrivatePkiVariantIntranetSsl}, " +
+                       $"{Constants.ApiV2.PrivatePkiVariantIgtfHost}. Current value: {configured}.";
+            }
+
+            if (!ep.HasExplicitProductCode)
+            {
+                return $"ProductFamily 'private-pki' requires the '{Constants.EnrollmentParam.ProductCode}' " +
+                       "template parameter to be set explicitly to your account's Private PKI catalog product " +
+                       "code (Private PKI codes vary per customer catalog and cannot be resolved from the " +
+                       "selected SSL/TLS product name).";
+            }
+
+            normalizedVariant = variant.ToLowerInvariant();
+            return null;
+        }
+
+        /// <summary>
         /// Dispatches all enrollment types through the V2 REST API.
         /// </summary>
         private async Task<EnrollmentResult> EnrollV2Async(
@@ -1341,12 +1435,67 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 enrollmentType, ep.ProductFamilySlug, ep.ProductVariant, ep.ProductId, ep.HasExplicitProductCode,
                 ep.HasExplicitProductCode ? ep.ProductCode : "(resolved from catalog)");
 
-            // Derive the primary domain from subject CN
+            // Issue 0033: the create-order body is family-specific. Previously every family got
+            // the SSL body (productVariant/certificate/agreement...), which is not the Private PKI
+            // or Document Signer shape at all. ssl (and any unrecognized ProductFamily, which
+            // ProductFamilySlug already maps to ssl) keeps the exact pre-0033 flow below.
+            bool isPrivatePki = string.Equals(ep.ProductFamilySlug, Constants.ApiV2.FamilyPrivatePki, StringComparison.Ordinal);
+
+            // Document Signer (signature): the body DTO exists (V2CreateSignatureOrderRequest),
+            // but its mandatory subjectType / subject.email and the per-subject-type subject
+            // name/organization fields have no settled source in the Command enrollment inputs
+            // yet — an open design decision on issue 0033. Fail fast with a clear message, before
+            // any CA call, rather than guessing those values or sending the wrong-family SSL body
+            // (which the CA rejects anyway: subjectType and subject.email are "400 if missing").
+            if (string.Equals(ep.ProductFamilySlug, Constants.ApiV2.FamilySignature, StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "EnrollV2Async rejected a ProductFamily=signature (Document Signer) order — V2 Document " +
+                    "Signer enrollment is not yet supported by this plugin version. EnrollmentType={EnrollmentType}, " +
+                    "ProductId={ProductId}",
+                    enrollmentType, ep.ProductId);
+                _logger.MethodExit(LogLevel.Debug);
+                return new EnrollmentResult
+                {
+                    CARequestID   = string.Empty,
+                    Certificate   = null,
+                    Status        = (int)EndEntityStatus.FAILED,
+                    StatusMessage = "V2 enrollment rejected: ProductFamily 'signature' (Document Signer) is not yet " +
+                                    "supported for enrollment by this plugin version. A Document Signer order needs " +
+                                    "signer-subject details (subjectType, subject email, and per-subject-type name or " +
+                                    "organization fields) that the plugin does not yet take from the enrollment request. " +
+                                    "No order was placed."
+                };
+            }
+
+            string privatePkiVariant = null;
+            if (isPrivatePki)
+            {
+                string pkiConfigError = ValidatePrivatePkiEnrollmentParams(ep, out privatePkiVariant);
+                if (pkiConfigError != null)
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async rejected a private-pki order before any CA call: {Reason}", pkiConfigError);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = "V2 enrollment rejected: " + pkiConfigError
+                    };
+                }
+            }
+
+            // Derive the primary domain from subject CN (for private-pki this is the order's
+            // `hostname` — spec: "hostname - primary CN" — sourced the same way).
             string domain = ep.DomainName;
             if (string.IsNullOrWhiteSpace(domain))
                 domain = ExtractCnFromSubject(subject);
             if (string.IsNullOrWhiteSpace(domain))
-                throw new Exception("Cannot determine primary domain for V2 order — set the DomainName enrollment parameter or ensure the CSR subject has a CN.");
+                throw new Exception(isPrivatePki
+                    ? "Cannot determine the primary hostname for V2 private-pki order — set the DomainName enrollment parameter or ensure the CSR subject has a CN."
+                    : "Cannot determine primary domain for V2 order — set the DomainName enrollment parameter or ensure the CSR subject has a CN.");
 
             // organization is "Conditional — Mandatory for OV / EV" per the V2 spec's SSL field
             // table; every OV/EV create example in the spec sends it, and it is omitted entirely
@@ -1355,8 +1504,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // clear message here — before any catalog/order-placement call — rather than
             // sending an incomplete block and letting the CA surface that opaque error. See
             // issues/0028-v2-organizationnumber-not-sent.md.
-            bool isOvOrEv = string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantOv, StringComparison.OrdinalIgnoreCase)
-                         || string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase);
+            // SSL-only: Private PKI "has no DCV, no organization block, and no Subscriber
+            // Agreement" per the spec (issue 0033), and its ProductVariant is intranet-ssl/igtf-host.
+            bool isOvOrEv = !isPrivatePki
+                         && (string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantOv, StringComparison.OrdinalIgnoreCase)
+                          || string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase));
 
             V2OrganizationParams organization = null;
             if (isOvOrEv)
@@ -1487,21 +1639,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // account/catalog version — see issue 0036 triage). Here, a catalog failure or an
             // unresolvable mapping MUST fail the enrollment loudly: there is no safe fallback code
             // to send on the wire.
+            //
+            // Private PKI (issue 0033): the explicit ProductCode is required (validated above) and
+            // trusted as-is, exactly like the SSL explicit-override case; the catalog is not
+            // fetched at all because its only use on that path — SSL UCC detection — does not
+            // apply (ValidateProductInfo checks the code's productTypeID at template save time).
             string productCode;
             bool isUccProduct = false;
             List<ProductDetail> catalog = null;
-            try
+            if (!isPrivatePki)
             {
-                catalog = await _client.GetProductDetailsV2Async();
-            }
-            catch (Exception catalogEx)
-            {
-                _logger.LogWarning(catalogEx,
-                    "EnrollV2Async: could not fetch the live V2 product catalog. ProductId={ProductId}, " +
-                    "HasExplicitProductCode={HasExplicit}", ep.ProductId, ep.HasExplicitProductCode);
+                try
+                {
+                    catalog = await _client.GetProductDetailsV2Async();
+                }
+                catch (Exception catalogEx)
+                {
+                    _logger.LogWarning(catalogEx,
+                        "EnrollV2Async: could not fetch the live V2 product catalog. ProductId={ProductId}, " +
+                        "HasExplicitProductCode={HasExplicit}", ep.ProductId, ep.HasExplicitProductCode);
+                }
             }
 
-            if (ep.HasExplicitProductCode)
+            if (isPrivatePki)
+            {
+                productCode = ep.ProductCode;
+            }
+            else if (ep.HasExplicitProductCode)
             {
                 productCode = ep.ProductCode;
 
@@ -1571,7 +1735,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // rejected non-UCC request never places a CA order. See
             // issues/f3-v2-multi-san-limitation.md and
             // issues/0047-v2-multi-san-guard-blocks-ucc-orders.md.
-            if (!isUccProduct)
+            //
+            // SSL-only (issue 0033): a private-pki order carries its SANs in additionalHosts,
+            // which the spec defines as a multi-entry "SAN list (DNS names or IPv4 / IPv6)" for
+            // every Private PKI variant, so the single-domain restriction does not apply.
+            if (!isPrivatePki && !isUccProduct)
             {
                 var sanEntries = ExtractSanEntriesFromCsr(csr, out _);
                 var extraSans = sanEntries
@@ -1643,6 +1811,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     productCode, additionalDomains?.Count ?? 0);
             }
 
+            // Private PKI additionalHosts (issue 0033): same SAN source rule as the UCC path
+            // above, but DNS names AND IP addresses are both native here (spec: "SAN list (DNS
+            // names or IPv4 / IPv6)"; the Intranet SSL example sends "10.0.0.50").
+            List<string> additionalHosts = null;
+            if (isPrivatePki)
+            {
+                additionalHosts = BuildPrivatePkiAdditionalHosts(san, csr, subject, domain);
+                _logger.LogInformation(
+                    "EnrollV2Async: private-pki order. Variant={Variant}, ProductCode={ProductCode}, " +
+                    "Hostname={Hostname}, AdditionalHostCount={Count}",
+                    privatePkiVariant, productCode, LogSanitizer.Strip(domain), additionalHosts?.Count ?? 0);
+            }
+
             string requestorName  = string.IsNullOrWhiteSpace(ep.RequesterName)  ? _config.RequestorName  : ep.RequesterName;
             string requestorEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? _config.RequestorEmail : ep.RequesterEmail;
             string signerName     = string.IsNullOrWhiteSpace(ep.SignerName)     ? requestorName          : ep.SignerName;
@@ -1678,54 +1859,85 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string technicalContactIsd    = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode)      ? requestorIsd    : _config.TechnicalContactIsdCode;
             string technicalContactMobile = string.IsNullOrWhiteSpace(_config.TechnicalContactMobileNumber) ? requestorMobile : _config.TechnicalContactMobileNumber;
 
-            var orderReq = new V2CreateSslOrderRequest
+            // Blocks shared verbatim by every family's create body — the spec's requestor,
+            // subscription and technicalPointOfContact field tables are identical for the SSL/TLS
+            // and Private PKI folders (issue 0033).
+            var requestor = new V2Requestor
             {
-                ProductVariant    = ep.ProductVariant,
-                EmailNotifications = emailNotifications,
-                Requestor = new V2Requestor
-                {
-                    Name        = requestorName,
-                    Email       = requestorEmail,
-                    Phone       = ComposeV2Phone(requestorIsd, requestorMobile),
-                    Designation = requestorDesignation
-                },
-                Organization = organization,
-                Certificate = new V2CertificateParams
-                {
-                    Domain            = domain,
-                    AutoSecureWww     = _config.AutoSecureWww == "1",
-                    AdditionalDomains = additionalDomains
-                },
-                Subscription = new V2SubscriptionParams
-                {
-                    ValidityYears   = validityYears,
-                    AutoRenew       = subscriptionAutoRenew,
-                    RenewBeforeDays = subscriptionRenewBeforeDays
-                },
-                Agreement = new V2AgreementParams
-                {
-                    SignerName  = signerName,
-                    SignerIp    = string.IsNullOrWhiteSpace(signerIp)    ? null : signerIp,
-                    SignerPlace = string.IsNullOrWhiteSpace(signerPlace)  ? null : signerPlace,
-                    Accepted    = true
-                },
-                // Always populated (never omitted), even though the spec marks every subfield
-                // Optional — mirrors V1's fallback-to-Requestor* TechnicalPointOfContact
-                // defaulting rather than leaving the block blank. See issue 0030.
-                TechnicalPointOfContact = new V2TechnicalPointOfContact
-                {
-                    Name        = technicalContactName,
-                    Email       = technicalContactEmail,
-                    Phone       = ComposeV2Phone(technicalContactIsd, technicalContactMobile),
-                    Designation = Constants.ApiV2.DefaultTechnicalContactDesignation
-                },
-                Remarks = "Issued via Keyfactor Command AnyCA REST Gateway.",
-                // Mirrors V1's DelegationInformation.GroupNumber — omit when unconfigured so the
-                // order falls back to the account's default billing group (issue 0029).
-                GroupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber
+                Name        = requestorName,
+                Email       = requestorEmail,
+                Phone       = ComposeV2Phone(requestorIsd, requestorMobile),
+                Designation = requestorDesignation
             };
+            var subscription = new V2SubscriptionParams
+            {
+                ValidityYears   = validityYears,
+                AutoRenew       = subscriptionAutoRenew,
+                RenewBeforeDays = subscriptionRenewBeforeDays
+            };
+            // Always populated (never omitted), even though the spec marks every subfield
+            // Optional — mirrors V1's fallback-to-Requestor* TechnicalPointOfContact
+            // defaulting rather than leaving the block blank. See issue 0030.
+            var technicalPointOfContact = new V2TechnicalPointOfContact
+            {
+                Name        = technicalContactName,
+                Email       = technicalContactEmail,
+                Phone       = ComposeV2Phone(technicalContactIsd, technicalContactMobile),
+                Designation = Constants.ApiV2.DefaultTechnicalContactDesignation
+            };
+            const string remarks = "Issued via Keyfactor Command AnyCA REST Gateway.";
+            // Mirrors V1's DelegationInformation.GroupNumber — omit when unconfigured so the
+            // order falls back to the account's default billing group (issue 0029).
+            string groupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber;
 
-            var createResp = await _client.PlaceOrderV2Async(ep.ProductFamilySlug, productCode, orderReq);
+            V2CreateOrderResponse createResp;
+            if (isPrivatePki)
+            {
+                // Spec "Private PKI Certificates" body: no productVariant / organization /
+                // certificate / agreement blocks — "Private PKI has no DCV, no organization
+                // block, and no Subscriber Agreement".
+                var privatePkiReq = new V2CreatePrivatePkiOrderRequest
+                {
+                    Variant                 = privatePkiVariant,
+                    EmailNotifications      = emailNotifications,
+                    GroupNumber             = groupNumber,
+                    Requestor               = requestor,
+                    Hostname                = domain,
+                    AdditionalHosts         = additionalHosts,
+                    Subscription            = subscription,
+                    Remarks                 = remarks,
+                    TechnicalPointOfContact = technicalPointOfContact
+                };
+                createResp = await _client.PlaceOrderV2Async(productCode, privatePkiReq);
+            }
+            else
+            {
+                var orderReq = new V2CreateSslOrderRequest
+                {
+                    ProductVariant     = ep.ProductVariant,
+                    EmailNotifications = emailNotifications,
+                    Requestor          = requestor,
+                    Organization       = organization,
+                    Certificate = new V2CertificateParams
+                    {
+                        Domain            = domain,
+                        AutoSecureWww     = _config.AutoSecureWww == "1",
+                        AdditionalDomains = additionalDomains
+                    },
+                    Subscription = subscription,
+                    Agreement = new V2AgreementParams
+                    {
+                        SignerName  = signerName,
+                        SignerIp    = string.IsNullOrWhiteSpace(signerIp)    ? null : signerIp,
+                        SignerPlace = string.IsNullOrWhiteSpace(signerPlace)  ? null : signerPlace,
+                        Accepted    = true
+                    },
+                    TechnicalPointOfContact = technicalPointOfContact,
+                    Remarks                 = remarks,
+                    GroupNumber             = groupNumber
+                };
+                createResp = await _client.PlaceOrderV2Async(ep.ProductFamilySlug, productCode, orderReq);
+            }
             string orderId = createResp.OrderId;
 
             _logger.LogInformation(
@@ -3656,6 +3868,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return false;
             }
 
+            // Issue 0033: domain control validation exists only for the SSL/TLS family — the
+            // spec's DCV endpoints live under /ssl-certificates only, the Private PKI folder says
+            // "No DCV - your CA trusts you", and the Document Signer folder has no DCV step. This
+            // single gate covers every caller (EnrollV2Async, GetSingleRecordV2Async and V2
+            // Synchronize), so a non-SSL order that is merely pending approval/documents is never
+            // sent to a nonexistent /{family}/{orderId}/dcv endpoint.
+            if (!string.Equals(productFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug(
+                    "V2 DCV skipped: product family '{Family}' has no domain control validation step. OrderId={OrderId}",
+                    productFamilySlug, orderId);
+                return false;
+            }
+
             bool multiDomainMode = domainEntries != null && domainEntries.Count > 0;
 
             if (!multiDomainMode && string.IsNullOrWhiteSpace(domain))
@@ -5018,60 +5244,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private List<SanEntry> BuildSanList(Dictionary<string, string[]> san, string csr, string subject)
         {
-            var result = new List<SanEntry>();
-            // Type+value identity, so the same name requested as two different SAN types is
-            // preserved while an exact repeat across the two sources collapses.
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             // "type|value" keys of entries that came from the CSR fallback, not the gateway
             // dictionary — used only to word the provenance log accurately once the final,
             // possibly-filtered result is known (see below).
-            var fromCsrKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            void Add(string type, string value, bool fromCsr = false)
-            {
-                if (string.IsNullOrWhiteSpace(value)) return;
-                string trimmed = value.Trim();
-                string key = $"{type}|{trimmed}";
-                if (!seen.Add(key)) return;
-                result.Add(new SanEntry { Type = type, Value = trimmed });
-                if (fromCsr) fromCsrKeys.Add(key);
-            }
+            var result = CollectRequestedSanEntries(san, csr, out var fromCsrKeys, out var skippedCsrTags);
 
             string FormatSans(IEnumerable<SanEntry> sans) =>
                 LogSanitizer.Strip(string.Join("; ", sans.Select(s => $"{s.Type}:{s.Value}")));
-
-            // AnyCA passes SANs keyed by type name — the real gateway uses "dnsname",
-            // "rfc822name", "ipaddress"; MapSanType normalizes the spelling variants.
-            if (san != null)
-            {
-                foreach (var kvp in san)
-                {
-                    string sanType = MapSanType(kvp.Key);
-                    if (kvp.Value == null) continue;
-
-                    foreach (string value in kvp.Value)
-                        Add(sanType, value);
-                }
-            }
-
-            // CSR fallback — only when the gateway dictionary is itself absent (san == null), NOT
-            // merely "computed to zero SAN entries" (i.e. result.Count == 0 at this point). Those
-            // are different things:
-            // a non-null dictionary — even an empty one, or one whose keys all map to empty arrays
-            // — means Command's enrollment pattern ran and deliberately produced no SANs for this
-            // request, which the CSR fallback must respect rather than override. san == null means
-            // Command never populated SAN data for this enrollment path at all, which is the one
-            // case this fallback exists for. Checking "computed to zero" instead of "san is null"
-            // would let an enrollment pattern that explicitly computes zero SANs still have
-            // CSR-derived names spliced back in — reopening the policy-reintroduction risk the
-            // fallback-over-union redesign exists to close.
-            var skippedCsrTags = new List<int>();
-            if (san == null)
-            {
-                var csrSans = ExtractSanEntriesFromCsr(csr, out skippedCsrTags);
-                foreach (var csrSan in csrSans)
-                    Add(csrSan.Type, csrSan.Value, fromCsr: true);
-            }
 
             if (skippedCsrTags.Count > 0)
             {
@@ -5185,6 +5364,146 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// The SAN source rule shared by <see cref="BuildSanList"/> and
+        /// <see cref="BuildPrivatePkiAdditionalHosts"/> (issue 0033 extracted it verbatim from
+        /// <see cref="BuildSanList"/> so both honour it identically): the gateway-supplied SAN
+        /// dictionary (types normalized by <see cref="MapSanType"/>), falling back to the CSR's own
+        /// subjectAltName extension only when the dictionary is itself <c>null</c> — see
+        /// <see cref="BuildSanList"/> for why this is a fallback, not a union. Entries are trimmed
+        /// and de-duplicated by type+value. No filtering and no logging happens here.
+        /// </summary>
+        /// <param name="fromCsrKeys">"type|value" keys of the entries that came from the CSR fallback.</param>
+        /// <param name="skippedCsrTags">GeneralName tags present in the CSR that have no string rendering.</param>
+        private static List<SanEntry> CollectRequestedSanEntries(
+            Dictionary<string, string[]> san, string csr,
+            out HashSet<string> fromCsrKeys, out List<int> skippedCsrTags)
+        {
+            var result = new List<SanEntry>();
+            // Type+value identity, so the same name requested as two different SAN types is
+            // preserved while an exact repeat across the two sources collapses.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var csrKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void Add(string type, string value, bool fromCsr = false)
+            {
+                if (string.IsNullOrWhiteSpace(value)) return;
+                string trimmed = value.Trim();
+                string key = $"{type}|{trimmed}";
+                if (!seen.Add(key)) return;
+                result.Add(new SanEntry { Type = type, Value = trimmed });
+                if (fromCsr) csrKeys.Add(key);
+            }
+
+            // AnyCA passes SANs keyed by type name — the real gateway uses "dnsname",
+            // "rfc822name", "ipaddress"; MapSanType normalizes the spelling variants.
+            if (san != null)
+            {
+                foreach (var kvp in san)
+                {
+                    string sanType = MapSanType(kvp.Key);
+                    if (kvp.Value == null) continue;
+
+                    foreach (string value in kvp.Value)
+                        Add(sanType, value);
+                }
+            }
+
+            // CSR fallback — only when the gateway dictionary is itself absent (san == null), NOT
+            // merely "computed to zero SAN entries" (i.e. result.Count == 0 at this point). Those
+            // are different things:
+            // a non-null dictionary — even an empty one, or one whose keys all map to empty arrays
+            // — means Command's enrollment pattern ran and deliberately produced no SANs for this
+            // request, which the CSR fallback must respect rather than override. san == null means
+            // Command never populated SAN data for this enrollment path at all, which is the one
+            // case this fallback exists for. Checking "computed to zero" instead of "san is null"
+            // would let an enrollment pattern that explicitly computes zero SANs still have
+            // CSR-derived names spliced back in — reopening the policy-reintroduction risk the
+            // fallback-over-union redesign exists to close.
+            skippedCsrTags = new List<int>();
+            if (san == null)
+            {
+                var csrSans = ExtractSanEntriesFromCsr(csr, out skippedCsrTags);
+                foreach (var csrSan in csrSans)
+                    Add(csrSan.Type, csrSan.Value, fromCsr: true);
+            }
+
+            fromCsrKeys = csrKeys;
+            return result;
+        }
+
+        /// <summary>
+        /// Issue 0033: resolves the <c>additionalHosts</c> list for a V2 private-pki order. Spec
+        /// ("Private PKI Certificates" -> Create - Intranet SSL): "<c>additionalHosts[]</c> - SAN
+        /// list (DNS names or IPv4 / IPv6)"; the example body sends
+        /// <c>["portal.acme.local", "reports.acme.local", "10.0.0.50"]</c> with the primary host in
+        /// <c>hostname</c>, not repeated here.
+        ///
+        /// - Source: <see cref="CollectRequestedSanEntries"/> — the same gateway-dictionary-with-
+        ///   CSR-fallback rule the SSL UCC path uses via <see cref="BuildSanList"/>.
+        /// - DNS and IP SANs are both submitted. Unlike SSL's FQDN-only <c>additionalDomains</c>,
+        ///   IP literals are native to this field, so the V1-era <c>SubmitNonDnsSans</c> switch
+        ///   (whose purpose is keeping SANs CERTInext cannot validate out of a domain-name field)
+        ///   is deliberately not consulted — dropping a requested IP SAN here would silently issue
+        ///   a certificate without it.
+        /// - Email/URI SANs (and CSR GeneralName types with no string form) have no place in a
+        ///   host list: excluded with a warning that names only their types (an email SAN value is
+        ///   personal data).
+        /// - The primary <paramref name="hostname"/> is excluded; duplicates collapse
+        ///   case-insensitively. Returns <c>null</c> (field omitted) when nothing remains.
+        /// </summary>
+        private List<string> BuildPrivatePkiAdditionalHosts(
+            Dictionary<string, string[]> san, string csr, string subject, string hostname)
+        {
+            var requested = CollectRequestedSanEntries(san, csr, out var fromCsrKeys, out var skippedCsrTags);
+
+            if (skippedCsrTags.Count > 0)
+            {
+                _logger.LogWarning(
+                    "{Count} SAN(s) in the CSR use a type that cannot be represented as a host name or IP " +
+                    "address and were not submitted (ASN.1 GeneralName tag(s): {Tags}). V2 private-pki " +
+                    "additionalHosts carries DNS names and IPv4/IPv6 addresses only, so these cannot appear " +
+                    "on the issued certificate. Subject={Subject}",
+                    skippedCsrTags.Count, string.Join(", ", skippedCsrTags), LogSanitizer.Strip(subject));
+            }
+
+            bool IsHostType(SanEntry s) =>
+                string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(s.Type, "ip", StringComparison.OrdinalIgnoreCase);
+
+            var unsupported = requested.Where(s => !IsHostType(s)).ToList();
+            if (unsupported.Count > 0)
+            {
+                _logger.LogWarning(
+                    "EnrollV2Async: {Count} requested SAN(s) are neither DNS names nor IP addresses and cannot " +
+                    "be submitted via V2 private-pki additionalHosts (DNS names or IPv4/IPv6 only) — they will " +
+                    "NOT appear on the issued certificate. Types=[{Types}]",
+                    unsupported.Count, string.Join(", ", unsupported.Select(s => s.Type)));
+            }
+
+            var hosts = requested
+                .Where(IsHostType)
+                .Select(s => s.Value?.Trim())
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Where(v => !string.Equals(v, hostname, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            // Gateway- and CSR-sourced entries are mutually exclusive by construction (the CSR is
+            // only read when the gateway dictionary is null), so when any entry came from the CSR,
+            // every surviving host did. Same wiring-smell warning BuildSanList raises for SSL.
+            if (fromCsrKeys.Count > 0 && hosts.Count > 0)
+            {
+                _logger.LogWarning(
+                    "Command supplied no SAN data for this enrollment; {Count} SAN(s) present in the CSR " +
+                    "have been added to the private-pki order's additionalHosts instead. Review the " +
+                    "enrollment pattern / template SAN configuration. Subject={Subject}",
+                    hosts.Count, LogSanitizer.Strip(subject));
+            }
+
+            return hosts.Count == 0 ? null : hosts;
         }
 
         private static string MapSanType(string anyCAType)

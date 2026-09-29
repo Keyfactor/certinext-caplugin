@@ -229,7 +229,7 @@
                 },
                 {
                     "name": "DomainName",
-                    "description": "OPTIONAL: Primary domain for SSL/TLS orders. Derived from the CSR CN if omitted."
+                    "description": "OPTIONAL: Primary domain for SSL/TLS orders (for V2 private-pki orders, the primary hostname). Derived from the CSR CN if omitted."
                 },
                 {
                     "name": "SignerName",

@@ -62,7 +62,7 @@ behavior without disrupting V1 traffic.
 | `DefaultProductCode` | Not used for V2 renewals (see [Renewals](#renewals-and-reissuance) below) — V2 has no separate renewal call to fall back to a default code for. |
 | `TechnicalContactName` / `Email` / `IsdCode` / `MobileNumber` | Not used. The V2 order body has no technical-point-of-contact field. |
 | `IgnoreExpired` | **Not honored during V2 Synchronize.** Expired certificates are always included in the V2 sync result set. |
-| `SubmitNonDnsSans` | Not applicable — see the single-domain limitation above; non-DNS SANs were never part of this concern for V2, DNS SANs beyond the primary domain already fail outright. |
+| `SubmitNonDnsSans` | **SSL family (`ProductFamily=ssl`):** not applicable — see the single-domain limitation above; non-DNS SANs were never part of this concern for V2, DNS SANs beyond the primary domain already fail outright. **Private PKI family (`ProductFamily=private-pki`):** not consulted — the order's `additionalHosts` field accepts DNS names and IPv4/IPv6 addresses natively, so IP-address SANs are always submitted; email and URI SANs cannot be expressed there and are left off the order with a warning in the gateway log. |
 | `PageSize` | Still used, now against V2's `/reports/orders` paging. |
 | `RequestorName` / `RequestorEmail` / `RequestorMobileNumber` / `RequestorDesignation` | Still used — carried into the V2 order's `requestor` block. `RequestorDesignation` is omitted from the order when blank (the default) rather than sent with any value. |
 | `SignerPlace` / `SignerIp` | Still used — carried into the V2 order's `agreement` block. |
@@ -77,7 +77,10 @@ above.
 For each template you're migrating:
 
 1. Add `ProductFamily` (default `ssl`) and `ProductVariant` (`dv`/`ov`/`ev`) if not already present —
-   these are V2-only parameters with no V1 equivalent.
+   these are V2-only parameters with no V1 equivalent. For a Private PKI template, set
+   `ProductFamily=private-pki`, `ProductVariant` to `intranet-ssl` or `igtf-host`, and an explicit
+   `ProductCode` (see [V2 Private PKI Orders](#v2-private-pki-orders)). `ProductFamily=signature`
+   (Document Signer) enrollment is not yet supported.
 2. Re-verify `ProductCode` against the V2 catalog. V1 and V2 product codes are not guaranteed to be
    the same numeric values on your account — call `GetProductDetailsV2Async` (or the equivalent live
    probe) rather than assuming the V1 code carries over. Template validation (`ValidateProductInfo`)

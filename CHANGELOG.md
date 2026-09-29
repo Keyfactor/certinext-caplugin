@@ -43,6 +43,7 @@
 - fix(v2): V2 DCV now runs for every SAN on a UCC order, not just the primary domain (0042).
 - fix(sync): V2 `Synchronize`/`GetSingleRecord` no longer emit a body-less REVOKED record unless the gateway already holds a certificate body for that order, preventing a poisoned gateway row that broke every future Command scan of the CA (0049).
 - fix(enroll): V2 `Enroll` no longer returns a body-less REVOKED result; a REVOKED disposition observed post-CSR-submit, post-DCV, or during the pickup poll is now reported as FAILED (0052).
+- fix(v2): V2 `private-pki` enrollment now sends the Private PKI order body (`variant`, `hostname`, `additionalHosts` incl. IP SANs; no DCV) instead of the SSL body; `signature` enrollment fails fast until its subject mapping is designed (0033).
 - fix(logging): requestor personal data (name, email, phone, org contact fields) and full CA request/response payloads are now redacted from gateway logs by default, gated behind a new opt-in `LogSensitiveRequestData` connector setting (0040).
 
 ## Chores

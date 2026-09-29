@@ -94,8 +94,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         public string KeyType => GetString(Constants.EnrollmentParam.KeyType, string.Empty);
 
         /// <summary>
-        /// Primary domain name for SSL/TLS orders.
-        /// Derived from the CSR CN by the client if omitted here.
+        /// Primary domain name for SSL/TLS orders (and the <c>hostname</c> of a V2 private-pki
+        /// order — issue 0033). Derived from the CSR CN by the client if omitted here.
         /// </summary>
         public string DomainName => GetString(Constants.EnrollmentParam.DomainName, string.Empty);
 
@@ -141,10 +141,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         };
 
         /// <summary>
-        /// V2 product variant sent in the order body (e.g. "dv", "ov", "ev").
-        /// Default: "dv".
+        /// V2 product variant within the family, sent in the order body. For the SSL family this
+        /// is the <c>productVariant</c> field ("dv", "ov", "ev"); for the private-pki family it
+        /// is the <c>variant</c> field ("intranet-ssl", "igtf-host" — issue 0033).
+        /// Default: "dv" (SSL-only; private-pki enrollment rejects it — see
+        /// <see cref="HasExplicitProductVariant"/>).
         /// </summary>
         public string ProductVariant => GetString(Constants.EnrollmentParam.ProductVariant, "dv");
+
+        /// <summary>
+        /// True when the ProductVariant template parameter is actually set (non-blank), as
+        /// opposed to <see cref="ProductVariant"/> falling back to its SSL-only "dv" default.
+        /// Used only to word the private-pki validation error accurately (issue 0033).
+        /// </summary>
+        public bool HasExplicitProductVariant =>
+            !string.IsNullOrEmpty(GetString(Constants.EnrollmentParam.ProductVariant, string.Empty));
 
         // ------------------------------------------------------------------
         // Helpers

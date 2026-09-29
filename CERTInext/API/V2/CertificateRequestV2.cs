@@ -132,8 +132,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// <summary>
     /// Technical point-of-contact block for V2 orders. Per the V2 spec's field table (SSL/TLS
     /// Certificates folder description — confirmed identical for the Document Signer and
-    /// Private PKI folders, though those product families are not yet wired through
-    /// <c>EnrollV2Async</c>; see issue 0033), all four subfields are documented Optional. Unlike
+    /// Private PKI folders; <see cref="V2CreatePrivatePkiOrderRequest"/> and
+    /// <see cref="V2CreateSignatureOrderRequest"/> reuse this type, see issue 0033), all four
+    /// subfields are documented Optional. Unlike
     /// V1's <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.API.TechnicalPointOfContact"/>,
     /// which sends ISD code and mobile number as two separate fields
     /// (<c>tpcIsdCode</c>/<c>tpcMobileNumber</c>), the V2 shape has a single <c>phone</c> field —
@@ -244,7 +245,232 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// Request body for PUT /api/certinext/v2/{family}-certificates/{orderId}/csr.
+    /// Request body for POST /api/certinext/v2/private-pki-certificates (issue 0033). Modelled
+    /// from the V2 spec's "Private PKI Certificates" folder field table ("Field requirements (in
+    /// body order)"): <c>variant</c>, <c>requestor.name</c>, <c>requestor.email</c> and
+    /// <c>hostname</c> are strictly mandatory ("400 if missing"); everything else is Optional.
+    /// Per the spec, "Private PKI has no DCV, no organization block, and no Subscriber
+    /// Agreement" — so, unlike <see cref="V2CreateSslOrderRequest"/>, there is no
+    /// <c>productVariant</c>, <c>organization</c>, <c>certificate</c> or <c>agreement</c> block
+    /// here. SANs go in <see cref="AdditionalHosts"/>, which (unlike SSL's FQDN-only
+    /// <c>additionalDomains</c>) accepts IP literals.
+    ///
+    /// Only the fields <c>EnrollV2Async</c> populates are modelled. Spec-Optional fields the
+    /// plugin has no source for (<c>caProfileId</c>, <c>masterProductId</c> — both "derived from
+    /// X-Product-Code" — <c>saveAsDraft</c>, <c>requestId</c>, <c>csr</c>, <c>tags</c>,
+    /// <c>customFields</c>) are deliberately omitted, matching how the SSL DTO treats its own
+    /// unused optional fields. The CSR is submitted by the separate Submit CSR call, per the
+    /// spec's Private PKI workflow (Create -> Submit CSR -> Track -> Download).
+    /// Product code is sent as the X-Product-Code header (not in this body).
+    /// </summary>
+    public class V2CreatePrivatePkiOrderRequest
+    {
+        /// <summary>
+        /// Mandatory. Spec enum for create: <c>intranet-ssl</c> / <c>igtf-host</c>
+        /// (<see cref="Keyfactor.Extensions.CAPlugin.CERTInext.Constants.ApiV2.PrivatePkiVariants"/>).
+        /// </summary>
+        [JsonPropertyName("variant")]
+        public string Variant { get; set; }
+
+        /// <summary>
+        /// Optional (spec default <c>all</c>). Same connector mapping as
+        /// <see cref="V2CreateSslOrderRequest.EmailNotifications"/>; null is omitted on the wire.
+        /// </summary>
+        [JsonPropertyName("emailNotifications")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string EmailNotifications { get; set; }
+
+        /// <summary>Optional. Omitted when the connector has no <c>GroupNumber</c> configured.</summary>
+        [JsonPropertyName("groupNumber")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string GroupNumber { get; set; }
+
+        /// <summary>Mandatory (<c>name</c> + <c>email</c> strictly mandatory; phone/designation optional).</summary>
+        [JsonPropertyName("requestor")]
+        public V2Requestor Requestor { get; set; }
+
+        /// <summary>Mandatory. Spec: "<c>hostname</c> - primary CN".</summary>
+        [JsonPropertyName("hostname")]
+        public string Hostname { get; set; }
+
+        /// <summary>
+        /// Optional. Spec: "<c>additionalHosts[]</c> - SAN list (DNS names or IPv4 / IPv6)".
+        /// Omitted from the wire body when null (no additional SANs).
+        /// </summary>
+        [JsonPropertyName("additionalHosts")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public System.Collections.Generic.List<string> AdditionalHosts { get; set; }
+
+        /// <summary>Optional (autoRenew defaults ON at the CA when omitted — always sent, as for SSL).</summary>
+        [JsonPropertyName("subscription")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public V2SubscriptionParams Subscription { get; set; }
+
+        [JsonPropertyName("remarks")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Remarks { get; set; }
+
+        /// <summary>Optional per spec; populated with the same fallbacks the SSL body uses.</summary>
+        [JsonPropertyName("technicalPointOfContact")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public V2TechnicalPointOfContact TechnicalPointOfContact { get; set; }
+    }
+
+    /// <summary>
+    /// <c>subject</c> block of a V2 Document Signer (signature) order (issue 0033). Modelled from
+    /// the V2 spec's "Document Signer Certificates" folder field table. Only <see cref="Email"/>
+    /// is strictly mandatory ("400 if missing"); the rest are Optional or Conditional on
+    /// <c>subjectType</c>:
+    ///  - <c>firstName</c> / <c>lastName</c>: "required for natural-person / legal-person"
+    ///  - <c>organizationName</c>: "required for legal-person / legal-entity"
+    ///  - <c>organizationIdentificationNumber</c>: "typically required for legal-entity"
+    ///  - <c>businessCategory</c>: "legal-entity"
+    ///  - <c>countryCode</c>: "Optional (ISO 3166-1 alpha-2)"
+    /// Every non-mandatory field is omitted from the wire when null so a legal-entity body never
+    /// carries empty person-name keys (and vice versa).
+    /// </summary>
+    public class V2SignatureSubject
+    {
+        [JsonPropertyName("firstName")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string FirstName { get; set; }
+
+        [JsonPropertyName("lastName")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string LastName { get; set; }
+
+        /// <summary>Mandatory for every <c>subjectType</c>.</summary>
+        [JsonPropertyName("email")]
+        public string Email { get; set; }
+
+        [JsonPropertyName("phone")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Phone { get; set; }
+
+        [JsonPropertyName("designation")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Designation { get; set; }
+
+        [JsonPropertyName("organizationName")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string OrganizationName { get; set; }
+
+        [JsonPropertyName("organizationUnit")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string OrganizationUnit { get; set; }
+
+        [JsonPropertyName("organizationIdentificationNumber")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string OrganizationIdentificationNumber { get; set; }
+
+        /// <summary>Spec examples: <c>Business Entity</c> | <c>Government</c> | <c>Non-Commercial Entity</c>.</summary>
+        [JsonPropertyName("businessCategory")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string BusinessCategory { get; set; }
+
+        /// <summary>Spec examples: <c>passport</c> | <c>driving-license</c> | <c>national-id</c>.</summary>
+        [JsonPropertyName("identityDocumentType")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string IdentityDocumentType { get; set; }
+
+        [JsonPropertyName("identificationNumber")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string IdentificationNumber { get; set; }
+
+        [JsonPropertyName("streetAddress1")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string StreetAddress1 { get; set; }
+
+        [JsonPropertyName("streetAddress2")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string StreetAddress2 { get; set; }
+
+        [JsonPropertyName("locality")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Locality { get; set; }
+
+        [JsonPropertyName("state")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string State { get; set; }
+
+        [JsonPropertyName("postalCode")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string PostalCode { get; set; }
+
+        [JsonPropertyName("countryCode")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string CountryCode { get; set; }
+    }
+
+    /// <summary>
+    /// Request body for POST /api/certinext/v2/signature-certificates (issue 0033). Modelled from
+    /// the V2 spec's "Document Signer Certificates" folder field table. Strictly mandatory ("400
+    /// if missing"): <c>subjectType</c>, <c>requestor.name</c>, <c>requestor.email</c>,
+    /// <c>subject.email</c>; "The <c>subject.*</c> fields beyond email vary by <c>subjectType</c> -
+    /// the backend applies stricter per-type rules."
+    ///
+    /// <b>Not yet wired into <c>EnrollV2Async</c>.</b> The body shape is fully determined by the
+    /// spec, but several of its mandatory/conditional values (<c>subjectType</c>,
+    /// <c>subject.email</c>, the per-type <c>subject</c> name/organization fields) have no settled
+    /// source in the Command enrollment inputs yet — see issue 0033. Until that is decided,
+    /// <c>EnrollV2Async</c> fails a <c>ProductFamily=signature</c> enrollment fast instead of
+    /// sending any body. The DTO and its client overload exist so that wiring is a pure
+    /// source-mapping change.
+    ///
+    /// <see cref="Agreement"/> reuses <see cref="V2AgreementParams"/> (the spec's signature and
+    /// SSL agreement tables are identical: <c>signerName</c>, <c>signerPlace</c>,
+    /// <c>accepted</c>). Leave <see cref="V2AgreementParams.SignerIp"/> null for this family —
+    /// the spec's signature Accept Agreement note says "Do not send <c>signerIp</c> in the body -
+    /// it will be ignored", and the create field table does not list it.
+    /// Product code is sent as the X-Product-Code header (not in this body).
+    /// </summary>
+    public class V2CreateSignatureOrderRequest
+    {
+        /// <summary>
+        /// Mandatory. Spec enum: <c>natural-person</c> / <c>legal-person</c> / <c>legal-entity</c>
+        /// (<see cref="Keyfactor.Extensions.CAPlugin.CERTInext.Constants.ApiV2.SignatureSubjectTypes"/>).
+        /// </summary>
+        [JsonPropertyName("subjectType")]
+        public string SubjectType { get; set; }
+
+        [JsonPropertyName("emailNotifications")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string EmailNotifications { get; set; }
+
+        [JsonPropertyName("groupNumber")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string GroupNumber { get; set; }
+
+        /// <summary>Mandatory (<c>name</c> + <c>email</c> strictly mandatory).</summary>
+        [JsonPropertyName("requestor")]
+        public V2Requestor Requestor { get; set; }
+
+        /// <summary>Mandatory; see <see cref="V2SignatureSubject"/> for the per-type rules.</summary>
+        [JsonPropertyName("subject")]
+        public V2SignatureSubject Subject { get; set; }
+
+        [JsonPropertyName("subscription")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public V2SubscriptionParams Subscription { get; set; }
+
+        /// <summary>Spec: "Optional - required before issuance".</summary>
+        [JsonPropertyName("agreement")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public V2AgreementParams Agreement { get; set; }
+
+        [JsonPropertyName("remarks")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Remarks { get; set; }
+
+        [JsonPropertyName("technicalPointOfContact")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public V2TechnicalPointOfContact TechnicalPointOfContact { get; set; }
+    }
+
+    /// <summary>
+    /// Request body for PUT /api/certinext/v2/{family}-certificates/{orderId}/csr. The spec
+    /// documents the identical <c>{ "csr", "attested" }</c> body for the SSL/TLS, Private PKI
+    /// and Document Signer families (issue 0033), so one shape serves all three.
     /// </summary>
     public class V2SubmitCsrRequest
     {

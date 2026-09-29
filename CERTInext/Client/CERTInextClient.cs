@@ -1335,10 +1335,48 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             V2CreateSslOrderRequest request,
             CancellationToken ct = default)
         {
+            // Issue 0033: the SSL-shaped body must only ever go to the SSL endpoint. Previously
+            // the slug was substituted into the URL unchecked, so a private-pki/signature
+            // template silently sent this body to the wrong family's create endpoint.
+            if (!string.Equals(productFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException(
+                    $"A V2 SSL/TLS order body can only be sent to the '{Constants.ApiV2.FamilySsl}' family, " +
+                    $"not '{productFamilySlug}'. Use the Private PKI or Document Signer PlaceOrderV2Async overload.",
+                    nameof(productFamilySlug));
+
+            return await PlaceOrderV2CoreAsync(Constants.ApiV2.SslCertificatesPath, productCode, request, ct);
+        }
+
+        /// <inheritdoc/>
+        public Task<V2CreateOrderResponse> PlaceOrderV2Async(
+            string productCode,
+            V2CreatePrivatePkiOrderRequest request,
+            CancellationToken ct = default)
+            => PlaceOrderV2CoreAsync(Constants.ApiV2.PrivatePkiCertificatesPath, productCode, request, ct);
+
+        /// <inheritdoc/>
+        public Task<V2CreateOrderResponse> PlaceOrderV2Async(
+            string productCode,
+            V2CreateSignatureOrderRequest request,
+            CancellationToken ct = default)
+            => PlaceOrderV2CoreAsync(Constants.ApiV2.SignatureCertificatesPath, productCode, request, ct);
+
+        /// <summary>
+        /// Shared V2 create-order transport for every product family (issue 0033): POSTs the
+        /// family-specific body to <paramref name="path"/> with the X-Product-Code and
+        /// Idempotency-Key headers. Request and response bodies are only ever logged (Trace)
+        /// through <see cref="ApplyLoggingRedaction"/>, so credentials are always scrubbed and
+        /// requestor/subject PII is scrubbed unless <c>LogSensitiveRequestData</c> is on.
+        /// </summary>
+        private async Task<V2CreateOrderResponse> PlaceOrderV2CoreAsync<TRequest>(
+            string path,
+            string productCode,
+            TRequest request,
+            CancellationToken ct)
+        {
             Logger.MethodEntry(LogLevel.Trace);
             EnsureV2Client();
             string idempotencyKey = Guid.NewGuid().ToString();
-            string path = $"{Constants.ApiV2.SslCertificatesPath.Replace("ssl-certificates", productFamilySlug)}";
             var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
             req.AddHeader("X-Product-Code", productCode ?? string.Empty);
             string json = JsonSerializer.Serialize(request, GetJsonOptions());
@@ -2657,11 +2695,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // designation, signer place/IP). "name" is bare only inside the V2 requestor /
         // technicalPointOfContact blocks in every currently-logged body — it is never used as an
         // exact top-level key anywhere else on the CERTInext wire shapes this plugin logs raw.
+        //
+        // Issue 0033: the V2 Document Signer (signature) body's `subject` block and its create
+        // response add a natural person's name, identity-document and street-address fields
+        // (firstName, lastName, identityDocumentType, identificationNumber, streetAddress1/2,
+        // locality, postalCode) and a `subjectDisplayName` (full name for natural/legal person).
+        // subject.email / subject.phone / subject.designation are already covered by the bare
+        // "email"/"phone"/"designation" keys. Deliberately NOT added: organizationName,
+        // organizationUnit, organizationIdentificationNumber, businessCategory, state,
+        // countryCode — organization or coarse-location data, and "organizationName" is also a
+        // V1 order/report key whose value is an OV organization, not a person. The V2
+        // private-pki body (issue 0033) adds no new personal keys: its requestor /
+        // technicalPointOfContact blocks reuse the bare keys above, and hostname /
+        // additionalHosts are host names / IP literals, not personal data.
         private static readonly string[] PersonalOtherFieldNames =
         {
             "requestorName", "requesterName", "tpcName", "signerName", "name",
             "requestorIsdCode", "requestorMobileNumber", "requestorDesignation",
-            "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signedPlace", "signerip", "phone", "designation"
+            "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signedPlace", "signerip", "phone", "designation",
+            "firstName", "lastName", "subjectDisplayName", "identityDocumentType", "identificationNumber",
+            "streetAddress1", "streetAddress2", "locality", "postalCode"
         };
 
         /// <summary>
@@ -2674,7 +2727,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <c>signerPlace</c>, <c>signerIP</c>/<c>signerIp</c>, the legacy <c>requesterName</c>/
         /// <c>requesterEmail</c> aliases, and the <c>requestorEmailId</c> search filter) and the
         /// V2 nested <c>requestor</c> / <c>technicalPointOfContact</c> shapes (bare <c>name</c>/
-        /// <c>email</c>/<c>phone</c>/<c>designation</c>).
+        /// <c>email</c>/<c>phone</c>/<c>designation</c>), plus the V2 Document Signer
+        /// <c>subject</c> block's person fields and <c>subjectDisplayName</c> (issue 0033 — see
+        /// <c>PersonalOtherFieldNames</c> for the exact list and what is deliberately excluded).
         ///
         /// Email values are masked via <see cref="LogSanitizer.MaskEmail"/> so the domain stays
         /// visible (e.g. <c>"j***@example.com"</c>) while the local part is hidden. Every other

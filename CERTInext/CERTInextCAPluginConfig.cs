@@ -549,7 +549,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.DomainName] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Primary domain for SSL/TLS orders. " +
+                    Comments = "OPTIONAL: Primary domain for SSL/TLS orders (for V2 private-pki orders, the primary hostname). " +
                                "Derived from the CSR CN if omitted.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -588,7 +588,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "V2 API ONLY: Product family for this template. " +
                                "Accepted values: 'ssl' (default), 'private-pki', 'signature'. " +
-                               "Maps to the corresponding V2 resource path (/api/certinext/v2/{family}-certificates/).",
+                               "Maps to the corresponding V2 resource path (/api/certinext/v2/{family}-certificates/). " +
+                               "'private-pki' requires an explicit ProductCode and a Private PKI ProductVariant. " +
+                               "'signature' (Document Signer) enrollment is not yet supported.",
                     Hidden = false,
                     DefaultValue = "ssl",
                     Type = "String"
@@ -596,7 +598,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.EnrollmentParam.ProductVariant] = new PropertyConfigInfo
                 {
                     Comments = "V2 API ONLY: Product variant sent in the V2 order body. " +
-                               "Accepted values: 'dv' (default), 'ov', 'ev'. " +
+                               "ProductFamily 'ssl': 'dv' (default), 'ov', 'ev'. " +
+                               "ProductFamily 'private-pki': 'intranet-ssl' or 'igtf-host' (required; no default). " +
                                "Must match the variant associated with the configured product code.",
                     Hidden = false,
                     DefaultValue = "dv",

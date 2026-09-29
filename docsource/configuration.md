@@ -341,10 +341,21 @@ When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductFamily` | Optional | String | CERTInext V2 product family. Accepted values: `ssl`, `private-pki`, `signature`. Default: `ssl`. | `ssl` |
-| `ProductVariant` | Optional | String | Product variant within the family (e.g. `dv`, `ov`, `ev`). Default: `dv`. | `dv` |
+| `ProductFamily` | Optional | String | CERTInext V2 product family. Supported for enrollment: `ssl` (SSL/TLS) and `private-pki` (Private PKI — see [V2 Private PKI Orders](#v2-private-pki-orders)). `signature` (Document Signer) is accepted by the parameter, but Document Signer enrollment is not yet supported: a `signature` enrollment fails before any order is placed. Default: `ssl`. | `ssl` |
+| `ProductVariant` | Optional | String | Product variant within the family. `ssl`: `dv`, `ov`, or `ev` (default `dv`). `private-pki`: `intranet-ssl` or `igtf-host` — required, with no default (the SSL default `dv` is rejected). | `dv` |
 
 `ProductCode` continues to carry the numeric product code and is sent in the `X-Product-Code` header on V2 order placement.
+
+### V2 Private PKI Orders
+
+With `ProductFamily=private-pki`, the plugin places the order against CERTInext's Private PKI endpoint using the Private PKI request body, which differs from the SSL/TLS one:
+
+- **Product code is required.** Set `ProductCode` explicitly to your account's Private PKI catalog code. Private PKI codes vary per customer catalog, so the plugin can't look one up from the product selected on the template. Template validation checks that the code exists in the V2 catalog and is a Private PKI product (catalog `productTypeID` `39`).
+- **Variant is required.** Set `ProductVariant` to `intranet-ssl` or `igtf-host`.
+- **Hostname.** The order's primary `hostname` comes from `DomainName`, or from the CSR's CN when `DomainName` isn't set.
+- **SANs, including IP addresses.** Additional SANs are sent in the order's `additionalHosts` field, which accepts DNS names and IPv4/IPv6 addresses. SANs come from the gateway's SAN list; the plugin falls back to the SANs in the CSR only when the gateway supplies none. Email and URI SANs can't be expressed in `additionalHosts`, so they're left off the order and a warning is written to the gateway log. `SubmitNonDnsSans` isn't consulted for Private PKI orders.
+- **No DCV, organization, or subscriber agreement.** Private PKI orders have none of these steps, so DCV is never attempted for them, and `OrganizationNumber`, `AutoSecureWww`, `SignerName`, `SignerPlace`, and `SignerIp` aren't used.
+- **Shared fields.** The requestor, technical contact, subscription, email-notification, and group settings are sent exactly as they are for SSL/TLS orders.
 
 ### V2 Order Lifecycle
 

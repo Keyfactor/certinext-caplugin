@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -185,14 +185,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         Task PingV2Async(CancellationToken ct = default);
 
         /// <summary>
-        /// Places a new order via POST /api/certinext/v2/{productFamilySlug}.
+        /// Places a new SSL/TLS order via POST /api/certinext/v2/{productFamilySlug}.
         /// The product code is sent as the X-Product-Code header.
         /// An Idempotency-Key is generated automatically.
+        /// <paramref name="productFamilySlug"/> must be <c>ssl-certificates</c>: this body is the
+        /// SSL/TLS shape, and sending it to another family's endpoint is exactly issue 0033 —
+        /// any other slug throws <see cref="ArgumentException"/> before a request is made. Use
+        /// the <see cref="V2CreatePrivatePkiOrderRequest"/> / <see cref="V2CreateSignatureOrderRequest"/>
+        /// overloads for the other families.
         /// </summary>
         Task<V2CreateOrderResponse> PlaceOrderV2Async(
             string productFamilySlug,
             string productCode,
             V2CreateSslOrderRequest request,
+            CancellationToken ct = default);
+
+        /// <summary>
+        /// Places a new Private PKI order via POST /api/certinext/v2/private-pki-certificates
+        /// (issue 0033). Same X-Product-Code / Idempotency-Key handling as the SSL overload.
+        ///
+        /// A distinct overload rather than a shared base type on the SSL overload's request
+        /// parameter, deliberately: every existing Moq Setup/Callback is typed to
+        /// <see cref="V2CreateSslOrderRequest"/>, and widening that parameter would break the
+        /// typed callbacks at runtime. The family is implied by the request type, so there is no
+        /// slug parameter that could be mismatched with the body.
+        /// </summary>
+        Task<V2CreateOrderResponse> PlaceOrderV2Async(
+            string productCode,
+            V2CreatePrivatePkiOrderRequest request,
+            CancellationToken ct = default);
+
+        /// <summary>
+        /// Places a new Document Signer order via POST /api/certinext/v2/signature-certificates
+        /// (issue 0033). Same X-Product-Code / Idempotency-Key handling as the SSL overload. Not
+        /// yet called by <c>EnrollV2Async</c> — see <see cref="V2CreateSignatureOrderRequest"/>.
+        /// </summary>
+        Task<V2CreateOrderResponse> PlaceOrderV2Async(
+            string productCode,
+            V2CreateSignatureOrderRequest request,
             CancellationToken ct = default);
 
         /// <summary>

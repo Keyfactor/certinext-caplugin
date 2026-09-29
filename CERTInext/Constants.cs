@@ -133,7 +133,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // V2 API enrollment parameters
             public const string ProductFamily = "ProductFamily";  // V2: "ssl", "private-pki", or "signature"
-            public const string ProductVariant = "ProductVariant"; // V2: "dv", "ov", or "ev"
+            public const string ProductVariant = "ProductVariant"; // V2: ssl "dv"/"ov"/"ev"; private-pki "intranet-ssl"/"igtf-host"
         }
 
         public static class Products
@@ -448,6 +448,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // other value (dv and its wildcard/UCC combinations) omits it entirely.
             public const string ProductVariantOv = "ov";
             public const string ProductVariantEv = "ev";
+
+            // Private PKI create-body `variant` enum (issue 0033). Spec, "Private PKI
+            // Certificates" field table: "`variant` | **Mandatory** (`intranet-ssl` /
+            // `igtf-host`)". Sourced from the ProductVariant template parameter (the same
+            // "variant within the family" parameter the SSL body's productVariant uses).
+            // Note: the spec's create-*response* table echoes a wider enum (`intranet-ssl` /
+            // `igtf-host` / `igtf-personal` / `device` / `vpn`) — only the two documented
+            // create values are accepted here; see issue 0033.
+            public const string PrivatePkiVariantIntranetSsl = "intranet-ssl";
+            public const string PrivatePkiVariantIgtfHost    = "igtf-host";
+            public static readonly System.Collections.Generic.HashSet<string> PrivatePkiVariants =
+                new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    PrivatePkiVariantIntranetSsl,
+                    PrivatePkiVariantIgtfHost
+                };
+
+            // Catalog productTypeID for Private PKI products. Spec, Catalog -> List Products
+            // "productTypeID values": `"39"` | Private PKI | Private PKI (`8`). Also observed live
+            // on the sandbox catalog (product 149, "Sandbox emSign Intranet SSL 1 Year").
+            public const string PrivatePkiProductTypeId = "39";
+
+            // Document Signer create-body `subjectType` enum (issue 0033). Spec, "Document
+            // Signer Certificates" field table: "`subjectType` | **Mandatory**
+            // (`natural-person` / `legal-person` / `legal-entity`)". Not yet sourced by
+            // EnrollV2Async — signature enrollment is still an open design decision.
+            public static readonly System.Collections.Generic.HashSet<string> SignatureSubjectTypes =
+                new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    "natural-person",
+                    "legal-person",
+                    "legal-entity"
+                };
 
             // Fixed designation sent on technicalPointOfContact.designation (issue 0030). The
             // spec documents this as free text with no enum (examples: "Technical Contact",
