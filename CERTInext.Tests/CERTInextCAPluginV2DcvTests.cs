@@ -15,6 +15,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -552,6 +554,425 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_cap_001", It.IsAny<CancellationToken>()), Times.Once);
             mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync("ord_cap_002", It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0042 — UCC additionalDomains SANs never got DCV-validated because the V2 DCV
+        // machinery only ever drove the order's primary domain. These tests exercise the
+        // generalized PerformDcvV2MultiDomainAsync path (driven from Track Order's
+        // verifications.domain.domains[] block) end to end through Enroll/Synchronize, the
+        // same way the EMS-1080 tests above exercise the single-domain path.
+        // ---------------------------------------------------------------------------
+
+        private static V2DomainVerificationEntry DomainEntry(
+            string domain, string dcvStatus, string dcvMethod = null, string verifiedAt = null) =>
+            new V2DomainVerificationEntry
+            {
+                Domain       = domain,
+                DomainStatus = "ACTIVE",
+                DcvStatus    = dcvStatus,
+                DcvMethod    = dcvMethod,
+                VerifiedAt   = verifiedAt,
+                CaaStatus    = "SKIPPED"
+            };
+
+        private static V2OrderStatusResponse StatusWithDomains(string status, params V2DomainVerificationEntry[] domains) =>
+            new V2OrderStatusResponse
+            {
+                OrderId       = OrderId,
+                Status        = status,
+                Domain        = domains.FirstOrDefault()?.Domain,
+                Verifications = new V2Verifications
+                {
+                    Domain = new V2DomainVerification { Status = "PENDING", Domains = domains.ToList() }
+                }
+            };
+
+        private const string UccPrimary = "example.com";
+        private const string UccSanA = "a.pending0042.example.com";
+        private const string UccSanB = "b.pending0042.example.com";
+
+        [Fact]
+        public async Task PerformDcvV2_Ucc_PrimaryVerified_TwoPendingSans_StagesAndVerifiesOnlyPendingSans_CleansUpAll()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            // 1st TrackOrder call (post-CSR check): primary already VERIFIED, both SANs PENDING.
+            // Every call after that (the WaitForDomainsVerifiedV2Async poll, and EnrollV2Async's
+            // own post-DCV re-check) sees the order fully issued with every domain VERIFIED.
+            int trackCalls = 0;
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() =>
+                {
+                    trackCalls++;
+                    return trackCalls == 1
+                        ? StatusWithDomains("pending-dcv",
+                            DomainEntry(UccPrimary, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanA, "PENDING"),
+                            DomainEntry(UccSanB, "PENDING"))
+                        : StatusWithDomains("issued",
+                            DomainEntry(UccPrimary, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanA, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanB, "VERIFIED", "dns-txt"));
+                });
+
+            mock.Setup(c => c.GetDcvV2Async(OrderId, UccSanA, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-a", TokenExpiryDate = "2026-12-31 23:59:59" });
+            mock.Setup(c => c.GetDcvV2Async(OrderId, UccSanB, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-b", TokenExpiryDate = "2026-12-31 23:59:59" });
+
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, UccSanA, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, UccSanB, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            mock.Setup(c => c.DownloadCertificateV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DownloadResponse());
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+
+            validator.StagedRecords.Select(r => r.key).Should().BeEquivalentTo(
+                new[] { $"_emsign-validation.{UccSanA}", $"_emsign-validation.{UccSanB}" },
+                "only the two pending SANs should be staged — the already-VERIFIED primary must never be re-challenged");
+
+            validator.CleanedUpKeys.Should().BeEquivalentTo(
+                new[] { $"_emsign-validation.{UccSanA}", $"_emsign-validation.{UccSanB}" },
+                "every staged record must be cleaned up");
+
+            mock.Verify(c => c.GetDcvV2Async(OrderId, UccPrimary, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.VerifyDcvV2Async(OrderId, UccPrimary, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task PerformDcvV2_Ucc_OneSanVerifyFails_OtherStillVerified_AllCleanedUp_OrderStaysPending()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            // 1st call: post-CSR, both SANs pending. Every later call (the poll for the one SAN
+            // that DID verify, and EnrollV2Async's post-DCV re-check): SanA verified, SanB still
+            // pending — the order legitimately cannot advance further this pass.
+            int trackCalls = 0;
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() =>
+                {
+                    trackCalls++;
+                    return trackCalls == 1
+                        ? StatusWithDomains("pending-dcv",
+                            DomainEntry(UccPrimary, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanA, "PENDING"),
+                            DomainEntry(UccSanB, "PENDING"))
+                        : StatusWithDomains("pending-dcv",
+                            DomainEntry(UccPrimary, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanA, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanB, "PENDING"));
+                });
+
+            mock.Setup(c => c.GetDcvV2Async(OrderId, UccSanA, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-a", TokenExpiryDate = "2026-12-31 23:59:59" });
+            mock.Setup(c => c.GetDcvV2Async(OrderId, UccSanB, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-b", TokenExpiryDate = "2026-12-31 23:59:59" });
+
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, UccSanA, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, UccSanB, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("simulated transient verify failure for SanB"));
+
+            var validator = new FakeDomainValidator();
+            // PickupRetries > 0 (mirrors the 0051 regression test above): confirms dcvV2Ran still
+            // gates the pickup poll even on the partial-failure multi-domain path.
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator), pickupRetries: 5);
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                "SanB never verified, so the order must stay pending — not be treated as failed or issued");
+            result.CARequestID.Should().Be(OrderId);
+
+            validator.CleanedUpKeys.Should().BeEquivalentTo(
+                new[] { $"_emsign-validation.{UccSanA}", $"_emsign-validation.{UccSanB}" },
+                "both staged records must be cleaned up regardless of SanB's verify failure");
+
+            mock.Verify(c => c.VerifyDcvV2Async(OrderId, UccSanA, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.VerifyDcvV2Async(OrderId, UccSanB, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()),
+                Times.Exactly(3),
+                "a pickup poll must not stack on top of the inline DCV wait — no 4th TrackOrderV2Async call");
+            mock.Verify(c => c.DownloadCertificateV2Async(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task SynchronizeV2_Ucc_OneSanStillPendingFromAnEarlierPass_OnlyThatSanIsProcessed()
+        {
+            var mock = NewMock();
+            const string syncOrderId = "ord_ucc_sync_001";
+            var row = PendingDcvRow(syncOrderId, DateTime.UtcNow.AddMinutes(-10));
+
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(row));
+
+            // Primary and SanA were already verified on an earlier sync pass; only SanB remains.
+            var pendingStatus = new V2OrderStatusResponse
+            {
+                OrderId = syncOrderId,
+                Status = "pending-dcv",
+                Domain = UccPrimary,
+                Verifications = new V2Verifications
+                {
+                    Domain = new V2DomainVerification
+                    {
+                        Status = "PENDING",
+                        Domains = new List<V2DomainVerificationEntry>
+                        {
+                            DomainEntry(UccPrimary, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanA, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanB, "PENDING")
+                        }
+                    }
+                }
+            };
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(syncOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, pendingStatus));
+
+            mock.Setup(c => c.GetDcvV2Async(syncOrderId, UccSanB, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-b", TokenExpiryDate = "2026-12-31 23:59:59" });
+            mock.Setup(c => c.VerifyDcvV2Async(syncOrderId, UccSanB, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            var issuedStatus = new V2OrderStatusResponse
+            {
+                OrderId = syncOrderId,
+                Status = "issued",
+                Domain = UccPrimary,
+                Verifications = new V2Verifications
+                {
+                    Domain = new V2DomainVerification
+                    {
+                        Status = "VERIFIED",
+                        Domains = new List<V2DomainVerificationEntry>
+                        {
+                            DomainEntry(UccPrimary, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanA, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanB, "VERIFIED", "dns-txt")
+                        }
+                    }
+                }
+            };
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), syncOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(issuedStatus);
+            mock.Setup(c => c.ResolveAndTrackOrderV2Async(syncOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(issuedStatus);
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async(syncOrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId = syncOrderId, SerialNumber = "AA11BB22", CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var config = new CERTInextConfig
+            {
+                UseV2Api = true, ApiUrl = "https://v2.certinext.io",
+                OAuthClientId = "c", OAuthClientSecret = "s",
+                DcvEnabled = true, DcvTimeoutMinutes = 1, DcvPropagationDelaySeconds = 1,
+                DcvSyncMaxOrderAgeHours = 0, DcvSyncMaxPerPass = 0
+            };
+            var validator = new FakeDomainValidator();
+            var plugin = new CERTInextCAPlugin(mock.Object, new FakeDomainValidatorFactory(validator), config);
+
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().ContainSingle(r => r.CARequestID == syncOrderId);
+
+            mock.Verify(c => c.GetDcvV2Async(syncOrderId, UccSanB, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.GetDcvV2Async(syncOrderId, UccSanA, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.GetDcvV2Async(syncOrderId, UccPrimary, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            mock.Verify(c => c.GetDcvV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+                "the no-domain single-domain-fallback overload must not be used once domainEntries is populated");
+
+            validator.StagedRecords.Should().ContainSingle();
+            validator.CleanedUpKeys.Should().ContainSingle();
+        }
+
+        [Fact]
+        public async Task PerformDcvV2_DomainsArrayAbsent_UsesSingleDomainFallback_NeverThePerDomainOverload()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            // No Verifications block anywhere in this sequence — the pre-0042 shape.
+            mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PendingDcvStatus())
+                .ReturnsAsync(IssuedStatus())
+                .ReturnsAsync(IssuedStatus());
+
+            mock.Setup(c => c.GetDcvV2Async(OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "legacy-token", TokenExpiryDate = "2026-12-31 23:59:59" });
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, "example.com", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+            mock.Setup(c => c.DownloadCertificateV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DownloadResponse());
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            validator.StagedRecords.Should().ContainSingle();
+
+            // The 4-argument (per-domain) overload is a distinct method — confirming it was
+            // never called proves the domainEntries-absent case took the untouched legacy path,
+            // not the generalized multi-domain one (issue 0042's "keep today's primary-domain
+            // behaviour exactly" requirement).
+            mock.Verify(c => c.GetDcvV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+
+        [Fact]
+        public async Task PerformDcvV2_Ucc_Ems1080OnPendingSan_TreatedAsVerified_NotAnError_NoStagingOrVerify()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            int trackCalls = 0;
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() =>
+                {
+                    trackCalls++;
+                    return trackCalls == 1
+                        ? StatusWithDomains("pending-dcv",
+                            DomainEntry(UccPrimary, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanA, "PENDING"))
+                        : StatusWithDomains("issued",
+                            DomainEntry(UccPrimary, "VERIFIED", "dns-txt"),
+                            DomainEntry(UccSanA, "VERIFIED", "dns-txt"));
+                });
+
+            // EMS-1080 at GetDcv for the pending SAN — the domain became verified CA-side
+            // between Track Order reporting it pending and this challenge fetch.
+            mock.Setup(c => c.GetDcvV2Async(OrderId, UccSanA, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception(
+                    "CERTInext V2 API error during 'V2 get DCV challenge (per-domain)'. HTTP 422. " +
+                    "Unprocessable Entity: EMS-1080 Domain is already verified."));
+
+            mock.Setup(c => c.DownloadCertificateV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DownloadResponse());
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED,
+                "EMS-1080 on a pending SAN must be treated as already verified, not a failure");
+            validator.StagedRecords.Should().BeEmpty(
+                "EMS-1080 at GetDcv means there is no fresh challenge to publish for this SAN");
+            validator.CleanedUpKeys.Should().BeEmpty("nothing was staged, so there is nothing to clean up");
+
+            mock.Verify(c => c.VerifyDcvV2Async(
+                    OrderId, UccSanA, It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never,
+                "VerifyDcv must never be reached for a domain GetDcv already reported as verified");
+        }
+
+        [Fact]
+        public void V2OrderStatusResponse_Deserializes_PendingSanDomainsArray_WithoutDcvMethod()
+        {
+            // Raw shape from issues/0042 "Pending-SAN challenge shape (live)" (order 7465857196,
+            // 2026-09-28) — pending entries carry no "dcvMethod" key at all; it only appears once
+            // an entry reaches VERIFIED.
+            const string rawJson = @"{
+                ""orderId"": ""7465857196"",
+                ""status"": ""pending-approval"",
+                ""domain"": ""ucc0042-202609290046.dcv-test.scrup.org"",
+                ""verifications"": {
+                    ""domain"": {
+                        ""status"": ""PENDING"",
+                        ""domains"": [
+                            {""domain"":""a.pending0042-202609290046.example.com"",""domainStatus"":""ACTIVE"",""dcvStatus"":""PENDING"",""caaStatus"":""SKIPPED""},
+                            {""domain"":""b.pending0042-202609290046.example.com"",""domainStatus"":""ACTIVE"",""dcvStatus"":""PENDING"",""caaStatus"":""SKIPPED""},
+                            {""domain"":""ucc0042-202609290046.dcv-test.scrup.org"",""domainStatus"":""ACTIVE"",""dcvMethod"":""dns-txt"",""dcvStatus"":""VERIFIED"",""verifiedAt"":""2026-09-29T00:46:09Z"",""caaStatus"":""PASSED""}
+                        ]
+                    },
+                    ""empty"": false
+                }
+            }";
+
+            // Null-forgiving here: System.Text.Json's Deserialize<T> is annotated to return
+            // T?, but a successfully-parsed non-null JSON object (as above) never actually
+            // produces a null reference — the Should().NotBeNull() below is the runtime
+            // guarantee backing that, which the compiler's static analysis can't see through.
+            var result = JsonSerializer.Deserialize<V2OrderStatusResponse>(rawJson)!;
+
+            result.Should().NotBeNull();
+            result.Verifications.Should().NotBeNull();
+            result.Verifications.Domain.Should().NotBeNull();
+            result.Verifications.Domain.Status.Should().Be("PENDING");
+            result.Verifications.Domain.Domains.Should().HaveCount(3);
+
+            var sanA = result.Verifications.Domain.Domains.Single(d => d.Domain == "a.pending0042-202609290046.example.com");
+            sanA.DcvStatus.Should().Be("PENDING");
+            sanA.DcvMethod.Should().BeNull("pending entries carry no dcvMethod key at all — absent, not present-but-null-looking");
+            sanA.VerifiedAt.Should().BeNull();
+
+            var verifiedPrimary = result.Verifications.Domain.Domains.Single(
+                d => d.Domain == "ucc0042-202609290046.dcv-test.scrup.org");
+            verifiedPrimary.DcvStatus.Should().Be("VERIFIED");
+            verifiedPrimary.DcvMethod.Should().Be("dns-txt");
+            verifiedPrimary.VerifiedAt.Should().Be("2026-09-29T00:46:09Z");
         }
     }
 }
