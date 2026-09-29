@@ -429,6 +429,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string StatusRevoked                         = "revoked";
             public const string StatusRejected                        = "rejected";
             public const string StatusExpired                         = "expired";
+            // Spec-documented V2 status (issue 0039) — CERTInext can't say where the order is; not terminal.
+            public const string StatusUnknown                         = "unknown";
 
             // Per-domain dcvStatus values on Track Order's verifications.domain.domains[]
             // block (issue 0042). Confirmed live (2026-09-28, order 7465857196): PENDING while

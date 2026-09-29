@@ -203,13 +203,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// Maps a V2 REST API order status string to the Keyfactor
         /// <see cref="EndEntityStatus"/> integer code expected by the gateway.
         ///
-        /// Covers all 11 status values documented by the V2 spec's <c>/reports/orders</c>
+        /// Covers the status values documented by the V2 spec's <c>/reports/orders</c>
         /// <c>status</c> filter (issues/0031). <c>pending-organization-verification</c>,
         /// <c>pending-documents</c>, and <c>pending-approval</c> join the existing
         /// pending-* values as EXTERNALVALIDATION — they are OV/EV/DV orders still
         /// actively progressing toward issuance, not failures. <c>rejected</c> and
         /// <c>expired</c> are terminal negative outcomes mapped to FAILED deliberately,
-        /// same as the pre-existing <c>cancelled</c>. Any value not in this list falls
+        /// same as the pre-existing <c>cancelled</c>. The spec-documented <c>unknown</c> maps to
+        /// EXTERNALVALIDATION (issue 0039): the order may still be live. Any value not in this list falls
         /// through to the default arm, which also returns FAILED but logs a warning —
         /// see issues/0031 for why "deliberately FAILED" and "unmapped, degrading to
         /// FAILED" are kept distinguishable in the logs even though the return value
@@ -238,6 +239,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
                 case Constants.ApiV2.StatusRejected:
                 case Constants.ApiV2.StatusExpired:
                     return (int)EndEntityStatus.FAILED;
+
+                case Constants.ApiV2.StatusUnknown:
+                    // Issue 0039: `unknown` is in the spec's documented status list, so it is NOT
+                    // the "status we've never heard of" case below — CERTInext is saying it can't
+                    // currently report where the order is, not that the order is dead. Treat it as
+                    // pending so Command keeps the order and sync/pickup keep re-checking it, rather
+                    // than dropping a possibly-live order as FAILED. Warn so an order stuck here is
+                    // visible to operators.
+                    Logger.LogWarning(
+                        "V2StatusToRequestDisposition: CERTInext reported V2 order status 'unknown' — " +
+                        "treating the order as pending (EXTERNALVALIDATION) rather than FAILED; it will be " +
+                        "re-checked on the next status poll or sync. If an order stays 'unknown', raise it with CERTInext.");
+                    return (int)EndEntityStatus.EXTERNALVALIDATION;
 
                 default:
                     // Distinct from the deliberate cancelled/rejected/expired -> FAILED
