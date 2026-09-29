@@ -2661,7 +2661,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             "requestorName", "requesterName", "tpcName", "signerName", "name",
             "requestorIsdCode", "requestorMobileNumber", "requestorDesignation",
-            "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signerip", "phone", "designation"
+            "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signedPlace", "signerip", "phone", "designation"
         };
 
         /// <summary>
