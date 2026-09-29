@@ -63,6 +63,7 @@
 - chore(tests): regression coverage for `EmailNotifications` mapping (`"1"`/`"0"`/blank/invalid) on V2 order create (0027).
 - chore(tests): regression coverage for the V2 CSR-SAN-count guard through `Enroll` for both UCC (order placed, SANs as `additionalDomains`) and non-UCC (FAILED, no order placed) products (0047).
 - chore(tests): regression coverage for the V2 bodyless-REVOKED guard — gateway-holds-body, no-body, no-row, reader-failure, and GENERATED-unaffected cases, in both `Synchronize` and `GetSingleRecord` (0049).
+- chore(tests): regression coverage for the V2 `Enroll` REVOKED→FAILED normalization — post-CSR-submit, mid-pickup-poll, post-DCV-recheck, and FAILED/GENERATED-unaffected cases (0052).
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 

@@ -456,6 +456,67 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Issue 0052: a REVOKED disposition discovered on the post-DCV status re-check must be
+        // mapped to FAILED, not returned as a body-less REVOKED record — mirrors
+        // EnrollV2_DcvRan_SkipsPickupPoll_EvenThoughPickupIsEnabled above, but the second
+        // TrackOrderV2Async observation is "revoked" instead of another pending state.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task EnrollV2_PostDcvRecheckRevoked_ReturnsFailed_NotBodylessRevoked()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } // non-UCC
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            // 1st call: post-CSR check (pending-dcv), triggers the inline DCV block. 2nd:
+            // PerformDcvV2SingleDomainAsync's own internal step-4 poll (it calls
+            // TrackOrderV2Async itself to wait out "pending-dcv" — see its doc comment) observes
+            // "revoked", which is != "pending-dcv" so that poll loop breaks and DCV reports done.
+            // 3rd: EnrollV2Async's own post-DCV re-check observes the same revoked status.
+            mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PendingDcvStatus())
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "revoked", Domain = "example.com" })
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "revoked", Domain = "example.com" });
+
+            mock.Setup(c => c.GetDcvV2Async(OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "dcv-token-revoked", TokenExpiryDate = "2026-12-31 23:59:59" });
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, "example.com", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            var validator = new FakeDomainValidator();
+            // Pickup enabled to prove the poll is correctly skipped (dcvV2Ran) rather than
+            // masking the revoked status behind additional polling/downloads.
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator), pickupRetries: 5);
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED,
+                "a REVOKED disposition discovered on the post-DCV re-check has no certificate " +
+                "body and must never be reported as REVOKED (issue 0052)");
+            result.Certificate.Should().BeNull();
+            result.CARequestID.Should().Be(OrderId);
+            result.StatusMessage.Should().Contain(OrderId).And.Contain("revoked");
+
+            mock.Verify(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()),
+                Times.Exactly(3),
+                "the pickup poll must not run on top of the inline DCV wait — no 4th TrackOrderV2Async call");
+            mock.Verify(c => c.DownloadCertificateV2Async(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        // ---------------------------------------------------------------------------
         // Synchronize (V2, issues/0022) — DCV-during-sync age-window / per-pass-cap gating.
         // Reuses EvaluateDcvSyncEligibility/DcvSyncDecision — same bounds V1 sync uses (issue
         // 0002), applied to the V2 /reports/orders path.
