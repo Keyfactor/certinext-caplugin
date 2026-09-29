@@ -294,13 +294,13 @@ sequenceDiagram
 
 **Token caching:** the Bearer token is cached for its 1-hour lifetime and shared across all V2 calls in the same gateway process. A new token is fetched automatically 60 seconds before expiry.
 
-**Idempotency:** every unsafe V2 POST carries a unique `Idempotency-Key` UUID. If the gateway retries the same request (for example after a timeout), CERTInext returns the original response without creating a duplicate order.
+**Idempotency:** V2 order-create and revoke calls carry a fresh `Idempotency-Key` UUID, but the plugin can't rely on it to prevent duplicates. The V2 spec describes the header as "Parsed today; enforced in a future release", and a new key is generated on every call, so a retry never reuses one. In a live sandbox check (2026-09-25), two order-create calls sent with the same key created two separate orders. The second call returned a generic HTTP 500 even though its order had been created. The plugin never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. The only revoke retry is the one-time reason fallback described under [Revocation](#revocation), which is sent after CERTInext has already rejected the first call. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
 
 **Full certificate chain:** the V2 `/certificate` endpoint returns the leaf certificate in `certificatePem` and any intermediate certificates in `chainPem[]`. The plugin concatenates these into a single PEM before returning to Command.
 
-**Order IDs:** V2 order IDs are opaque strings (e.g. `ord_abc123`). They are stored as the `CARequestID` in Command alongside V1 numeric IDs — both coexist in the database.
+**Order IDs:** the plugin stores the V2 `orderId` unchanged as the `CARequestID`. The V2 spec's examples show `ord_`-prefixed IDs, but orders placed through V2 on the sandbox so far have returned numeric order numbers in the same format as V1 (e.g. `6625262451`), and V1 order numbers resolve through V2 Track Order unchanged.
 
-**Synchronize stays on V1:** the V2 `/reports/orders` endpoint returns 501 Not Implemented. Synchronization always calls the V1 `GetOrderReport` endpoint regardless of `UseV2Api`. A warning is logged when `UseV2Api = true` to make this visible. A follow-up update will switch sync to V2 once the endpoint ships.
+**Synchronize uses V2 reports:** with `UseV2Api = true`, Synchronize pages through V2 `/reports/orders` and downloads the certificate body for each issued order. An incremental sync starts `V2SyncLookbackHours` (default 72) before the last sync time.
 
 ---
 
@@ -339,20 +339,24 @@ sequenceDiagram
 
 **Audit trail:** The revocation intent is written to the gateway log *before* the API call is made. This ensures that the intent is captured even if the API call subsequently fails, satisfying SOX audit requirements.
 
-**Reason code fallback (V2 only):** CERTInext's V2 revoke endpoint only accepts 5 of the 9 RFC 5280
-reason values its own API spec documents as valid — `key-compromise`, `affiliation-changed`,
-`superseded`, `cessation-of-operation`, and `privilege-withdrawn` succeed; `unspecified`,
-`ca-compromise`, `certificate-hold`, and `aa-compromise` all return a 422 "Invalid Revoke Reason ID",
-confirmed live against the sandbox independent of this plugin. Since Keyfactor Command defaults to
-`unspecified` (CRL reason 0) when no explicit reason is given — by far the most common revoke case —
+**Reason code fallback (V2 only):** the V2 spec documents 8 RFC 5280 reason values for the SSL/TLS
+revoke endpoint. `aa-compromise` is listed only for the Document Signer and Private PKI endpoints,
+which document 9. In live sandbox testing on SSL/TLS orders, independent of this plugin, only 5 values
+succeeded: `key-compromise`, `affiliation-changed`, `superseded`, `cessation-of-operation`, and
+`privilege-withdrawn`. Three documented values, `unspecified`, `ca-compromise`, and
+`certificate-hold`, returned a 422 "Invalid Revoke Reason ID". So did the undocumented `aa-compromise`.
+Revoke reasons for Private PKI and Document Signer orders haven't been tested live.
+
+Since Keyfactor Command defaults to `unspecified` (CRL reason 0) when no explicit reason is given — by far the most common revoke case —
 the plugin retries once with `cessation-of-operation` whenever CERTInext rejects `unspecified` this
 way. `cessation-of-operation` was chosen over V1's existing `key-compromise` fallback because
 `key-compromise` carries the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation, which would
 misrepresent a revoke that was never actually a key compromise. Only the exact "unspecified" +
-"Invalid Revoke Reason ID" combination triggers the retry; any other revoke failure (including the
-other 3 rejected reason values, if a caller ever sends one directly) is surfaced as-is. See
+"Invalid Revoke Reason ID" combination triggers the retry; any other revoke failure is surfaced as-is.
+That includes the other rejected values, which the plugin sends for CRL reasons 2 (`ca-compromise`),
+6 (`certificate-hold`), and 10 (`aa-compromise`). See
 `issues/0026` for the full reason-value test matrix and the open question to CERTInext support about
-whether the documented 9-value enum is intentional.
+whether the documented reason enum is intentional.
 
 **Note field quirk:** CERTInext's revoke `note` (audit remarks) field rejects a semicolon (`;`) with a
 separate 422, "Invalid Revoke Remarks." — confirmed live that comma, period, slash, and parentheses are

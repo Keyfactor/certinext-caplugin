@@ -221,7 +221,7 @@ The product codes in this table were observed on:
 | emSign Intranet SSL 1 year | `149` | `100` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
 | IGTF Host 1 year | (not observed) | `104` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
 
-> Note: Private PKI products are not available for ordering on standard CERTInext accounts. Attempting to place an order will return EMS-1162 (product not provisioned). The sandbox Private PKI code (`149`) also returns EMS-1162 on standard sandbox accounts even though it appears in the `GetProductDetails` list. Contact eMudhra to have these products enabled on your account.
+> Note: Private PKI products need a separate entitlement. On an account without it, placing an order returns EMS-1162 (product not provisioned). Contact eMudhra to have these products enabled. An earlier V1 note recorded the sandbox code `149` returning EMS-1162. More recently, a read-only V2 catalog check on the plugin's sandbox account (2026-09-25) listed `149` ("Sandbox emSign Intranet SSL 1 Year", `productTypeID` `39`) as active. No order has been placed against it, so it's unconfirmed whether a V2 order for it is accepted. Check your own account's catalog rather than relying on either observation.
 
 ### S/MIME and Document Signing
 
@@ -230,15 +230,19 @@ The same numeric product codes have been observed for S/MIME and document-signin
 | Product | Sandbox / Production Code | Availability |
 |---|---|---|
 | S/MIME | `894` | Requires a separate S/MIME entitlement on the account. Not available on standard SSL accounts. |
-| Natural Person Doc Signer (tier 1) | `825` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Natural Person Doc Signer (tier 2) | `826` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Natural Person Doc Signer (tier 3) | `827` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Person Doc Signer (tier 1) | `822` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Person Doc Signer (tier 2) | `823` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Person Doc Signer (tier 3) | `824` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Entity Doc Signer (tier 1) | `819` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Entity Doc Signer (tier 2) | `820` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Entity Doc Signer (tier 3) | `821` | Requires document signing entitlement. Not orderable on standard accounts. |
+| Document Signer | `819`–`827` | Requires document signing entitlement. Not orderable on standard accounts. See the code-to-product table below. |
+
+The two CERTInext references disagree on which Document Signer code is which product. The V2 API
+spec's Product Codes table lists `819`–`821` as Natural Person and `825`–`827` as Legal Entity. The
+earlier V1 Postman collection this table was first built from listed them the other way round. Both
+list `822`–`824` as Legal Person. Neither mapping has been checked against a live catalog, so confirm
+the product name for each code in your account's catalog before you use one.
+
+| Code | V2 API spec | Earlier V1 Postman collection |
+|---|---|---|
+| `819` / `820` / `821` | Natural Person, 1 / 2 / 3 year | Legal Entity, 1 / 2 / 3 year |
+| `822` / `823` / `824` | Legal Person, 1 / 2 / 3 year | Legal Person, 1 / 2 / 3 year |
+| `825` / `826` / `827` | Legal Entity, 1 / 2 / 3 year | Natural Person, 1 / 2 / 3 year |
 
 > Note: S/MIME (894) and document signing products (819–827) require a separate entitlement that is not included in a standard SSL/TLS account. Contact eMudhra to request access.
 
@@ -326,8 +330,8 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 
 1. Log in to the CERTInext portal for your environment.
 2. Navigate to **Integrations → APIs**.
-3. Click **+ Create API Credentials** and select **Auth Type**: `OAuth2 (V2)`.
-4. Note the **Client ID** and **Client Secret**. Enter them in `OAuthClientId` and `OAuthClientSecret`.
+3. Click **+ Create API Credentials**, set **API Type** to `REST`, and select the **OAuth** auth type (not `Access Key`). The V2 spec requires the key to be generated in OAuth mode. A key that wasn't gets HTTP 403 `unauthorized_client` at token time.
+4. Note the client ID and client secret. Enter them in `OAuthClientId` and `OAuthClientSecret`. The V2 spec's token example uses the account number as `client_id`, but the plugin never substitutes `AccountNumber` for it, so set `OAuthClientId` explicitly. See [Step 1 of the migration guide](#step-1--create-a-v2-oauth2-credential) for what hasn't been verified about reusing V1 OAuth keys.
 5. Set `UseV2Api` to `true` and set `ApiUrl` to the V2 base URL (no trailing path suffix), e.g. `https://sandbox-us-api.certinext.io`.
 6. V1-only fields (`ApiKey`, `AccountNumber`, `AuthMode`) are not required in this mode and can be left blank.
 
@@ -359,7 +363,7 @@ With `ProductFamily=private-pki`, the plugin places the order against CERTInext'
 
 ### V2 Order Lifecycle
 
-V2 orders are identified by an opaque string ID prefixed with `ord_` (e.g. `ord_a1b2c3d4`). This ID is returned by the V2 order placement endpoint and stored as the `CARequestID`. It is stable for the lifetime of the order and is used for all subsequent tracking, certificate download, and revocation calls.
+V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but orders placed through V2 on the sandbox so far have returned numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
 
 V2 status strings map to Keyfactor enrollment statuses as follows:
 
