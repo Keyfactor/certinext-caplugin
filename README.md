@@ -134,7 +134,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **RequestorIsdCode** - International dialing code for the requestor phone number (e.g. '1' for US). Default: '1'.
         * **RequestorMobileNumber** - Requestor mobile number (digits only, no country code).
         * **RequestorDesignation** - OPTIONAL: Job title / role of the requestor (e.g. 'IT Administrator'). Sent in V2 orders' `requestor.designation` field. Free text with no CA-side enum. Left blank by default, in which case the field is omitted entirely from the order rather than sent with a default value.
-        * **SignerPlace** - City or location of the subscriber agreement signer. Required by CERTInext for all orders.
+        * **SignerPlace** - City or location of the subscriber agreement signer (e.g. 'San Francisco, CA'). REQUIRED when UseV2Api is on: the V2 Subscriber Agreement sent with every SSL order requires it, so the connector cannot be saved with it blank. A per-template SignerPlace enrollment parameter overrides it.
         * **SignerIp** - IP address of the subscriber agreement signer. Required by CERTInext for all orders.
         * **DefaultProductCode** - OPTIONAL: Default numeric product code used when not specified at template level. Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). Retrieve available codes from Integrations → APIs → GetProductDetails.
         * **AccountingModel** - OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel`. "2" = credit-based (most accounts, default). "1" = cash model.
@@ -146,7 +146,7 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **IgnoreExpired** - If true, expired certificates will be skipped during synchronization. Default: false.
         * **PageSize** - Number of orders to fetch per page during synchronization. Default: 100, max: 500.
         * **Enabled** - Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true.
-        * **LogSensitiveRequestData** - OPTIONAL diagnostic escape hatch. When true, enabling it writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. Meant for temporary use while verifying a new deployment — confirming exactly what was sent to the CA and that the order succeeded — and should be turned back off once verification is complete. When false (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. 'j***@example.com') and the enrollment log line omits the requester name entirely. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: false.
+        * **LogSensitiveRequestData** - OPTIONAL diagnostic escape hatch. When true, enabling it writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. Meant for temporary use while verifying a new deployment — confirming exactly what was sent to the CA and that the order succeeded — and should be turned back off once verification is complete. When false (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. 'j***@example.com') and the enrollment log line omits the requester name entirely. Email SAN values (rfc822Name) in log lines are masked the same way; DNS, IP and URI SANs are always logged in full. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: false.
         * **DcvEnabled** - OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false.
         * **DcvTxtRecordTemplate** - OPTIONAL: Format string for the DNS TXT record hostname used during DCV. {0} is replaced with the domain name being validated. Default: _emsign-validation.{0}
         * **DcvPropagationDelaySeconds** - OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: 30.
@@ -191,7 +191,7 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
     * **RequesterEmail** - OPTIONAL: Default requester email address. Used when no email can be derived from the subject.
     * **RenewalWindowDays** - OPTIONAL: Number of days before certificate expiration within which a renewal is triggered. Certificates expiring further than this window are reissued instead. Certificates that have already expired also fall back to reissue. Default: 90.
     * **KeyType** - OPTIONAL: Key algorithm to request (e.g. 'RSA2048', 'RSA4096', 'EC256', 'EC384'). If omitted, the profile default is used.
-    * **DomainName** - OPTIONAL: Primary domain for SSL/TLS orders. Derived from the CSR CN if omitted.
+    * **DomainName** - OPTIONAL: Primary domain for SSL/TLS orders (for V2 private-pki orders, the primary hostname). Derived from the CSR CN if omitted.
     * **SignerName** - OPTIONAL: Per-template subscriber agreement signer name. Falls back to the connector-level RequestorName if omitted.
     * **SignerPlace** - OPTIONAL: Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted.
     * **SignerIp** - OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted.
@@ -261,7 +261,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `RequestorIsdCode` | Optional | International dialing code for the requestor phone number (digits only, no `+` prefix). Default: `1` (United States). | N/A — use the country code for your requestor. | `1` |
 | `RequestorMobileNumber` | Optional | Requestor mobile number (digits only, no country code). Included in the `requestorInformation` block. | N/A | `5551234567` |
 | `RequestorDesignation` | Optional | Job title / role of the requestor (e.g. `IT Administrator`). Sent in the `requestorInformation` block (V1) and the `requestor.designation` field (V2 mode). Free text with no CA-side enum. Left blank by default, in which case the field is omitted from the order entirely rather than sent with a default value. | N/A | `IT Administrator` |
-| `SignerPlace` | Required | City or location of the person accepting the subscriber agreement on behalf of your organization. Required by CERTInext for all orders. | Use the physical city where the signer is located. | `Austin` |
+| `SignerPlace` | Required | City or location of the person accepting the subscriber agreement on behalf of your organization. Required by CERTInext for all orders. When `UseV2Api` is `true` the connector can't be saved with this blank, because the V2 Subscriber Agreement sent with every SSL order requires it (a template's `SignerPlace` enrollment parameter still overrides it). | Use the physical city where the signer is located. | `Austin` |
 | `SignerIp` | Required | Public IP address of the host accepting the subscriber agreement. Required by CERTInext for all orders. | Use the outbound IP of the AnyCA Gateway host, or the IP of the workstation from which the agreement was accepted. | `203.0.113.10` |
 | `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in the `productDetails.groupNumber` field of `GetProductDetails` requests *and* in `delegationInformation.groupNumber` on every SSL order. Some sandbox accounts return an empty product list from `GetProductDetails` unless this field is included. Available in the CERTInext portal under **Delegation → Groups**. | Portal → **Delegation → Groups**. | `2345678901` |
 | `OrganizationNumber` | Optional, strongly recommended for OV/EV and faster DV | Numeric CERTInext organization number for a pre-vetted organization. When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and this number, telling CERTInext to skip its manual organization-vetting queue. Without it, orders may sit in `Pending System RA` for extended manual review (observed: tens of hours). | Portal → **Organizations → Pre-vetted Organizations**. | `1234567` |
@@ -277,7 +277,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `IgnoreExpired` | Optional | If `true`, expired certificates are skipped during synchronization and are not imported into Keyfactor Command. Default: `false`. | N/A | `false` |
 | `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500`. Reduce this value if synchronization requests time out. | N/A | `100` |
 | `Enabled` | Optional | Enables or disables the CA connector. Setting this to `false` allows the connector record to be created before all credentials are available, without triggering a live connectivity test. Default: `true`. | N/A | `true` |
-| `LogSensitiveRequestData` | Optional | **Diagnostic escape hatch — off by default.** When `true`, this writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. It's meant for temporary use while verifying a new deployment (confirming exactly what was sent to the CA and that the order succeeded) — turn it back off once verification is complete. When `false` (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. `j***@example.com`) and the enrollment log line omits the requester name entirely. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: `false`. | N/A | `false` |
+| `LogSensitiveRequestData` | Optional | **Diagnostic escape hatch — off by default.** When `true`, this writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. It's meant for temporary use while verifying a new deployment (confirming exactly what was sent to the CA and that the order succeeded) — turn it back off once verification is complete. When `false` (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. `j***@example.com`) and the enrollment log line omits the requester name entirely. Email SAN values (rfc822Name) in log lines are masked the same way; DNS, IP and URI SANs are always logged in full. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: `false`. | N/A | `false` |
 | `PickupRetries` | Optional | Number of times `Enroll` polls CERTInext for the certificate after a successful order submission, before returning pending and leaving pickup to the next sync. Set to `0` to disable the wait entirely. OV/EV orders validate asynchronously (minutes to hours) and typically exhaust this wait regardless of the value. Default: `5`. | N/A | `5` |
 | `PickupDelay` | Optional | Seconds between certificate-pickup retries. The total pickup budget is a fixed 5-second initial delay + (`PickupRetries` × `PickupDelay`), hard-capped at 180 seconds regardless of how the two values are set. Aim for well under ~90s total so the call doesn't run long enough to trip Command's own enrollment timeout. Default: `10` (a ~55s ceiling with default `PickupRetries`). | N/A | `10` |
 
@@ -350,7 +350,7 @@ The product codes in this table were observed on:
 | emSign Intranet SSL 1 year | `149` | `100` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
 | IGTF Host 1 year | (not observed) | `104` | Requires special provisioning by eMudhra. Not orderable on standard accounts. |
 
-> Note: Private PKI products are not available for ordering on standard CERTInext accounts. Attempting to place an order will return EMS-1162 (product not provisioned). The sandbox Private PKI code (`149`) also returns EMS-1162 on standard sandbox accounts even though it appears in the `GetProductDetails` list. Contact eMudhra to have these products enabled on your account.
+> Note: Private PKI products need a separate entitlement. On an account without it, placing an order returns EMS-1162 (product not provisioned). Contact eMudhra to have these products enabled. An earlier V1 note recorded the sandbox code `149` returning EMS-1162. More recently, a read-only V2 catalog check on the plugin's sandbox account (2026-09-25) listed `149` ("Sandbox emSign Intranet SSL 1 Year", `productTypeID` `39`) as active. No order has been placed against it, so it's unconfirmed whether a V2 order for it is accepted. Check your own account's catalog rather than relying on either observation.
 
 ### S/MIME and Document Signing
 
@@ -359,15 +359,19 @@ The same numeric product codes have been observed for S/MIME and document-signin
 | Product | Sandbox / Production Code | Availability |
 |---|---|---|
 | S/MIME | `894` | Requires a separate S/MIME entitlement on the account. Not available on standard SSL accounts. |
-| Natural Person Doc Signer (tier 1) | `825` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Natural Person Doc Signer (tier 2) | `826` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Natural Person Doc Signer (tier 3) | `827` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Person Doc Signer (tier 1) | `822` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Person Doc Signer (tier 2) | `823` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Person Doc Signer (tier 3) | `824` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Entity Doc Signer (tier 1) | `819` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Entity Doc Signer (tier 2) | `820` | Requires document signing entitlement. Not orderable on standard accounts. |
-| Legal Entity Doc Signer (tier 3) | `821` | Requires document signing entitlement. Not orderable on standard accounts. |
+| Document Signer | `819`–`827` | Requires document signing entitlement. Not orderable on standard accounts. See the code-to-product table below. |
+
+The two CERTInext references disagree on which Document Signer code is which product. The V2 API
+spec's Product Codes table lists `819`–`821` as Natural Person and `825`–`827` as Legal Entity. The
+earlier V1 Postman collection this table was first built from listed them the other way round. Both
+list `822`–`824` as Legal Person. Neither mapping has been checked against a live catalog, so confirm
+the product name for each code in your account's catalog before you use one.
+
+| Code | V2 API spec | Earlier V1 Postman collection |
+|---|---|---|
+| `819` / `820` / `821` | Natural Person, 1 / 2 / 3 year | Legal Entity, 1 / 2 / 3 year |
+| `822` / `823` / `824` | Legal Person, 1 / 2 / 3 year | Legal Person, 1 / 2 / 3 year |
+| `825` / `826` / `827` | Legal Entity, 1 / 2 / 3 year | Natural Person, 1 / 2 / 3 year |
 
 > Note: S/MIME (894) and document signing products (819–827) require a separate entitlement that is not included in a standard SSL/TLS account. Contact eMudhra to request access.
 
@@ -392,8 +396,8 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 
 1. Log in to the CERTInext portal for your environment.
 2. Navigate to **Integrations → APIs**.
-3. Click **+ Create API Credentials** and select **Auth Type**: `OAuth2 (V2)`.
-4. Note the **Client ID** and **Client Secret**. Enter them in `OAuthClientId` and `OAuthClientSecret`.
+3. Click **+ Create API Credentials**, set **API Type** to `REST`, and select the **OAuth** auth type (not `Access Key`). The V2 spec requires the key to be generated in OAuth mode. A key that wasn't gets HTTP 403 `unauthorized_client` at token time.
+4. Note the client ID and client secret. Enter them in `OAuthClientId` and `OAuthClientSecret`. The V2 spec's token example uses the account number as `client_id`, but the plugin never substitutes `AccountNumber` for it, so set `OAuthClientId` explicitly. See [Step 1 of the migration guide](#step-1--create-a-v2-oauth2-credential) for what hasn't been verified about reusing V1 OAuth keys.
 5. Set `UseV2Api` to `true` and set `ApiUrl` to the V2 base URL (no trailing path suffix), e.g. `https://sandbox-us-api.certinext.io`.
 6. V1-only fields (`ApiKey`, `AccountNumber`, `AuthMode`) are not required in this mode and can be left blank.
 
@@ -407,14 +411,25 @@ When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductFamily` | Optional | String | CERTInext V2 product family. Accepted values: `ssl`, `private-pki`, `signature`. Default: `ssl`. | `ssl` |
-| `ProductVariant` | Optional | String | Product variant within the family (e.g. `dv`, `ov`, `ev`). Default: `dv`. | `dv` |
+| `ProductFamily` | Optional | String | CERTInext V2 product family. Supported for enrollment: `ssl` (SSL/TLS) and `private-pki` (Private PKI — see [V2 Private PKI Orders](#v2-private-pki-orders)). `signature` (Document Signer) is accepted by the parameter, but Document Signer enrollment is not yet supported: a `signature` enrollment fails before any order is placed. Default: `ssl`. | `ssl` |
+| `ProductVariant` | Optional | String | Product variant within the family. `ssl`: `dv`, `ov`, or `ev` (default `dv`). `private-pki`: `intranet-ssl` or `igtf-host` — required, with no default (the SSL default `dv` is rejected). | `dv` |
 
 `ProductCode` continues to carry the numeric product code and is sent in the `X-Product-Code` header on V2 order placement.
 
+### V2 Private PKI Orders
+
+With `ProductFamily=private-pki`, the plugin places the order against CERTInext's Private PKI endpoint using the Private PKI request body, which differs from the SSL/TLS one:
+
+- **Product code is required.** Set `ProductCode` explicitly to your account's Private PKI catalog code. Private PKI codes vary per customer catalog, so the plugin can't look one up from the product selected on the template. Template validation checks that the code exists in the V2 catalog and is a Private PKI product (catalog `productTypeID` `39`).
+- **Variant is required.** Set `ProductVariant` to `intranet-ssl` or `igtf-host`.
+- **Hostname.** The order's primary `hostname` comes from `DomainName`, or from the CSR's CN when `DomainName` isn't set.
+- **SANs, including IP addresses.** Additional SANs are sent in the order's `additionalHosts` field, which accepts DNS names and IPv4/IPv6 addresses. SANs come from the gateway's SAN list; the plugin falls back to the SANs in the CSR only when the gateway supplies none. Email and URI SANs can't be expressed in `additionalHosts`, so they're left off the order and a warning is written to the gateway log. `SubmitNonDnsSans` isn't consulted for Private PKI orders.
+- **No DCV, organization, or subscriber agreement.** Private PKI orders have none of these steps, so DCV is never attempted for them, and `OrganizationNumber`, `AutoSecureWww`, `SignerName`, `SignerPlace`, and `SignerIp` aren't used.
+- **Shared fields.** The requestor, technical contact, subscription, email-notification, and group settings are sent exactly as they are for SSL/TLS orders.
+
 ### V2 Order Lifecycle
 
-V2 orders are identified by an opaque string ID prefixed with `ord_` (e.g. `ord_a1b2c3d4`). This ID is returned by the V2 order placement endpoint and stored as the `CARequestID`. It is stable for the lifetime of the order and is used for all subsequent tracking, certificate download, and revocation calls.
+V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but orders placed through V2 on the sandbox so far have returned numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
 
 V2 status strings map to Keyfactor enrollment statuses as follows:
 
@@ -446,39 +461,52 @@ V1 API documented above; `true` switches **all** operations — Enroll, GetSingl
 Synchronize — to V2. The two APIs cannot be mixed on a single connector.
 
 > **V2 is labeled Preview.** It has real functional gaps relative to V1 (see
-> [Known Gaps](#known-gaps) below) — most notably that DCV automation for multi-domain (UCC)
-> orders only drives the primary domain (see below). Read this whole document — especially that
-> section — before migrating a production connector.
+> [Known Gaps](#known-gaps) below) — most notably that per-SAN DCV on multi-domain (UCC) orders
+> hasn't been confirmed by CERTInext or verified end to end (see below), and that Document Signer
+> (`ProductFamily=signature`) enrollment isn't supported yet. Read this whole document — especially
+> that section — before migrating a production connector.
 
 ### Before You Begin: Confirm V2 Will Work for Your Templates
 
 **V2 supports multi-domain (UCC) certificates**, including **DV UCC, DV Wildcard UCC, OV UCC, OV
 Wildcard UCC, and EV UCC**. The plugin detects a UCC product from the live Catalog's `productTypeID`
-and sends the extra SAN domains via the order's `additionalDomains` field — the CSR itself must
-still carry only the primary domain (per the CERTInext V2 spec, SANs for UCC orders come from the
-order, not the CSR); a CSR that carries extra SANs is rejected with a `FAILED` result regardless of
-product type, the same as before.
+and sends the extra SAN domains in the order's `additionalDomains` field. Per the CERTInext V2 spec,
+a UCC order's SANs are taken from the order, not the CSR. `additionalDomains` takes DNS names only,
+so any non-DNS SAN (IP, email, URI) is left off a UCC order and a warning is written to the gateway
+log. For a non-UCC SSL product, a CSR that carries DNS SANs beyond the primary domain and its `www.`
+variant is rejected with a `FAILED` result before any order is placed; UCC products are exempt from
+that check.
 
-**DCV automation does not yet cover the extra SAN domains.** The plugin's DNS-01 DCV flow only
-drives the primary domain; a UCC order's additional domains are not currently validated by this
-plugin's automation, so a live UCC order may stall at `pending-dcv` until that's addressed (tracked
-separately). If your UCC templates require automated DCV for every SAN today, keep them on a V1
-connector until that gap closes.
+**UCC DCV: the plugin runs DCV for each SAN, but the behavior isn't confirmed yet.** For a UCC order,
+the plugin's DNS-01 DCV flow publishes, verifies, and cleans up a TXT record for each domain that
+CERTInext reports as not yet validated, not just the primary domain. CERTInext hasn't yet confirmed
+how per-SAN DCV is meant to work on V2, and this path hasn't been verified end to end against a live
+UCC order. Test each UCC template on the sandbox before you rely on it in production, and keep it on
+a V1 connector if you need that guarantee today.
 
 ### Step 1 — Create a V2 OAuth2 Credential
 
-V2 authentication is **not** the same credential as V1's `AuthMode: OAuth`, even though both end up
-in the connector's `OAuthClientId`/`OAuthClientSecret` fields. You need a new credential created
-specifically for V2:
+V2 authenticates with an OAuth2 `client_credentials` token, and the CERTInext V2 spec requires the
+API key to be generated in **OAuth mode**. The credential goes in the connector's
+`OAuthClientId`/`OAuthClientSecret` fields:
 
 1. Log in to the CERTInext portal for your environment.
 2. Navigate to **Integrations → APIs**.
 3. Click **+ Create API Credentials**.
-4. Set **API Type** to `REST` and **Auth Type** to `OAuth2 (V2)` — not `OAuth`, not `Access Key`.
+4. Set **API Type** to `REST` and select the **OAuth** auth type, not `Access Key`.
 5. Complete the form and click **Generate**.
-6. Note the **Client ID** and **Client Secret** immediately; the secret is shown once.
+6. Note the client ID and client secret right away.
 
-Reusing an existing V1 `AccessKey` or V1 `OAuth` credential will not work against the V2 API.
+A V1 `Access Key` credential won't work against V2. If the key wasn't generated in OAuth mode, the
+token request fails with HTTP 403 `unauthorized_client`, and the plugin reports that the key wasn't
+generated in OAuth mode. A wrong client ID or secret fails with HTTP 401 `invalid_client` instead.
+Nobody has checked whether a key that was already created in OAuth mode for V1's `AuthMode: OAuth`
+also works on V2. If you reuse one and get the 403, create a new OAuth-mode key.
+
+The V2 spec's token example sends the account number as `client_id`. It hasn't been verified whether
+the portal ever shows a client ID that differs from the account number. The plugin never substitutes
+`AccountNumber` for the client ID, so always set `OAuthClientId` explicitly, even if the value
+matches your account number.
 
 ### Step 2 — Update the CA Connector
 
@@ -489,20 +517,20 @@ behavior without disrupting V1 traffic.
 | V1 field | What happens when you set `UseV2Api = true` |
 |---|---|
 | `ApiUrl` | **Must change format.** V1 requires the `/emSignHub-API/` path segment (e.g. `https://us-api.certinext.io/emSignHub-API/`); V2 is the bare host with no trailing slash or path suffix (e.g. `https://us-api.certinext.io`). Using the V1-style URL under V2 (or vice versa) will fail every call. |
-| `AccountNumber` | Not required. Ignored by every V2 code path. |
+| `AccountNumber` | Not required, and not read by any V2 code path. V2 authenticates with `OAuthClientId`; the plugin doesn't reuse `AccountNumber` as the OAuth `client_id` (see Step 1). |
 | `AuthMode` | Not required. V2 always authenticates via OAuth2 `client_credentials`, regardless of this setting. |
 | `ApiKey` | Not required. V2 never computes an `authKey`. |
-| `OAuthClientId` / `OAuthClientSecret` | **Reused, but repointed.** Replace the values with the V2 credential from Step 1 — do not leave V1 OAuth credentials here. |
+| `OAuthClientId` / `OAuthClientSecret` | **Reused, but repointed.** Set them to the OAuth-mode credential from Step 1. It's unverified whether a V1 `AuthMode: OAuth` key also works on V2 (see Step 1). |
 | `OAuthTokenUrl` | Not used. V2 always requests a token from `{ApiUrl}/oauth/token`; the token URL is derived, not configured. |
-| `GroupNumber` | **Not carried into V2 orders.** V1 sends this in `delegationInformation` on every order; the V2 order body has no equivalent field. If your account routes orders by group, confirm with eMudhra how group routing is handled on the V2 API before relying on it. |
+| `GroupNumber` | **Honored.** Sent as `groupNumber` on V2 order create (SSL/TLS and Private PKI) and as a `groupNumber` query parameter on the catalog and orders-report calls. Omitted when blank, so the account's default group applies. It hasn't been verified live whether the catalog and report filters actually narrow results on a multi-group account. |
 | `OrganizationNumber` | **Required for OV/EV, otherwise unused.** V2 OV/EV orders now send `organization.organizationNumber` (with `preVetted=true`) from this setting — CERTInext hard-rejects an OV/EV order with no organization data (HTTP 422 `EMS-1180`), so `OrganizationNumber` must be set on the connector before enrolling OV/EV certificates via V2. DV orders never send an organization block, so this setting has no effect for DV. |
 | `AccountingModel` | Not used by V2 order placement. |
 | `EmailNotifications` | **Honored, with one default-value difference from V1.** `1` maps to `emailNotifications: "all"`; `0` maps to `"0"` (confirmed live 2026-09-28 to suppress order-creation emails, same as V1). Blank/unset is omitted on V2 (the CA's own default of `"all"` applies) rather than sent as `"0"` the way V1's own fallback does — set `EmailNotifications=0` explicitly if you want V2 orders silent. Any other value fails the V2 enrollment before any CA call. |
 | `SubscriptionAutoRenew` / `SubscriptionRenewCriteriaDays` | Honored. `SubscriptionAutoRenew=1` sets `subscription.autoRenew=true`; `SubscriptionRenewCriteriaDays` sets `subscription.renewBeforeDays` (blank omits the field, so the CA's documented default of 30 applies). An unparseable or negative `SubscriptionRenewCriteriaDays` fails the enrollment before any CA call. |
 | `DefaultProductCode` | Not used for V2 renewals (see [Renewals](#renewals-and-reissuance) below) — V2 has no separate renewal call to fall back to a default code for. |
-| `TechnicalContactName` / `Email` / `IsdCode` / `MobileNumber` | Not used. The V2 order body has no technical-point-of-contact field. |
-| `IgnoreExpired` | **Not honored during V2 Synchronize.** Expired certificates are always included in the V2 sync result set. |
-| `SubmitNonDnsSans` | Not applicable — see the single-domain limitation above; non-DNS SANs were never part of this concern for V2, DNS SANs beyond the primary domain already fail outright. |
+| `TechnicalContactName` / `Email` / `IsdCode` / `MobileNumber` | **Honored.** Sent as the order's `technicalPointOfContact` block on V2 SSL/TLS and Private PKI orders. Each blank field falls back to the matching `Requestor*` value, the same as V1. `designation` is always sent as `Technical Contact`. |
+| `IgnoreExpired` | **Honored during V2 Synchronize.** When `true`, a report row whose `certificateExpiryDate` parses and is in the past is skipped. A row with a missing or unparseable expiry date is kept. |
+| `SubmitNonDnsSans` | **SSL family (`ProductFamily=ssl`):** not consulted. A non-UCC order carries only the primary domain (plus `www.` when `AutoSecureWww` is set). A UCC order's `additionalDomains` takes DNS names only, so non-DNS SANs are left off the order with a warning in the gateway log (see [Before You Begin](#before-you-begin-confirm-v2-will-work-for-your-templates)). **Private PKI family (`ProductFamily=private-pki`):** not consulted — the order's `additionalHosts` field accepts DNS names and IPv4/IPv6 addresses natively, so IP-address SANs are always submitted; email and URI SANs cannot be expressed there and are left off the order with a warning in the gateway log. |
 | `PageSize` | Still used, now against V2's `/reports/orders` paging. |
 | `RequestorName` / `RequestorEmail` / `RequestorMobileNumber` / `RequestorDesignation` | Still used — carried into the V2 order's `requestor` block. `RequestorDesignation` is omitted from the order when blank (the default) rather than sent with any value. |
 | `SignerPlace` / `SignerIp` | Still used — carried into the V2 order's `agreement` block. |
@@ -517,13 +545,18 @@ above.
 For each template you're migrating:
 
 1. Add `ProductFamily` (default `ssl`) and `ProductVariant` (`dv`/`ov`/`ev`) if not already present —
-   these are V2-only parameters with no V1 equivalent.
+   these are V2-only parameters with no V1 equivalent. For a Private PKI template, set
+   `ProductFamily=private-pki`, `ProductVariant` to `intranet-ssl` or `igtf-host`, and an explicit
+   `ProductCode` (see [V2 Private PKI Orders](#v2-private-pki-orders)). `ProductFamily=signature`
+   (Document Signer) enrollment is not yet supported.
 2. Re-verify `ProductCode` against the V2 catalog. V1 and V2 product codes are not guaranteed to be
    the same numeric values on your account — call `GetProductDetailsV2Async` (or the equivalent live
    probe) rather than assuming the V1 code carries over. Template validation (`ValidateProductInfo`)
    automatically checks `ProductCode` against the V2 catalog once `UseV2Api=true`, so an incorrect
    code will be caught at template save time, not silently at enrollment.
-3. Confirm the template does not enroll for a UCC/multi-domain product (see above).
+3. If the template enrolls for a UCC (multi-domain) product, test it on the sandbox first. The plugin
+   runs DCV for each SAN, but CERTInext hasn't confirmed that behavior yet (see
+   [Before You Begin](#before-you-begin-confirm-v2-will-work-for-your-templates)).
 4. If `ProductVariant` is `ov` or `ev`, set `OrganizationNumber` on the CA connector (a pre-vetted
    organization number from CERTInext's Accounts → List Organizations). It is mandatory for OV/EV
    under V2 — enrollment fails fast with a clear error if it's missing, rather than reaching the CA
@@ -541,9 +574,13 @@ pointing a production template at the V2 connector. At minimum, confirm:
 
 ## Behavioral Differences After Migrating
 
-- **Order identifiers.** V2 orders are opaque strings prefixed `ord_` (e.g. `ord_a1b2c3d4`), stored as
-  `CARequestID` exactly like V1's numeric order IDs — Command itself doesn't care about the format —
-  but any external tooling or scripts that parse or expect a numeric `CARequestID` will need updating.
+- **Order identifiers.** The V2 spec's examples show `ord_`-prefixed order IDs (e.g.
+  `ord_8K9mQ2vR8nP4bL`), but the orders placed through V2 against the sandbox so far have come back
+  with numeric order numbers in the same format as V1 (e.g. `6625262451`). V1-placed order numbers
+  also resolve through V2 Track Order and appear under the same number in the V2 orders report, so
+  existing `CARequestID` values carry over. The plugin stores whatever `orderId` CERTInext returns as
+  the `CARequestID`. Treat it as an opaque string in any external tooling rather than assuming either
+  format.
 - **Status vocabulary.** V2 reports order status as strings (`issued`, `pending-dcv`, `pending-csr`,
   `pending-agreement`, `pending-organization-verification`, `pending-documents`, `pending-approval`,
   `revoked`, `cancelled`, `rejected`, `expired`) rather than V1's numeric CERTInext status codes. The
@@ -573,10 +610,14 @@ migration decision if you rely on CERTInext's free-renewal-within-subscription b
 V1 sends CERTInext a numeric `revokeReasonId`; V2 sends a kebab-case string reason. The plugin
 handles this translation automatically, including retrying once with `cessation-of-operation` when
 CERTInext rejects the RFC 5280 "unspecified" reason (Command's default when no reason is given) — no
-customer action needed. Two narrow edge cases remain open: CRL reason `10` (`aa-compromise`) may
-still be rejected for SSL-family orders (Command rarely sends this reason), and a revoke note
-containing a semicolon (`;`) is rejected by CERTInext with `"Invalid Revoke Remarks"` (the plugin's
-own generated notes avoid this, but a future customer-supplied note would need to avoid it too).
+customer action needed for that case. On SSL/TLS orders, only `key-compromise` (1),
+`affiliation-changed` (3), `superseded` (4), `cessation-of-operation` (5), and `privilege-withdrawn`
+(9) were accepted in live sandbox testing. `ca-compromise` (2) and `certificate-hold` (6) are listed
+in the spec for SSL/TLS but were rejected with `"Invalid Revoke Reason ID"`. `aa-compromise` (10)
+isn't listed for SSL/TLS at all and was also rejected. The plugin surfaces those failures as-is,
+without a retry. Revoke reasons for Private PKI orders haven't been tested live. Separately, a revoke
+note containing a semicolon (`;`) is rejected with `"Invalid Revoke Remarks"`. The plugin's own
+generated notes avoid semicolons, but a future customer-supplied note would need to avoid them too.
 
 ## Known Gaps
 
@@ -584,12 +625,13 @@ As of this writing, the following V2 limitations are known and unresolved. None 
 show-stoppers for a single-domain, credit-tolerant deployment, but you should decide with these in
 mind rather than discover them after cutting over:
 
-- **Multi-domain (UCC) orders can be placed, but DCV only drives the primary domain** — see
-  [Before You Begin](#before-you-begin-confirm-v2-will-work-for-your-templates) above. This is the
-  most likely reason to delay migrating a UCC template until DCV automation covers every SAN.
+- **UCC per-SAN DCV is unconfirmed.** The plugin runs DCV for each SAN on a UCC order, but CERTInext
+  hasn't confirmed the per-SAN DCV behavior and the path hasn't been verified end to end. See
+  [Before You Begin](#before-you-begin-confirm-v2-will-work-for-your-templates) above.
+- **Document Signer (`ProductFamily=signature`) enrollment isn't supported yet.** It fails before any
+  order is placed.
 - **Every renewal/reissue places a new order and consumes a new credit** — see
   [Renewals and Reissuance](#renewals-and-reissuance) above.
-- **`GroupNumber` has no V2 effect** — group-based order routing is not available under V2.
 - **`OrganizationNumber` is now required to enroll OV/EV via V2, but only unlocks acceptance, not
   V1's pre-vetting speed benefit.** V2 OV/EV orders send `organization.organizationNumber` with
   `preVetted=true` (mirroring V1's `organizationDetails.preVetting`), which is what makes CERTInext
@@ -597,11 +639,9 @@ mind rather than discover them after cutting over:
   observed vetting-queue speedup has not been independently confirmed for V2; if your account was
   relying on `OrganizationNumber` to fast-path DV issuance under V1, note that DV orders under V2
   never send an organization block, so that specific benefit does not carry over.
-- **`AccountingModel` and the technical-point-of-contact fields have no V2 effect on billing/contact
-  behavior beyond what's noted in the table above** — see the table for `EmailNotifications` and
-  `SubscriptionAutoRenew`/`RenewCriteriaDays`, both of which are now honored on V2.
-- **`IgnoreExpired` is not honored during V2 Synchronize** — expired certificates always come back in
-  the V2 sync result set.
+- **`AccountingModel` has no V2 effect.** V2 order create has no equivalent field. `GroupNumber`, the
+  technical-contact fields, `EmailNotifications`, `SubscriptionAutoRenew`/`RenewCriteriaDays`, and
+  `IgnoreExpired` are all honored on V2 (see the table above).
 - **V2 `TrackOrder` responses omit `_links`** — a spec-shape discrepancy observed live; no functional
   impact has been identified so far, but it means any future feature that expects those links (e.g.
   a direct download link) can't rely on them yet.
@@ -612,15 +652,15 @@ Rolling back is just setting `UseV2Api` back to `false` on the connector — the
 (`ApiKey`/`AccountNumber`/`AuthMode` or V1 `OAuth`) are unaffected by having been unused while V2 was
 active, as long as you didn't overwrite them in Step 2.
 
-**One-way caveat:** `GetSingleRecord`, `Synchronize`, and renewal lookups dispatch to V1 or V2 purely
-based on the connector's current `UseV2Api` flag — not by inspecting the shape of the stored
-`CARequestID`. Any certificate that was **enrolled while `UseV2Api=true`** has an `ord_`-prefixed
-`CARequestID`. If you flip the connector back to `UseV2Api=false`, the V1 API path will attempt to
-look that ID up as a V1 order and will not find it — future sync passes and renewals for those
-specific certificates will fail until the connector is switched back to V2 (or those certificates are
-otherwise resolved out of inventory). Certificates enrolled before the switch to V2 are unaffected
-either way. Plan a rollback path with this in mind rather than toggling the flag back and forth on a
-connector that has already issued V2 certificates.
+**Rollback caveat (unverified):** `Enroll`, `GetSingleRecord`, `Revoke`, and `Synchronize` choose V1
+or V2 purely from the connector's current `UseV2Api` flag, not from the stored `CARequestID`. What
+has been observed on the sandbox runs in one direction only: V1-placed order numbers resolve through
+V2 Track Order, and V2-placed orders so far have numeric order numbers in the same format as V1. The
+reverse hasn't been tested. Nobody has checked whether V1 Track Order or `GetOrderReport` can see an
+order that was placed through V2. Until that's confirmed, treat rolling back a connector that has
+already issued V2 certificates as untested. Before you rely on it, check on the sandbox that sync,
+revoke, and renewal still work for those certificates after switching back. Certificates enrolled
+before the switch to V2 are V1 orders and are unaffected.
 
 ## Architecture
 
@@ -918,13 +958,13 @@ sequenceDiagram
 
 **Token caching:** the Bearer token is cached for its 1-hour lifetime and shared across all V2 calls in the same gateway process. A new token is fetched automatically 60 seconds before expiry.
 
-**Idempotency:** every unsafe V2 POST carries a unique `Idempotency-Key` UUID. If the gateway retries the same request (for example after a timeout), CERTInext returns the original response without creating a duplicate order.
+**Idempotency:** V2 order-create and revoke calls carry a fresh `Idempotency-Key` UUID, but the plugin can't rely on it to prevent duplicates. The V2 spec describes the header as "Parsed today; enforced in a future release", and a new key is generated on every call, so a retry never reuses one. In a live sandbox check (2026-09-25), two order-create calls sent with the same key created two separate orders. The second call returned a generic HTTP 500 even though its order had been created. The plugin never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. The only revoke retry is the one-time reason fallback described under [Revocation](#revocation), which is sent after CERTInext has already rejected the first call. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
 
 **Full certificate chain:** the V2 `/certificate` endpoint returns the leaf certificate in `certificatePem` and any intermediate certificates in `chainPem[]`. The plugin concatenates these into a single PEM before returning to Command.
 
-**Order IDs:** V2 order IDs are opaque strings (e.g. `ord_abc123`). They are stored as the `CARequestID` in Command alongside V1 numeric IDs — both coexist in the database.
+**Order IDs:** the plugin stores the V2 `orderId` unchanged as the `CARequestID`. The V2 spec's examples show `ord_`-prefixed IDs, but orders placed through V2 on the sandbox so far have returned numeric order numbers in the same format as V1 (e.g. `6625262451`), and V1 order numbers resolve through V2 Track Order unchanged.
 
-**Synchronize stays on V1:** the V2 `/reports/orders` endpoint returns 501 Not Implemented. Synchronization always calls the V1 `GetOrderReport` endpoint regardless of `UseV2Api`. A warning is logged when `UseV2Api = true` to make this visible. A follow-up update will switch sync to V2 once the endpoint ships.
+**Synchronize uses V2 reports:** with `UseV2Api = true`, Synchronize pages through V2 `/reports/orders` and downloads the certificate body for each issued order. An incremental sync starts `V2SyncLookbackHours` (default 72) before the last sync time.
 
 ---
 
@@ -963,20 +1003,24 @@ sequenceDiagram
 
 **Audit trail:** The revocation intent is written to the gateway log *before* the API call is made. This ensures that the intent is captured even if the API call subsequently fails, satisfying SOX audit requirements.
 
-**Reason code fallback (V2 only):** CERTInext's V2 revoke endpoint only accepts 5 of the 9 RFC 5280
-reason values its own API spec documents as valid — `key-compromise`, `affiliation-changed`,
-`superseded`, `cessation-of-operation`, and `privilege-withdrawn` succeed; `unspecified`,
-`ca-compromise`, `certificate-hold`, and `aa-compromise` all return a 422 "Invalid Revoke Reason ID",
-confirmed live against the sandbox independent of this plugin. Since Keyfactor Command defaults to
-`unspecified` (CRL reason 0) when no explicit reason is given — by far the most common revoke case —
+**Reason code fallback (V2 only):** the V2 spec documents 8 RFC 5280 reason values for the SSL/TLS
+revoke endpoint. `aa-compromise` is listed only for the Document Signer and Private PKI endpoints,
+which document 9. In live sandbox testing on SSL/TLS orders, independent of this plugin, only 5 values
+succeeded: `key-compromise`, `affiliation-changed`, `superseded`, `cessation-of-operation`, and
+`privilege-withdrawn`. Three documented values, `unspecified`, `ca-compromise`, and
+`certificate-hold`, returned a 422 "Invalid Revoke Reason ID". So did the undocumented `aa-compromise`.
+Revoke reasons for Private PKI and Document Signer orders haven't been tested live.
+
+Since Keyfactor Command defaults to `unspecified` (CRL reason 0) when no explicit reason is given — by far the most common revoke case —
 the plugin retries once with `cessation-of-operation` whenever CERTInext rejects `unspecified` this
 way. `cessation-of-operation` was chosen over V1's existing `key-compromise` fallback because
 `key-compromise` carries the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation, which would
 misrepresent a revoke that was never actually a key compromise. Only the exact "unspecified" +
-"Invalid Revoke Reason ID" combination triggers the retry; any other revoke failure (including the
-other 3 rejected reason values, if a caller ever sends one directly) is surfaced as-is. See
+"Invalid Revoke Reason ID" combination triggers the retry; any other revoke failure is surfaced as-is.
+That includes the other rejected values, which the plugin sends for CRL reasons 2 (`ca-compromise`),
+6 (`certificate-hold`), and 10 (`aa-compromise`). See
 `issues/0026` for the full reason-value test matrix and the open question to CERTInext support about
-whether the documented 9-value enum is intentional.
+whether the documented reason enum is intentional.
 
 **Note field quirk:** CERTInext's revoke `note` (audit remarks) field rejects a semicolon (`;`) with a
 separate 422, "Invalid Revoke Remarks." — confirmed live that comma, period, slash, and parentheses are
