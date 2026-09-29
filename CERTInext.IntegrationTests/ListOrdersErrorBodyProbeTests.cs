@@ -39,6 +39,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     ///   <c>ApiUrl</c> becomes when that file is sourced into the shell (issue 0017).</item>
     /// </list>
     /// It also shows, offline, which <c>ApiUrl</c> the fixture resolves under each env overlay.
+    /// Since the 0017 fix the shell overlay makes the fixture fail fast with an actionable message
+    /// (printed as <c>FAIL-FAST: ...</c>), and an earlier <see cref="V2EnvHelper.LoadAndPromote"/>
+    /// no longer changes the fixture's <c>ApiUrl</c>. The repro call still hits the V2 base URL
+    /// directly (bypassing the fixture) to capture the raw error body.
     ///
     /// The response body is captured from the client's own non-success log line (already
     /// redacted via <c>ApplyLoggingRedaction</c>) by swapping <see cref="LogHandler.Factory"/>
@@ -174,6 +178,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                                    "bound before this probe ran; run this class alone.");
         }
 
+        /// <summary>
+        /// Builds a fresh fixture after <paramref name="mutateEnv"/> and reports its ApiUrl. Since
+        /// the 0017 fix, the shell-overlay case makes the fixture fail fast instead of resolving the
+        /// V2 URL (reported as <c>FAIL-FAST: ...</c>), and <see cref="V2EnvHelper.LoadAndPromote"/>
+        /// no longer promotes <c>CERTINEXT_API_URL</c>, so the in-process case resolves the V1 URL.
+        /// </summary>
         private static string ResolveFixtureApiUrlWith(Action mutateEnv)
         {
             var snapshot = new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal);
@@ -183,6 +193,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 mutateEnv();
                 return new IntegrationTestFixture().Config?.ApiUrl ?? "(not configured)";
+            }
+            catch (InvalidOperationException ex)
+            {
+                return $"FAIL-FAST: {ex.Message}";
             }
             finally
             {

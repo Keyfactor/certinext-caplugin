@@ -38,6 +38,51 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             };
 
         // ---------------------------------------------------------------------------
+        // V1 env keys
+        // ---------------------------------------------------------------------------
+
+        internal const string ApiUrlKey             = "CERTINEXT_API_URL";
+        internal const string AccessKeyKey          = "CERTINEXT_ACCESS_KEY";
+        internal const string AccountNumberKey      = "CERTINEXT_ACCOUNT_NUMBER";
+        internal const string GroupNumberKey        = "CERTINEXT_GROUP_NUMBER";
+        internal const string OrgNumberKey          = "CERTINEXT_ORG_NUMBER";
+        internal const string ProductCodeKey        = "CERTINEXT_PRODUCT_CODE";
+        internal const string RequestorEmailKey     = "CERTINEXT_REQUESTOR_EMAIL";
+        internal const string RequestorNameKey      = "CERTINEXT_REQUESTOR_NAME";
+        internal const string CloudflareApiTokenKey = "CERTINEXT_CF_API_TOKEN";
+        internal const string CloudflareZoneIdKey   = "CERTINEXT_CF_ZONE_ID";
+
+        /// <summary>
+        /// Path segment every V1 (<c>emSignHub-API</c>) base URL carries. A resolved
+        /// <see cref="ApiUrl"/> without it is almost always the V2 base URL from
+        /// <c>~/.env_certinext_v2</c> (issue 0017).
+        /// </summary>
+        internal const string V1ApiPathSegment = "/emSignHub-API";
+
+        /// <summary>
+        /// Every env key the V1 side of the harness reads: the keys this fixture resolves, plus
+        /// <c>CERTINEXT_DCV_DOMAIN</c>, which V1 <c>DcvLifecycleTests</c> reads straight from
+        /// process env. <see cref="V2EnvHelper.LoadAndPromote"/> must never write these into
+        /// process env, because real env vars take precedence over <c>~/.env_certinext</c> here
+        /// and the V2 file defines the same names with V2 values (issue 0017).
+        /// </summary>
+        internal static readonly IReadOnlySet<string> V1EnvKeys =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ApiUrlKey,
+                AccessKeyKey,
+                AccountNumberKey,
+                GroupNumberKey,
+                OrgNumberKey,
+                ProductCodeKey,
+                RequestorEmailKey,
+                RequestorNameKey,
+                CloudflareApiTokenKey,
+                CloudflareZoneIdKey,
+                "CERTINEXT_DCV_DOMAIN",
+            };
+
+        // ---------------------------------------------------------------------------
         // Credential properties
         // ---------------------------------------------------------------------------
 
@@ -100,6 +145,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             var env = LoadEnvFile(envPath);
 
+            ApiUrl        = GetEnvValue(env, ApiUrlKey);
+            AccessKey     = GetEnvValue(env, AccessKeyKey);
+            AccountNumber = GetEnvValue(env, AccountNumberKey);
+            GroupNumber   = GetEnvValue(env, GroupNumberKey);
+            OrgNumber     = GetEnvValue(env, OrgNumberKey);
+            ProductCode   = GetEnvValue(env, ProductCodeKey);
+            RequestorEmail = GetEnvValue(env, RequestorEmailKey);
+            RequestorName  = GetEnvValue(env, RequestorNameKey);
+
+            CloudflareApiToken    = GetEnvValue(env, CloudflareApiTokenKey);
+            CloudflareZoneId      = GetEnvValue(env, CloudflareZoneIdKey);
+            IsCloudflareConfigured = !string.IsNullOrWhiteSpace(CloudflareApiToken) &&
+                                     !string.IsNullOrWhiteSpace(CloudflareZoneId);
+
+            IsConfigured = !string.IsNullOrWhiteSpace(ApiUrl) &&
+                           !string.IsNullOrWhiteSpace(AccessKey);
+
+            // Issue 0017: fail fast (before promoting anything into process env and before any
+            // client/network call) when a V2 base URL has leaked into the V1 fixture. Only
+            // checked when the fixture would otherwise be configured, so an unconfigured run
+            // still skips cleanly.
+            if (IsConfigured)
+                EnsureV1ApiUrl(ApiUrl,
+                    fromProcessEnvironment: System.Environment.GetEnvironmentVariable(ApiUrlKey) != null);
+
             // Promote env-file values into the process environment so that any code
             // calling System.Environment.GetEnvironmentVariable() picks them up.
             // Opt-in destructive-test flags are deliberately excluded: they must be
@@ -109,23 +179,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 if (System.Environment.GetEnvironmentVariable(kv.Key) == null
                     && !_optInOnlyFlags.Contains(kv.Key))
                     System.Environment.SetEnvironmentVariable(kv.Key, kv.Value);
-
-            ApiUrl        = GetEnvValue(env, "CERTINEXT_API_URL");
-            AccessKey     = GetEnvValue(env, "CERTINEXT_ACCESS_KEY");
-            AccountNumber = GetEnvValue(env, "CERTINEXT_ACCOUNT_NUMBER");
-            GroupNumber   = GetEnvValue(env, "CERTINEXT_GROUP_NUMBER");
-            OrgNumber     = GetEnvValue(env, "CERTINEXT_ORG_NUMBER");
-            ProductCode   = GetEnvValue(env, "CERTINEXT_PRODUCT_CODE");
-            RequestorEmail = GetEnvValue(env, "CERTINEXT_REQUESTOR_EMAIL");
-            RequestorName  = GetEnvValue(env, "CERTINEXT_REQUESTOR_NAME");
-
-            CloudflareApiToken    = GetEnvValue(env, "CERTINEXT_CF_API_TOKEN");
-            CloudflareZoneId      = GetEnvValue(env, "CERTINEXT_CF_ZONE_ID");
-            IsCloudflareConfigured = !string.IsNullOrWhiteSpace(CloudflareApiToken) &&
-                                     !string.IsNullOrWhiteSpace(CloudflareZoneId);
-
-            IsConfigured = !string.IsNullOrWhiteSpace(ApiUrl) &&
-                           !string.IsNullOrWhiteSpace(AccessKey);
 
             if (IsConfigured)
             {
@@ -162,8 +215,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Reads a KEY=VALUE file, stripping blank lines and lines starting with '#'.
         /// Real environment variables overlay the file so CI overrides always win.
+        /// <paramref name="processEnvironment"/> defaults to the real process environment; unit
+        /// tests pass their own so they never have to mutate shared process state.
         /// </summary>
-        private static Dictionary<string, string> LoadEnvFile(string path)
+        internal static Dictionary<string, string> LoadEnvFile(
+            string path, System.Collections.IDictionary processEnvironment = null)
         {
             var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -186,7 +242,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
 
             // Real environment variables take precedence over the file
-            foreach (System.Collections.DictionaryEntry de in System.Environment.GetEnvironmentVariables())
+            foreach (System.Collections.DictionaryEntry de in
+                     processEnvironment ?? System.Environment.GetEnvironmentVariables())
             {
                 string k = de.Key?.ToString();
                 string v = de.Value?.ToString();
@@ -217,6 +274,36 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 val = val.Substring(1, val.Length - 2);
             }
             return val;
+        }
+
+        /// <summary>
+        /// Throws <see cref="InvalidOperationException"/> when <paramref name="apiUrl"/> lacks
+        /// the V1 <see cref="V1ApiPathSegment"/>, i.e. a V2 base URL has leaked into the V1
+        /// fixture (issue 0017). Left unchecked, every V1 call 404s and surfaces as the
+        /// misleading "unrecognised error body" (issue 0044). The message names the key and
+        /// where it came from, and shows only scheme/host/path — never credentials, userinfo,
+        /// or query strings. Exposed <c>internal</c> for direct unit-testing.
+        /// </summary>
+        internal static void EnsureV1ApiUrl(string apiUrl, bool fromProcessEnvironment)
+        {
+            if (string.IsNullOrWhiteSpace(apiUrl) ||
+                apiUrl.IndexOf(V1ApiPathSegment, StringComparison.OrdinalIgnoreCase) >= 0)
+                return;
+
+            string shown = Uri.TryCreate(apiUrl.Trim(), UriKind.Absolute, out Uri uri)
+                ? $"{uri.Scheme}://{uri.Authority}{uri.AbsolutePath}"
+                : "(not an absolute URL)";
+            string source = fromProcessEnvironment
+                ? "the process environment (real env vars override ~/.env_certinext)"
+                : "~/.env_certinext";
+
+            throw new InvalidOperationException(
+                $"IntegrationTestFixture: {ApiUrlKey} resolved to '{shown}' (from {source}), which lacks " +
+                $"the V1 path segment '{V1ApiPathSegment}'. This looks like a CERTInext V2 base URL leaking " +
+                "into the V1 fixture (issue 0017); V1 calls against it fail with 'unrecognised error body'. " +
+                "Source only ~/.env_certinext into the shell (set -a; . ~/.env_certinext; set +a), never " +
+                "~/.env_certinext_v2 — the V2 tests read that file from disk themselves. In an already-" +
+                $"polluted shell, run 'unset {ApiUrlKey}' or open a fresh shell.");
         }
 
         private static string GetEnvValue(Dictionary<string, string> env, string key)

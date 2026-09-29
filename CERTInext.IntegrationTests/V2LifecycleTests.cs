@@ -679,17 +679,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     }
 
     /// <summary>
-    /// Shared helper for loading <c>~/.env_certinext_v2</c> and promoting its values into
-    /// process environment, overriding V1 values the fixture may have already set. Used
-    /// by both <see cref="V2LifecycleTests"/> and <c>V2DcvLifecycleTests</c> so the two
-    /// files don't duplicate env-loading logic.
+    /// Shared helper for loading <c>~/.env_certinext_v2</c>. V2 test classes must read their
+    /// values from the dictionary <see cref="LoadAndPromote"/> returns, never from process env:
+    /// keys the V1 <see cref="IntegrationTestFixture"/> also reads are deliberately NOT promoted
+    /// (issue 0017). Used by <see cref="V2LifecycleTests"/>, <c>V2DcvLifecycleTests</c>, and the
+    /// other V2 test classes so they don't duplicate env-loading logic.
     /// </summary>
     internal static class V2EnvHelper
     {
         /// <summary>
-        /// Loads <c>~/.env_certinext_v2</c>, force-promotes its keys into process
-        /// environment (overriding any V1 values already set by <see cref="IntegrationTestFixture"/>),
-        /// and returns the merged environment dictionary.
+        /// Loads <c>~/.env_certinext_v2</c> and returns the merged environment dictionary (V2 file
+        /// values win over process env). V2-only file keys (e.g. <c>CERTINEXT_CLIENT_ID</c>,
+        /// <c>CERTINEXT_USE_V2_API</c>) are still promoted into process env; keys in
+        /// <see cref="IntegrationTestFixture.V1EnvKeys"/> (<c>CERTINEXT_API_URL</c> and the rest)
+        /// are never written to process env. The V1 fixture lets real env vars override
+        /// <c>~/.env_certinext</c>, so promoting the V2 values of those shared names corrupted the
+        /// V1 fixture of any class constructed later in the same test process (issues 0017, 0044).
         /// </summary>
         public static Dictionary<string, string> LoadAndPromote()
         {
@@ -699,18 +704,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             var (env, fileKeys) = LoadEnvFile(v2Path);
 
-            // Force-promote V2-file-defined keys into process env so they override
-            // any V1 values the fixture already set.
-            foreach (string key in fileKeys)
+            foreach (string key in PromotableKeys(fileKeys))
                 if (env.TryGetValue(key, out string fv))
                     Environment.SetEnvironmentVariable(key, fv);
 
-            // Promote remaining keys that aren't already in process env
-            foreach (var kv in env)
-                if (Environment.GetEnvironmentVariable(kv.Key) == null)
-                    Environment.SetEnvironmentVariable(kv.Key, kv.Value);
-
             return env;
+        }
+
+        /// <summary>
+        /// The V2-file keys <see cref="LoadAndPromote"/> may write into process env: every file
+        /// key except those the V1 side reads (<see cref="IntegrationTestFixture.V1EnvKeys"/>).
+        /// Exposed <c>internal</c> for direct unit-testing.
+        /// </summary>
+        internal static List<string> PromotableKeys(IEnumerable<string> fileKeys)
+        {
+            var keys = new List<string>();
+            foreach (string key in fileKeys)
+                if (!IntegrationTestFixture.V1EnvKeys.Contains(key))
+                    keys.Add(key);
+            return keys;
         }
 
         /// <summary>

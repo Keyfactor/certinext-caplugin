@@ -94,6 +94,10 @@ The file is parsed line by line:
 - Each line must be in `KEY=VALUE` format.
 - Values are not quoted — do not surround values with `"` or `'`.
 - Real environment variables override file values (useful for CI injection).
+- Exception: the fixture fails fast if the resolved `CERTINEXT_API_URL` lacks `/emSignHub-API`
+  (a V2 base URL leaked in, issue 0017). Source only `~/.env_certinext` into the shell, never
+  `~/.env_certinext_v2`. The V2 test classes read that file from disk themselves and never write
+  V1-shared keys (`CERTINEXT_API_URL`, `CERTINEXT_ACCESS_KEY`, ...) into the process environment.
 
 ---
 
