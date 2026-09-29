@@ -53,6 +53,7 @@
 - fix(config): V2 connectors now require `SignerPlace` at save time, and V2 SSL enrollment fails fast if it resolves blank, since the Subscriber Agreement requires it (0039).
 - fix(sync): the spec-documented V2 order status `unknown` now maps to pending instead of FAILED, so a possibly-live order isn't dropped (0039).
 - fix(v2): V2 order create now omits `X-Product-Code` entirely for a null/blank product code instead of sending it empty (0054).
+- fix(v2): non-UCC V2 enrollment now rejects extra SANs from Command's SAN dictionary instead of silently dropping them (0061).
 
 ## Chores
 - docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).

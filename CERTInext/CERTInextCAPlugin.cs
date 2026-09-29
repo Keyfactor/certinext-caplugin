@@ -1762,37 +1762,66 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             // Non-UCC V2 products support only a single domain plus autoSecureWww's www.<domain>
-            // variant; any other DNS SAN in the CSR would be silently dropped or cause a CA-side
-            // rejection, so fail fast with a clear message rather than letting the CA return an
-            // opaque error. UCC (multi-domain) products are exempt — their extra SANs are the
-            // expected input and are carried into additionalDomains below instead. This check
-            // necessarily runs after UCC detection above (which needs the live catalog lookup to
-            // know isUccProduct), not before it, but it still runs before PlaceOrderV2Async, so a
-            // rejected non-UCC request never places a CA order. See
-            // issues/f3-v2-multi-san-limitation.md and
-            // issues/0047-v2-multi-san-guard-blocks-ucc-orders.md.
+            // variant; any other DNS SAN — from the CSR OR Command's SAN dictionary — would be
+            // silently dropped (issue 0061) or cause a CA-side rejection, so fail fast with a
+            // clear message rather than letting the CA return an opaque error, or the extra
+            // names vanish with no order-side signal at all. UCC (multi-domain) products are
+            // exempt — their extra SANs are the expected input and are carried into
+            // additionalDomains below instead. This check necessarily runs after UCC detection
+            // above (which needs the live catalog lookup to know isUccProduct), not before it,
+            // but it still runs before PlaceOrderV2Async, so a rejected non-UCC request never
+            // places a CA order. See issues/f3-v2-multi-san-limitation.md,
+            // issues/0047-v2-multi-san-guard-blocks-ucc-orders.md and
+            // issues/0061-v2-san-dictionary-extras-silently-dropped.md.
+            //
+            // Issue 0061: looking at the CSR alone missed the case where Command's SAN
+            // dictionary carries the extras and the CSR itself carries only the primary domain —
+            // a non-UCC order never sends additionalDomains at all, so those dictionary-only
+            // extras had nowhere to go and were dropped with no warning.
+            //
+            // This guard deliberately takes the UNION of the CSR's own SANs and the SAN
+            // dictionary — NOT CollectRequestedSanEntries'/BuildSanList's "fallback, not union"
+            // rule (dictionary wins when non-null; CSR consulted only when the dictionary is
+            // null). That rule exists to decide what additionalDomains/additionalHosts actually
+            // send to the CA, where the CSR's own subjectAltName extension is otherwise ignored.
+            // Here it is wrong: SubmitCsrV2Async submits the CSR to CERTInext verbatim regardless
+            // of what the SAN dictionary contains, so a CSR-embedded extra domain still reaches
+            // the CA even when Command also supplied a (single-domain) SAN dictionary. Deferring
+            // to the dictionary alone whenever it is non-null would let that CSR-embedded extra
+            // slip past this guard unrejected — a regression of the pre-0061 CSR-extras reject
+            // (issues/f3-v2-multi-san-limitation.md, issues/0047-v2-multi-san-guard-blocks-ucc-orders.md)
+            // for any enrollment that also happens to pass a SAN dictionary.
             //
             // SSL-only (issue 0033): a private-pki order carries its SANs in additionalHosts,
             // which the spec defines as a multi-entry "SAN list (DNS names or IPv4 / IPv6)" for
             // every Private PKI variant, so the single-domain restriction does not apply.
             if (!isPrivatePki && !isUccProduct)
             {
-                var sanEntries = ExtractSanEntriesFromCsr(csr, out _);
-                var extraSans = sanEntries
+                var csrSanEntries = ExtractSanEntriesFromCsr(csr, out _);
+                // CollectRequestedSanEntries(san, csr: null, ...) yields exactly the SAN
+                // dictionary's own (MapSanType-normalized) entries: when san is non-null the
+                // CSR-fallback branch never runs, and when san is null there is nothing to
+                // collect (csr: null makes the fallback branch's own CSR read a no-op) — the
+                // real CSR is already covered by csrSanEntries above, so no double-count.
+                var dictSanEntries = CollectRequestedSanEntries(san, csr: null, out _, out _);
+                var extraSans = csrSanEntries
+                    .Concat(dictSanEntries)
                     .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
                     .Select(s => s.Value?.ToLowerInvariant())
                     .Where(v => !string.IsNullOrWhiteSpace(v))
                     .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
                     .Where(v => !string.Equals(v, "www." + domain, StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
                 if (extraSans.Count > 0)
                 {
                     _logger.LogWarning(
-                        "EnrollV2Async rejected multi-SAN CSR for order on domain '{Domain}'. " +
+                        "EnrollV2Async rejected multi-SAN order on domain '{Domain}'. " +
                         "This product does not support additional domains via the V2 API " +
                         "(autoSecureWww covers www.); only UCC (multi-domain) products may carry " +
-                        "extra SANs. ExtraSans=[{ExtraSans}]",
+                        "extra SANs, whether requested via the CSR or Command's SAN dictionary. " +
+                        "ExtraSans=[{ExtraSans}]",
                         LogSanitizer.Strip(domain),
                         LogSanitizer.Strip(string.Join(", ", extraSans)));
                     _logger.MethodExit(LogLevel.Debug);
@@ -1801,12 +1830,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         CARequestID   = string.Empty,
                         Certificate   = null,
                         Status        = (int)EndEntityStatus.FAILED,
-                        StatusMessage = $"V2 enrollment rejected: the CSR contains {extraSans.Count} SAN(s) beyond " +
-                                        $"the primary domain ('{domain}') and its www. variant. " +
+                        StatusMessage = $"V2 enrollment rejected: {extraSans.Count} SAN(s) beyond " +
+                                        $"the primary domain ('{domain}') and its www. variant were requested " +
+                                        "(via the CSR and/or Command's SAN dictionary). " +
                                         "This product only supports a single domain via the V2 API " +
                                         "(UCC/multi-domain products are the exception). " +
-                                        "Resubmit with a single-domain CSR, or enroll against a UCC " +
-                                        "product if additional domains are required."
+                                        "Resubmit with a single-domain CSR and no additional SANs, or enroll " +
+                                        "against a UCC product if additional domains are required."
                     };
                 }
             }
