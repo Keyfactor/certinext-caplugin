@@ -40,6 +40,7 @@
 - fix(enroll): the V2 single-domain CSR-SAN-count guard now exempts UCC products, instead of rejecting every UCC CSR enrollment before it could reach the UCC path (0047).
 - fix(audit): the "Enrollment complete" audit log now records the leaf serial for V2 chain PEMs instead of `(parse-error)` (0050).
 - fix(sync): V2 `Synchronize`/`GetSingleRecord` no longer emit a body-less REVOKED record unless the gateway already holds a certificate body for that order, preventing a poisoned gateway row that broke every future Command scan of the CA (0049).
+- fix(enroll): V2 `Enroll` no longer returns a body-less REVOKED result; a REVOKED disposition observed post-CSR-submit, post-DCV, or during the pickup poll is now reported as FAILED (0052).
 
 ## Chores
 - docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).

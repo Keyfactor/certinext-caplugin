@@ -1711,10 +1711,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // has a CARequestID and the next sync can resolve the status.
             V2OrderStatusResponse postCsrStatus;
             int disposition;
+            // Raw CA status string behind the current `disposition` value — kept in step with it
+            // (reassigned everywhere `disposition` is recomputed from a fresh TrackOrderV2Async
+            // call) purely so a terminal REVOKED result can be logged/reported with the CA's own
+            // status text (issue 0052), not just Command's mapped disposition.
+            string lastKnownCaStatus;
             try
             {
                 postCsrStatus = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
                 disposition = StatusMapper.V2StatusToRequestDisposition(postCsrStatus.Status);
+                lastKnownCaStatus = postCsrStatus.Status;
             }
             catch (Exception trackEx)
             {
@@ -1762,6 +1768,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // Re-check status after DCV completes
                         var tracked = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
                         disposition = StatusMapper.V2StatusToRequestDisposition(tracked.Status);
+                        lastKnownCaStatus = tracked.Status;
                         _logger.LogInformation(
                             "V2 DCV completed inline for order {OrderId}. Post-DCV status={Status}",
                             orderId, tracked.Status);
@@ -1824,11 +1831,60 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                     : disposition,
                 StatusMessage = $"V2 order placed. Status={createResp.Status}"
             };
-            var pickedUpResult = await PickUpEnrolledCertificateV2Async(
-                pendingResult, orderId, ep.ProductFamilySlug, dcvV2Ran);
+            var (pickedUpResult, observedCaStatus) = await PickUpEnrolledCertificateV2Async(
+                pendingResult, orderId, ep.ProductFamilySlug, dcvV2Ran, lastKnownCaStatus);
+
+            // Issue 0052: normalize a body-less REVOKED disposition to FAILED once here, right
+            // before returning — every path above that can surface REVOKED (the post-CSR-submit
+            // status check, the post-DCV status re-check, and PickUpEnrolledCertificateV2Async's
+            // own poll) funnels through pickedUpResult, so a single check here covers all of them
+            // rather than patching each branch individually. See NormalizeV2RevokedEnrollResult.
+            var finalResult = NormalizeV2RevokedEnrollResult(pickedUpResult, orderId, observedCaStatus);
 
             _logger.MethodExit(LogLevel.Debug);
-            return pickedUpResult;
+            return finalResult;
+        }
+
+        /// <summary>
+        /// Issue 0052: at enroll time the gateway never holds a stored certificate body for a
+        /// brand-new order — unlike the Synchronize/GetSingleRecord 0049 guard (<see
+        /// cref="DecideBodylessRevokedRecord"/>), there is no "gateway already holds a body" case
+        /// for <see cref="EnrollV2Async"/> to fall back to. A REVOKED disposition surfaced from V2
+        /// enrollment — whether observed on the post-CSR-submit status check, the post-DCV status
+        /// re-check, or <see cref="PickUpEnrolledCertificateV2Async"/>'s own poll — is therefore
+        /// always body-less. Persisting that as a REVOKED row with <c>Certificate = null</c> is
+        /// exactly what poisons the gateway per issue 0049 (RevocationDate never clears, and every
+        /// later revoked-certificate search calls FromDER(null) and 500s). Mapped to FAILED here,
+        /// once, on the final result <see cref="EnrollV2Async"/> is about to return, rather than in
+        /// each branch that can produce a REVOKED disposition.
+        /// </summary>
+        private EnrollmentResult NormalizeV2RevokedEnrollResult(EnrollmentResult result, string orderId, string observedCaStatus)
+        {
+            if (result == null || result.Status != (int)EndEntityStatus.REVOKED)
+                return result;
+
+            // SOC2 audit trail: the log must show the CA reported revoked and the plugin reported
+            // FAILED, with enough context (order id + raw CA status) to reconstruct why.
+            _logger.LogWarning(
+                "V2 enroll observed order '{OrderId}' as revoked at the CA (raw status='{CaStatus}') " +
+                "before a certificate was ever delivered. Mapping the enrollment result to FAILED " +
+                "instead of a body-less REVOKED record — Enroll has no stored certificate body to " +
+                "fall back on, unlike the Synchronize/GetSingleRecord 0049 guard.",
+                orderId, string.IsNullOrWhiteSpace(observedCaStatus) ? "(unknown)" : observedCaStatus);
+
+            string statusSuffix = string.IsNullOrWhiteSpace(observedCaStatus)
+                ? string.Empty
+                : $" (CA status '{observedCaStatus}')";
+
+            return new EnrollmentResult
+            {
+                CARequestID   = result.CARequestID,
+                Certificate   = null,
+                Status        = (int)EndEntityStatus.FAILED,
+                StatusMessage = $"Order '{orderId}' was revoked at the CA{statusSuffix} before a " +
+                                 "certificate could be delivered; reporting enrollment failure rather " +
+                                 "than a certificate revocation with no certificate body."
+            };
         }
 
         /// <summary>
@@ -4588,10 +4644,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <c>GetEffectivePickupRetries</c>, <c>GetEffectivePickupDelaySeconds</c>) so the two
         /// behave identically from an operator's perspective. Never throws — any polling error
         /// degrades to the pending result.
+        ///
+        /// Also returns the freshest raw CA status string observed while producing the result
+        /// (falling back to <paramref name="lastKnownCaStatus"/> when no fresher poll ran) — issue
+        /// 0052 needs this so <see cref="EnrollV2Async"/>'s terminal REVOKED-to-FAILED
+        /// normalization can log/report the CA's own status text, not just Command's mapped
+        /// disposition. Note: a REVOKED result reaching that normalization is never "surfaced
+        /// immediately" as REVOKED any more — see <c>NormalizeV2RevokedEnrollResult</c>.
         /// </summary>
-        private async Task<EnrollmentResult> PickUpEnrolledCertificateV2Async(
+        private async Task<(EnrollmentResult Result, string RawCaStatus)> PickUpEnrolledCertificateV2Async(
             EnrollmentResult pendingResult, string orderId, string productFamilySlug,
-            bool dcvV2Ran, CancellationToken ct = default)
+            bool dcvV2Ran, string lastKnownCaStatus, CancellationToken ct = default)
         {
             // The inline V2 DCV path already owns the in-call issuance wait for this order —
             // running a second stacked poll here would double the wait budget (when
@@ -4599,13 +4662,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // order DCV already left mid-flight. Defer to the pending result; a later sync
             // completes it. Mirrors dcvIssuanceWaitRan's role in the V1 method above.
             if (dcvV2Ran)
-                return pendingResult;
+                return (pendingResult, lastKnownCaStatus);
 
             // Only a still-pending (external-validation) result can benefit from a pickup poll.
-            // An already issued/failed/revoked result is returned as-is.
+            // An already issued/failed/revoked result is returned unpolled — the caller's own
+            // terminal normalization (NormalizeV2RevokedEnrollResult) decides what a REVOKED
+            // disposition here ultimately becomes; this method no longer surfaces it as-is.
             if (pendingResult == null
                 || pendingResult.Status != (int)EndEntityStatus.EXTERNALVALIDATION)
-                return pendingResult;
+                return (pendingResult, lastKnownCaStatus);
 
             // A pending result with no order id cannot be polled — surface the anomaly rather
             // than silently returning, so an un-pollable pending state leaves an audit trace.
@@ -4614,7 +4679,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogWarning(
                     "V2 synchronous pickup skipped: a pending enrollment was returned with no order " +
                     "id to poll. The certificate can only be reconciled by a later synchronization.");
-                return pendingResult;
+                return (pendingResult, lastKnownCaStatus);
             }
 
             int retries = _config.GetEffectivePickupRetries();
@@ -4623,7 +4688,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogInformation(
                     "V2 synchronous certificate pickup disabled (PickupRetries<=0). Order {OrderId} " +
                     "will be picked up on the next synchronization.", orderId);
-                return pendingResult;
+                return (pendingResult, lastKnownCaStatus);
             }
 
             int delaySeconds = _config.GetEffectivePickupDelaySeconds();
@@ -4663,6 +4728,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     {
                         var tracked = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
                         int disposition = StatusMapper.V2StatusToRequestDisposition(tracked.Status);
+                        lastKnownCaStatus = tracked.Status;
 
                         // SOC2 CC7.3: record each poll's observed disposition so the issuance
                         // timeline is reconstructable (how many polls ran, what each returned).
@@ -4690,13 +4756,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                         orderId,
                                         string.IsNullOrWhiteSpace(certResp.SerialNumber) ? "(not provided by CA)" : certResp.SerialNumber,
                                         attempt, retries);
-                                    return new EnrollmentResult
+                                    return (new EnrollmentResult
                                     {
                                         CARequestID   = orderId,
                                         Certificate   = fullChain,
                                         Status        = (int)EndEntityStatus.GENERATED,
                                         StatusMessage = "Certificate issued via V2 API."
-                                    };
+                                    }, lastKnownCaStatus);
                                 }
 
                                 _logger.LogDebug(
@@ -4718,7 +4784,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         else if (disposition == (int)EndEntityStatus.REVOKED
                                  || disposition == (int)EndEntityStatus.FAILED)
                         {
-                            // Terminal non-issued outcomes carry no body and are surfaced immediately.
+                            // Terminal non-issued outcomes carry no body and stop the poll
+                            // immediately — but neither is "returned as-is" any more: the REVOKED
+                            // case still comes back from this method with Status=REVOKED, but
+                            // EnrollV2Async's terminal NormalizeV2RevokedEnrollResult call maps it
+                            // to FAILED before it ever reaches the gateway (issue 0052), since a
+                            // REVOKED order observed here never has a downloadable certificate body.
                             if (disposition == (int)EndEntityStatus.FAILED)
                                 _logger.LogError(
                                     "V2 order {OrderId} reached terminal FAILED status '{Status}' during " +
@@ -4729,13 +4800,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                     "V2 order {OrderId} was REVOKED ('{Status}') during synchronous pickup " +
                                     "(attempt {Attempt}/{Retries}).",
                                     orderId, tracked.Status, attempt, retries);
-                            return new EnrollmentResult
+                            return (new EnrollmentResult
                             {
                                 CARequestID   = orderId,
                                 Certificate   = null,
                                 Status        = disposition,
                                 StatusMessage = $"Order {orderId} reached status '{tracked.Status}' during enrollment pickup."
-                            };
+                            }, lastKnownCaStatus);
                         }
                     }
                     catch (Exception ex)
@@ -4780,7 +4851,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "sync will pick up the certificate later.", orderId);
             }
 
-            return pendingResult;
+            return (pendingResult, lastKnownCaStatus);
         }
 
         /// <summary>
