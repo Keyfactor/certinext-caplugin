@@ -1948,7 +1948,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // The V2 API creates the order in 'pending-csr' and requires a separate PUT to submit
             // the CSR before the order can progress to validation or issuance.
-            await _client.SubmitCsrV2Async(ep.ProductFamilySlug, orderId, csr);
+            // Issue 0039: if Submit CSR throws, the order already exists at pending-csr and Command
+            // would otherwise never learn its ID. Cancel it once (best effort) and fail.
+            try
+            {
+                await _client.SubmitCsrV2Async(ep.ProductFamilySlug, orderId, csr);
+            }
+            catch (Exception csrEx)
+            {
+                var orphanResult = await CancelOrphanedV2OrderAfterCsrFailureAsync(
+                    ep.ProductFamilySlug, orderId, csrEx);
+                _logger.MethodExit(LogLevel.Debug);
+                return orphanResult;
+            }
             _logger.LogInformation("V2 CSR submitted. OrderId={OrderId}", orderId);
 
             // Re-read status after CSR submission — the order advances past pending-csr.
@@ -2089,6 +2101,74 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             _logger.MethodExit(LogLevel.Debug);
             return finalResult;
+        }
+
+        /// <summary>
+        /// Cancel reason sent to CERTInext when Submit CSR fails after the order was created
+        /// (issue 0039). Deliberately fixed text: the CSR exception may carry CA response detail,
+        /// and the reason is persisted in the CA's audit log.
+        /// </summary>
+        internal const string OrphanedOrderCancelReason =
+            "Keyfactor gateway: CSR submission failed; cancelling orphaned order.";
+
+        /// <summary>
+        /// Issue 0039: <see cref="EnrollV2Async"/> calls this when <c>SubmitCsrV2Async</c> throws
+        /// after the order was placed. Makes exactly one best-effort <c>CancelOrderV2Async</c>
+        /// call (never retried, never rethrown) and returns a FAILED result that carries the
+        /// orderId and says whether the orphaned order was cancelled.
+        /// </summary>
+        private async Task<EnrollmentResult> CancelOrphanedV2OrderAfterCsrFailureAsync(
+            string familySlug, string orderId, Exception csrEx)
+        {
+            _logger.MethodEntry(LogLevel.Trace);
+            // The CSR exception message can carry CA response detail (problem+json "detail"),
+            // so it is redacted like any other CA body and capped at 500 characters.
+            string csrFailure = RedactAndCapForLog(csrEx.Message);
+
+            string cancelOutcome;
+            string cancelMessage;
+            try
+            {
+                var outcome = await _client.CancelOrderV2Async(familySlug, orderId, OrphanedOrderCancelReason);
+                if (outcome == V2CancelOrderOutcome.Cancelled)
+                {
+                    cancelOutcome = "cancelled";
+                    cancelMessage = "The orphaned order was cancelled.";
+                }
+                else
+                {
+                    cancelOutcome = "not cancelled (HTTP 422: order already in a terminal state)";
+                    cancelMessage = "The orphaned order was NOT cancelled: the CA reported it is already in a " +
+                                    "terminal state (HTTP 422). Check the order in the CERTInext portal.";
+                }
+            }
+            catch (Exception cancelEx)
+            {
+                cancelOutcome = $"not cancelled (cancel failed: {cancelEx.GetType().Name}: " +
+                                $"{RedactAndCapForLog(cancelEx.Message)})";
+                cancelMessage = "The orphaned order was NOT cancelled: the cancel request failed. " +
+                                "Cancel it manually in the CERTInext portal. See gateway logs for details.";
+            }
+
+            _logger.LogWarning(
+                "V2 CSR submission failed after the order was placed. OrderId={OrderId}, Family={Family}, " +
+                "CsrFailure={CsrFailure}, CancelOutcome={CancelOutcome}",
+                orderId, familySlug, csrFailure, cancelOutcome);
+
+            _logger.MethodExit(LogLevel.Trace);
+            return new EnrollmentResult
+            {
+                CARequestID   = orderId,
+                Certificate   = null,
+                Status        = (int)EndEntityStatus.FAILED,
+                StatusMessage = $"V2 CSR submission failed for order {orderId}: {csrFailure} {cancelMessage}"
+            };
+        }
+
+        private string RedactAndCapForLog(string message)
+        {
+            string redacted = CERTInextClient.ApplyLoggingRedaction(message ?? string.Empty, _config?.LogSensitiveRequestData ?? false);
+            return redacted.Length <= 500 ? redacted : redacted.Substring(0, 500) + "…";
         }
 
         /// <summary>

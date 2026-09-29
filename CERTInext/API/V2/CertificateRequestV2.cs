@@ -499,4 +499,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("note")]
         public string Note { get; set; }
     }
+
+    /// <summary>
+    /// Request body for POST /api/certinext/v2/{family}-certificates/{orderId}/cancel
+    /// ("Cancel Order"). The SSL spec entry marks <c>reason</c> as "required free-text.
+    /// Persisted in the audit log"; an empty reason is rejected with EMS-984 (issue 0039).
+    /// </summary>
+    public class V2CancelOrderRequest
+    {
+        [JsonPropertyName("reason")]
+        public string Reason { get; set; }
+    }
+
+    /// <summary>
+    /// Outcome of a V2 Cancel Order call that did not throw (issue 0039).
+    /// </summary>
+    public enum V2CancelOrderOutcome
+    {
+        /// <summary>HTTP 2xx (spec: 204 No Content) — the order is cancelled.</summary>
+        Cancelled,
+
+        /// <summary>HTTP 422 — spec: "order already in a terminal state"; nothing was cancelled.</summary>
+        AlreadyTerminal
+    }
 }

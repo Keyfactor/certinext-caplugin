@@ -263,6 +263,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             CancellationToken ct = default);
 
         /// <summary>
+        /// Cancels a not-yet-issued V2 order via POST /api/certinext/v2/{family}/{orderId}/cancel
+        /// with body <c>{ "reason": ... }</c> (issue 0039). An Idempotency-Key is generated
+        /// automatically. Returns <see cref="V2CancelOrderOutcome.Cancelled"/> on 2xx (spec: 204)
+        /// and <see cref="V2CancelOrderOutcome.AlreadyTerminal"/> on 422 (spec: "order already in
+        /// a terminal state"); throws on any other failure. Never retries.
+        /// </summary>
+        /// <param name="productFamilySlug">One of the <c>Constants.ApiV2.Family*</c> slugs.</param>
+        /// <param name="orderId">The V2 order ID.</param>
+        /// <param name="reason">Required free-text reason (the CA rejects an empty one with EMS-984).</param>
+        Task<V2CancelOrderOutcome> CancelOrderV2Async(
+            string productFamilySlug,
+            string orderId,
+            string reason,
+            CancellationToken ct = default);
+
+        /// <summary>
         /// Returns V2 auth/me response (accountNumber, authType).
         /// </summary>
         Task<V2AuthMeResponse> GetAuthMeV2Async(CancellationToken ct = default);

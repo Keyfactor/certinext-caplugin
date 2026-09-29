@@ -1498,6 +1498,41 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <inheritdoc/>
+        public async Task<V2CancelOrderOutcome> CancelOrderV2Async(
+            string productFamilySlug,
+            string orderId,
+            string reason,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            if (string.IsNullOrWhiteSpace(reason))
+                throw new ArgumentException(
+                    "A cancel reason is required (CERTInext rejects an empty one with EMS-984).", nameof(reason));
+            EnsureV2Client();
+            string idempotencyKey = Guid.NewGuid().ToString();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/cancel";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
+            req.AddJsonBody(JsonSerializer.Serialize(new V2CancelOrderRequest { Reason = reason }, GetJsonOptions()));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            sw.Stop();
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
+                path, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+            if (resp.StatusCode == (HttpStatusCode)422)
+            {
+                // Spec "Cancel Order" 422: "order already in a terminal state" (e.g. already
+                // issued — use /revoke). Not an exception: the caller reports it as "not cancelled".
+                LogV2ApiFailure("V2 cancel order", resp, LogLevel.Warning);
+                Logger.MethodExit(LogLevel.Trace);
+                return V2CancelOrderOutcome.AlreadyTerminal;
+            }
+            ThrowOnV2Failure(resp, "V2 cancel order");
+            Logger.MethodExit(LogLevel.Trace);
+            return V2CancelOrderOutcome.Cancelled;
+        }
+
+        /// <inheritdoc/>
         public async Task<V2OrderStatusResponse> ResolveAndTrackOrderV2Async(
             string orderId,
             CancellationToken ct = default)

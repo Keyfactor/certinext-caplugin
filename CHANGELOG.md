@@ -49,6 +49,7 @@
 - fix(logging): requestor personal data (name, email, phone, org contact fields) and full CA request/response payloads are now redacted from gateway logs by default, gated behind a new opt-in `LogSensitiveRequestData` connector setting (0040).
 - fix(logging): email SAN values are now masked in enrollment and SAN-resolution log lines unless `LogSensitiveRequestData` is on (0040).
 - fix(logging): email SANs in Trace-logged `additionalDomains`/`additionalHosts` arrays and V1 `domainVerification` keys are now masked unless `LogSensitiveRequestData` is on (0040).
+- fix(v2): if V2 CSR submission fails after the order is placed, the plugin now cancels the orphaned order once (best effort) and returns FAILED with its order ID (0039).
 
 ## Chores
 - docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).
