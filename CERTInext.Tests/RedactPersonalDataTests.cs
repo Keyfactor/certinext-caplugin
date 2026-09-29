@@ -251,6 +251,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             output.Should().Contain("\"signerPlace\":\"***REDACTED***\"");
         }
 
+        // V2 place-order response echoes the agreement as subscriberAgreement with the key
+        // "signedPlace" (not the request's "signerPlace"), plus an orderedBy contact. Shape taken
+        // from a live sandbox response (2026-09-29); values here are fictitious.
+        private const string V2OrderResponseJson =
+            "{\"orderId\":\"4898663698\",\"status\":\"pending-approval\",\"productVariant\":\"dv\"," +
+            "\"domain\":\"example.com\",\"resolvedProductCode\":\"842\"," +
+            "\"requestor\":{\"name\":\"Jane Doe\",\"email\":\"jane.doe@example.com\"}," +
+            "\"orderedBy\":{\"name\":\"Account Owner\",\"email\":\"owner@example.com\"}," +
+            "\"subscriberAgreement\":{\"signed\":true,\"signerName\":\"John Signer\"," +
+            "\"signedAt\":\"2026-09-26T15:58:51Z\",\"signedPlace\":\"Austin\"}}";
+
+        [Fact]
+        public void RedactPersonalData_V2OrderResponse_RedactsSubscriberAgreementAndOrderedBy()
+        {
+            string output = CERTInextClient.RedactPersonalData(V2OrderResponseJson);
+
+            output.Should().NotContain("Austin");
+            output.Should().Contain("\"signedPlace\":\"***REDACTED***\"");
+            output.Should().NotContain("John Signer");
+            output.Should().NotContain("Jane Doe");
+            output.Should().NotContain("Account Owner");
+            output.Should().Contain("\"email\":\"o***@example.com\"");
+            output.Should().Contain("\"orderId\":\"4898663698\"");
+            output.Should().Contain("\"domain\":\"example.com\"");
+            output.Should().Contain("\"signedAt\":\"2026-09-26T15:58:51Z\"");
+        }
+
         // ---------------------------------------------------------------------------
         // Whitespace tolerance — a pretty-printed body must redact identically to a compact one.
         // ---------------------------------------------------------------------------
