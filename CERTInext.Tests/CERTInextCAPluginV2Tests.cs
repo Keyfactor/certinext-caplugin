@@ -51,7 +51,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             string dcvTxtRecordTemplate = null,
             string requestorIsdCode = null,
             string requestorMobileNumber = null,
-            ICertificateDataReader certDataReader = null) =>
+            ICertificateDataReader certDataReader = null,
+            string organizationNumber = null) =>
             new CERTInextCAPlugin(client, new CERTInextConfig
             {
                 UseV2Api        = true,
@@ -65,6 +66,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 RequestorEmail  = "test@example.com",
                 SignerIp        = "1.2.3.4",
                 SignerPlace     = "New York",
+                OrganizationNumber = organizationNumber,
                 PickupRetries   = 0,
                 IgnoreExpired   = ignoreExpired,
                 DcvTxtRecordTemplate  = dcvTxtRecordTemplate,
@@ -279,11 +281,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         // ---------------------------------------------------------------------------
         // V2 product code resolution when no explicit ProductCode is configured (issue 0036).
-        // ProductVariant is deliberately left at its "dv" default in these two tests even though
-        // ProductID selects OV/EV SSL — ProductVariant and ProductID are independent enrollment
-        // parameters (see issue 0036's own note on this), and using "dv" keeps the OV/EV
-        // organization-block guard (issue 0028) out of scope so the test isolates product-code
-        // resolution specifically.
+        //
+        // Issue 0059 update: these two tests used to leave ProductVariant at its "dv" default
+        // even though ProductID selects OV/EV SSL, specifically to keep the OV/EV
+        // organization-block guard (issue 0028) out of scope. Post-0059, ProductVariant is no
+        // longer independent of ProductID — the plugin now derives/validates it from the product
+        // — so an OV/EV ProductID with no explicit ProductVariant now legitimately resolves to
+        // "ov"/"ev" and requires the organization block. These tests now configure
+        // OrganizationNumber (so that guard is satisfied) and leave ProductVariant unset
+        // entirely, so the derived value continues to isolate product-code resolution as before.
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -316,14 +322,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_resolve_001", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_resolve_001", Status = "pending-dcv" });
 
-            var plugin = BuildV2Plugin(mock.Object);
+            var plugin = BuildV2Plugin(mock.Object, organizationNumber: "ORG-TEST-001");
             var productInfo = new EnrollmentProductInfo
             {
                 ProductID = Constants.Products.OvSsl,
                 ProductParameters = new Dictionary<string, string>
                 {
                     ["ProductFamily"]  = "ssl",
-                    ["ProductVariant"] = "dv",
+                    // No explicit ProductVariant — issue 0059 derives "ov" from ProductID.
                     ["DomainName"]     = "example.com"
                 }
             };
@@ -359,14 +365,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }, // DV SSL only
                 });
 
-            var plugin = BuildV2Plugin(mock.Object);
+            var plugin = BuildV2Plugin(mock.Object, organizationNumber: "ORG-TEST-001");
             var productInfo = new EnrollmentProductInfo
             {
                 ProductID = Constants.Products.EvSsl,
                 ProductParameters = new Dictionary<string, string>
                 {
                     ["ProductFamily"]  = "ssl",
-                    ["ProductVariant"] = "dv",
+                    // No explicit ProductVariant — issue 0059 derives "ev" from ProductID.
                     ["DomainName"]     = "example.com"
                 }
             };

@@ -62,10 +62,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 PickupRetries     = 0
             });
 
-        private static EnrollmentProductInfo MakeV2ProductInfo(string productCode, string productVariant) =>
+        // Issue 0059: ProductVariant must agree with ProductId (the plugin now derives/validates
+        // one from the other), so callers pass both explicitly rather than this helper hardcoding
+        // a single ProductID ("OV SSL") for every variant under test.
+        private static EnrollmentProductInfo MakeV2ProductInfo(string productId, string productCode, string productVariant) =>
             new EnrollmentProductInfo
             {
-                ProductID = "OV SSL",
+                ProductID = productId,
                 ProductParameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["ProductCode"]    = productCode,
@@ -111,14 +114,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         [Theory]
-        [InlineData("ov")]
-        [InlineData("ev")]
-        [InlineData("OV")]
-        [InlineData("Ev")]
-        public async Task Enroll_V2_OvOrEvProduct_PopulatesOrganizationBlockFromConfig(string productVariant)
+        [InlineData("ov", Constants.Products.OvSsl, "846", "16")]
+        [InlineData("ev", Constants.Products.EvSsl, "847", "19")]
+        [InlineData("OV", Constants.Products.OvSsl, "846", "16")]
+        [InlineData("Ev", Constants.Products.EvSsl, "847", "19")]
+        public async Task Enroll_V2_OvOrEvProduct_PopulatesOrganizationBlockFromConfig(
+            string productVariant, string productId, string catalogCode, string catalogTypeId)
         {
             var mock = NewMock();
-            StubCatalog(mock, "846", "16"); // non-UCC product type ID
+            StubCatalog(mock, catalogCode, catalogTypeId);
             StubHappyOrderPlacement(mock, "ord_org_001");
 
             V2CreateSslOrderRequest captured = null;
@@ -134,7 +138,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 csr: GenerateCsrPem("example.com"),
                 subject: "CN=example.com",
                 san: null,
-                productInfo: MakeV2ProductInfo("846", productVariant),
+                productInfo: MakeV2ProductInfo(productId, catalogCode, productVariant),
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
@@ -168,7 +172,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 csr: GenerateCsrPem("example.com"),
                 subject: "CN=example.com",
                 san: null,
-                productInfo: MakeV2ProductInfo("842", "dv"),
+                productInfo: MakeV2ProductInfo(Constants.Products.DvSsl, "842", "dv"),
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
@@ -179,9 +183,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Theory]
-        [InlineData("ov")]
-        [InlineData("ev")]
-        public async Task Enroll_V2_OvOrEvProduct_MissingOrganizationNumber_FailsFastWithoutCallingCa(string productVariant)
+        [InlineData("ov", Constants.Products.OvSsl)]
+        [InlineData("ev", Constants.Products.EvSsl)]
+        public async Task Enroll_V2_OvOrEvProduct_MissingOrganizationNumber_FailsFastWithoutCallingCa(
+            string productVariant, string productId)
         {
             // Strict mock with NOTHING stubbed: proves the guard fires before any catalog lookup
             // or order-placement call — mirrors the CSR-SAN-count guard's own Strict-mock test.
@@ -192,7 +197,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 csr: GenerateCsrPem("example.com"),
                 subject: "CN=example.com",
                 san: null,
-                productInfo: MakeV2ProductInfo("846", productVariant),
+                productInfo: MakeV2ProductInfo(productId, "846", productVariant),
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
