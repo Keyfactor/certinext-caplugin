@@ -1731,6 +1731,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 };
             }
 
+            // Whether the inline DCV block below took ownership of the in-call issuance wait for
+            // this order (issue 0051). Declared outside the #if so both build flavors compile the
+            // pickup-gate call below the same way (it simply stays false on the no-DCV build).
+            // Mirrors dcvIssuanceWaitRan in EnrollNewAsync, but the condition is derived
+            // differently: V2's outer gate here is only "order landed in pending-dcv" — whether
+            // DCV is actually configured/enabled is checked *inside* PerformDcvV2IfNeededAsync, not
+            // at this call site — so we can't pre-set the flag before calling it (that would also
+            // catch the DCV-disabled case and wrongly skip pickup for every V2 order). Instead this
+            // is set from PerformDcvV2IfNeededAsync's own return contract ("true when DCV steps were
+            // executed, false when cleanly skipped"), which is the one source of truth for whether
+            // an in-call wait was actually spent.
+            bool dcvV2Ran = false;
+
 #if SUPPORTS_DCV
             // Attempt DCV inline when the order lands in pending-dcv and DCV is configured
             if (disposition == (int)EndEntityStatus.EXTERNALVALIDATION)
@@ -1741,6 +1754,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 try
                 {
                     bool dcvDone = await PerformDcvV2IfNeededAsync(orderId, domain, ep.ProductFamilySlug, dcvCts.Token);
+                    dcvV2Ran = dcvDone;
                     if (dcvDone)
                     {
                         // Re-check status after DCV completes
@@ -1753,6 +1767,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
                 catch (Exception dcvEx)
                 {
+                    // Every early-exit path inside PerformDcvV2IfNeededAsync (not configured, no
+                    // domain, in-flight elsewhere, GetDcv/staging/verify failure) is caught
+                    // internally and returns false rather than throwing — the only way an
+                    // exception reaches here is VerifyDcvV2Async failing *after* the TXT record
+                    // was already staged and the propagation delay already spent. Real in-call
+                    // wait time was consumed, so still treat this as "DCV ran" and defer to the
+                    // next sync rather than stacking a pickup poll on top.
+                    dcvV2Ran = true;
                     _logger.LogWarning(dcvEx,
                         "V2 inline DCV attempt failed for order {OrderId}; order will remain pending for sync.",
                         orderId);
@@ -1787,9 +1809,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
             }
 
-            // Return as pending for gateway to pick up via sync
-            _logger.MethodExit(LogLevel.Debug);
-            return new EnrollmentResult
+            // Synchronous certificate pickup (V2 parity with the V1/Sectigo pickup poll, issue
+            // 0051): poll for the issued certificate so a fast-issuing DV order returns GENERATED
+            // + PEM in this same call instead of waiting for the next synchronization. No-op when
+            // the inline DCV block above already ran an in-call wait for this order (dcvV2Ran).
+            var pendingResult = new EnrollmentResult
             {
                 CARequestID   = orderId,
                 Certificate   = null,
@@ -1798,6 +1822,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                     : disposition,
                 StatusMessage = $"V2 order placed. Status={createResp.Status}"
             };
+            var pickedUpResult = await PickUpEnrolledCertificateV2Async(
+                pendingResult, orderId, ep.ProductFamilySlug, dcvV2Ran);
+
+            _logger.MethodExit(LogLevel.Debug);
+            return pickedUpResult;
         }
 
         /// <summary>
@@ -4097,6 +4126,214 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogWarning(ex,
                     "Synchronous pickup failed for order {OrderNumber}. Returning pending result; " +
                     "sync will pick up the certificate later.", orderNumber);
+            }
+
+            return pendingResult;
+        }
+
+        /// <summary>
+        /// Synchronous certificate pickup for the V2 API — parity with
+        /// <see cref="PickUpEnrolledCertificateAsync"/> above (issue 0051: V2 enrollment had no
+        /// analogous poll, so a DV order that CERTInext issues within seconds of CSR submission
+        /// only ever reached Command via a gateway sync plus a Command full scan). After a V2
+        /// order is created and its CSR submitted, polls <see cref="ICERTInextClient.TrackOrderV2Async"/>
+        /// up to <c>PickupRetries</c> times, <c>PickupDelay</c> seconds apart (after the same
+        /// fixed initial delay), so a fast-issuing order is returned GENERATED + PEM in this same
+        /// enrollment call instead of waiting for the next synchronization. Reuses the identical
+        /// config knobs and wait-budget ceiling as the V1 method (<c>Constants.Pickup</c>,
+        /// <c>GetEffectivePickupRetries</c>, <c>GetEffectivePickupDelaySeconds</c>) so the two
+        /// behave identically from an operator's perspective. Never throws — any polling error
+        /// degrades to the pending result.
+        /// </summary>
+        private async Task<EnrollmentResult> PickUpEnrolledCertificateV2Async(
+            EnrollmentResult pendingResult, string orderId, string productFamilySlug,
+            bool dcvV2Ran, CancellationToken ct = default)
+        {
+            // The inline V2 DCV path already owns the in-call issuance wait for this order —
+            // running a second stacked poll here would double the wait budget (when
+            // PerformDcvV2IfNeededAsync ran its own tracking poll) or waste it re-polling an
+            // order DCV already left mid-flight. Defer to the pending result; a later sync
+            // completes it. Mirrors dcvIssuanceWaitRan's role in the V1 method above.
+            if (dcvV2Ran)
+                return pendingResult;
+
+            // Only a still-pending (external-validation) result can benefit from a pickup poll.
+            // An already issued/failed/revoked result is returned as-is.
+            if (pendingResult == null
+                || pendingResult.Status != (int)EndEntityStatus.EXTERNALVALIDATION)
+                return pendingResult;
+
+            // A pending result with no order id cannot be polled — surface the anomaly rather
+            // than silently returning, so an un-pollable pending state leaves an audit trace.
+            if (string.IsNullOrWhiteSpace(orderId))
+            {
+                _logger.LogWarning(
+                    "V2 synchronous pickup skipped: a pending enrollment was returned with no order " +
+                    "id to poll. The certificate can only be reconciled by a later synchronization.");
+                return pendingResult;
+            }
+
+            int retries = _config.GetEffectivePickupRetries();
+            if (retries <= 0)
+            {
+                _logger.LogInformation(
+                    "V2 synchronous certificate pickup disabled (PickupRetries<=0). Order {OrderId} " +
+                    "will be picked up on the next synchronization.", orderId);
+                return pendingResult;
+            }
+
+            int delaySeconds = _config.GetEffectivePickupDelaySeconds();
+
+            // Hard ceiling on total in-call occupancy — identical rationale to the V1 method:
+            // PickupRetries and PickupDelay are each clamped independently, but their product can
+            // still reach ~30 min at the extremes. Cap the retry count to fit; the remainder is
+            // imported by the next synchronization.
+            int maxPollRetries = Math.Max(1,
+                (Constants.Pickup.MaxTotalWaitSeconds - Constants.Pickup.InitialDelaySeconds) / delaySeconds);
+            if (retries > maxPollRetries)
+            {
+                _logger.LogInformation(
+                    "Configured pickup budget (PickupRetries={Configured}, PickupDelaySeconds={Delay}) exceeds the " +
+                    "{MaxTotal}s in-call ceiling; capping to {Capped} attempts. The certificate will be imported by " +
+                    "the next synchronization if it has not issued by then.",
+                    retries, delaySeconds, Constants.Pickup.MaxTotalWaitSeconds, maxPollRetries);
+                retries = maxPollRetries;
+            }
+
+            _logger.LogInformation(
+                "Starting V2 synchronous certificate pickup. OrderId={OrderId}, PickupRetries={Retries}, " +
+                "PickupDelaySeconds={Delay} (max ~{Max}s including a {Initial}s initial delay).",
+                orderId, retries, delaySeconds,
+                Constants.Pickup.InitialDelaySeconds + retries * delaySeconds, Constants.Pickup.InitialDelaySeconds);
+
+            int pollErrors = 0;
+            try
+            {
+                // Small static delay before the first poll — mirrors the V1 method's attempt to
+                // let a fast order finish issuing before we start polling at all.
+                await Task.Delay(TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds), ct);
+
+                for (int attempt = 1; attempt <= retries; attempt++)
+                {
+                    try
+                    {
+                        var tracked = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
+                        int disposition = StatusMapper.V2StatusToRequestDisposition(tracked.Status);
+
+                        // SOC2 CC7.3: record each poll's observed disposition so the issuance
+                        // timeline is reconstructable (how many polls ran, what each returned).
+                        _logger.LogDebug(
+                            "V2 pickup poll observed status. OrderId={OrderId}, Attempt={Attempt}/{Retries}, " +
+                            "MappedDisposition={Disposition}, Status='{Status}'.",
+                            orderId, attempt, retries, disposition, tracked.Status);
+
+                        if (disposition == (int)EndEntityStatus.GENERATED)
+                        {
+                            // Issued: only surface GENERATED when the certificate body actually
+                            // downloads — never hand Command a body-less "issued" record. A failed
+                            // or empty download keeps polling until the body appears or the budget
+                            // runs out, same invariant the V1 method already enforces.
+                            try
+                            {
+                                var certResp = await _client.DownloadCertificateV2Async(productFamilySlug, orderId, ct);
+                                string fullChain = AssembleV2CertChain(certResp);
+
+                                if (!string.IsNullOrWhiteSpace(fullChain))
+                                {
+                                    _logger.LogInformation(
+                                        "V2 synchronous pickup complete. OrderId={OrderId}, SerialNumber={Serial}, " +
+                                        "Attempt={Attempt}/{Retries}.",
+                                        orderId,
+                                        string.IsNullOrWhiteSpace(certResp.SerialNumber) ? "(not provided by CA)" : certResp.SerialNumber,
+                                        attempt, retries);
+                                    return new EnrollmentResult
+                                    {
+                                        CARequestID   = orderId,
+                                        Certificate   = fullChain,
+                                        Status        = (int)EndEntityStatus.GENERATED,
+                                        StatusMessage = "Certificate issued via V2 API."
+                                    };
+                                }
+
+                                _logger.LogDebug(
+                                    "V2 pickup poll: order {OrderId} reports issued but returned no certificate " +
+                                    "body yet (attempt {Attempt}/{Retries}); continuing to poll.",
+                                    orderId, attempt, retries);
+                            }
+                            catch (Exception dlEx)
+                            {
+                                // Issued but the download itself failed — consume the attempt and
+                                // keep polling rather than aborting; a later attempt (or the next
+                                // sync) may succeed.
+                                pollErrors++;
+                                _logger.LogWarning(dlEx,
+                                    "V2 pickup: order {OrderId} is issued but certificate download failed " +
+                                    "(attempt {Attempt}/{Retries}).", orderId, attempt, retries);
+                            }
+                        }
+                        else if (disposition == (int)EndEntityStatus.REVOKED
+                                 || disposition == (int)EndEntityStatus.FAILED)
+                        {
+                            // Terminal non-issued outcomes carry no body and are surfaced immediately.
+                            if (disposition == (int)EndEntityStatus.FAILED)
+                                _logger.LogError(
+                                    "V2 order {OrderId} reached terminal FAILED status '{Status}' during " +
+                                    "synchronous pickup (attempt {Attempt}/{Retries}).",
+                                    orderId, tracked.Status, attempt, retries);
+                            else
+                                _logger.LogWarning(
+                                    "V2 order {OrderId} was REVOKED ('{Status}') during synchronous pickup " +
+                                    "(attempt {Attempt}/{Retries}).",
+                                    orderId, tracked.Status, attempt, retries);
+                            return new EnrollmentResult
+                            {
+                                CARequestID   = orderId,
+                                Certificate   = null,
+                                Status        = disposition,
+                                StatusMessage = $"Order {orderId} reached status '{tracked.Status}' during enrollment pickup."
+                            };
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (ex is OperationCanceledException) throw;
+                        // A transient status-fetch failure consumes an attempt rather than aborting
+                        // the wait; if it never recovers the pending result is returned below.
+                        pollErrors++;
+                        _logger.LogWarning(ex,
+                            "V2 pickup TrackOrderV2Async failed for order {OrderId} (attempt {Attempt}/{Retries}).",
+                            orderId, attempt, retries);
+                    }
+
+                    // Delay after every attempt (including the last), matching the V1 method's
+                    // pickup cadence so the max-occupancy ceiling is identical.
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+                }
+
+                // SOC1 accuracy: don't attribute non-completion to "still validating" when the
+                // real cause was every poll erroring (e.g. a CA-side TrackOrder outage). Distinguish
+                // the two so the log reflects what actually happened.
+                if (pollErrors == retries)
+                    _logger.LogWarning(
+                        "V2 synchronous pickup exhausted {Retries} attempts for order {OrderId} — ALL polls " +
+                        "errored (see preceding warnings). Returning pending result; the next synchronization " +
+                        "will re-attempt retrieval.",
+                        retries, orderId);
+                else
+                    _logger.LogInformation(
+                        "V2 synchronous pickup did not complete within {Retries} attempts for order {OrderId} " +
+                        "({Errors} poll error(s); remainder still pending). Returning pending result; the " +
+                        "certificate will be imported by the next synchronization.",
+                        retries, orderId, pollErrors);
+                pendingResult.StatusMessage =
+                    $"{pendingResult.StatusMessage} The certificate was not issued within the enrollment-pickup " +
+                    "window; it will be imported by a later synchronization.";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 synchronous pickup failed for order {OrderId}. Returning pending result; " +
+                    "sync will pick up the certificate later.", orderId);
             }
 
             return pendingResult;
