@@ -163,6 +163,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 OAuthClientSecret = "my-secret",
                 RequestorName     = "Test User",
                 RequestorEmail    = "test@example.com",
+                // Issue 0039: SignerPlace is now required for V2 SSL orders (spec: agreement.signerPlace
+                // "Conditional - required if `agreement` sent"), so the "default config" fixture sets it
+                // and the expected agreement block below now carries signerPlace.
+                SignerPlace       = "Austin",
                 PickupRetries     = 0
             };
             // No ProductFamily / ProductVariant / DomainName: exercises the ssl + dv defaults and
@@ -188,7 +192,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 "\"requestor\":{\"name\":\"Test User\",\"email\":\"test@example.com\",\"phone\":\"\"}," +
                 "\"certificate\":{\"domain\":\"example.com\",\"autoSecureWww\":false}," +
                 "\"subscription\":{\"validityYears\":1,\"autoRenew\":false,\"renewBeforeDays\":30}," +
-                "\"agreement\":{\"signerName\":\"Test User\",\"accepted\":true}," +
+                "\"agreement\":{\"signerName\":\"Test User\",\"signerPlace\":\"Austin\",\"accepted\":true}," +
                 "\"technicalPointOfContact\":{\"name\":\"Test User\",\"email\":\"test@example.com\",\"phone\":\"\",\"designation\":\"Technical Contact\"}," +
                 "\"remarks\":\"Issued via Keyfactor Command AnyCA REST Gateway.\"}");
         }

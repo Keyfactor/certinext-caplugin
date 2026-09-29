@@ -1505,7 +1505,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 ["UseV2Api"] = true,
                 ["ApiUrl"] = server.Urls[0],
                 ["OAuthClientId"] = "my-client",
-                ["OAuthClientSecret"] = "my-secret"
+                ["OAuthClientSecret"] = "my-secret",
+                ["SignerPlace"] = "New York" // required for V2 (issue 0039)
                 // No AccountNumber / AuthMode / ApiKey at all.
             };
 
@@ -1558,7 +1559,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 ["UseV2Api"] = true,
                 ["ApiUrl"] = server.Urls[0],
                 ["OAuthClientId"] = "my-client",
-                ["OAuthClientSecret"] = "my-secret"
+                ["OAuthClientSecret"] = "my-secret",
+                ["SignerPlace"] = "New York" // required for V2 (issue 0039)
             };
 
             Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);

@@ -451,6 +451,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 if (string.IsNullOrWhiteSpace(oauthClientSecret))
                     errors.Add($"'{Constants.Config.OAuthClientSecret}' is required when UseV2Api is true.");
+
+                // Issue 0039: every V2 SSL create order sends an `agreement` block, and the V2 spec
+                // marks agreement.signerPlace "Conditional - required if `agreement` sent". Required
+                // at the connector level (user decision) even though a per-template SignerPlace
+                // enrollment parameter can override it — EnrollV2Async also fails fast if the
+                // resolved value is blank.
+                string signerPlace = GetStringValue(connectionInfo, Constants.Config.SignerPlace);
+                if (string.IsNullOrWhiteSpace(signerPlace))
+                    errors.Add($"'{Constants.Config.SignerPlace}' is required when UseV2Api is true — the CERTInext " +
+                               "V2 Subscriber Agreement sent with every SSL order requires the signing place " +
+                               "(city/location, e.g. 'San Francisco, CA').");
             }
             else
             {
@@ -1486,6 +1497,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
             }
 
+            // Issue 0039: the SSL create body always carries an `agreement` block, and the V2 spec
+            // marks agreement.signerPlace "Conditional - required if `agreement` sent". Resolved
+            // per-template SignerPlace -> connector SignerPlace (which ValidateCAConnectionInfo
+            // already requires); fail fast here too, before any CA call, in case the connector was
+            // saved before that check existed. Private PKI sends no agreement, so it is exempt.
+            string signerPlace = string.IsNullOrWhiteSpace(ep.SignerPlace) ? _config.SignerPlace : ep.SignerPlace;
+            if (!isPrivatePki && string.IsNullOrWhiteSpace(signerPlace))
+            {
+                _logger.LogWarning(
+                    "EnrollV2Async rejected an SSL order before any CA call — no SignerPlace is configured " +
+                    "(neither the template's SignerPlace enrollment parameter nor the CA connector's SignerPlace), " +
+                    "but the V2 Subscriber Agreement requires it. EnrollmentType={EnrollmentType}, ProductId={ProductId}",
+                    enrollmentType, ep.ProductId);
+                _logger.MethodExit(LogLevel.Debug);
+                return new EnrollmentResult
+                {
+                    CARequestID   = string.Empty,
+                    Certificate   = null,
+                    Status        = (int)EndEntityStatus.FAILED,
+                    StatusMessage = "V2 enrollment rejected: the CERTInext V2 Subscriber Agreement requires a signer " +
+                                    "place, but SignerPlace is blank on both the CA connector and the template. Set " +
+                                    "SignerPlace on the CA connector (or the template's SignerPlace enrollment " +
+                                    "parameter) and retry. No order was placed."
+                };
+            }
+
             // Derive the primary domain from subject CN (for private-pki this is the order's
             // `hostname` — spec: "hostname - primary CN" — sourced the same way).
             string domain = ep.DomainName;
@@ -1830,8 +1867,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string requestorEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? _config.RequestorEmail : ep.RequesterEmail;
             string signerName     = string.IsNullOrWhiteSpace(ep.SignerName)     ? requestorName          : ep.SignerName;
             string signerIp       = string.IsNullOrWhiteSpace(ep.SignerIp)       ? _config.SignerIp       : ep.SignerIp;
-            string signerPlace    = string.IsNullOrWhiteSpace(ep.SignerPlace)    ? _config.SignerPlace    : ep.SignerPlace;
-            int validityYears     = ep.ValidityYears > 0 ? ep.ValidityYears
+            // signerPlace is resolved (and required for SSL) near the top of this method.
+            int validityYears    = ep.ValidityYears > 0 ? ep.ValidityYears
                                   : (int.TryParse(_config.SubscriptionValidityYears, out int cfgYears) && cfgYears > 0 ? cfgYears : 1);
 
             // requestorIsd/requestorMobile are the same Requestor* defaults V1 falls back to for

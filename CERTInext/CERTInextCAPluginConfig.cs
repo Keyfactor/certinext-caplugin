@@ -187,7 +187,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.SignerPlace] = new PropertyConfigInfo
                 {
-                    Comments = "City or location of the subscriber agreement signer. Required by CERTInext for all orders.",
+                    Comments = "City or location of the subscriber agreement signer (e.g. 'San Francisco, CA'). " +
+                               "REQUIRED when UseV2Api is on: the V2 Subscriber Agreement sent with every SSL order " +
+                               "requires it, so the connector cannot be saved with it blank. A per-template " +
+                               "SignerPlace enrollment parameter overrides it.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"

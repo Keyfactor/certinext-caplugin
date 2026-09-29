@@ -2473,6 +2473,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 AcceptAgreement = "1",
                 SignerName = _config.RequestorName ?? "Keyfactor Gateway",
+                // Effectively dead fallback (issue 0039): SignerPlace defaults to "", not null, so a blank setting sends "" (only an explicit JSON null reaches "Gateway"). V1 wire behaviour intentionally unchanged.
                 SignerPlace = _config.SignerPlace ?? "Gateway",
                 SignerIp = signerIp
             };
