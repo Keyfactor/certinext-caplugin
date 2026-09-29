@@ -2513,14 +2513,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // Deserialization helpers
         // ---------------------------------------------------------------------------
 
-        private static T DeserializeOrThrow<T>(RestResponse resp, string operation) where T : class
+        // Instance (not static) — calls LogApiFailure, which needs _config.LogSensitiveRequestData.
+        private T DeserializeOrThrow<T>(RestResponse resp, string operation) where T : class
         {
             if (!resp.IsSuccessful)
             {
-                string errMsg = ExtractErrorMessage(resp.Content, operation);
-                Logger.LogError(
-                    "CERTInext API error during '{Operation}': HttpStatus={Status}, Error={Error}",
-                    operation, (int)resp.StatusCode, errMsg);
+                // Issue 0044: V1 documents errors only as HTTP-200 meta envelopes, so a non-2xx
+                // body here is usually not from the V1 application at all (e.g. ApiUrl missing the
+                // /emSignHub-API/ segment). Log the redacted body and put the HTTP status in the
+                // message so "See gateway logs for details" has something to point at.
+                string errMsg = ExtractErrorMessage(resp.Content, operation, (int)resp.StatusCode);
+                LogApiFailure(operation, resp, errorMessage: errMsg, level: LogLevel.Error);
                 throw new Exception(errMsg);
             }
 
@@ -2833,10 +2836,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Truncate(sanitizedBody, LoggedResponseBodyCapBytes));
         }
 
-        private static string ExtractErrorMessage(string content, string operation)
+        internal static string ExtractErrorMessage(string content, string operation, int? httpStatus = null)
         {
+            string status = httpStatus.HasValue ? $" (HTTP {httpStatus.Value})" : string.Empty;
+
             if (string.IsNullOrWhiteSpace(content))
-                return $"CERTInext returned no body for operation '{operation}'.";
+                return $"CERTInext returned no body{status} for operation '{operation}'.";
 
             if (content.Length > MaxErrorBodyBytes)
             {
@@ -2858,19 +2863,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     if (meta.TryGetProperty("errorMessage", out var em)) errMsg = em.GetString();
                     if (meta.TryGetProperty("errorCode", out var ec)) errCode = ec.GetString();
                     if (!string.IsNullOrWhiteSpace(errMsg) || !string.IsNullOrWhiteSpace(errCode))
-                        return $"CERTInext error during '{operation}': {errMsg ?? errCode} [{errCode}]";
+                        return $"CERTInext error during '{operation}'{status}: {errMsg ?? errCode} [{errCode}]";
                 }
 
                 // Fall back to legacy ApiErrorResponse shape
                 if (doc.RootElement.TryGetProperty("message", out var legacyMsg))
-                    return $"CERTInext error during '{operation}': {legacyMsg.GetString()}";
+                    return $"CERTInext error during '{operation}'{status}: {legacyMsg.GetString()}";
             }
             catch
             {
                 // Fall through to safe generic message
             }
 
-            return $"CERTInext returned an unrecognised error body for operation '{operation}'. " +
+            return $"CERTInext returned an unrecognised error body{status} for operation '{operation}'. " +
                    "See gateway logs for details.";
         }
 
