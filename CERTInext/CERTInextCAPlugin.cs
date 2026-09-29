@@ -1780,20 +1780,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // dictionary, falling back to CSR SANs only when Command supplied no SAN dictionary at
             // all (BuildSanList's own fallback rule). additionalDomains is a domain-name-only field
             // per the V2 spec, so non-DNS SAN types are excluded (and logged) rather than submitted.
+            // BuildSanList runs in DNS-only mode here (issue 0046): V1's SubmitNonDnsSans switch
+            // and its "submitted rather than dropped" wording do not apply to this field, so the
+            // exclusion is logged below instead — SAN types only, since a value (e.g. an email
+            // address) may be personal data.
             List<string> additionalDomains = null;
             if (isUccProduct)
             {
-                var resolvedSans = BuildSanList(san, csr, subject);
-                var nonDnsSans = resolvedSans?
-                    .Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                if (nonDnsSans != null && nonDnsSans.Count > 0)
+                var resolvedSans = BuildSanList(san, csr, subject, dnsOnly: true, out var nonDnsSans);
+                if (nonDnsSans.Count > 0)
                 {
                     _logger.LogWarning(
-                        "EnrollV2Async: {Count} requested SAN(s) are not DNS names and cannot be " +
-                        "submitted via V2 additionalDomains (FQDNs only) — they will NOT appear on the " +
-                        "issued certificate. Types=[{Types}]",
-                        nonDnsSans.Count, string.Join(", ", nonDnsSans.Select(s => s.Type)));
+                        "EnrollV2Async: {Count} non-DNS SAN(s) excluded from V2 additionalDomains " +
+                        "(FQDNs only) — they will NOT appear on the issued certificate. " +
+                        "Types=[{Types}], Subject={Subject}",
+                        nonDnsSans.Count,
+                        string.Join(", ", nonDnsSans.Select(s => s.Type).Distinct(StringComparer.OrdinalIgnoreCase)),
+                        LogSanitizer.Strip(subject));
                 }
 
                 additionalDomains = resolvedSans?
@@ -5243,7 +5246,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// the CN, which reads as the CA stripping SANs supplied on the CSR.
         /// </summary>
         private List<SanEntry> BuildSanList(Dictionary<string, string[]> san, string csr, string subject)
+            => BuildSanList(san, csr, subject, dnsOnly: false, out _);
+
+        /// <summary>
+        /// <see cref="BuildSanList(Dictionary{string, string[]}, string, string)"/> with an explicit
+        /// DNS-only mode for callers whose wire field cannot carry non-DNS SANs at all — the V2
+        /// SSL UCC <c>additionalDomains</c> path (issue 0046). With <paramref name="dnsOnly"/> set,
+        /// non-DNS entries are removed before any logging, regardless of
+        /// <see cref="CERTInextConfig.SubmitNonDnsSans"/> (a V1-only switch), and handed back via
+        /// <paramref name="excludedNonDns"/> so the caller can log its own accurate message. The
+        /// V1-worded "DROPPED because SubmitNonDnsSans is false" / "submitted rather than dropped"
+        /// warnings are only emitted when <paramref name="dnsOnly"/> is false.
+        /// </summary>
+        private List<SanEntry> BuildSanList(
+            Dictionary<string, string[]> san, string csr, string subject,
+            bool dnsOnly, out List<SanEntry> excludedNonDns)
         {
+            excludedNonDns = new List<SanEntry>();
+
             // "type|value" keys of entries that came from the CSR fallback, not the gateway
             // dictionary — used only to word the provenance log accurately once the final,
             // possibly-filtered result is known (see below).
@@ -5301,7 +5321,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // that.
             var nonDns = result.Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)).ToList();
 
-            if (nonDns.Count > 0 && !_config.SubmitNonDnsSans)
+            if (dnsOnly)
+            {
+                // DNS-only caller (V2 SSL UCC additionalDomains, issue 0046): non-DNS SANs can
+                // never reach the wire there, whatever SubmitNonDnsSans says, so exclude them
+                // here — before the logging below — and leave the wording to the caller, which
+                // knows which field they were excluded from. No V1-worded warning is raised.
+                excludedNonDns = nonDns;
+                result = result
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                nonDns = new List<SanEntry>();
+
+                if (result.Count == 0)
+                    return null;
+            }
+            else if (nonDns.Count > 0 && !_config.SubmitNonDnsSans)
             {
                 _logger.LogWarning(
                     "{Count} requested SAN(s) are not DNS names and are being DROPPED because " +
@@ -5350,8 +5385,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             if (nonDns.Count > 0)
             {
-                // Reaching this line means SubmitNonDnsSans is true (the false case already
-                // returned above), so these are being submitted, not dropped.
+                // Reaching this line means dnsOnly is false and SubmitNonDnsSans is true (both
+                // other cases emptied nonDns above), so these are being submitted, not dropped.
                 _logger.LogWarning(
                     "{Count} requested SAN(s) are not DNS names: {Sans}. CERTInext's additionalDomains " +
                     "field takes domain names, so this order will either be rejected outright or be " +
