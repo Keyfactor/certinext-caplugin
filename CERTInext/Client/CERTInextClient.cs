@@ -2742,8 +2742,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Conservative substring/regex pass, same style as <see cref="RedactCredentials"/> —
         /// tolerant of whitespace around the JSON <c>key : value</c> separator (including
         /// pretty-printed bodies), and anchored on the opening/closing quote of the key so it
-        /// cannot match a key name as a substring of a longer one. Exposed <c>internal</c> for
-        /// unit testing.
+        /// cannot match a key name as a substring of a longer one. Email SANs inside SAN arrays
+        /// (<c>additionalDomains</c>/<c>additionalHosts</c>) and <c>domainVerification</c> keys are
+        /// masked afterwards by <see cref="MaskEmailsInSanContainers"/>. Exposed <c>internal</c>
+        /// for unit testing.
         /// </summary>
         internal static string RedactPersonalData(string body)
         {
@@ -2755,7 +2757,140 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             foreach (var key in PersonalOtherFieldNames)
                 body = RedactJsonField(body, key, _ => "***REDACTED***");
 
-            return body;
+            return MaskEmailsInSanContainers(body);
+        }
+
+        // Exact JSON keys whose value is an array of SAN strings. V1 additionalDomains carries every
+        // requested SAN regardless of type, emails included (SanSubmissionProbeTests finding B).
+        // V2 SSL additionalDomains and private-pki additionalHosts are filtered to DNS / IP before
+        // submission, so they are covered only as defence in depth: a DNS name or IP literal never
+        // contains '@', so masking there can only ever touch a mis-typed email.
+        private static readonly string[] SanArrayFieldNames = { "additionalDomains", "additionalHosts" };
+
+        // Exact JSON keys whose value is an object keyed by SAN value. The V1 TrackOrder
+        // domainVerification block is { "<Domain Name>": { ... }, "status": "..." }, and an email
+        // submitted in additionalDomains comes back as one of those keys (SanSubmissionProbeTests
+        // finding B: "san-probe@example.com" was returned as a domainVerification key).
+        private static readonly string[] SanKeyedObjectFieldNames = { "domainVerification" };
+
+        /// <summary>
+        /// Masks email addresses (issue 0040 follow-up) in the two SAN-bearing container shapes the
+        /// key/value regex in <see cref="RedactJsonField"/> cannot reach: string elements of a
+        /// <see cref="SanArrayFieldNames"/> array, and property names directly inside a
+        /// <see cref="SanKeyedObjectFieldNames"/> object. Only values containing <c>@</c> are masked,
+        /// with <see cref="LogSanitizer.MaskEmail"/>. DNS / IP values, every other key, and anything
+        /// nested deeper inside those containers are left alone. Keys match exactly and
+        /// case-insensitively, the same as <see cref="RedactJsonField"/>.
+        ///
+        /// Uses <see cref="Utf8JsonReader"/> to find the exact token spans, then splices masked
+        /// tokens into the original bytes. The rest of the body stays byte-for-byte as it was, with
+        /// its whitespace and escaping unchanged. A regex cannot follow nesting depth or escaped
+        /// quotes reliably, and a DOM re-serialize would reformat the whole logged body. Never
+        /// throws: a body that does not start with <c>{</c>/<c>[</c> is returned unchanged, and on
+        /// malformed or truncated JSON the masks found before the fault are still applied.
+        /// </summary>
+        internal static string MaskEmailsInSanContainers(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+            if (body.IndexOf('@') < 0 && body.IndexOf("\\u0040", StringComparison.OrdinalIgnoreCase) < 0)
+                return body;
+
+            int first = 0;
+            while (first < body.Length && char.IsWhiteSpace(body[first])) first++;
+            if (first == body.Length || (body[first] != '{' && body[first] != '[')) return body;
+
+            byte[] utf8 = Encoding.UTF8.GetBytes(body);
+            var edits = new List<(int Start, int Length, string Replacement)>();
+
+            try
+            {
+                var reader = new Utf8JsonReader(utf8, new JsonReaderOptions
+                {
+                    CommentHandling = JsonCommentHandling.Skip,
+                    AllowTrailingCommas = true
+                });
+
+                string pendingProperty = null;
+                int containerDepth = -1;   // CurrentDepth of tokens directly inside the targeted container
+                bool containerIsArray = false;
+
+                while (reader.Read())
+                {
+                    if (containerDepth >= 0)
+                    {
+                        if (reader.CurrentDepth < containerDepth)
+                        {
+                            containerDepth = -1;   // the container's own End token
+                            continue;
+                        }
+
+                        bool candidate = reader.CurrentDepth == containerDepth &&
+                            (containerIsArray
+                                ? reader.TokenType == JsonTokenType.String
+                                : reader.TokenType == JsonTokenType.PropertyName);
+                        if (candidate)
+                        {
+                            string value = reader.GetString();
+                            if (value != null && value.IndexOf('@') >= 0)
+                            {
+                                // TokenStartIndex is the opening quote; ValueSpan is the raw content.
+                                string masked = reader.ValueIsEscaped
+                                    ? JsonSerializer.Serialize(LogSanitizer.MaskEmail(value))
+                                    : "\"" + LogSanitizer.MaskEmail(Encoding.UTF8.GetString(reader.ValueSpan)) + "\"";
+                                edits.Add(((int)reader.TokenStartIndex, reader.ValueSpan.Length + 2, masked));
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (reader.TokenType == JsonTokenType.PropertyName)
+                    {
+                        pendingProperty = reader.GetString();
+                        continue;
+                    }
+
+                    if (pendingProperty != null)
+                    {
+                        if (reader.TokenType == JsonTokenType.StartArray && MatchesAny(SanArrayFieldNames, pendingProperty))
+                        {
+                            containerDepth = reader.CurrentDepth + 1;
+                            containerIsArray = true;
+                        }
+                        else if (reader.TokenType == JsonTokenType.StartObject && MatchesAny(SanKeyedObjectFieldNames, pendingProperty))
+                        {
+                            containerDepth = reader.CurrentDepth + 1;
+                            containerIsArray = false;
+                        }
+                    }
+                    pendingProperty = null;
+                }
+            }
+            catch (JsonException)
+            {
+                // Malformed or truncated body: keep the masks collected before the fault. Everything
+                // up to that point was well-formed, so those spans are correct.
+            }
+
+            if (edits.Count == 0) return body;
+
+            var output = new System.IO.MemoryStream(utf8.Length);
+            int cursor = 0;
+            foreach (var (start, length, replacement) in edits)
+            {
+                output.Write(utf8, cursor, start - cursor);
+                byte[] replacementBytes = Encoding.UTF8.GetBytes(replacement);
+                output.Write(replacementBytes, 0, replacementBytes.Length);
+                cursor = start + length;
+            }
+            output.Write(utf8, cursor, utf8.Length - cursor);
+            return Encoding.UTF8.GetString(output.GetBuffer(), 0, (int)output.Length);
+
+            static bool MatchesAny(string[] keys, string name)
+            {
+                foreach (var key in keys)
+                    if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            }
         }
 
         /// <summary>
