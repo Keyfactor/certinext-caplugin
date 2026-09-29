@@ -224,6 +224,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _output.WriteLine($"CN={cn}, SANs: dnsname=[{cn}], ipaddress=[{IpSan}]");
 
             string orderId = null;
+            // Set only once Enroll returned GENERATED with a certificate body; cleanup revokes an
+            // issued order and cancels anything else (issue 0039).
+            bool issued = false;
             try
             {
                 EnrollmentResult result = null;
@@ -278,12 +281,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 if (result.Status != (int)EndEntityStatus.GENERATED || string.IsNullOrWhiteSpace(result.Certificate))
                 {
                     _output.WriteLine($"Order {orderId} is still pending (not issued within the plugin's pickup poll). " +
-                                      "Not polling further; cleanup below will attempt revoke and otherwise print " +
+                                      "Not polling further; cleanup below will cancel it once and otherwise print " +
                                       "manual-cleanup instructions.");
                     Assert.Fail($"INCONCLUSIVE: private-pki order '{orderId}' did not issue within the pickup poll " +
                                 $"(status {result.Status}); end-to-end issuance not verified.");
                 }
 
+                issued = true;
                 var leaf = ParseLeaf(result.Certificate);
                 leaf.Should().NotBeNull("the GENERATED result must carry a parseable leaf certificate PEM");
 
@@ -301,39 +305,68 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
             finally
             {
-                await CleanupAsync(plugin, realClient, orderId, cn);
+                await CleanupAsync(plugin, realClient, orderId, cn, issued);
                 realClient.Dispose();
             }
         }
 
         /// <summary>
-        /// Best-effort, single-attempt cleanup. Never throws (a cleanup failure must not mask the
-        /// test's own result). Revokes via <c>plugin.Revoke</c> — whose pre-flight track only allows
-        /// issued orders — and falls back to manual-cleanup instructions: the existing raw V2 cancel
-        /// helpers (<c>EmailNotificationsV2ProbeTests</c>/<c>UccPendingSanOrderProbeTests</c>
-        /// <c>CancelOrderRawAsync</c>) are hard-wired to the ssl-certificates path, so none supports
-        /// the private-pki family. Finishes with one read-only GET on the private-pki order.
+        /// Best-effort cleanup: exactly one cleanup action, never retried, never throwing (a cleanup
+        /// failure must not mask the test's own result). An issued order is revoked via
+        /// <c>plugin.Revoke</c> (CRL reason 4, superseded); any other order is cancelled via
+        /// <see cref="ICERTInextClient.CancelOrderV2Async"/> on the private-pki family (issue 0039 —
+        /// <c>plugin.Revoke</c> refuses non-issued orders). Manual-cleanup instructions are printed
+        /// only when that action fails. If Enroll's own Submit CSR failure path already cancelled the
+        /// order, this cancel reports the CA's 422 "already terminal" answer. Finishes with one
+        /// read-only GET on the private-pki order.
         /// </summary>
-        private async Task CleanupAsync(CERTInextCAPlugin plugin, CERTInextClient client, string orderId, string cn)
+        private async Task CleanupAsync(CERTInextCAPlugin plugin, CERTInextClient client, string orderId, string cn, bool issued)
         {
             _output.WriteLine("--- Cleanup ---");
             if (string.IsNullOrWhiteSpace(orderId))
             {
-                _output.WriteLine("No order id captured — nothing to revoke. If Enroll threw after sending the create " +
-                                  $"request, check the CERTInext portal for a private-pki order with hostname '{cn}'.");
+                _output.WriteLine("No order id captured — nothing to revoke or cancel. If Enroll threw after sending the " +
+                                  $"create request, check the CERTInext portal for a private-pki order with hostname '{cn}'.");
                 return;
             }
 
-            try
+            bool cleanedUp = false;
+            if (issued)
             {
-                int revokeResult = await plugin.Revoke(orderId, hexSerialNumber: string.Empty, revocationReason: 4 /* superseded */);
-                _output.WriteLine($"Revoke(order={orderId}, reason=4 superseded) returned {revokeResult} ({(EndEntityStatus)revokeResult}).");
+                try
+                {
+                    int revokeResult = await plugin.Revoke(orderId, hexSerialNumber: string.Empty, revocationReason: 4 /* superseded */);
+                    _output.WriteLine($"Revoke(order={orderId}, reason=4 superseded) returned {revokeResult} ({(EndEntityStatus)revokeResult}).");
+                    cleanedUp = true;
+                }
+                catch (Exception ex)
+                {
+                    _output.WriteLine($"Revoke FAILED for order {orderId}: {ex.GetType().Name}: {ex.Message}");
+                }
             }
-            catch (Exception ex)
+            else
             {
-                _output.WriteLine($"Revoke FAILED for order {orderId}: {ex.GetType().Name}: {ex.Message}");
-                _output.WriteLine("Not retrying. MANUAL CLEANUP REQUIRED: in the CERTInext portal, cancel (if pending) or " +
-                                  $"revoke (if issued) order id {orderId}, product family private-pki " +
+                try
+                {
+                    var outcome = await client.CancelOrderV2Async(
+                        Constants.ApiV2.FamilyPrivatePki, orderId, "Keyfactor plugin live test cleanup (issue 0033).");
+                    _output.WriteLine($"CancelOrderV2Async(private-pki, order={orderId}) returned {outcome}" +
+                                      (outcome == V2CancelOrderOutcome.AlreadyTerminal
+                                          ? " (HTTP 422: already in a terminal state; nothing cancelled)."
+                                          : " (HTTP 2xx: order cancelled)."));
+                    cleanedUp = outcome == V2CancelOrderOutcome.Cancelled;
+                }
+                catch (Exception ex)
+                {
+                    _output.WriteLine($"Cancel FAILED for order {orderId}: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            if (!cleanedUp)
+            {
+                _output.WriteLine("Not retrying. Unless the track below shows the order cancelled or revoked, MANUAL " +
+                                  "CLEANUP REQUIRED: in the CERTInext portal, cancel (if pending) or revoke (if issued) " +
+                                  $"order id {orderId}, product family private-pki " +
                                   $"({Constants.ApiV2.PrivatePkiCertificatesPath}/{orderId}).");
             }
 
