@@ -41,5 +41,5 @@ issues/
 .codex/
 CLAUDE.md
 AGENTS.md
-logs*
+/logs*/
 *.log
