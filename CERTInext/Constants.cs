@@ -426,6 +426,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string StatusRejected                        = "rejected";
             public const string StatusExpired                         = "expired";
 
+            // Per-domain dcvStatus values on Track Order's verifications.domain.domains[]
+            // block (issue 0042). Confirmed live (2026-09-28, order 7465857196): PENDING while
+            // a SAN's DCV is outstanding, VERIFIED once confirmed, REJECTED after the parent
+            // order is cancelled. Uppercase — distinct from the V1 Dcv class's numeric "0"/"1"
+            // dcvStatus values, which belong to a different API generation entirely.
+            public const string DcvStatusPending  = "PENDING";
+            public const string DcvStatusVerified = "VERIFIED";
+            public const string DcvStatusRejected = "REJECTED";
+
             // Product-family slugs (used as URL path segments)
             public const string FamilySsl        = "ssl-certificates";
             public const string FamilyPrivatePki = "private-pki-certificates";

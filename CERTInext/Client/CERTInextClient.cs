@@ -1508,6 +1508,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <inheritdoc/>
+        public async Task<V2DcvChallengeResponse> GetDcvV2Async(
+            string orderId, string domain, string familySlug, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            // Per-domain scope (issue 0042) — confirmed live to return a distinct token per SAN
+            // on a UCC order (v2-api-support-questions.md Finding 9).
+            string path = $"/api/certinext/v2/{familySlug}/{orderId}/dcv?domain=" + Uri.EscapeDataString(domain);
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 get DCV challenge (per-domain)");
+            var result = DeserializeV2OrThrow<V2DcvChallengeResponse>(resp, "V2 get DCV challenge (per-domain)");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
         public async Task<V2DcvVerifyResponse> VerifyDcvV2Async(string orderId, string domain, string familySlug, CancellationToken ct = default)
         {
             Logger.MethodEntry(LogLevel.Trace);

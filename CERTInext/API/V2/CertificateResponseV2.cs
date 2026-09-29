@@ -144,6 +144,86 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         /// <summary>ISO 8601 timestamp when the certificate expires. Present when status = "issued".</summary>
         [JsonPropertyName("expiresAt")]
         public string ExpiresAt { get; set; }
+
+        /// <summary>
+        /// Per-domain DCV/CAA verification detail (issue 0042). Present on UCC orders whose
+        /// additional SANs each carry their own DCV state; confirmed live 2026-09-28 (order
+        /// 7465857196). Absent entirely on older/simpler response shapes — callers must treat
+        /// a null <see cref="V2Verifications.Domain"/>/<see cref="V2DomainVerification.Domains"/>
+        /// the same as "no per-domain detail available" and fall back to the single top-level
+        /// <see cref="Domain"/> field.
+        /// </summary>
+        [JsonPropertyName("verifications")]
+        public V2Verifications Verifications { get; set; }
+    }
+
+    /// <summary>
+    /// Top-level <c>verifications</c> object on the V2 Track Order response (issue 0042).
+    /// Only the <c>domain</c> sub-block is modeled — that is the only one this plugin's DCV
+    /// automation drives.
+    /// </summary>
+    public class V2Verifications
+    {
+        [JsonPropertyName("domain")]
+        public V2DomainVerification Domain { get; set; }
+    }
+
+    /// <summary>
+    /// <c>verifications.domain</c> block (issue 0042). <see cref="Status"/> is an aggregate that
+    /// is NOT reliable for driving DCV decisions — confirmed live 2026-09-28 that it stayed
+    /// "PENDING" even after the parent order was cancelled and every per-domain
+    /// <see cref="V2DomainVerificationEntry.DcvStatus"/> had already flipped to REJECTED. Use it
+    /// for logging only; always decide per-domain from <see cref="Domains"/>.
+    /// </summary>
+    public class V2DomainVerification
+    {
+        /// <summary>Aggregate status (e.g. "PENDING"). Logging only — see class remarks.</summary>
+        [JsonPropertyName("status")]
+        public string Status { get; set; }
+
+        /// <summary>Per-domain verification entries — one per domain on the order (primary + any
+        /// UCC additional SANs).</summary>
+        [JsonPropertyName("domains")]
+        public List<V2DomainVerificationEntry> Domains { get; set; }
+    }
+
+    /// <summary>
+    /// A single entry in <c>verifications.domain.domains[]</c> (issue 0042). Confirmed live
+    /// 2026-09-28, order 7465857196:
+    /// <c>{"domain":"a.pending....example.com","domainStatus":"ACTIVE","dcvStatus":"PENDING","caaStatus":"SKIPPED"}</c>
+    /// for a still-pending SAN, versus
+    /// <c>{"domain":"...","domainStatus":"ACTIVE","dcvMethod":"dns-txt","dcvStatus":"VERIFIED","verifiedAt":"...","caaStatus":"PASSED"}</c>
+    /// once verified. <see cref="DcvMethod"/> and <see cref="VerifiedAt"/> are absent entirely
+    /// (not present-but-null) on a pending entry — both are nullable here for exactly that
+    /// reason; a fix must not assume <see cref="DcvMethod"/> is populated before treating an
+    /// entry as needing DNS-01 DCV.
+    /// </summary>
+    public class V2DomainVerificationEntry
+    {
+        [JsonPropertyName("domain")]
+        public string Domain { get; set; }
+
+        [JsonPropertyName("domainStatus")]
+        public string DomainStatus { get; set; }
+
+        /// <summary>Absent on the wire until <see cref="DcvStatus"/> reaches VERIFIED — see class
+        /// remarks. This plugin only ever drives dns-txt DCV, so a null/absent value here is
+        /// treated as "use DNS-01", never as an unknown/unsupported method.</summary>
+        [JsonPropertyName("dcvMethod")]
+        public string DcvMethod { get; set; }
+
+        /// <summary>PENDING / VERIFIED / REJECTED (see <see cref="Constants.ApiV2"/>
+        /// DcvStatus* constants). Drive all per-domain DCV decisions from this field, never from
+        /// the aggregate <see cref="V2DomainVerification.Status"/>.</summary>
+        [JsonPropertyName("dcvStatus")]
+        public string DcvStatus { get; set; }
+
+        /// <summary>ISO 8601 timestamp. Absent until <see cref="DcvStatus"/> reaches VERIFIED.</summary>
+        [JsonPropertyName("verifiedAt")]
+        public string VerifiedAt { get; set; }
+
+        [JsonPropertyName("caaStatus")]
+        public string CaaStatus { get; set; }
     }
 
     /// <summary>

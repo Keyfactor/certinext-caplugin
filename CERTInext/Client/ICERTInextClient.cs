@@ -261,6 +261,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, string familySlug, CancellationToken ct = default);
 
         /// <summary>
+        /// Returns the DCV challenge details for one specific domain on a V2 order (issue 0042).
+        /// GET /api/certinext/v2/{familySlug}/{orderId}/dcv?domain={domain}
+        ///
+        /// A distinct overload rather than an optional parameter on <see cref="GetDcvV2Async(string,string,CancellationToken)"/>
+        /// deliberately: Moq (and any other expression-tree-based mocking) cannot omit an
+        /// argument on a mocked call — every existing 3-argument Setup/Verify for the no-domain
+        /// overload would otherwise fail to compile. Parameter order mirrors
+        /// <see cref="VerifyDcvV2Async"/>'s established <c>(orderId, domain, familySlug, ct)</c>
+        /// convention. Confirmed live to return a distinct token per SAN on a UCC order
+        /// (v2-api-support-questions.md Finding 9).
+        /// </summary>
+        Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, string domain, string familySlug, CancellationToken ct = default);
+
+        /// <summary>
         /// Asks CERTInext to verify the DNS TXT record for the given domain on a V2 order.
         /// POST /api/certinext/v2/{familySlug}/{orderId}/dcv/verify
         /// Both 200 OK and 204 No Content are treated as success.

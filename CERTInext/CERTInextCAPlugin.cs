@@ -1753,7 +1753,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 dcvCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
                 try
                 {
-                    bool dcvDone = await PerformDcvV2IfNeededAsync(orderId, domain, ep.ProductFamilySlug, dcvCts.Token);
+                    bool dcvDone = await PerformDcvV2IfNeededAsync(
+                        orderId, domain, ep.ProductFamilySlug, dcvCts.Token,
+                        postCsrStatus?.Verifications?.Domain?.Domains);
                     dcvV2Ran = dcvDone;
                     if (dcvDone)
                     {
@@ -1927,16 +1929,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
 #if SUPPORTS_DCV
                 // Mirror V1 GetSingleRecord: attempt DCV on pending-dcv orders so a manual
-                // single-record refresh can unstick an order whose DCV wasn't completed at enroll time.
+                // single-record refresh can unstick an order whose DCV wasn't completed at enroll
+                // time. issue 0042: a UCC order's own domainEntries[] can carry pending SANs even
+                // when the top-level Domain field is populated (the common case) or, defensively,
+                // if it were ever blank — either is enough to attempt DCV.
+                var pendingDomainEntries = statusResp.Verifications?.Domain?.Domains;
                 if (disposition == (int)EndEntityStatus.EXTERNALVALIDATION
-                    && !string.IsNullOrWhiteSpace(statusResp.Domain))
+                    && (!string.IsNullOrWhiteSpace(statusResp.Domain) || (pendingDomainEntries?.Count ?? 0) > 0))
                 {
                     int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
                     using var dcvCts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
                     try
                     {
                         bool dcvDone = await PerformDcvV2IfNeededAsync(
-                            caRequestID, statusResp.Domain, resolvedFamily, dcvCts.Token);
+                            caRequestID, statusResp.Domain, resolvedFamily, dcvCts.Token, pendingDomainEntries);
                         if (dcvDone)
                         {
                             statusResp = await _client.ResolveAndTrackOrderV2Async(caRequestID);
@@ -2190,7 +2196,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                     try
                                     {
                                         bool dcvDone = await PerformDcvV2IfNeededAsync(
-                                            row.OrderNumber, domain, resolvedFamily, dcvCts.Token);
+                                            row.OrderNumber, domain, resolvedFamily, dcvCts.Token,
+                                            trackedStatus?.Verifications?.Domain?.Domains);
                                         if (dcvDone)
                                         {
                                             trackedStatus = await _client.ResolveAndTrackOrderV2Async(row.OrderNumber, cancelToken);
@@ -3531,7 +3538,75 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// Performs DNS-01 DCV for a V2 SSL order using the V2 DCV endpoints.
-        /// Mirrors <see cref="PerformDcvIfNeededAsync"/> for the V2 API path.
+        ///
+        /// Issue 0042: a UCC order's additional SAN domains each carry their own DCV state in
+        /// Track Order's <c>verifications.domain.domains[]</c> block. This entry point owns the
+        /// single per-order <see cref="_dcvInFlight"/> guard (enrollment + sync overlap
+        /// protection — one guard entry regardless of how many domains the order has), then
+        /// dispatches to whichever flow applies:
+        ///   - <paramref name="domainEntries"/> non-empty → <see cref="PerformDcvV2MultiDomainAsync"/>,
+        ///     which loops every domain whose own <c>dcvStatus</c> isn't VERIFIED.
+        ///   - <paramref name="domainEntries"/> null/empty (single-domain orders, or an older/
+        ///     simpler response shape that never populated the block) → the original,
+        ///     byte-for-byte-unchanged single-domain flow in
+        ///     <see cref="PerformDcvV2SingleDomainAsync"/>.
+        ///
+        /// Returns <c>true</c> when DCV steps were executed for at least one domain, <c>false</c>
+        /// when skipped entirely (not configured, no domain(s) to act on, or already in flight).
+        /// </summary>
+        private async Task<bool> PerformDcvV2IfNeededAsync(
+            string orderId,
+            string domain,
+            string productFamilySlug,
+            CancellationToken ct,
+            IReadOnlyList<API.V2.V2DomainVerificationEntry> domainEntries = null)
+        {
+            if (_domainValidatorFactory == null || !_config.DcvEnabled)
+            {
+                _logger.LogDebug(
+                    "V2 DCV skipped: DCV factory not configured or DcvEnabled=false. OrderId={OrderId}", orderId);
+                return false;
+            }
+
+            bool multiDomainMode = domainEntries != null && domainEntries.Count > 0;
+
+            if (!multiDomainMode && string.IsNullOrWhiteSpace(domain))
+            {
+                _logger.LogWarning(
+                    "V2 DCV skipped: no domain name available for order {OrderId}.", orderId);
+                return false;
+            }
+
+            // Prevent concurrent DCV staging for the same order (enrollment + sync overlap).
+            // Mirrors the _dcvInFlight guard in TryRunDcvDuringSyncAsync (V1 path). One guard
+            // entry per ORDER, not per domain — a UCC order with several pending SANs is still
+            // a single in-flight unit of work.
+            if (!_dcvInFlight.TryAdd(orderId, 0))
+            {
+                _logger.LogInformation(
+                    "DCV already in flight for V2 order {OrderId}; skipping concurrent attempt.", orderId);
+                return false;
+            }
+
+            try
+            {
+                return multiDomainMode
+                    ? await PerformDcvV2MultiDomainAsync(orderId, domainEntries, productFamilySlug, ct)
+                    : await PerformDcvV2SingleDomainAsync(orderId, domain, productFamilySlug, ct);
+            }
+            finally
+            {
+                _dcvInFlight.TryRemove(orderId, out _);
+            }
+        }
+
+        /// <summary>
+        /// Original single-domain V2 DCV flow (pre-issue-0042), preserved byte-for-byte except
+        /// for the <c>_dcvInFlight</c> guard, which its caller <see cref="PerformDcvV2IfNeededAsync"/>
+        /// now owns for the whole call. Used whenever the order has no per-domain
+        /// <c>verifications.domain.domains[]</c> block to drive from (single-domain orders, or an
+        /// older/simpler response shape) — see issue 0042's "keep today's primary-domain
+        /// behaviour exactly" requirement.
         ///
         /// Flow:
         ///   1. GET /ssl-certificates/{orderId}/dcv → retrieve token (<c>token</c>)
@@ -3547,37 +3622,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///
         /// Returns <c>true</c> when DCV steps were executed, <c>false</c> when skipped.
         /// </summary>
-        private async Task<bool> PerformDcvV2IfNeededAsync(
+        private async Task<bool> PerformDcvV2SingleDomainAsync(
             string orderId,
             string domain,
             string productFamilySlug,
             CancellationToken ct)
         {
-            if (_domainValidatorFactory == null || !_config.DcvEnabled)
-            {
-                _logger.LogDebug(
-                    "V2 DCV skipped: DCV factory not configured or DcvEnabled=false. OrderId={OrderId}", orderId);
-                return false;
-            }
-
-            if (string.IsNullOrWhiteSpace(domain))
-            {
-                _logger.LogWarning(
-                    "V2 DCV skipped: no domain name available for order {OrderId}.", orderId);
-                return false;
-            }
-
             _logger.LogInformation(
                 "V2 DCV starting for order {OrderId}, domain {Domain}.", orderId, LogSanitizer.Strip(domain));
-
-            // Prevent concurrent DCV staging for the same order (enrollment + sync overlap).
-            // Mirrors the _dcvInFlight guard in TryRunDcvDuringSyncAsync (V1 path).
-            if (!_dcvInFlight.TryAdd(orderId, 0))
-            {
-                _logger.LogInformation(
-                    "DCV already in flight for V2 order {OrderId}; skipping concurrent attempt.", orderId);
-                return false;
-            }
 
             // 1. Fetch challenge
             V2DcvChallengeResponse challenge = null;
@@ -3764,6 +3816,398 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         _logger.LogWarning(ex,
                             "V2 DCV: Failed to clean up DNS TXT record. OrderId={OrderId}, Hostname={Hostname}. " +
                             "May require manual removal.", orderId, LogSanitizer.Strip(hostname));
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Generalized V2 DCV for orders whose Track Order response surfaced a per-domain
+        /// <c>verifications.domain.domains[]</c> block (issue 0042) — chiefly UCC orders with
+        /// additional SAN domains. Every entry whose own <c>dcvStatus</c> isn't VERIFIED is
+        /// processed: stage a TXT record for each pending domain, wait once for DNS propagation
+        /// (not once per domain), verify each domain individually, poll Track Order until every
+        /// domain just verified is confirmed (or the shared DCV timeout elapses), then always
+        /// clean up every staged record regardless of outcome.
+        ///
+        /// Partial failure: a domain that fails GetDcv/staging/verification is logged and
+        /// skipped — the others keep going. The order is left pending for any domain not
+        /// resolved this pass; because the caller always re-derives <paramref name="domainEntries"/>
+        /// from its own most recent Track Order response, the next sync/GetSingleRecord call
+        /// naturally retries only whichever domains are still not VERIFIED.
+        ///
+        /// The per-order <c>_dcvInFlight</c> guard is already held by the caller
+        /// (<see cref="PerformDcvV2IfNeededAsync"/>) for the whole call.
+        ///
+        /// Returns <c>true</c> when DCV steps were executed for at least one domain (staged, or
+        /// found already verified via EMS-1080); <c>false</c> only when every domain in
+        /// <paramref name="domainEntries"/> was already VERIFIED (nothing to do).
+        /// </summary>
+        private async Task<bool> PerformDcvV2MultiDomainAsync(
+            string orderId,
+            IReadOnlyList<API.V2.V2DomainVerificationEntry> domainEntries,
+            string productFamilySlug,
+            CancellationToken ct)
+        {
+            var pendingDomains = domainEntries
+                .Where(e => !string.IsNullOrWhiteSpace(e?.Domain)
+                    && !string.Equals(e.DcvStatus, Constants.ApiV2.DcvStatusVerified, StringComparison.OrdinalIgnoreCase))
+                .Select(e => e.Domain)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (pendingDomains.Count == 0)
+            {
+                _logger.LogDebug(
+                    "V2 DCV (multi-domain) skipped: every domain on order {OrderId} is already VERIFIED.",
+                    orderId);
+                return false;
+            }
+
+            _logger.LogInformation(
+                "V2 DCV (multi-domain) starting for order {OrderId}. PendingDomains=[{Domains}]",
+                orderId, LogSanitizer.Strip(string.Join(", ", pendingDomains)));
+
+            var staged = new List<(string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator)>();
+            var verifiedDomains = new List<string>();
+            var failedDomains = new List<(string domain, string reason)>();
+
+            async Task CleanupStagedAsync()
+            {
+                // Concurrent, not sequential — mirrors the V1 multi-SAN cleanup rationale
+                // (CleanupPartialStagingAsync above): a UCC order with N staged domains must not
+                // let the aggregate cleanup time scale with N.
+                await Task.WhenAll(staged.Select(entry => CleanupOneV2StagedRecordAsync(orderId, entry)));
+            }
+
+            try
+            {
+                // Phase 1: stage a TXT record for every pending domain. Every failure here is
+                // scoped to the one domain that hit it (logged loudly, then skipped) — never
+                // thrown — so one bad SAN cannot abort DCV for the co-tenant domains on the same
+                // order (issue 0042's "partial failure: keep going").
+                foreach (var d in pendingDomains)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    V2DcvChallengeResponse challenge = null;
+                    bool alreadySatisfied = false;
+                    try
+                    {
+                        challenge = await _client.GetDcvV2Async(orderId, d, productFamilySlug, ct);
+                    }
+                    catch (Exception ex) when (IsEms1080DomainAlreadyVerified(ex))
+                    {
+                        _logger.LogInformation(
+                            "V2 DCV already satisfied (EMS-1080) for domain {Domain} on order {OrderId}; " +
+                            "skipping TXT publish for this domain.", LogSanitizer.Strip(d), orderId);
+                        alreadySatisfied = true;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The shared, DcvTimeoutMinutes-bound cancellation — not a per-domain
+                        // failure. Propagate to the outer catch, which logs and cleans up.
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "V2 GetDcv failed for domain {Domain} on order {OrderId}; skipping this domain " +
+                            "so the rest of the order can still be validated.", LogSanitizer.Strip(d), orderId);
+                        failedDomains.Add((d, "GetDcv failed"));
+                        continue;
+                    }
+
+                    if (alreadySatisfied)
+                    {
+                        verifiedDomains.Add(d);
+                        continue;
+                    }
+
+                    string token = challenge?.Token;
+                    if (string.IsNullOrWhiteSpace(token))
+                    {
+                        _logger.LogError(
+                            "V2 GetDcv returned no token for domain {Domain} on order {OrderId}; skipping " +
+                            "this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(d), orderId);
+                        failedDomains.Add((d, "no DCV token returned"));
+                        continue;
+                    }
+
+                    string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
+                        ? Constants.Dcv.DefaultTxtRecordTemplate
+                        : _config.DcvTxtRecordTemplate;
+                    string hostname = string.Format(template, d);
+
+                    var validator = DomainValidatorFactory.ResolveDomainValidator(d, "dns-01");
+                    if (validator == null)
+                    {
+                        _logger.LogError(
+                            "No DNS provider plugin resolved for domain '{Domain}' on V2 order {OrderId}; " +
+                            "skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(d), orderId);
+                        failedDomains.Add((d, "no DNS provider resolved"));
+                        continue;
+                    }
+
+                    _logger.LogInformation(
+                        "Staging V2 DNS TXT record for DCV. OrderId={OrderId}, Domain={Domain}, Hostname={Hostname}",
+                        orderId, LogSanitizer.Strip(d), LogSanitizer.Strip(hostname));
+
+                    DomainValidationResult stageResult;
+                    try
+                    {
+                        stageResult = await validator.StageValidation(hostname, token, ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "V2 DCV: DNS provider threw while staging '{Domain}' for order {OrderId}; " +
+                            "skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(d), orderId);
+                        failedDomains.Add((d, "DNS provider plugin threw"));
+                        continue;
+                    }
+
+                    if (!stageResult.Success)
+                    {
+                        _logger.LogError(
+                            "V2 DCV: Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}. " +
+                            "Skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(d), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
+                        failedDomains.Add((d, $"stage failed: {stageResult.ErrorMessage}"));
+                        continue;
+                    }
+
+                    staged.Add((d, hostname, validator));
+                }
+            }
+            catch (Exception ex)
+            {
+                // Safety net for a genuinely unexpected failure: cancellation (the shared
+                // DcvTimeoutMinutes-bound token expiring mid-loop, explicitly re-thrown past the
+                // per-domain catches above) or a bug. Clean up whatever was already staged before
+                // this propagates — none of the callers add their own cleanup.
+                _logger.LogError(ex,
+                    "Unexpected failure during V2 DCV staging for order {OrderId}; cleaning up any " +
+                    "already-staged TXT records before this propagates.", orderId);
+                await CleanupStagedAsync();
+                throw;
+            }
+
+            if (staged.Count > 0)
+            {
+                try
+                {
+                    // One propagation wait for the whole batch, not one per domain.
+                    int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
+                    _logger.LogInformation(
+                        "Waiting {Delay}s for DNS propagation before V2 DCV verify. OrderId={OrderId}, DomainCount={Count}",
+                        delaySeconds, orderId, staged.Count);
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+
+                    // Phase 2: verify each staged domain individually — the spec's Verify DCV
+                    // body takes a single `domain`, mirroring Get DCV Challenges' per-domain
+                    // shape (per-SAN semantics unconfirmed live end-to-end — see
+                    // v2-api-support-questions.md Finding 9, question 3).
+                    foreach (var (d, _, _) in staged)
+                    {
+                        try
+                        {
+                            _logger.LogInformation(
+                                "Triggering V2 DCV verification. OrderId={OrderId}, Domain={Domain}",
+                                orderId, LogSanitizer.Strip(d));
+                            var verifyResp = await _client.VerifyDcvV2Async(orderId, d, productFamilySlug, ct);
+                            _logger.LogInformation(
+                                "V2 DCV verify response. OrderId={OrderId}, Domain={Domain}, OverallStatus={Status}",
+                                orderId, LogSanitizer.Strip(d), verifyResp?.OverallStatus ?? "(null)");
+
+                            if (string.Equals(verifyResp?.OverallStatus, "VERIFIED", StringComparison.OrdinalIgnoreCase))
+                            {
+                                verifiedDomains.Add(d);
+                            }
+                            else
+                            {
+                                _logger.LogWarning(
+                                    "V2 DCV verify did not return VERIFIED for domain {Domain} on order {OrderId}. " +
+                                    "Status={Status}", LogSanitizer.Strip(d), orderId, verifyResp?.OverallStatus);
+                                failedDomains.Add((d, $"verify returned {verifyResp?.OverallStatus ?? "(null)"}"));
+                            }
+                        }
+                        catch (Exception ex) when (IsEms1080DomainAlreadyVerified(ex))
+                        {
+                            // Same no-op as the GetDcv branch above, but surfaced at Verify time
+                            // instead — the domain became/was already verified between the two
+                            // calls. Treat as verified rather than deferring (issues/0020).
+                            _logger.LogInformation(
+                                "V2 DCV already satisfied (EMS-1080) for domain {Domain} on order {OrderId} " +
+                                "during VerifyDcv; treating as verified.", LogSanitizer.Strip(d), orderId);
+                            verifiedDomains.Add(d);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex,
+                                "V2 DCV verify failed for domain {Domain} on order {OrderId}; skipping this " +
+                                "domain so the rest of the order can still be validated.",
+                                LogSanitizer.Strip(d), orderId);
+                            failedDomains.Add((d, "verify failed"));
+                        }
+                    }
+
+                    // Phase 3: poll Track Order until every domain just verified this pass is
+                    // confirmed there too, before cleanup — mirrors the V1 rationale
+                    // (WaitForDcvVerificationAsync): VerifyDcv's synchronous response may not yet
+                    // be reflected by the CA's own async DNS lookup.
+                    var stagedDomainNames = new HashSet<string>(
+                        staged.Select(s => s.domain), StringComparer.OrdinalIgnoreCase);
+                    var justVerifiedStaged = verifiedDomains
+                        .Where(d => stagedDomainNames.Contains(d))
+                        .ToList();
+                    if (justVerifiedStaged.Count > 0)
+                    {
+                        await WaitForDomainsVerifiedV2Async(orderId, productFamilySlug, justVerifiedStaged, ct);
+                    }
+                }
+                finally
+                {
+                    await CleanupStagedAsync();
+                }
+            }
+
+            if (failedDomains.Count > 0)
+            {
+                _logger.LogError(
+                    "{FailedCount} domain(s) on V2 order {OrderId} could not be validated this pass and " +
+                    "were skipped: [{Domains}]. The order remains pending; a later sync/GetSingleRecord " +
+                    "retries only the still-unverified domains.",
+                    failedDomains.Count, orderId,
+                    LogSanitizer.Strip(string.Join(", ", failedDomains.Select(f => $"{f.domain} ({f.reason})"))));
+            }
+
+            _logger.LogInformation(
+                "V2 DCV (multi-domain) summary. OrderId={OrderId}, PendingCount={Pending}, VerifiedCount={Verified}, FailedCount={Failed}",
+                orderId, pendingDomains.Count, verifiedDomains.Count, failedDomains.Count);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Removes one already-published V2 DCV TXT record. Shared cleanup logic for
+        /// <see cref="PerformDcvV2MultiDomainAsync"/>'s staged-domain list — mirrors the
+        /// single-domain V2 path's own inline cleanup (and V1's
+        /// <c>CleanupOneStagedValidationAsync</c>) in both bound and best-effort behavior: a
+        /// fresh, independently-bounded token (neither the ambient <c>ct</c> nor
+        /// <see cref="CancellationToken.None"/>) so a stuck DNS provider cannot hang this
+        /// best-effort compensating action indefinitely, regardless of why cleanup was
+        /// triggered.
+        /// </summary>
+        private async Task CleanupOneV2StagedRecordAsync(
+            string orderId,
+            (string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator) entry)
+        {
+            var (domain, hostname, validator) = entry;
+            try
+            {
+                using var cleanupCts = new CancellationTokenSource(
+                    TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
+                await validator.CleanupValidation(hostname, cleanupCts.Token);
+                _logger.LogInformation(
+                    "V2 DCV: DNS TXT record cleaned up. OrderId={OrderId}, Domain={Domain}, Hostname={Hostname}",
+                    orderId, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 DCV: Failed to clean up DNS TXT record. OrderId={OrderId}, Domain={Domain}, " +
+                    "Hostname={Hostname}. May require manual removal.",
+                    orderId, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
+            }
+        }
+
+        /// <summary>
+        /// Polls <see cref="ICERTInextClient.TrackOrderV2Async"/> until every domain in
+        /// <paramref name="domains"/> reaches a VERIFIED <c>dcvStatus</c> in
+        /// <c>verifications.domain.domains[]</c>, reaches REJECTED (terminal — confirmed live
+        /// after an order cancellation, issue 0042), or <paramref name="ct"/> is cancelled /
+        /// the internal deadline elapses. V2 analogue of <see cref="WaitForDcvVerificationAsync"/>.
+        /// </summary>
+        private async Task WaitForDomainsVerifiedV2Async(
+            string orderId, string productFamilySlug, IReadOnlyList<string> domains, CancellationToken ct)
+        {
+            if (domains.Count == 0) return;
+
+            var pending = new HashSet<string>(domains, StringComparer.OrdinalIgnoreCase);
+            // Fixed short cadence — decoupled from DcvPropagationDelaySeconds (a one-shot DNS
+            // wait), not a poll interval.
+            int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
+
+            // Defense-in-depth deadline, same rationale as WaitForDcvVerificationAsync: bounded
+            // even if a future refactor breaks the cancellation chain.
+            var deadline = DateTime.UtcNow.AddMinutes(_config.GetEffectiveDcvTimeoutMinutes());
+
+            while (pending.Count > 0 && !ct.IsCancellationRequested)
+            {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    _logger.LogWarning(
+                        "V2 DCV verification poll exceeded its internal deadline ({Minutes}min). " +
+                        "OrderId={OrderId}, StillPendingDomains=[{Pending}]. Exiting and leaving TXT " +
+                        "records for the caller's cleanup.",
+                        _config.GetEffectiveDcvTimeoutMinutes(), orderId,
+                        LogSanitizer.Strip(string.Join(",", pending)));
+                    return;
+                }
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                V2OrderStatusResponse poll;
+                try
+                {
+                    poll = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "V2 TrackOrder polling failed during DCV wait. OrderId={OrderId}", orderId);
+                    return;
+                }
+
+                var entries = poll.Verifications?.Domain?.Domains;
+                if (entries == null) continue;
+
+                foreach (var entry in entries)
+                {
+                    if (entry?.Domain == null || !pending.Contains(entry.Domain)) continue;
+
+                    if (string.Equals(entry.DcvStatus, Constants.ApiV2.DcvStatusVerified, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation(
+                            "V2 DCV verified by CERTInext. OrderId={OrderId}, Domain={Domain}",
+                            orderId, LogSanitizer.Strip(entry.Domain));
+                        pending.Remove(entry.Domain);
+                    }
+                    else if (string.Equals(entry.DcvStatus, Constants.ApiV2.DcvStatusRejected, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogWarning(
+                            "V2 DCV rejected by CERTInext. OrderId={OrderId}, Domain={Domain}",
+                            orderId, LogSanitizer.Strip(entry.Domain));
+                        pending.Remove(entry.Domain);
                     }
                 }
             }
