@@ -47,6 +47,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData("cancelled",                             (int)EndEntityStatus.FAILED)]
         [InlineData("rejected",                              (int)EndEntityStatus.FAILED)]
         [InlineData("expired",                               (int)EndEntityStatus.FAILED)]
+        // Issue 0039: the spec-documented `unknown` means "may still be live" — pending, not FAILED.
+        [InlineData("unknown",                               (int)EndEntityStatus.EXTERNALVALIDATION)]
+        [InlineData("UNKNOWN",                               (int)EndEntityStatus.EXTERNALVALIDATION)]  // case-insensitive
+        [InlineData("Unknown",                               (int)EndEntityStatus.EXTERNALVALIDATION)]
         public void V2StatusToRequestDisposition_MapsCorrectly(string v2Status, int expectedDisposition)
         {
             StatusMapper.V2StatusToRequestDisposition(v2Status).Should().Be(expectedDisposition);
@@ -62,6 +66,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         [Theory]
         [InlineData("unknown-future")]
+        [InlineData("not-a-real-status")]  // issue 0039: garbage still defaults to FAILED, unlike `unknown`
         [InlineData("")]
         [InlineData(null)]
         public void V2StatusToRequestDisposition_UnrecognizedStatus_DefaultsToFailed(string v2Status)
