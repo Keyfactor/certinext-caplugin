@@ -1,9 +1,9 @@
 # 1.0.1
 
 ## Features
-- feat(v2): Add opt-in CERTInext V2 REST API code path — OAuth2 `client_credentials` auth, `ord_`-prefixed order IDs, and V2 status mapping — controlled by `UseV2Api` config flag (defaults `false`; V1 unchanged).
+- feat(v2): Add opt-in CERTInext V2 REST API code path — OAuth2 `client_credentials` auth and V2 status mapping — controlled by `UseV2Api` config flag (defaults `false`; V1 unchanged).
 - feat(v2): V2 enrollment handles all three `EnrollmentType` values (New/Reissue/RenewOrReissue) via a single V2 order placement; issued orders download the certificate immediately.
-- feat(v2): V2 revocation probes SSL → PrivatePKI → Signature families to locate and revoke an order by its `ord_` ID.
+- feat(v2): V2 revocation resolves the order's product family (SSL → Private PKI → Signature) and revokes it there.
 - feat(v2): V2 `GetSingleRecord` resolves order status across all three V2 product families without touching the V1 path.
 - feat(v2): Synchronize now uses V2 `/reports/orders` when `UseV2Api` is true, with an incremental lookback window (`V2SyncLookbackHours`, default 72h) — V1 credentials are no longer required in V2 mode.
 - feat(v2): Consolidated V2 config onto the existing `ApiUrl`/`OAuthClientId`/`OAuthClientSecret` fields; the never-shipped `ApiUrlV2`/`ClientId`/`ClientSecret` fields are removed.
