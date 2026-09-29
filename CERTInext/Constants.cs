@@ -205,6 +205,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     [EvSsl]             = "19",
                     [EvSslUcc]          = "20",
                 };
+
+            // V2-ONLY. Maps each SSL product name (ProductId) to the V2 create body's
+            // productVariant value ("dv"/"ov"/"ev") — issue 0059. Grouped by the same
+            // productTypeID assurance level ProductTypeIdsV2 above already documents (13-15 and
+            // 21 -> dv, 16-18 and 22 -> ov, 19-20 -> ev); kept as its own ProductId-keyed table
+            // (rather than a second indirection through ProductTypeIdsV2) so it reads the same way
+            // as DefaultProductCodes/ProductTypeIdsV2 above.
+            //
+            // Used by CERTInextCAPlugin.ResolveSslProductVariant (EnrollV2Async/ValidateProductInfo)
+            // to derive productVariant when the template's ProductVariant enrollment parameter is
+            // not set explicitly, and to reject an explicit ProductVariant that contradicts the
+            // selected product (e.g. "dv" configured for "OV SSL" — the bug this table fixes: the
+            // plugin was sending productVariant:"dv" for every product regardless of ProductId,
+            // which skips the OV/EV organization block CERTInext requires).
+            //
+            // All 10 SSL ProductIds are covered; there is no "unmapped" case today. private-pki
+            // and signature families are unrelated (private-pki's variant enum is intranet-ssl /
+            // igtf-host — Constants.ApiV2.PrivatePkiVariants — and signature enrollment is not yet
+            // supported) and must not consult this table.
+            public static readonly System.Collections.Generic.Dictionary<string, string> ProductVariantsV2 =
+                new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    [DvSsl]             = ApiV2.ProductVariantDv,
+                    [DvSslWildcard]     = ApiV2.ProductVariantDv,
+                    [DvSslUcc]          = ApiV2.ProductVariantDv,
+                    [DvSslWildcardUcc]  = ApiV2.ProductVariantDv,
+                    [OvSsl]             = ApiV2.ProductVariantOv,
+                    [OvSslWildcard]     = ApiV2.ProductVariantOv,
+                    [OvSslUcc]          = ApiV2.ProductVariantOv,
+                    [OvSslWildcardUcc]  = ApiV2.ProductVariantOv,
+                    [EvSsl]             = ApiV2.ProductVariantEv,
+                    [EvSslUcc]          = ApiV2.ProductVariantEv,
+                };
         }
 
         public static class CertificateStatusId
@@ -450,6 +483,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // other value (dv and its wildcard/UCC combinations) omits it entirely.
             public const string ProductVariantOv = "ov";
             public const string ProductVariantEv = "ev";
+
+            // The SSL family's own "no assurance vetting" variant. Given its own named constant
+            // (issue 0059) so Constants.Products.ProductVariantsV2 below doesn't repeat the "dv"
+            // literal that EnrollmentParams.ProductVariant/V2CreateSslOrderRequest.ProductVariant
+            // also default to.
+            public const string ProductVariantDv = "dv";
 
             // Private PKI create-body `variant` enum (issue 0033). Spec, "Private PKI
             // Certificates" field table: "`variant` | **Mandatory** (`intranet-ssl` /

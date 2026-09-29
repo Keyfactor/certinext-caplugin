@@ -592,6 +592,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             bool isPrivatePki = useV2
                 && string.Equals(params_.ProductFamilySlug, Constants.ApiV2.FamilyPrivatePki, StringComparison.Ordinal);
+            // Issue 0059: gate the SSL-only ProductVariant cross-check below on the SSL family
+            // specifically (not just "!isPrivatePki") so a signature (Document Signer) template —
+            // which has no productVariant concept — is left unaffected, same as before this fix.
+            bool isSsl = useV2
+                && string.Equals(params_.ProductFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.Ordinal);
 
             var tempClient = new CERTInextClient(tempConfig);
 
@@ -610,6 +615,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             "Product/profile validation failed — {Reason} ProductID={ProductID}",
                             pkiConfigError, params_.ProductId);
                         throw new AnyCAValidationException(pkiConfigError);
+                    }
+                }
+
+                // Issue 0059: an SSL template's explicit ProductVariant must agree with the
+                // product it's paired with — checked before any catalog call, same fail-fast
+                // placement as the private-pki check above, so a template that would silently
+                // send a DV-shaped body for an OV/EV product (or vice versa) is rejected at save
+                // time instead of at enroll.
+                if (isSsl)
+                {
+                    string variantError = ResolveSslProductVariant(params_, out _);
+                    if (variantError != null)
+                    {
+                        _logger.LogWarning(
+                            "Product/profile validation failed — {Reason} ProductID={ProductID}",
+                            variantError, params_.ProductId);
+                        throw new AnyCAValidationException(variantError);
                     }
                 }
 
@@ -1429,6 +1451,58 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// Issue 0059: resolves the SSL family's <c>productVariant</c> value to send, and
+        /// validates an explicit template override against the product it's paired with.
+        /// Previously, <see cref="EnrollmentParams.ProductVariant"/> defaulted to "dv" independent
+        /// of <see cref="EnrollmentParams.ProductId"/>, so an OV/EV product with no explicit
+        /// ProductVariant sent <c>productVariant:"dv"</c> — which skips the mandatory OV/EV
+        /// <c>organization</c> block (see <c>isOvOrEv</c> in <see cref="EnrollV2Async"/> and issue
+        /// 0028) — silently ordering a DV-shaped body for an OV/EV product.
+        ///
+        /// Derivation source: <see cref="Constants.Products.ProductVariantsV2"/>, keyed by
+        /// ProductId (the same productTypeID assurance-level grouping
+        /// <see cref="Constants.Products.ProductTypeIdsV2"/> documents). SSL-only — callers must
+        /// not invoke this for private-pki (see <see cref="ValidatePrivatePkiEnrollmentParams"/>)
+        /// or signature (not yet supported for enrollment) families.
+        ///
+        /// Returns <c>null</c> and sets <paramref name="resolvedVariant"/> when valid: either the
+        /// template's explicit value (when it agrees with the derived variant, or no mapping
+        /// exists for this ProductId — current pre-0059 behavior is kept rather than guessing), or
+        /// the value derived from ProductId when no explicit override is configured. Returns an
+        /// actionable error message (<paramref name="resolvedVariant"/> = <c>null</c>) when an
+        /// explicit override contradicts the product's derived variant.
+        /// </summary>
+        internal static string ResolveSslProductVariant(EnrollmentParams ep, out string resolvedVariant)
+        {
+            bool hasMapping = Constants.Products.ProductVariantsV2.TryGetValue(
+                ep.ProductId ?? string.Empty, out string derivedVariant);
+
+            if (!ep.HasExplicitProductVariant)
+            {
+                // No override configured — derive from the product when we have an authoritative
+                // mapping; otherwise fall back to the current (pre-0059) default rather than
+                // inventing a mapping for a product this table doesn't cover.
+                resolvedVariant = hasMapping ? derivedVariant : ep.ProductVariant;
+                return null;
+            }
+
+            string explicitVariant = ep.ProductVariant.Trim();
+            if (hasMapping && !string.Equals(explicitVariant, derivedVariant, StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedVariant = null;
+                return $"Template parameter '{Constants.EnrollmentParam.ProductVariant}' is set to " +
+                       $"'{explicitVariant}', but the selected product '{ep.ProductId}' is " +
+                       $"'{derivedVariant}'. Set '{Constants.EnrollmentParam.ProductVariant}' to " +
+                       $"'{derivedVariant}' (or remove the override to let the plugin derive it " +
+                       $"automatically from the product), or select a product whose assurance " +
+                       $"level matches '{explicitVariant}'.";
+            }
+
+            resolvedVariant = explicitVariant.ToLowerInvariant();
+            return null;
+        }
+
+        /// <summary>
         /// Dispatches all enrollment types through the V2 REST API.
         /// </summary>
         private async Task<EnrollmentResult> EnrollV2Async(
@@ -1497,6 +1571,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
             }
 
+            // Issue 0059: the SSL family's productVariant must reflect the actual product ordered
+            // — not the template's independent (and possibly wrong/stale) ProductVariant value.
+            // Resolve/validate before any CA call, same fail-fast placement as the private-pki
+            // check above. Private PKI (checked above) doesn't use this — its variant enum is
+            // unrelated (intranet-ssl/igtf-host).
+            string sslProductVariant = ep.ProductVariant;
+            if (!isPrivatePki)
+            {
+                string variantError = ResolveSslProductVariant(ep, out sslProductVariant);
+                if (variantError != null)
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async rejected an SSL order before any CA call: {Reason}", variantError);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = "V2 enrollment rejected: " + variantError
+                    };
+                }
+            }
+
             // Issue 0039: the SSL create body always carries an `agreement` block, and the V2 spec
             // marks agreement.signerPlace "Conditional - required if `agreement` sent". Resolved
             // per-template SignerPlace -> connector SignerPlace (which ValidateCAConnectionInfo
@@ -1543,8 +1641,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // SSL-only: Private PKI "has no DCV, no organization block, and no Subscriber
             // Agreement" per the spec (issue 0033), and its ProductVariant is intranet-ssl/igtf-host.
             bool isOvOrEv = !isPrivatePki
-                         && (string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantOv, StringComparison.OrdinalIgnoreCase)
-                          || string.Equals(ep.ProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase));
+                         && (string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantOv, StringComparison.OrdinalIgnoreCase)
+                          || string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase));
 
             V2OrganizationParams organization = null;
             if (isOvOrEv)
@@ -1555,14 +1653,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "EnrollV2Async rejected a '{Variant}' order for domain '{Domain}' — the CA " +
                         "connector's OrganizationNumber is not configured, but an organization block is " +
                         "mandatory for OV/EV orders under the V2 API.",
-                        ep.ProductVariant, LogSanitizer.Strip(domain));
+                        sslProductVariant, LogSanitizer.Strip(domain));
                     _logger.MethodExit(LogLevel.Debug);
                     return new EnrollmentResult
                     {
                         CARequestID   = string.Empty,
                         Certificate   = null,
                         Status        = (int)EndEntityStatus.FAILED,
-                        StatusMessage = $"V2 enrollment rejected: product variant '{ep.ProductVariant}' requires " +
+                        StatusMessage = $"V2 enrollment rejected: product variant '{sslProductVariant}' requires " +
                                         "a pre-vetted organization, but the CA connector's OrganizationNumber " +
                                         "setting is empty. Set OrganizationNumber on the CA connector before " +
                                         "enrolling OV/EV certificates via the V2 API."
@@ -1983,7 +2081,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 var orderReq = new V2CreateSslOrderRequest
                 {
-                    ProductVariant     = ep.ProductVariant,
+                    ProductVariant     = sslProductVariant,
                     EmailNotifications = emailNotifications,
                     Requestor          = requestor,
                     Organization       = organization,

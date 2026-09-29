@@ -54,6 +54,7 @@
 - fix(sync): the spec-documented V2 order status `unknown` now maps to pending instead of FAILED, so a possibly-live order isn't dropped (0039).
 - fix(v2): V2 order create now omits `X-Product-Code` entirely for a null/blank product code instead of sending it empty (0054).
 - fix(v2): non-UCC V2 enrollment now rejects extra SANs from Command's SAN dictionary instead of silently dropping them (0061).
+- fix(v2): V2 SSL enrollment now derives `productVariant` from the product and rejects a mismatched override, instead of always sending `dv` (0059).
 
 ## Chores
 - docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).
@@ -69,6 +70,7 @@
 - chore(tests): `ValidateProductInfo` coverage in V1 and V2 modes, plus V2 catalog-parser unit and live-integration tests (0025).
 - chore(tests): regression tests for the V2 `organization` block (populated for OV/EV, omitted for DV, fail-fast without `OrganizationNumber`); live acceptance against the sandbox confirmed CERTInext accepts the fixed request (0028).
 - chore(tests): regression coverage pinning the live V2 DCV response shape (`token`/`tokenExpiryDate` only) against both the client deserializer and the plugin's DCV staging path (0037).
+- chore(tests): regression tests for `productVariant` derivation/validation at enroll and template save, including the OV/EV organization-block interaction (0059).
 - chore(tests): regression coverage for V2 `productTypeID`-based product code resolution/validation and the V1-fallback-unaffected guarantee (0036).
 - chore(tests): regression coverage for `GroupNumber` on V2 order create, catalog, and orders-report calls (0029).
 - chore(tests): regression coverage for `technicalPointOfContact` (configured, blank-fallback, and per-field-fallback) on V2 SSL orders (0030).
