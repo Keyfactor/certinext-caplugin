@@ -1367,6 +1367,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Idempotency-Key headers. Request and response bodies are only ever logged (Trace)
         /// through <see cref="ApplyLoggingRedaction"/>, so credentials are always scrubbed and
         /// requestor/subject PII is scrubbed unless <c>LogSensitiveRequestData</c> is on.
+        /// X-Product-Code is the spec's "Optional override" on SSL create (and is sent the same
+        /// way for Private PKI / Document Signer, issue 0054 item #4): a null/blank
+        /// <paramref name="productCode"/> omits the header entirely rather than sending it empty,
+        /// which is not itself a valid override value.
         /// </summary>
         private async Task<V2CreateOrderResponse> PlaceOrderV2CoreAsync<TRequest>(
             string path,
@@ -1378,7 +1382,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             EnsureV2Client();
             string idempotencyKey = Guid.NewGuid().ToString();
             var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
-            req.AddHeader("X-Product-Code", productCode ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(productCode))
+                req.AddHeader("X-Product-Code", productCode);
             string json = JsonSerializer.Serialize(request, GetJsonOptions());
             Logger.LogTrace("PlaceOrderV2Async request payload: {Payload}",
                 ApplyLoggingRedaction(json, _config.LogSensitiveRequestData));
