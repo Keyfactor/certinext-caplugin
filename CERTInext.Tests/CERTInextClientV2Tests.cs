@@ -213,6 +213,120 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // Issue 0054 item #4: a null/blank product code must omit X-Product-Code
+        // entirely (spec: "Optional override" on SSL create — an empty override value
+        // is not itself valid) rather than sending the header empty.
+        // ---------------------------------------------------------------------------
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task PlaceOrderV2Async_Ssl_NullOrBlankProductCode_OmitsProductCodeHeader(string productCode)
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/ssl-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, productCode,
+                new V2CreateSslOrderRequest
+                {
+                    Requestor    = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
+                    Certificate  = new V2CertificateParams { Domain = "example.com" },
+                    Subscription = new V2SubscriptionParams(),
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                });
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates");
+            entry.RequestMessage.Headers.Should().NotContainKey("X-Product-Code",
+                "a null/blank product code is not a valid header override and must be omitted entirely");
+        }
+
+        [Fact]
+        public async Task PlaceOrderV2Async_Ssl_NonBlankProductCode_StillSendsHeader()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/ssl-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, "842",
+                new V2CreateSslOrderRequest
+                {
+                    Requestor    = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
+                    Certificate  = new V2CertificateParams { Domain = "example.com" },
+                    Subscription = new V2SubscriptionParams(),
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                });
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates");
+            entry.RequestMessage.Headers.Should().ContainKey("X-Product-Code")
+                .WhoseValue.Should().Contain("842");
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        public async Task PlaceOrderV2Async_PrivatePki_NullOrBlankProductCode_OmitsProductCodeHeader(string productCode)
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/private-pki-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"orderId\":\"ord_pki_002\",\"requestId\":\"req_3\",\"status\":\"pending-csr\"," +
+                              "\"variant\":\"intranet-ssl\",\"hostname\":\"intranet.example.com\"}"));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(productCode, new V2CreatePrivatePkiOrderRequest
+            {
+                Variant      = "intranet-ssl",
+                Hostname     = "intranet.example.com",
+                Requestor    = new V2Requestor { Name = "DevOps", Email = "devops@example.com" },
+                Subscription = new V2SubscriptionParams { ValidityYears = 1 }
+            });
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/private-pki-certificates");
+            entry.RequestMessage.Headers.Should().NotContainKey("X-Product-Code");
+        }
+
+        [Fact]
+        public async Task PlaceOrderV2Async_Signature_NullProductCode_OmitsProductCodeHeader()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/signature-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"orderId\":\"ord_sig_002\",\"requestId\":\"req_4\",\"status\":\"pending-documents\"," +
+                              "\"subjectType\":\"natural-person\",\"subjectDisplayName\":\"Test Person\"}"));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(null, new V2CreateSignatureOrderRequest
+            {
+                SubjectType = "natural-person",
+                Requestor   = new V2Requestor { Name = "Test Person", Email = "test.person@example.com" },
+                Subject     = new V2SignatureSubject { FirstName = "Test", LastName = "Person", Email = "test.person@example.com" }
+            });
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/signature-certificates");
+            entry.RequestMessage.Headers.Should().NotContainKey("X-Product-Code");
+        }
+
+        // ---------------------------------------------------------------------------
         // V2CertificateParams.AdditionalDomains wire serialization (issues/f3-v2-multi-san-limitation.md)
         // ---------------------------------------------------------------------------
 
