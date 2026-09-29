@@ -171,29 +171,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Enroll_V2_NonUccProduct_DoesNotPopulateAdditionalDomains_EvenWithGatewaySanDictionaryExtras()
+        public async Task Enroll_V2_NonUccProduct_SanDictionaryCarriesExtras_StillFailsFastWithNoPlaceOrderCall()
         {
+            // Issue 0061: the CSR alone carries only the primary domain, so the pre-0061 guard
+            // (which looked at the CSR only) did not trigger, and the SAN dictionary's extra
+            // domain silently vanished — a non-UCC order never sends additionalDomains at all, so
+            // there was nowhere for it to go. The guard must now consider the SAN dictionary too
+            // and reject, the same way it already rejects CSR-borne extras
+            // (Enroll_V2_NonUccProduct_CsrCarriesExtraSans_StillFailsFastWithNoPlaceOrderCall).
             var mock = NewMock();
             StubCatalog(mock, "842", "13"); // DV SSL (non-UCC)
 
-            V2CreateSslOrderRequest captured = null;
-            mock.Setup(c => c.PlaceOrderV2Async(
-                    It.IsAny<string>(), It.IsAny<string>(),
-                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
-                .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_nonucc_001", Status = "pending-dcv" });
-
-            mock.Setup(c => c.SubmitCsrV2Async(
-                    It.IsAny<string>(), "ord_nonucc_001", It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .Returns(Task.CompletedTask);
-            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_nonucc_001", It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_nonucc_001", Status = "pending-dcv" });
-
             var plugin = BuildV2Plugin(mock.Object);
 
-            // Gateway SAN dictionary carries extras, but the CSR itself carries only the primary
-            // domain, so the pre-existing fail-fast guard does not trigger — this is testing that
-            // a non-UCC product still does not forward the SAN dictionary's extras.
             var result = await plugin.Enroll(
                 csr: GenerateCsrPem("example.com"),
                 subject: "CN=example.com",
@@ -205,12 +195,129 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
-            result.CARequestID.Should().Be("ord_nonucc_001");
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().Contain("1 SAN(s) beyond");
+            result.StatusMessage.Should().Contain("single domain");
+
+            mock.Verify(c => c.PlaceOrderV2Async(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never,
+                "a rejected non-UCC request must never reach order placement, whether the extra " +
+                "SAN came from the CSR or the SAN dictionary");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_NonUccProduct_SanDictionaryHasOnlyPrimary_ButCsrCarriesExtraSan_StillFailsFastWithNoPlaceOrderCall()
+        {
+            // Regression for a union-vs-fallback bug introduced while first fixing issue 0061: a
+            // non-null SAN dictionary that carries only the primary domain must not make the
+            // guard defer to the dictionary and skip the CSR. SubmitCsrV2Async sends the CSR to
+            // CERTInext verbatim regardless of what the SAN dictionary contains, so a
+            // CSR-embedded extra domain still reaches the CA even when the dictionary is
+            // single-domain — the guard must reject this exactly like the CSR-only case
+            // (Enroll_V2_NonUccProduct_CsrCarriesExtraSans_StillFailsFastWithNoPlaceOrderCall).
+            var mock = NewMock();
+            StubCatalog(mock, "842", "13"); // DV SSL (non-UCC)
+
+            var plugin = BuildV2Plugin(mock.Object);
+
+            var result = await plugin.Enroll(
+                csr: GenerateCsrPem("example.com", "example.com", "other.example.com"),
+                subject: "CN=example.com",
+                san: new Dictionary<string, string[]> { ["dns"] = new[] { "example.com" } },
+                productInfo: MakeV2ProductInfo("842"),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().Contain("1 SAN(s) beyond");
+            result.StatusMessage.Should().Contain("single domain");
+
+            mock.Verify(c => c.PlaceOrderV2Async(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never,
+                "a non-null SAN dictionary carrying only the primary domain must not make the " +
+                "guard defer to it and miss a CSR-embedded extra SAN");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_NonUccProduct_SanDictionaryHasOnlyPrimaryAndWwwVariant_Allowed()
+        {
+            // The guard's existing primary-domain / www.<primary> allowance must still apply when
+            // those names arrive via the SAN dictionary rather than the CSR.
+            var mock = NewMock();
+            StubCatalog(mock, "842", "13"); // DV SSL (non-UCC)
+
+            V2CreateSslOrderRequest captured = null;
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_nonucc_002", Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_nonucc_002", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_nonucc_002", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_nonucc_002", Status = "pending-dcv" });
+
+            var plugin = BuildV2Plugin(mock.Object);
+
+            var result = await plugin.Enroll(
+                csr: GenerateCsrPem("example.com"),
+                subject: "CN=example.com",
+                san: new Dictionary<string, string[]>
+                {
+                    ["dns"] = new[] { "example.com", "www.example.com" }
+                },
+                productInfo: MakeV2ProductInfo("842"),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.CARequestID.Should().Be("ord_nonucc_002");
             captured.Should().NotBeNull();
-            V2CreateSslOrderRequest req = captured!;
-            req.Certificate.AdditionalDomains.Should().BeNull(
-                "non-UCC V2 products must keep the pre-fix single-domain wire shape regardless of " +
-                "what the SAN dictionary contains");
+            captured!.Certificate.AdditionalDomains.Should().BeNull(
+                "non-UCC V2 products must keep the single-domain wire shape even when the " +
+                "dictionary only ever carried allowed names");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_NonUccProduct_SanDictionaryHasOnlyNonDnsExtras_Allowed()
+        {
+            // dnsOnly semantics (issue 0046): a non-DNS SAN dictionary entry can never appear in
+            // additionalDomains and must not trip the reject guard either.
+            var mock = NewMock();
+            StubCatalog(mock, "842", "13"); // DV SSL (non-UCC)
+
+            V2CreateSslOrderRequest captured = null;
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_nonucc_003", Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_nonucc_003", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_nonucc_003", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_nonucc_003", Status = "pending-dcv" });
+
+            var plugin = BuildV2Plugin(mock.Object);
+
+            var result = await plugin.Enroll(
+                csr: GenerateCsrPem("example.com"),
+                subject: "CN=example.com",
+                san: new Dictionary<string, string[]>
+                {
+                    ["dns"] = new[] { "example.com" },
+                    ["rfc822name"] = new[] { "admin@example.com" }
+                },
+                productInfo: MakeV2ProductInfo("842"),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.CARequestID.Should().Be("ord_nonucc_003");
+            captured.Should().NotBeNull();
+            captured!.Certificate.AdditionalDomains.Should().BeNull(
+                "a non-DNS dictionary entry must not trip the non-UCC reject guard");
         }
 
         [Fact]
@@ -317,10 +424,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var plugin = BuildV2Plugin(mock.Object);
 
+            // Issue 0061: a catalog-lookup failure fails UCC-ness safe to false, so a non-empty
+            // SAN dictionary extra here would now trip the (now dictionary-aware) non-UCC reject
+            // guard instead of exercising this test's actual intent. Single-domain SAN data keeps
+            // the test focused on the catalog-lookup fallback it's named for.
             var result = await plugin.Enroll(
                 csr: GenerateCsrPem("example.com"),
                 subject: "CN=example.com",
-                san: new Dictionary<string, string[]> { ["dns"] = new[] { "example.com", "san1.example.com" } },
+                san: new Dictionary<string, string[]> { ["dns"] = new[] { "example.com" } },
                 productInfo: MakeV2ProductInfo("844"),
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
