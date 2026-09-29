@@ -534,5 +534,208 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             output.Should().Contain("10.0.0.50");
             output.Should().Contain("\"variant\":\"intranet-ssl\"");
         }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0040 follow-up: email SANs inside SAN arrays (V1 additionalDomains carries every
+        // SAN type) and V1 TrackOrder domainVerification keys, which the key/value regex can't reach.
+        // ---------------------------------------------------------------------------
+
+        private static string BuildV1OrderRequestJsonWithMixedSans(bool indented)
+        {
+            var request = new GenerateOrderSslRequest
+            {
+                Meta = new RequestMeta { Ver = "1.0", Ts = "2026-05-22T10:00:00+00:00", Txn = "1234567890", AccountNumber = "9988776655" },
+                OrderDetails = new SslOrderDetails
+                {
+                    ProductCode = "844",
+                    RequestorInformation = new RequestorInformation { RequestorName = "Jane Doe", RequestorEmail = "jane.doe@example.com" },
+                    CertificateInformation = new CertificateInformation
+                    {
+                        DomainName = "example.com",
+                        AdditionalDomains = new System.Collections.Generic.List<string> { "a.example.com", "alice@example.com", "10.0.0.1" }
+                    }
+                }
+            };
+            var options = ClientEquivalentJsonOptions();
+            options.WriteIndented = indented;
+            return JsonSerializer.Serialize(request, options);
+        }
+
+        [Fact]
+        public void ApplyLoggingRedaction_V1AdditionalDomains_FlagOff_MasksOnlyEmailElement()
+        {
+            string output = CERTInextClient.ApplyLoggingRedaction(BuildV1OrderRequestJsonWithMixedSans(indented: false), logSensitiveRequestData: false);
+
+            output.Should().NotContain("alice@");
+            output.Should().Contain("\"additionalDomains\":[\"a.example.com\",\"a***@example.com\",\"10.0.0.1\"]");
+            output.Should().Contain("\"domainName\":\"example.com\"");
+            output.Should().Contain("j***@example.com", "the existing key/value redaction still runs");
+        }
+
+        [Fact]
+        public void ApplyLoggingRedaction_V1AdditionalDomains_PrettyPrinted_FlagOff_MasksOnlyEmailElement()
+        {
+            string input = BuildV1OrderRequestJsonWithMixedSans(indented: true);
+            input.Should().Contain("\n", "precondition: the body is pretty-printed");
+
+            string output = CERTInextClient.ApplyLoggingRedaction(input, logSensitiveRequestData: false);
+
+            output.Should().NotContain("alice@");
+            output.Should().Contain("\"a***@example.com\"");
+            output.Should().Contain("\"a.example.com\"");
+            output.Should().Contain("\"10.0.0.1\"");
+            // Only the email token changes; the layout of the array is preserved.
+            string expectedArray = System.Text.RegularExpressions.Regex.Match(input, @"""additionalDomains"":\s*\[[^\]]*\]").Value
+                .Replace("\"alice@example.com\"", "\"a***@example.com\"");
+            expectedArray.Should().NotBeEmpty();
+            output.Should().Contain(expectedArray);
+        }
+
+        [Fact]
+        public void ApplyLoggingRedaction_V1AdditionalDomains_FlagOn_LeavesArrayVerbatim()
+        {
+            string input = BuildV1OrderRequestJsonWithMixedSans(indented: false);
+
+            string output = CERTInextClient.ApplyLoggingRedaction(input, logSensitiveRequestData: true);
+
+            output.Should().Be(CERTInextClient.RedactCredentials(input));
+            output.Should().Contain("\"additionalDomains\":[\"a.example.com\",\"alice@example.com\",\"10.0.0.1\"]");
+        }
+
+        [Fact]
+        public void RedactPersonalData_HandWrittenWhitespaceInSanArray_MasksEmailAndKeepsLayout()
+        {
+            string input = "{ \"additionalDomains\" :\n  [ \"a.example.com\" ,\n    \"alice@example.com\",\"10.0.0.1\" ] }";
+
+            string output = CERTInextClient.RedactPersonalData(input);
+
+            output.Should().Be("{ \"additionalDomains\" :\n  [ \"a.example.com\" ,\n    \"a***@example.com\",\"10.0.0.1\" ] }");
+        }
+
+        [Fact]
+        public void RedactPersonalData_SanArrayKeyMatch_IsCaseInsensitive()
+        {
+            CERTInextClient.RedactPersonalData("{\"AdditionalDomains\":[\"alice@example.com\"]}")
+                .Should().Be("{\"AdditionalDomains\":[\"a***@example.com\"]}");
+        }
+
+        [Fact]
+        public void RedactPersonalData_EscapedEmailElement_IsMasked()
+        {
+            // Elements using JSON unicode escapes (backslash-u0040 for '@', backslash-u0069 for 'i')
+            // must still be detected and masked.
+            CERTInextClient.RedactPersonalData("{\"additionalDomains\":[\"alice\\u0040example.com\",\"al\\u0069ce@example.com\"]}")
+                .Should().Be("{\"additionalDomains\":[\"a***@example.com\",\"a***@example.com\"]}");
+        }
+
+        [Fact]
+        public void RedactPersonalData_V2SanArrays_MaskEmailElements_DefenceInDepth()
+        {
+            // V2 filters these to DNS/IP before submission; a mis-typed email must still be masked,
+            // and DNS/IP values must be untouched.
+            CERTInextClient.RedactPersonalData("{\"certificate\":{\"domain\":\"example.com\",\"additionalDomains\":[\"www.example.com\",\"bob@example.com\"]}}")
+                .Should().Be("{\"certificate\":{\"domain\":\"example.com\",\"additionalDomains\":[\"www.example.com\",\"b***@example.com\"]}}");
+            CERTInextClient.RedactPersonalData("{\"hostname\":\"h.acme.local\",\"additionalHosts\":[\"10.0.0.50\",\"bob@acme.local\",\"::1\"]}")
+                .Should().Be("{\"hostname\":\"h.acme.local\",\"additionalHosts\":[\"10.0.0.50\",\"b***@acme.local\",\"::1\"]}");
+        }
+
+        [Fact]
+        public void RedactPersonalData_UnrelatedArraysAndValuesWithAt_AreUntouched()
+        {
+            // Only the named SAN containers are touched. An '@' in any other array, object key or
+            // string value is left as it is.
+            string input = "{\"notifyList\":[\"alice@example.com\"],\"tags\":[\"x@y\"],\"note\":\"ping bob@example.com\"," +
+                           "\"customFields\":{\"owner@example.com\":\"v\"},\"additionalDomains\":[\"a.example.com\"]}";
+
+            CERTInextClient.RedactPersonalData(input).Should().Be(input);
+        }
+
+        [Fact]
+        public void RedactPersonalData_NestedContainersInsideSanArray_AreNotDescendedInto()
+        {
+            // Only direct string elements of the array are candidates.
+            string input = "{\"additionalDomains\":[[\"alice@example.com\"],{\"k\":\"bob@example.com\"},\"carol@example.com\"]}";
+
+            CERTInextClient.RedactPersonalData(input)
+                .Should().Be("{\"additionalDomains\":[[\"alice@example.com\"],{\"k\":\"bob@example.com\"},\"c***@example.com\"]}");
+        }
+
+        // V1 TrackOrder wire shape per the spec: domainVerification is keyed by domain name, with a
+        // block-level "status". SanSubmissionProbeTests (finding B) saw an email SAN come back as one
+        // of these keys.
+        private const string V1TrackOrderResponseWithEmailDomainKey =
+            "{\"meta\":{\"status\":\"1\"},\"orderDetails\":{\"orderStatus\":\"Pending\"," +
+            "\"domainVerification\":{" +
+            "\"example.com\":{\"dcvMethod\":\"DNS\",\"dcvStatus\":\"1\",\"status\":\"1\",\"verifiedDate\":\"2026-09-01\",\"caaStatus\":\"1\"}," +
+            "\"san-probe@example.com\":{\"dcvMethod\":\"\",\"dcvStatus\":\"0\",\"status\":\"1\",\"verifiedDate\":\"\",\"caaStatus\":\"1\"}," +
+            "\"192.0.2.10\":{\"dcvMethod\":\"\",\"dcvStatus\":\"0\",\"status\":\"1\",\"verifiedDate\":\"\",\"caaStatus\":\"1\"}," +
+            "\"status\":\"0\"}," +
+            "\"customFields\":{\"owner@example.com\":\"kept\"}}}";
+
+        [Fact]
+        public void ApplyLoggingRedaction_V1TrackOrderDomainVerification_FlagOff_MasksEmailKeyOnly()
+        {
+            string output = CERTInextClient.ApplyLoggingRedaction(V1TrackOrderResponseWithEmailDomainKey, logSensitiveRequestData: false);
+
+            output.Should().Be(V1TrackOrderResponseWithEmailDomainKey.Replace("\"san-probe@example.com\":", "\"s***@example.com\":"));
+
+            // The masked body still deserializes into the real DTO and keeps the DNS/IP entries.
+            var parsed = JsonSerializer.Deserialize<TrackOrderResponse>(output, ClientEquivalentJsonOptions());
+            var domainVerification = parsed?.OrderDetails?.DomainVerification;
+            domainVerification.Should().NotBeNull();
+            domainVerification!.GetDomainEntries().Keys.Should().BeEquivalentTo(new[] { "example.com", "s***@example.com", "192.0.2.10" });
+            domainVerification.Status.Should().Be("0");
+        }
+
+        [Fact]
+        public void ApplyLoggingRedaction_V1TrackOrderDomainVerification_FlagOn_Verbatim()
+        {
+            CERTInextClient.ApplyLoggingRedaction(V1TrackOrderResponseWithEmailDomainKey, logSensitiveRequestData: true)
+                .Should().Be(V1TrackOrderResponseWithEmailDomainKey);
+        }
+
+        [Fact]
+        public void RedactPersonalData_DomainVerificationPrettyPrinted_MasksEmailKey()
+        {
+            string input = "{\n  \"domainVerification\" : {\n    \"alice@example.com\" : { \"dcvStatus\" : \"0\" },\n    \"status\" : \"0\"\n  }\n}";
+
+            CERTInextClient.RedactPersonalData(input)
+                .Should().Be("{\n  \"domainVerification\" : {\n    \"a***@example.com\" : { \"dcvStatus\" : \"0\" },\n    \"status\" : \"0\"\n  }\n}");
+        }
+
+        [Theory]
+        [InlineData("{\"additionalDomains\":[\"a.example.com\",\"alice@example.com\",\"bob@ex")]
+        [InlineData("{\"additionalDomains\":[")]
+        [InlineData("{\"additionalDomains\":[\"alice@example.com\"")]
+        [InlineData("{\"domainVerification\":{\"alice@example.com\":{\"dcvStatus\":")]
+        [InlineData("{\"additionalDomains\":[\"alice@example.com\",,]} trailing @ garbage")]
+        [InlineData("{not json at all @ }")]
+        [InlineData("[\"@\"")]
+        [InlineData("<html><body>contact admin@example.com</body></html>")]
+        [InlineData("additionalDomains=alice@example.com&x=1")]
+        [InlineData("   ")]
+        public void RedactPersonalData_MalformedOrTruncatedBody_DoesNotThrow(string input)
+        {
+            System.Func<string> act = () => CERTInextClient.RedactPersonalData(input);
+            act.Should().NotThrow();
+            System.Func<string> act2 = () => CERTInextClient.ApplyLoggingRedaction(input, logSensitiveRequestData: false);
+            act2.Should().NotThrow();
+        }
+
+        [Fact]
+        public void RedactPersonalData_TruncatedBody_MasksElementsSeenBeforeTheFault()
+        {
+            // A body cut off mid-array keeps the masks for the complete elements before the cut.
+            // The partial last element is not a complete token, so it is left as it was.
+            CERTInextClient.RedactPersonalData("{\"additionalDomains\":[\"a.example.com\",\"alice@example.com\",\"bob@ex")
+                .Should().Be("{\"additionalDomains\":[\"a.example.com\",\"a***@example.com\",\"bob@ex");
+        }
+
+        [Fact]
+        public void RedactPersonalData_NonJsonBody_IsReturnedUnchanged()
+        {
+            string input = "additionalDomains=alice@example.com&x=1";
+            CERTInextClient.RedactPersonalData(input).Should().Be(input);
+        }
     }
 }
