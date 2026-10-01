@@ -156,6 +156,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// </summary>
         private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(120);
 
+        /// <summary>
+        /// 300s — P1 and P2 both place an OV-shaped order (productVariant:"ov" + an
+        /// organization block + an additionalDomains entry) and both hit the 120s
+        /// <see cref="ProbeTimeout"/> as a client-side <c>TaskCanceledException</c> (HTTP 0)
+        /// on a live sandbox run (issue 0058 sweep follow-up — see
+        /// Sweep_FindsAndCancelsOrphanedGapProbeOrders's header comment). A client timeout does
+        /// not prove CERTInext never created the order, so raising only the OV-create timeout
+        /// (not every probe's) gives a future P1/P2 run enough headroom to get a real HTTP
+        /// response — success or CA-side rejection — back from the create call itself.
+        /// </summary>
+        private static readonly TimeSpan OvCreateProbeTimeout = TimeSpan.FromSeconds(300);
+
         private readonly IntegrationTestFixture _fixture;
         private readonly ITestOutputHelper _output;
 
@@ -209,6 +221,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             Skip.If(string.IsNullOrWhiteSpace(_inboxTestEmail),
                 "CERTINEXT_INBOX_TEST_EMAIL not set — set it to a real inbox you can check, " +
                 "never CERTINEXT_REQUESTOR_EMAIL (non-deliverable placeholder). Skipping.");
+        }
+
+        /// <summary>
+        /// Narrower gate than <see cref="SkipUnlessArmedAndConfigured"/> for
+        /// <see cref="Sweep_FindsAndCancelsOrphanedGapProbeOrders"/> — that sweep lists/tracks/
+        /// cancels pre-existing orders rather than building a requestor/technicalPointOfContact
+        /// block, so it does not need CERTINEXT_INBOX_TEST_EMAIL. Still requires the same
+        /// go/no-go opt-in and live V2 credentials as P1-P5, since it can cancel real sandbox
+        /// orders.
+        /// </summary>
+        private void SkipUnlessArmedForSweep()
+        {
+            Skip.If(!_armed,
+                $"{OptInFlag}=1 not set in the real process environment — this sweep can cancel " +
+                "real sandbox orders and requires the same explicit go/no-go as P1-P5 (issue 0058). Skipping.");
+            Skip.If(!_v2Enabled,
+                "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
         }
 
         // ---------------------------------------------------------------------------
@@ -294,6 +323,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 productCodeOrNull: null,
                 requestJson: requestJson,
                 primaryDomain: primary,
+                createTimeoutOverride: OvCreateProbeTimeout,
                 extraProbeWork: async (createResp, orderId) =>
                 {
                     List<string> productCodeHits = ScanForKeyValues(createResp.Body, "productcode");
@@ -363,6 +393,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 productCodeOrNull: ovSslProductCode,
                 requestJson: requestJson,
                 primaryDomain: primary,
+                createTimeoutOverride: OvCreateProbeTimeout,
                 extraProbeWork: async (createResp, orderId) =>
                 {
                     if (string.IsNullOrWhiteSpace(orderId))
@@ -607,6 +638,180 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
+        // Sweep — find and clean up orders P1-P5 may have orphaned on the sandbox
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// P1 and P2 both place an OV-shaped order (productVariant:"ov" + an organization block
+        /// + one additionalDomains entry) and both hit <see cref="ProbeTimeout"/> as a
+        /// client-side <c>TaskCanceledException</c> (HTTP 0) on a live sandbox run. A client
+        /// timeout does not prove CERTInext never created the order — if it did, that order is
+        /// now orphaned on the sandbox with no <c>CARequestID</c> ever recorded by this test
+        /// process. This sweep answers that by listing the V2 orders report for "today" (UTC),
+        /// finding every row whose <c>domainName</c> starts with "gap-p" (covers all of
+        /// P1-P5's own domain naming, not just P1/P2 — any of them could have left an orphan
+        /// the same way), tracking each one raw, and cancelling it if it is not already
+        /// cancelled/revoked/rejected — confirming with a fresh GET afterward.
+        ///
+        /// Read-only discovery, not a mutation gate: gated by the same <see cref="OptInFlag"/> +
+        /// V2-credentials guard as P1-P5 (this sweep can cancel real sandbox orders), but — unlike
+        /// <see cref="SkipUnlessArmedAndConfigured"/> — it does NOT require
+        /// CERTINEXT_INBOX_TEST_EMAIL: it never builds a requestor/technicalPointOfContact block,
+        /// so the placeholder email <see cref="BuildV2Client"/> otherwise threads through
+        /// (CERTInextConfig.RequestorEmail) is immaterial to a report-list/track/cancel-only run.
+        ///
+        /// Uses <c>GET /api/certinext/v2/reports/orders</c> via the already-typed
+        /// <see cref="CERTInextClient.ListOrdersV2Async"/> (paging handled internally,
+        /// <c>domainName</c> confirmed live per <see cref="OrderReportEntryV2.DomainName"/>'s own
+        /// doc comment) rather than hand-rolling pagination against
+        /// <see cref="CERTInextClient.ProbeV2GetAsync"/> a second time. If that call throws, the
+        /// finding is logged (nothing else in the report envelope carries a domain value to fall
+        /// back to) and the exception is rethrown — a report failure is a probe-mechanism break,
+        /// not a CA-response finding.
+        /// </summary>
+        [SkippableFact]
+        public async Task Sweep_FindsAndCancelsOrphanedGapProbeOrders()
+        {
+            SkipUnlessArmedForSweep();
+
+            DateTime todayUtc = DateTime.UtcNow.Date;
+            string from = todayUtc.ToString("yyyy-MM-dd");
+            string to = todayUtc.AddDays(1).ToString("yyyy-MM-dd"); // +1 day margin — Probe3 confirmed from/to are inclusive date brackets.
+
+            _output.WriteLine("=== Issue 0058 sweep: orphaned gap-probe orders ===");
+            _output.WriteLine($"Report window: GET {Constants.ApiV2.OrdersReportPath}?from={from}&to={to} (UTC 'today' + 1 day margin).");
+
+            using CERTInextClient client = BuildV2Client();
+
+            var candidates = new List<OrderReportEntryV2>();
+            int rowsScanned = 0;
+            try
+            {
+                await foreach (var row in client.ListOrdersV2Async(from, to, pageSize: 100))
+                {
+                    rowsScanned++;
+                    if (!string.IsNullOrWhiteSpace(row.DomainName) &&
+                        row.DomainName.StartsWith("gap-p", StringComparison.OrdinalIgnoreCase))
+                    {
+                        candidates.Add(row);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _output.WriteLine($"FINDING: GET {Constants.ApiV2.OrdersReportPath} (paged) threw: " +
+                                   $"{ex.GetType().Name}: {RedactForLog(ex.Message)}");
+                _output.WriteLine("Tried: OrderReportEntryV2.DomainName (confirmed-live field) via " +
+                                   "CERTInextClient.ListOrdersV2Async, paging page=1.. with size=100, " +
+                                   $"from={from}&to={to}. No other field on this report row models a " +
+                                   "domain value to fall back to.");
+                throw;
+            }
+
+            _output.WriteLine($"Report rows scanned: {rowsScanned}. Candidates (domainName starts with \"gap-p\"): {candidates.Count}.");
+
+            bool foundP1 = false, foundP2 = false;
+            bool anyCancelFailed = false;
+
+            foreach (var row in candidates)
+            {
+                string orderId = row.OrderNumber;
+                string domainLower = row.DomainName?.ToLowerInvariant() ?? string.Empty;
+                if (domainLower.StartsWith("gap-p1-")) foundP1 = true;
+                if (domainLower.StartsWith("gap-p2-")) foundP2 = true;
+
+                _output.WriteLine("");
+                _output.WriteLine($"--- Candidate: OrderId={orderId ?? "<none>"} Domain={RedactForLog(row.DomainName)} " +
+                                   $"OrderStatus={row.OrderStatus} CertificateStatus={row.CertificateStatus} OrderDate={row.OrderDate} ---");
+
+                if (string.IsNullOrWhiteSpace(orderId))
+                {
+                    _output.WriteLine("No orderNumber on this report row — cannot track or cancel it. Skipping.");
+                    _output.WriteLine($"SUMMARY | OrderId=<none> Domain={RedactForLog(row.DomainName)} " +
+                                       "StatusBefore=<none> StatusAfter=<none> ProductVariant=<none> " +
+                                       "ResolvedProductCode=<none> AdditionalDomainsPresent=False Cancel=SKIPPED (no orderNumber)");
+                    continue;
+                }
+
+                var before = await TrackOrderRawAsync(orderId);
+                _output.WriteLine($"Track (before): HTTP {before.StatusCode}");
+                _output.WriteLine(RedactForLog(before.Body));
+
+                string statusBefore = TryExtractStringField(before.Body, "status");
+                string productVariant = TryExtractStringField(before.Body, "productVariant");
+                List<string> productCodeHits = ScanForKeyValues(before.Body, "productcode");
+                List<string> additionalDomainHits = ScanForKeyValues(before.Body, "additionaldomains");
+                List<string> domainHits = ScanForKeyValues(before.Body, "domain");
+                string resolvedProductCode = productCodeHits.Count > 0
+                    ? string.Join("; ", productCodeHits)
+                    : "<not echoed>";
+
+                _output.WriteLine($"StatusBefore={statusBefore ?? "<none>"} ProductVariant={productVariant ?? "<none>"} " +
+                                   $"ResolvedProductCode={resolvedProductCode}");
+                _output.WriteLine(additionalDomainHits.Count > 0
+                    ? $"additionalDomains field(s) found: {string.Join("; ", additionalDomainHits.Select(RedactForLog))}"
+                    : "No additionalDomains field found on Track Order.");
+                _output.WriteLine(domainHits.Count > 0
+                    ? $"domain-related field(s) found: {string.Join("; ", domainHits.Select(RedactForLog))}"
+                    : "No domain-related field found on Track Order.");
+
+                bool alreadyTerminal =
+                    string.Equals(statusBefore, Constants.ApiV2.StatusCancelled, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(statusBefore, Constants.ApiV2.StatusRevoked, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(statusBefore, Constants.ApiV2.StatusRejected, StringComparison.OrdinalIgnoreCase);
+
+                string statusAfter = statusBefore;
+                string cancelOutcome;
+
+                if (alreadyTerminal)
+                {
+                    cancelOutcome = $"SKIPPED (already {statusBefore})";
+                    _output.WriteLine($"Order is already terminal ({statusBefore}) — not cancelling.");
+                }
+                else
+                {
+                    try
+                    {
+                        V2CancelOrderOutcome outcome = await client.CancelOrderV2Async(
+                            Constants.ApiV2.FamilySsl,
+                            orderId,
+                            "Issue 0058 sweep — cancelling an orphaned gap-probe order found via the orders report.");
+                        cancelOutcome = outcome.ToString();
+                        _output.WriteLine($"Cancel outcome: {cancelOutcome}");
+
+                        var after = await TrackOrderRawAsync(orderId);
+                        statusAfter = TryExtractStringField(after.Body, "status");
+                        _output.WriteLine($"Track (after): HTTP {after.StatusCode}");
+                        _output.WriteLine(RedactForLog(after.Body));
+                    }
+                    catch (Exception ex)
+                    {
+                        cancelOutcome = $"FAILED ({ex.GetType().Name}: {RedactForLog(ex.Message)})";
+                        statusAfter = "<not re-checked — cancel call itself failed>";
+                        anyCancelFailed = true;
+                        _output.WriteLine($"Cancel call FAILED — not retried: {RedactForLog(ex.Message)}");
+                    }
+                }
+
+                _output.WriteLine(
+                    $"SUMMARY | OrderId={orderId} Domain={RedactForLog(row.DomainName)} " +
+                    $"StatusBefore={statusBefore ?? "<none>"} StatusAfter={statusAfter ?? "<none>"} " +
+                    $"ProductVariant={productVariant ?? "<none>"} ResolvedProductCode={resolvedProductCode} " +
+                    $"AdditionalDomainsPresent={additionalDomainHits.Count > 0} Cancel={cancelOutcome}");
+            }
+
+            _output.WriteLine("");
+            _output.WriteLine(
+                $"SUMMARY | Sweep complete. RowsScanned={rowsScanned} CandidatesFound={candidates.Count} " +
+                $"P1Found={foundP1} P2Found={foundP2}");
+
+            anyCancelFailed.Should().BeFalse(
+                "one or more gap-probe orders could not be cancelled during the sweep — see the FAILED " +
+                "cancel outcome(s) logged above; per issue 0058's own rule, this sweep does not retry a " +
+                "failed cancel automatically.");
+        }
+
+        // ---------------------------------------------------------------------------
         // Shared create-then-cancel runner
         // ---------------------------------------------------------------------------
 
@@ -622,7 +827,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             string productCodeOrNull,
             string requestJson,
             string primaryDomain,
-            Func<RawApiResponse, string, Task> extraProbeWork)
+            Func<RawApiResponse, string, Task> extraProbeWork,
+            TimeSpan? createTimeoutOverride = null)
         {
             _output.WriteLine($"=== Issue 0058 {probeId} probe ===");
             _output.WriteLine($"Domain={primaryDomain} ProductCode={productCodeOrNull ?? "<omitted — no X-Product-Code header>"}");
@@ -632,7 +838,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             RawApiResponse createResp = null;
             try
             {
-                createResp = await PlaceSslOrderRawAsync(productCodeOrNull, requestJson);
+                createResp = await PlaceSslOrderRawAsync(productCodeOrNull, requestJson, createTimeoutOverride);
                 _output.WriteLine("");
                 _output.WriteLine("--- Create-order response ---");
                 _output.WriteLine($"HTTP {createResp.StatusCode}");
@@ -817,12 +1023,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Raw HTTP POST to /api/certinext/v2/ssl-certificates. When
         /// <paramref name="productCodeOrNull"/> is null, the X-Product-Code header is omitted
         /// entirely (not sent empty) — P1's exact probe condition. Does not throw on non-2xx.
+        /// <paramref name="timeoutOverride"/> defaults to <see cref="ProbeTimeout"/>; P1/P2 pass
+        /// <see cref="OvCreateProbeTimeout"/> instead (see that field's comment).
         /// </summary>
-        private async Task<RawApiResponse> PlaceSslOrderRawAsync(string productCodeOrNull, string requestJson)
+        private async Task<RawApiResponse> PlaceSslOrderRawAsync(
+            string productCodeOrNull, string requestJson, TimeSpan? timeoutOverride = null)
         {
-            string accessToken = await V2RawProbeHelpers.GetV2AccessTokenAsync(_v2ApiUrl, _v2ClientId, _v2ClientSecret, ProbeTimeout);
+            TimeSpan timeout = timeoutOverride ?? ProbeTimeout;
+            string accessToken = await V2RawProbeHelpers.GetV2AccessTokenAsync(_v2ApiUrl, _v2ClientId, _v2ClientSecret, timeout);
 
-            using var apiClient = V2RawProbeHelpers.NewApiClient(_v2ApiUrl.TrimEnd('/'), ProbeTimeout);
+            using var apiClient = V2RawProbeHelpers.NewApiClient(_v2ApiUrl.TrimEnd('/'), timeout);
             var req = new RestRequest(Constants.ApiV2.SslCertificatesPath, Method.Post);
             req.AddHeader("Authorization", $"Bearer {accessToken}");
             req.AddHeader("Accept", "application/json");
