@@ -347,16 +347,16 @@ succeeded: `key-compromise`, `affiliation-changed`, `superseded`, `cessation-of-
 `certificate-hold`, returned a 422 "Invalid Revoke Reason ID". So did the undocumented `aa-compromise`.
 Revoke reasons for Private PKI and Document Signer orders haven't been tested live.
 
-Since Keyfactor Command defaults to `unspecified` (CRL reason 0) when no explicit reason is given — by far the most common revoke case —
-the plugin retries once with `cessation-of-operation` whenever CERTInext rejects `unspecified` this
-way. `cessation-of-operation` was chosen over V1's existing `key-compromise` fallback because
+Rather than surface any of these four rejections to the caller, the plugin retries each once with a
+close accepted substitute: `unspecified` (CRL reason 0, Command's default when no explicit reason is
+given — by far the most common revoke case) and `certificate-hold` (CRL reason 6) retry as
+`cessation-of-operation`; `ca-compromise` (CRL reason 2) and `aa-compromise` (CRL reason 10) retry as
+`key-compromise`. `cessation-of-operation` was chosen over `key-compromise` for the first pair
+because neither `unspecified` nor `certificate-hold` implies an actual key compromise, and
 `key-compromise` carries the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation, which would
-misrepresent a revoke that was never actually a key compromise. Only the exact "unspecified" +
-"Invalid Revoke Reason ID" combination triggers the retry; any other revoke failure is surfaced as-is.
-That includes the other rejected values, which the plugin sends for CRL reasons 2 (`ca-compromise`),
-6 (`certificate-hold`), and 10 (`aa-compromise`). See
-`issues/0026` for the full reason-value test matrix and the open question to CERTInext support about
-whether the documented reason enum is intentional.
+misrepresent the revoke. Only these four specific rejections trigger a retry; any other revoke
+failure is surfaced as-is. See `issues/0026` for the full reason-value test matrix and the open
+question to CERTInext support about whether the documented reason enum is intentional.
 
 **Note field quirk:** CERTInext's revoke `note` (audit remarks) field rejects a semicolon (`;`) with a
 separate 422, "Invalid Revoke Remarks." — confirmed live that comma, period, slash, and parentheses are

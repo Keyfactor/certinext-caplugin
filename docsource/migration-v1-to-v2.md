@@ -61,7 +61,7 @@ behavior without disrupting V1 traffic.
 
 | V1 field | What happens when you set `UseV2Api = true` |
 |---|---|
-| `ApiUrl` | **Must change format.** V1 requires the `/emSignHub-API/` path segment (e.g. `https://us-api.certinext.io/emSignHub-API/`); V2 is the bare host with no trailing slash or path suffix (e.g. `https://us-api.certinext.io`). Using the V1-style URL under V2 (or vice versa) will fail every call. |
+| `ApiUrl` | **Must change format.** V1 requires the `/emSignHub-API/` path segment (e.g. `https://us-api.certinext.io/emSignHub-API/`); V2 is the bare host with no trailing slash or path suffix (e.g. `https://us-api.certinext.io`). Using the V1-style URL under V2 (or vice versa) will fail every call. In both modes, `ApiUrl` must use `https` — `http` is rejected at connection-validation time except for a loopback host, which stays allowed for local test servers. |
 | `AccountNumber` | Not required, and not read by any V2 code path. V2 authenticates with `OAuthClientId`; the plugin doesn't reuse `AccountNumber` as the OAuth `client_id` (see Step 1). |
 | `AuthMode` | Not required. V2 always authenticates via OAuth2 `client_credentials`, regardless of this setting. |
 | `ApiKey` | Not required. V2 never computes an `authKey`. |
@@ -89,22 +89,34 @@ above.
 
 For each template you're migrating:
 
-1. Add `ProductFamily` (default `ssl`) and `ProductVariant` (`dv`/`ov`/`ev`) if not already present —
-   these are V2-only parameters with no V1 equivalent. For a Private PKI template, set
-   `ProductFamily=private-pki`, `ProductVariant` to `intranet-ssl` or `igtf-host`, and an explicit
-   `ProductCode` (see [V2 Private PKI Orders](#v2-private-pki-orders)). `ProductFamily=signature`
-   (Document Signer) enrollment is not yet supported.
-2. Re-verify `ProductCode` against the V2 catalog. V1 and V2 product codes are not guaranteed to be
-   the same numeric values on your account — call `GetProductDetailsV2Async` (or the equivalent live
-   probe) rather than assuming the V1 code carries over. Template validation (`ValidateProductInfo`)
-   automatically checks `ProductCode` against the V2 catalog once `UseV2Api=true`, so an incorrect
-   code will be caught at template save time, not silently at enrollment.
-3. If the template enrolls for a UCC (multi-domain) product, test it on the sandbox first. The plugin
+1. **If the template sets only `ProductId` (no explicit `ProductCode`), check whether the live V2
+   catalog has more than one product at that assurance level.** The plugin resolves the numeric code
+   automatically from the catalog when exactly one entry matches; when the catalog has several (e.g.
+   two DV SSL entries with different billing terms), you must either set `ProductCode` explicitly on
+   the template or set the connector's `DefaultProductCode` to one of the candidates — otherwise every
+   enrollment against that template fails with an error listing the candidate codes. See
+   [V2 Product Code Resolution](configuration.md#v2-product-code-resolution) for the full resolution
+   order.
+2. Add `ProductFamily` (default `ssl`) if not already present — this is a V2-only parameter with no
+   V1 equivalent. `ProductVariant` (`dv`/`ov`/`ev`) is optional for `ssl`: if left unset, the plugin
+   derives it from the selected product (an OV product sends `ov`, an EV product sends `ev`) instead
+   of defaulting to `dv`; set it explicitly only to override. For a Private PKI template, set
+   `ProductFamily=private-pki`, `ProductVariant` to `intranet-ssl` or `igtf-host` (required, no
+   default), and an explicit `ProductCode` (see [V2 Private PKI Orders](#v2-private-pki-orders)).
+   `ProductFamily=signature` (Document Signer) enrollment is not yet supported.
+3. Re-verify `ProductCode` (if set explicitly) against the V2 catalog. V1 and V2 product codes are not
+   guaranteed to be the same numeric values on your account — call `GetProductDetailsV2Async` (or the
+   equivalent live probe) rather than assuming the V1 code carries over. Template validation
+   (`ValidateProductInfo`) automatically checks `ProductCode` against the V2 catalog once
+   `UseV2Api=true`, so an incorrect code will be caught at template save time, not silently at
+   enrollment.
+4. If the template enrolls for a UCC (multi-domain) product, test it on the sandbox first. The plugin
    runs DCV for each SAN, but CERTInext hasn't confirmed that behavior yet (see
    [Before You Begin](#before-you-begin-confirm-v2-will-work-for-your-templates)).
-4. If `ProductVariant` is `ov` or `ev`, set `OrganizationNumber` on the CA connector (a pre-vetted
-   organization number from CERTInext's Accounts → List Organizations). It is mandatory for OV/EV
-   under V2 — enrollment fails fast with a clear error if it's missing, rather than reaching the CA
+5. If the product is OV or EV (whether `ProductVariant` is set explicitly or left to be derived), set
+   `OrganizationNumber` on the CA connector (a pre-vetted organization number from CERTInext's
+   Accounts → List Organizations). It is mandatory for OV/EV under V2 — enrollment fails fast with a
+   clear error if it's missing, rather than reaching the CA
    and getting back an opaque 422.
 
 ### Step 4 — Test Before Cutting Over
@@ -153,16 +165,21 @@ migration decision if you rely on CERTInext's free-renewal-within-subscription b
 ### Revocation Reason Codes
 
 V1 sends CERTInext a numeric `revokeReasonId`; V2 sends a kebab-case string reason. The plugin
-handles this translation automatically, including retrying once with `cessation-of-operation` when
-CERTInext rejects the RFC 5280 "unspecified" reason (Command's default when no reason is given) — no
-customer action needed for that case. On SSL/TLS orders, only `key-compromise` (1),
+handles this translation automatically. On SSL/TLS orders, only `key-compromise` (1),
 `affiliation-changed` (3), `superseded` (4), `cessation-of-operation` (5), and `privilege-withdrawn`
-(9) were accepted in live sandbox testing. `ca-compromise` (2) and `certificate-hold` (6) are listed
-in the spec for SSL/TLS but were rejected with `"Invalid Revoke Reason ID"`. `aa-compromise` (10)
-isn't listed for SSL/TLS at all and was also rejected. The plugin surfaces those failures as-is,
-without a retry. Revoke reasons for Private PKI orders haven't been tested live. Separately, a revoke
-note containing a semicolon (`;`) is rejected with `"Invalid Revoke Remarks"`. The plugin's own
-generated notes avoid semicolons, but a future customer-supplied note would need to avoid them too.
+(9) were accepted in live sandbox testing. `unspecified` (0, Command's default when no reason is
+given), `ca-compromise` (2), `certificate-hold` (6), and `aa-compromise` (10) are all rejected live
+with `"Invalid Revoke Reason ID"` — `ca-compromise` and `certificate-hold` are listed in the spec for
+SSL/TLS, `aa-compromise` isn't listed for SSL/TLS at all, but the live sandbox rejects all four the
+same way. Rather than fail the revoke, the plugin retries each once with a close accepted
+substitute: `ca-compromise` and `aa-compromise` retry as `key-compromise`; `unspecified` and
+`certificate-hold` retry as `cessation-of-operation` (chosen over `key-compromise` for those two
+because neither implies an actual key compromise, and `key-compromise` carries the spec's own BR
+§4.9.1.1 24-hour CRL-turnaround obligation that would misrepresent the revoke). No customer action is
+needed for any of these four cases. Any other revoke failure is surfaced as-is, without a retry.
+Revoke reasons for Private PKI orders haven't been tested live. Separately, a revoke note containing
+a semicolon (`;`) is rejected with `"Invalid Revoke Remarks"`. The plugin's own generated notes avoid
+semicolons, but a future customer-supplied note would need to avoid them too.
 
 ## Known Gaps
 

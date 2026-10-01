@@ -102,8 +102,22 @@
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 
 ## Upgrade Notes
+- **A template that sets only `ProductId` (no explicit `ProductCode`) now needs an explicit `ProductCode`, or the connector's `DefaultProductCode`, whenever the live V2 catalog has more than one product sharing that assurance level — otherwise enrollment fails with a message listing the candidate codes.**
+- **V2 OV/EV templates with no `ProductVariant` override now send `productVariant: "ov"`/`"ev"` (derived from the product) instead of always `"dv"`, and now require the connector's `OrganizationNumber` to be set.**
+- **`ApiUrl` must use `https`.** `http` is accepted only for a loopback host (`localhost`/`127.0.0.1`/`::1`), for local test servers.
+- **V2 revoke reasons CERTInext rejects are now substituted with an accepted one and retried once:** CA-compromise and AA-compromise fall back to key-compromise; unspecified and certificate-hold fall back to cessation-of-operation.
+- **V2 order status `expired` is now reported to Command as issued (GENERATED)**, matching V1, instead of failed.
+- **V2 Renew/Reissue/RenewOrReissue always place a brand-new CA order; the original order/certificate is not revoked.**
 - **Non-DNS SANs (IP, email, URI) are now submitted instead of silently dropped.** CERTInext can't validate them, so such an order won't issue until the SAN is removed. Set `SubmitNonDnsSans` to `false` to restore the old drop-silently behavior.
 - **No more duplicate or orphaned orders after a network timeout.** Order/CSR submissions no longer auto-retry after a timeout, since the CA may have already created the order. If it was created, the next sync imports it.
+
+## Known Limitations
+- OV and OV UCC are not verified end to end under V2 — a slow create can exceed the plugin's 120s client timeout, leaving a CA-side order the gateway doesn't yet track (0064).
+- EV is not verified live under V2.
+- DCV TXT publish/verify on a never-before-validated domain, and wildcard DCV, are not verified live against the CA (sandbox limitation).
+- V2's multi-domain order model differs from the spec's documented product auto-resolve behavior; a non-UCC product with extra CSR SANs is rejected client-side before any order is placed (0060).
+- The CSR is submitted in a separate call after order creation, not inline on create (0062).
+- A UCC order's CSR carries every SAN, not just the primary domain in `CN` as the spec describes (0063).
 
 # 1.0.0
 
