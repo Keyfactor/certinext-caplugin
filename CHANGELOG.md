@@ -1,12 +1,3 @@
-# 1.0.2
-
-## Bug Fixes
-- fix(revoke): V2 revoke denials (404/422) and the not-GENERATED/retry-failure paths now log an audit record (CARequestID, product family, HTTP status, EMS code); exception types/messages unchanged.
-- fix(enroll): a transport-level failure or timeout from V2 CSR submission no longer cancels an order the CA may have already accepted — the plugin now tracks the order first and only cancels if it's still pending-csr.
-
-## Chores
-- chore(tests): regression coverage for the 404/422/not-GENERATED/retry-outcome revoke logging and the CSR-transport-failure branches (rejection, still-pending, progressed, tracking-also-fails).
-
 # 1.0.1
 
 ## Features
@@ -20,6 +11,8 @@
 - feat(v2): V2 enrollment now supports multi-SAN (UCC) certificates. UCC products are detected from the live Catalog's `productTypeID`, and the SAN set is sent via `additionalDomains` (F3).
 
 ## Bug Fixes
+- fix(revoke): V2 revoke denials (404/422) and the not-GENERATED/retry-failure paths now log an audit record (CARequestID, product family, HTTP status, EMS code).
+- fix(enroll): a transport error or timeout on V2 CSR submission no longer cancels an order the CA may have accepted; the plugin tracks the order first and cancels only if it is still pending-csr.
 - **UCC certificates no longer come back with only the common name.** The gateway sends SANs under the key `dnsname`, which the plugin didn't recognize, so orders went out with an empty domain list. SANs are now read from every key the gateway sends, plus from the CSR itself.
 - **Renewals no longer lose their SANs.** Renewals were submitted with no additional domains and the wrong primary domain; both now come from the certificate being renewed.
 - **Enrollment no longer fails on an order CERTInext auto-approves before it finishes issuing.** The plugin used to report these as issued with no certificate attached, which the gateway rejected. It now returns pending and picks up the certificate once CERTInext finishes issuing it.
