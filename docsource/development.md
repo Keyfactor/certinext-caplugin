@@ -45,7 +45,7 @@ CERTINEXT_SIGNER_IP=
 The plugin builds against two `Keyfactor.AnyGateway.IAnyCAPlugin` contracts from a single
 codebase, selected by the `DcvSupport` MSBuild property. The plugin's `AnyCAPluginCertificate`
 records must match the gateway host's IAnyCAPlugin version to persist, so the build must target
-the host (see issue 0003).
+the host.
 
 | Build | Command | IAnyCAPlugin | DCV | Target gateway host |
 |---|---|---|---|---|
@@ -114,7 +114,7 @@ See `CERTInext.IntegrationTests/INTEGRATION_TESTING.md` for a full description o
 
 ## Product Integration Test Coverage
 
-`DraftOrderTests.cs` (and `TrackOrderTests.cs`) previously recorded live draft-order results here, but both were removed: they asserted specific `requestNumber` values hardcoded from one developer's account, which don't exist on any other account and so failed everywhere else. Their intent — verifying draft-order and track-order semantics — is now covered by `LifecycleTests`, which creates its own order and asserts on it without relying on account-specific identifiers.
+Draft-order and track-order semantics are covered by `LifecycleTests`, which creates its own order and asserts on it without relying on account-specific identifiers.
 
 Product codes are provisioned per account by eMudhra and are not portable across accounts (see the [Product Codes](configuration.md#product-codes) section in configuration.md). To discover which codes and required fields apply to *your* account:
 
@@ -122,4 +122,4 @@ Product codes are provisioned per account by eMudhra and are not portable across
 make probe-products
 ```
 
-This places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which return a `requestNumber` (valid/provisioned) versus an error (invalid or not provisioned). See `CERTInext.IntegrationTests/TESTING.md` for the current, account-specific findings and expected test results.
+This places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which return a `requestNumber` (valid/provisioned) versus an error (invalid or not provisioned). See `CERTInext.IntegrationTests/TESTING.md` for expected test results.

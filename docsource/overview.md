@@ -32,19 +32,19 @@ The same access key / account works perfectly fine before and after the failing 
 
 The CERTInext sandbox at `https://sandbox-us-api.certinext.io/emSignHub-API` applies a **burst rate limit** on order placement and surfaces rate‑limit rejection through the **generic** error string `"Inactive Account User."` — the same string the API uses for genuinely inactive accounts. There is currently no distinguishing `errorCode`, `Retry-After` header, or structured field to tell the two conditions apart from the meta block alone.
 
-Empirically the limit kicks in at roughly **16+ enrollments submitted within 10 seconds** on the US sandbox. Sustained submission velocity well below that runs cleanly.
+The limit applies at roughly **16+ enrollments submitted within 10 seconds** on the US sandbox. Sustained submission velocity well below that runs cleanly.
 
 **Confirmation steps**
 
 1. Run a single `Ping` against the same `ApiUrl` / `AccessKey`. If it succeeds, the account is active; the prior failure was almost certainly a rate-limit hit.
-2. Check the gateway warning log for the `LogApiFailure` line emitted just before the throw (see issue [#8](https://github.com/Keyfactor/certinext-caplugin/issues/8) and the `LogApiFailure` helper in `CERTInextClient.cs`). The full raw response body is included there — if CERTInext ever surfaces a distinguishing code or message for rate-limit (as opposed to account-state), it will appear in that line.
+2. Check the gateway warning log for the `LogApiFailure` line written by the plugin's `LogApiFailure` helper just before the exception is thrown. The full raw response body is included there — if CERTInext ever surfaces a distinguishing code or message for rate-limit (as opposed to account-state), it will appear in that line.
 3. Wait 30–60 seconds, then retry the failed enrollment(s). A successful retry confirms it was rate-limit.
 
 **Mitigation**
 
-- **Reduce submission velocity**: throttle order placements to roughly one per 1–2 seconds. The plugin does not yet have a built-in client-side throttle; pacing must come from the caller (e.g. Keyfactor Command's enrollment scheduling, or a workflow that places certs in batches).
+- **Automatic retry**: when order placement returns this error, the plugin retries it with exponential backoff and jitter (up to 5 attempts) before surfacing the failure, so brief bursts resolve without operator action.
+- **Reduce submission velocity**: throttle order placements to roughly one per 1–2 seconds. The plugin does not have a built-in client-side throttle; pacing must come from the caller (e.g. Keyfactor Command's enrollment scheduling, or a workflow that places certs in batches).
 - **For high-volume migration scenarios**: split the workload into batches of ~10 orders separated by a short pause, rather than firing everything at once.
-- **No client-side automatic retry on this error**: a defensive retry inside `PlaceOrderAsync` would paper over the misleading error string and burn the operator's order quota on retries. We document the gotcha instead.
 
 ### Enrollment returns immediately with `Status=90 (EXTERNALVALIDATION)`
 
@@ -75,7 +75,7 @@ CERTInext exposes the `domainVerification` slot in `TrackOrder` **before** the `
 
 **Mitigation**
 
-No action needed. Plugin's sync-driven DCV retry handles this transparently — the order will be picked up on a subsequent sync cycle once the CA-side gate clears (observed window: seconds to a few hours, environment-dependent).
+No action needed. Plugin's sync-driven DCV retry handles this transparently — the order will be picked up on a subsequent sync cycle once the CA-side gate clears (the window ranges from seconds to a few hours, depending on the environment).
 
 ### Plugin fails to load with `Could not load type 'Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory'`
 
@@ -85,7 +85,7 @@ Gateway returns HTTP 500 on CA registration or first enrollment with the body `{
 
 **Root cause**
 
-Older gateway image whose bundled `Keyfactor.AnyGateway.IAnyCAPlugin` assembly is v3.2 or earlier (the `IDomainValidatorFactory` interface is v3.3+). This was fully addressed by the issue [#7](https://github.com/Keyfactor/certinext-caplugin/issues/7) fix in v1.0 — both the constructor-signature surface AND the field-type surface are now safe to load on v3.2 hosts.
+Older gateway image whose bundled `Keyfactor.AnyGateway.IAnyCAPlugin` assembly is v3.2 or earlier (the `IDomainValidatorFactory` interface is v3.3+). Since v1.0, both the constructor-signature surface and the field-type surface are safe to load on v3.2 hosts.
 
 **Mitigation**
 

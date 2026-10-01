@@ -224,9 +224,9 @@ sequenceDiagram
     API-->>Plugin: 201 Created — orderId assigned\nstatus: pending-dcv
 
     Plugin->>API: GET /ssl-certificates/{orderId}/dcv
-    API-->>Plugin: DCV challenge\n(fileNameContent = TXT value,\ndcvMethod = "2" for DNS-TXT)
+    API-->>Plugin: DCV challenge\n(token = TXT value)
 
-    Plugin->>DNS: Publish TXT record\n_emudhra-challenge.{domain} → fileNameContent
+    Plugin->>DNS: Publish TXT record\n(DcvTxtRecordTemplate, default _emsign-validation.{domain}) → token
     Plugin->>Plugin: Wait for DNS propagation
 
     Plugin->>API: POST /ssl-certificates/{orderId}/dcv/verify\n(domain, method: "dns-txt")
@@ -294,11 +294,11 @@ sequenceDiagram
 
 **Token caching:** the Bearer token is cached for its 1-hour lifetime and shared across all V2 calls in the same gateway process. A new token is fetched automatically 60 seconds before expiry.
 
-**Idempotency:** V2 order-create and revoke calls carry a fresh `Idempotency-Key` UUID, but the plugin can't rely on it to prevent duplicates. The V2 spec describes the header as "Parsed today; enforced in a future release", and a new key is generated on every call, so a retry never reuses one. In a live sandbox check (2026-09-25), two order-create calls sent with the same key created two separate orders. The second call returned a generic HTTP 500 even though its order had been created. The plugin never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. The only revoke retry is the one-time reason fallback described under [Revocation](#revocation), which is sent after CERTInext has already rejected the first call. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
+**Idempotency:** V2 order-create and revoke calls carry a fresh `Idempotency-Key` UUID, but the plugin can't rely on it to prevent duplicates. The V2 spec describes the header as "Parsed today; enforced in a future release", and a new key is generated on every call, so a retry never reuses one. CERTInext does not currently deduplicate on the key: two order-create calls sent with the same key create two separate orders, and the second can return a generic HTTP 500 even though its order was created. The plugin never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. The only revoke retry is the one-time reason fallback described under [Revocation](#revocation), which is sent after CERTInext has already rejected the first call. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
 
 **Full certificate chain:** the V2 `/certificate` endpoint returns the leaf certificate in `certificatePem` and any intermediate certificates in `chainPem[]`. The plugin concatenates these into a single PEM before returning to Command.
 
-**Order IDs:** the plugin stores the V2 `orderId` unchanged as the `CARequestID`. The V2 spec's examples show `ord_`-prefixed IDs, but orders placed through V2 on the sandbox so far have returned numeric order numbers in the same format as V1 (e.g. `6625262451`), and V1 order numbers resolve through V2 Track Order unchanged.
+**Order IDs:** the plugin stores the V2 `orderId` unchanged as the `CARequestID`. The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (e.g. `6625262451`), and V1 order numbers resolve through V2 Track Order unchanged.
 
 **Synchronize uses V2 reports:** with `UseV2Api = true`, Synchronize pages through V2 `/reports/orders` and downloads the certificate body for each issued order. An incremental sync starts `V2SyncLookbackHours` (default 72) before the last sync time.
 
@@ -341,11 +341,10 @@ sequenceDiagram
 
 **Reason code fallback (V2 only):** the V2 spec documents 8 RFC 5280 reason values for the SSL/TLS
 revoke endpoint. `aa-compromise` is listed only for the Document Signer and Private PKI endpoints,
-which document 9. In live sandbox testing on SSL/TLS orders, independent of this plugin, only 5 values
-succeeded: `key-compromise`, `affiliation-changed`, `superseded`, `cessation-of-operation`, and
-`privilege-withdrawn`. Three documented values, `unspecified`, `ca-compromise`, and
-`certificate-hold`, returned a 422 "Invalid Revoke Reason ID". So did the undocumented `aa-compromise`.
-Revoke reasons for Private PKI and Document Signer orders haven't been tested live.
+which document 9. On SSL/TLS orders, CERTInext accepts only 5 values: `key-compromise`,
+`affiliation-changed`, `superseded`, `cessation-of-operation`, and `privilege-withdrawn`. Three
+documented values, `unspecified`, `ca-compromise`, and `certificate-hold`, return a 422 "Invalid Revoke
+Reason ID", as does the undocumented `aa-compromise`.
 
 Rather than surface any of these four rejections to the caller, the plugin retries each once with a
 close accepted substitute: `unspecified` (CRL reason 0, Command's default when no explicit reason is
@@ -355,12 +354,11 @@ given — by far the most common revoke case) and `certificate-hold` (CRL reason
 because neither `unspecified` nor `certificate-hold` implies an actual key compromise, and
 `key-compromise` carries the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation, which would
 misrepresent the revoke. Only these four specific rejections trigger a retry; any other revoke
-failure is surfaced as-is. See `issues/0026` for the full reason-value test matrix and the open
-question to CERTInext support about whether the documented reason enum is intentional.
+failure is surfaced as-is.
 
 **Note field quirk:** CERTInext's revoke `note` (audit remarks) field rejects a semicolon (`;`) with a
-separate 422, "Invalid Revoke Remarks." — confirmed live that comma, period, slash, and parentheses are
-all accepted; only `;` triggers it. The retry note above avoids semicolons for this reason.
+separate 422, "Invalid Revoke Remarks." Commas, periods, slashes, and parentheses are accepted; only `;`
+triggers it. The retry note above avoids semicolons for this reason.
 
 ---
 

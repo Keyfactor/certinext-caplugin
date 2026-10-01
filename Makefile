@@ -140,11 +140,11 @@ generate-test-csr:
 
 # ---------------------------------------------------------------------------
 # probe-products — places saveAndHold=1 draft orders for every SSL/TLS
-# product code known to be provisioned on this sandbox account and reports
-# which codes are accepted by GenerateOrderSSL.
+# product code in the list below and reports which codes are accepted by
+# GenerateOrderSSL for the configured account.
 #
-# Product codes exercised (all SSL/TLS from GetProductDetails for this
-# sandbox account with groupNumber=2171775848):
+# Product codes exercised (sandbox SSL/TLS codes; production codes differ —
+# see docsource/configuration.md):
 #   842 DV SSL Certificate
 #   843 DV SSL Certificate Wildcard
 #   844 DV SSL Certificate UCC
@@ -169,7 +169,7 @@ probe-products: generate-test-csr
 # Aliases: orders
 # Optional overrides: PAGE (default 1), PAGE_SIZE (default 10)
 #
-# Response shape (live API, verified 2026-04):
+# Response shape:
 #   { "orderDetails": { "ordersArray": [...], "noOfPages": N,
 #                       "totalNoOfResults": N, "pageSize": N, "currentPage": "1" },
 #     "meta": { "status": "1", ... } }
@@ -287,17 +287,11 @@ submit-csr:
 # ---------------------------------------------------------------------------
 # list-cas — Sub-CA listing via API
 #
-# The CERTInext REST API does NOT expose a Sub-CA listing endpoint.
-# All 18 candidate endpoint names return HTTP 404.
+# The CERTInext REST API does not expose a Sub-CA listing endpoint.
+# Sub-CA information is available in the CERTInext portal UI
+# (https://sandbox-us.certinext.io for the sandbox environment).
 #
-# Sub-CA information must be obtained via the sandbox portal UI at
-# https://sandbox-us.certinext.io.  Active Sub-CAs for this account:
-#   Name : emSign Issuing Sand box CA IGTF - C6
-#   Type : Subordinate CA
-#   Status : Active
-#   (Backed by emSign Trusted Sandbox Root CA - C6)
-#
-# See analysis/certinext-caplugin/postman-api-findings.md for full details.
+# See analysis/certinext-caplugin/postman-api-findings.md for details.
 # ---------------------------------------------------------------------------
 
 list-cas:
@@ -321,8 +315,8 @@ list-cas:
 #     make register-import        # 05 import templates into Command  [CHECK=1]
 #     make register-enrollment    # 06 enrollment patterns + template KeyRetention
 #
-# Stages 01 and 06 are VERIFIED live; 02-05 are built from docs/reference
-# captures — validate against a live gateway/Command before relying on them.
+# Stages 02-05 are modeled on the captured JSON in docs/reference — validate
+# them against your gateway/Command before relying on them.
 # Auth (cookie/token/OAuth), env vars, and gotchas: scripts/register/README.md.
 # NOTE: stage 04 (and stage 02's CA-connection PUT) touch the CA config, which
 # is fragile — leave it alone unless explicitly required.
@@ -351,14 +345,11 @@ register-enrollment:
 # ---------------------------------------------------------------------------
 # create-product — Create a custom product via API
 #
-# The CERTInext REST API does NOT expose a product creation or configuration
-# endpoint.  All 8 candidate endpoint names return HTTP 404.
-#
-# Products must be created via the sandbox portal UI at
-# https://sandbox-us.certinext.io under:
+# The CERTInext REST API does not expose a product creation or configuration
+# endpoint.  Products are created in the CERTInext portal UI under:
 #   Account → Products → Configure Product
 #
-# See analysis/certinext-caplugin/postman-api-findings.md for full details.
+# See analysis/certinext-caplugin/postman-api-findings.md for details.
 # ---------------------------------------------------------------------------
 
 create-product:
@@ -367,9 +358,10 @@ create-product:
 # ---------------------------------------------------------------------------
 # generate-order-igtf — Place a Private PKI order using product 149
 #
-# Product 149 (Sandbox emSign Intranet SSL 1 Year) is the only Private PKI
-# product provisioned on this sandbox account.  Product 108 (IGTF Host
-# Certificate) is NOT provisioned here — GetFieldDetails returns EMS-1269.
+# Product 149 (Sandbox emSign Intranet SSL 1 Year) is a Private PKI product
+# available on sandbox accounts with the Private PKI entitlement.  Product 108
+# (IGTF Host Certificate) requires separate provisioning — GetFieldDetails
+# returns EMS-1269 when it is not provisioned.
 #
 # Uses GenerateOrderPrivatePKI.
 # Required: CSR at /tmp/certinext-igtf-test.csr (run generate-test-csr first)
@@ -415,7 +407,7 @@ generate-order-private-pki: generate-test-csr
 # reports whether they exist (non-404) or not (404).  Wraps
 # scripts/probe_endpoints.py.
 #
-# Result (confirmed 2026-04): ALL 18 candidates return HTTP 404.
+# None of the candidate endpoints exist (all return HTTP 404).
 # ---------------------------------------------------------------------------
 
 probe-endpoints:
@@ -455,7 +447,7 @@ get-field-details:
 FILTER ?=
 
 show-postman-bodies:
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/extract_postman_bodies.py \
+	@python3 scripts/extract_postman_bodies.py \
 	  --filter "$(FILTER)"
 
 # ---------------------------------------------------------------------------
@@ -467,7 +459,7 @@ show-postman-bodies:
 # ---------------------------------------------------------------------------
 
 show-postman-variables:
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/extract_postman_variables.py
+	@python3 scripts/extract_postman_variables.py
 
 # ---------------------------------------------------------------------------
 # probe-private-pki-payloads — Try three payload variants for
@@ -481,7 +473,7 @@ show-postman-variables:
 # ---------------------------------------------------------------------------
 
 probe-private-pki-payloads: generate-test-csr
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/order_private_pki_minimal.py \
+	@python3 scripts/order_private_pki_minimal.py \
 	  --csr /tmp/certinext-test.csr \
 	  --domain "$(IGTF_DOMAIN)" \
 	  --product "$(PRIVATE_PKI_CODE)" \
@@ -785,7 +777,7 @@ api-help:
 	@echo ""
 	@echo "  make probe-products   [PROBE_DOMAIN=test-integration.example.com]"
 	@echo "      Place saveAndHold=1 draft orders for all SSL/TLS product codes"
-	@echo "      provisioned on the sandbox account (842–851, 149) and report which"
+	@echo "      in the sandbox product list (842–851, 149) and report which"
 	@echo "      codes are accepted.  A code returning a requestNumber is valid."
 	@echo "      Depends on generate-test-csr (called automatically)."
 	@echo ""
@@ -823,9 +815,8 @@ api-help:
 	@echo ""
 	@echo "  make generate-order-igtf   [IGTF_CSR_FILE=/tmp/certinext-igtf-test.csr]"
 	@echo "      GenerateOrderPrivatePKI — place a Private PKI order using product 149"
-	@echo "      (Sandbox emSign Intranet SSL, the only active Private PKI product on this"
-	@echo "      sandbox account).  Uses saveAndHold=1 by default."
-	@echo "      NOTE: product 108 (IGTF Host) is not provisioned on this account."
+	@echo "      (Sandbox emSign Intranet SSL).  Uses saveAndHold=1 by default."
+	@echo "      NOTE: product 108 (IGTF Host) requires separate provisioning."
 	@echo ""
 	@echo "  make generate-order-private-pki   [PRIVATE_PKI_CSR=...] [PRIVATE_PKI_DOMAIN=...] [PRIVATE_PKI_CODE=149]"
 	@echo "      GenerateOrderPrivatePKI — place a Private PKI order for any product code."
