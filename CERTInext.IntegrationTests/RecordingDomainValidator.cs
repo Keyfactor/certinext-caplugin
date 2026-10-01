@@ -25,7 +25,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     /// <see cref="IDomainValidator"/> spy that wraps a real (Cloudflare or stub) validator
     /// and records every <c>StageValidation</c>/<c>CleanupValidation</c> call, including the
     /// FQDN and staged value, so DCV-on tests can assert whether the plugin actually staged
-    /// a TXT record rather than just asserting that Enroll did not throw (gap G5, issues/0020).
+    /// a TXT record rather than just asserting that Enroll did not throw.
     /// </summary>
     internal sealed class RecordingDomainValidator : IDomainValidator
     {

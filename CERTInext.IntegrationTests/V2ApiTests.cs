@@ -42,9 +42,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     ///   export CERTINEXT_USE_V2_API=1
     ///   dotnet test CERTInext.IntegrationTests/ --filter "FullyQualifiedName~V2ApiTests"
     /// </code>
-    /// Note: the shell must source ONLY <c>~/.env_certinext</c> (never <c>~/.env_certinext_v2</c> —
-    /// see issue 0017); this class loads <c>~/.env_certinext_v2</c> itself from disk at
-    /// test-construction time.
+    /// Note: the shell must source ONLY <c>~/.env_certinext</c> (never <c>~/.env_certinext_v2</c>);
+    /// this class loads <c>~/.env_certinext_v2</c> itself from disk at test-construction time.
     ///
     /// <b>Required variables in <c>~/.env_certinext_v2</c> (or real env vars):</b>
     /// <list type="bullet">
@@ -55,8 +54,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     ///   <item><c>CERTINEXT_DCV_DOMAIN</c>    — domain for lifecycle test (e.g. dcv-test.example.com)</item>
     /// </list>
     /// V1 variables (<c>CERTINEXT_API_URL</c>, <c>CERTINEXT_ACCESS_KEY</c>, etc.) are NOT required
-    /// for V2-mode tests — Synchronize now uses V2 <c>/reports/orders</c> when UseV2Api is true
-    /// (issues/0022), and V1 credentials are optional in that mode.
+    /// for V2-mode tests — Synchronize uses V2 <c>/reports/orders</c> when UseV2Api is true,
+    /// and V1 credentials are optional in that mode.
     /// </summary>
     public class V2ApiTests : IClassFixture<IntegrationTestFixture>
     {
@@ -78,8 +77,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _fixture = fixture;
             _output  = output;
 
-            // Load ~/.env_certinext_v2 via the shared helper (issues/0017, gap G14 — one env
-            // loader, not a private copy per test class). V2 file values take priority over
+            // Load ~/.env_certinext_v2 via the shared helper (one env loader, not a private
+            // copy per test class). V2 file values take priority over
             // process env because IntegrationTestFixture may have already promoted the V1
             // CERTINEXT_API_URL (with /emSignHub-API suffix) into process env, and the V2 base
             // URL is different.
@@ -155,9 +154,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             trackResp.OrderId.Should().Be(createResp.OrderId);
             trackResp.Status.Should().NotBeNullOrEmpty(
                 "V2 TrackOrder must return a status for the placed order");
-            // Best-effort structural check: this sandbox's TrackOrder response has been
-            // observed to omit "_links" entirely (see issues/0016), so we log rather than
-            // hard-fail — the regression we actually guard against is OrderId/Status shape.
+            // Best-effort structural check: this sandbox's TrackOrder response can omit
+            // "_links" entirely, so this logs rather than hard-fails — the shape actually
+            // guarded against here is OrderId/Status.
             if (trackResp.Links?.Self?.Href is string href && !string.IsNullOrWhiteSpace(href))
                 _output.WriteLine($"TrackOrder links.self.href: {href}");
             else
@@ -169,16 +168,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Synchronize uses V2 /reports/orders when UseV2Api=true (issues/0022)
+        // Synchronize uses V2 /reports/orders when UseV2Api=true
         // ---------------------------------------------------------------------------
 
         /// <summary>
         /// Verifies that Synchronize calls V2 <c>/reports/orders</c> (not V1 GetOrderReport)
-        /// when <c>UseV2Api=true</c>, and succeeds with ZERO V1 credentials configured at all —
-        /// the hard acceptance criterion from the Phase 4 parent plan. A single
-        /// <see cref="CERTInextConfig.ApiUrl"/> now serves both modes (issues/0022 config
-        /// consolidation), so the V1-only fields (ApiKey/AccountNumber/AuthMode) below are
-        /// simply never set.
+        /// when <c>UseV2Api=true</c>, and succeeds with ZERO V1 credentials configured at all.
+        /// A single <see cref="CERTInextConfig.ApiUrl"/> serves both modes, so the V1-only
+        /// fields (ApiKey/AccountNumber/AuthMode) below are simply never set.
         /// </summary>
         [SkippableFact]
         public async Task Sync_UsesV2_WithZeroV1Credentials()
@@ -203,9 +200,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 // The DEFAULT 72h lookback margin (Constants.ApiV2.DefaultSyncLookbackHours) is
                 // always added on top of lastSync regardless of how recent lastSync is, so on a
                 // busy shared sandbox account even a "last hour" delta sync still touches
-                // several days of orders unless this is overridden. See issues/0022's "V2 sync
-                // per-row download cost" note — this is a real, currently-unbounded cost on the
-                // live path, not just a test-tuning artifact.
+                // several days of orders unless this is overridden. This is a real, currently
+                // unbounded cost on the live path, not just a test-tuning artifact.
                 V2SyncLookbackHours = 1
                 // Deliberately NOT set: ApiKey, AccountNumber, AuthMode, OAuthTokenUrl — all
                 // V1-only fields. Proving Synchronize succeeds without them is the point of
@@ -216,11 +212,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var plugin = new CERTInextCAPlugin(client, config);
 
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(1000);
-            // 300s: this shared sandbox has been observed to return 100+ orders even within a
-            // narrow ~1-2h window (heavy ongoing test activity), and each issued row costs a
-            // live download plus (when family isn't already known) a family-probe TrackOrder
-            // call — real, measured durations for comparable scope elsewhere in this class are
-            // 3-4.5 minutes. See issues/0022's "V2 sync per-row download cost" note — this is a
+            // 300s: this shared sandbox can return 100+ orders even within a narrow ~1-2h
+            // window (heavy ongoing test activity), and each issued row costs a live download
+            // plus (when family isn't already known) a family-probe TrackOrder call — a
             // genuine current performance characteristic of the live path, not a test artifact.
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(300));
 
@@ -234,7 +228,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             // The delta sync window is narrow (see V2SyncLookbackHours above), so this only
             // proves correctness (zero V1 creds, records returned, shape is sane) — not sync
-            // performance at scale, which issues/0022 flags as a separate, real concern.
+            // performance at scale, which is a separate, real concern.
             records.Should().NotBeEmpty(
                 "Synchronize must return records via V2 /reports/orders when UseV2Api=true, with zero V1 " +
                 "credentials configured — an empty result here proves nothing about which code path ran");
@@ -264,10 +258,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             products.Should().NotBeNull("V2 catalog/products must return a non-null list");
             products.Should().NotBeEmpty("V2 catalog/products must return at least one product");
 
-            // Hard assertion restored (issues/0016 item 1, fixed by issues/0025): the live
-            // catalog/products response is a nested category envelope, the same shape V1's
-            // GetProductDetails returns. ParseProductDetailsV2Response now flattens it, so
-            // every parsed product must carry a non-empty ProductCode.
+            // The live catalog/products response is a nested category envelope, the same
+            // shape V1's GetProductDetails returns. ParseProductDetailsV2Response flattens
+            // it, so every parsed product must carry a non-empty ProductCode.
             products.Should().OnlyContain(p => !string.IsNullOrWhiteSpace(p.ProductCode),
                 "ParseProductDetailsV2Response must flatten the nested category envelope into ProductCode-bearing rows");
             _output.WriteLine($"{products.Count}/{products.Count} catalog products carry a non-empty ProductCode.");
@@ -275,8 +268,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Drives <see cref="CERTInextCAPlugin.ValidateProductInfo"/> (not just the client
-        /// method) end-to-end in V2 mode against the configured product code — the regression
-        /// test for issue 0025. Read-only.
+        /// method) end-to-end in V2 mode against the configured product code. Read-only.
         /// </summary>
         [SkippableFact]
         public async Task ValidateProductInfo_V2_AcceptsConfiguredProductCode()
@@ -383,9 +375,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Revokes a previously issued V2 order. Prefers CERTINEXT_V2_ISSUED_ORDER_ID;
         /// otherwise self-enrolls a fresh order via <see cref="EnsureIssuedOrderIdAsync"/>
-        /// and polls (bounded) for issuance (V2_TEST_GAP_PLAN.md Phase 1.4b) — so the test
-        /// no longer depends on another test's run order (issues/0017, gap G7) to have a
-        /// usable order ID.
+        /// and polls (bounded) for issuance, so the test does not depend on another test's
+        /// run order to have a usable order ID.
         /// </summary>
         [SkippableFact]
         public async Task Revoke_V2_IssuedOrder()
@@ -397,7 +388,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             // Revoke — sandbox may report 'issued' via track but reject revocation
             // with 422 ("Certificate Request still being processed") while the order
-            // is still being processed internally (issues/0019).
+            // is still being processed internally.
             var revokeReq = new V2RevokeRequest
             {
                 Reason = "superseded",
@@ -447,10 +438,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// CERTInext's domain DCV is account-scoped and reusable (BR 3.2.2.5): once
         /// <c>CERTINEXT_DCV_DOMAIN</c> is verified once, it stays verified for the
         /// <c>validTill</c> reuse window, and GetDcv/VerifyDcv return EMS-1080
-        /// ("Domain is already verified") instead of issuing a fresh challenge — see
-        /// issues/0020. That is treated here as the reuse-path outcome, not a failure:
-        /// the publish/verify steps are skipped and the order is polled directly for
-        /// leaving pending-dcv.
+        /// ("Domain is already verified") instead of issuing a fresh challenge. That is
+        /// treated here as the reuse-path outcome, not a failure: the publish/verify
+        /// steps are skipped and the order is polled directly for leaving pending-dcv.
         /// </summary>
         [SkippableFact]
         public async Task DcvFlow_V2_PublishesAndVerifies()
@@ -504,15 +494,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     reuseStatus!.Status.Should().NotBe(
                         Constants.ApiV2.StatusPendingDcv,
                         $"order {orderId} must leave pending-dcv on a reused/already-verified domain (EMS-1080) " +
-                        "without a fresh TXT challenge. If this fails, see issues/0020.");
+                        "without a fresh TXT challenge.");
                     return;
                 }
                 dcvResp.Should().NotBeNull();
                 dcvResp.Token.Should().NotBeNullOrEmpty(
                     "GetDcvV2Async must return a TXT token in Token");
 
-                // The live response has no domainName field (issues/0037) — the domain is
-                // already known locally from the order-placement request.
+                // The live response has no domainName field — the domain is already known
+                // locally from the order-placement request.
                 string domainName = _v2Domain;
 
                 // 3. Publish TXT record
@@ -567,7 +557,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// ChainPem is populated.  The test passes in either case — it is a
         /// best-effort diagnostic to confirm chain assembly works in production.
         /// Prefers CERTINEXT_V2_ISSUED_ORDER_ID; otherwise self-enrolls a fresh order
-        /// via <see cref="EnsureIssuedOrderIdAsync"/> (V2_TEST_GAP_PLAN.md Phase 1.4b).
+        /// via <see cref="EnsureIssuedOrderIdAsync"/>.
         /// </summary>
         [SkippableFact]
         public async Task ChainPem_V2_IsAssembled()
@@ -653,8 +643,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             return new CERTInextClient(new CERTInextConfig
             {
-                // A single ApiUrl now serves V2 (issues/0022 config consolidation) — no V1-only
-                // fields are set here.
+                // A single ApiUrl serves V2 — no V1-only fields are set here.
                 ApiUrl            = _v2ApiUrl,
                 UseV2Api          = true,
                 OAuthClientId     = _v2ClientId,
@@ -672,7 +661,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <c>CERTINEXT_V2_ISSUED_ORDER_ID</c> if set; otherwise places a fresh order on
         /// <paramref name="client"/> and polls (bounded) until it reaches <c>issued</c>, so
         /// tests using this helper are self-contained and don't depend on env state or
-        /// another test's run order (V2_TEST_GAP_PLAN.md Phase 1.4b). <c>Skip.If</c>s when
+        /// another test's run order. <c>Skip.If</c>s when
         /// no env ID is set and the freshly-placed order never reaches <c>issued</c> within
         /// the poll budget — sandboxes may require DCV to auto-issue.
         /// </summary>

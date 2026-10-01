@@ -13,9 +13,9 @@
 // limitations under the License.
 //
 // V2 release-candidate readiness: assertion-bearing live lifecycle coverage for the product
-// families/shapes the existing V2 suite (V2LifecycleTests/V2ApiTests/V2DcvLifecycleTests/
-// V2GapProbeTests) never exercised end to end — DV UCC, OV, OV UCC, EV, wildcard DV, and
-// renew/reissue. Each test is gated by its own CERTINEXT_V2_LIFECYCLE_<NAME>=1 flag (never
+// families/shapes the existing V2 suite (V2LifecycleTests/V2ApiTests/V2DcvLifecycleTests)
+// never exercised end to end — DV UCC, OV, OV UCC, EV, wildcard DV, and renew/reissue. Each
+// test is gated by its own CERTINEXT_V2_LIFECYCLE_<NAME>=1 flag (never
 // promoted from ~/.env_certinext_v2 — see IntegrationTestFixture._optInOnlyFlags), places real
 // sandbox orders, and always cleans up (revoke if issued, cancel otherwise) via
 // CleanupOrderAsync in a try/finally. Fresh-domain DCV coverage lives in
@@ -59,13 +59,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private readonly bool _v2Enabled;
 
         /// <summary>
-        /// 300s target for OV/EV order-creation calls per the task brief (known CA latency —
-        /// issue 0064). NOT actually enforceable at this (plugin-level) layer: CERTInextClient's
-        /// V2 RestClient hard-codes <c>Timeout = TimeSpan.FromSeconds(120)</c> (CERTInextClient.cs,
-        /// both the V1 and V2 RestClientOptions blocks) with no CERTInextConfig override to raise
-        /// it. OV/EV tests below catch a client-side timeout distinctly from a CA-side rejection
-        /// and record it rather than assert past it — see IsClientTimeout below. Flagged in the
-        /// handoff report as a production gap, not silently worked around here.
+        /// 300s target for OV/EV order-creation calls (CA latency for these product types can
+        /// be significant). NOT actually enforceable at this (plugin-level) layer:
+        /// CERTInextClient's V2 RestClient hard-codes <c>Timeout = TimeSpan.FromSeconds(120)</c>
+        /// (CERTInextClient.cs, both the V1 and V2 RestClientOptions blocks) with no
+        /// CERTInextConfig override to raise it. OV/EV tests below catch a client-side timeout
+        /// distinctly from a CA-side rejection and record it rather than assert past it — see
+        /// IsClientTimeout below. This is a known production gap: the client-side timeout can
+        /// trip before the CA itself would reject or accept the order.
         /// </summary>
         private static readonly TimeSpan OvEvCreateTimeoutTarget = TimeSpan.FromSeconds(300);
 
@@ -177,7 +178,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// plugin's hard-coded 120s V2 RestClient timeout expiring before the CA responds) from a
         /// genuine CA-side rejection. See <see cref="OvEvCreateTimeoutTarget"/>'s doc comment.
         ///
-        /// Also matches the shape actually observed on a live run: CERTInextClient's
+        /// Also matches the shape the CA can return for the same condition: CERTInextClient's
         /// <c>ThrowOnV2Failure</c> does not always surface a <see cref="TaskCanceledException"/>
         /// for a RestSharp-level transport timeout — it can instead produce a plain
         /// <see cref="Exception"/> reading "CERTInext V2 API error during '...'. HTTP 0.
@@ -268,7 +269,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 {
                     var outcome = await client.CancelOrderV2Async(
                         family, orderId,
-                        $"V2 full-lifecycle test orphan sweep — client-side timeout at submission (issue 0064), tag={probeTag}.");
+                        $"V2 full-lifecycle test orphan sweep — client-side timeout at submission, tag={probeTag}.");
                     return $"orphan sweep found order {orderId} (status was {status.Status}) and cancelled it (outcome={outcome})";
                 }
                 catch (Exception cancelEx)
@@ -286,7 +287,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Cleans up a sandbox order this test created: revokes it via the plugin's real V2
         /// Revoke if it reached GENERATED, otherwise cancels it via the raw cancel endpoint
-        /// (the plugin has no V2 cancel method — <see cref="V2RawProbeHelpers"/>). Single attempt
+        /// (the plugin has no V2 cancel method — <see cref="V2RawHttpHelpers"/>). Single attempt
         /// only — never retries a cancel. Logs rather than throws on failure so a cleanup problem
         /// never masks the test's own assertion result; failures are surfaced in test output for
         /// manual follow-up in the CERTInext portal.
@@ -306,7 +307,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 else
                 {
-                    await V2RawProbeHelpers.CancelSslOrderRawAsync(
+                    await V2RawHttpHelpers.CancelSslOrderRawAsync(
                         _v2ApiUrl, _v2ClientId, _v2ClientSecret, orderId,
                         "V2 full-lifecycle test cleanup — order not issued, cancelling.");
                     _output.WriteLine($"Cleanup: cancelled non-issued order {orderId} (status={current?.Status}).");
@@ -328,9 +329,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Places one V2 DV SSL UCC order (<see cref="Constants.Products.DvSslUcc"/>) with the
         /// primary domain on the account's long-reused, likely-already-verified
         /// <c>CERTINEXT_DCV_DOMAIN</c>, plus two fresh never-seen subdomains as additional SANs
-        /// (so the order itself places cleanly regardless of whether the extra SANs clear DCV —
-        /// mirrors UccPendingSanOrderProbeTests' reasoning). Exercises Enroll -> GetSingleRecord
-        /// -> Synchronize, then cleans up (revoke if GENERATED, else cancel).
+        /// (so the order itself places cleanly regardless of whether the extra SANs clear DCV).
+        /// Exercises Enroll -> GetSingleRecord -> Synchronize, then cleans up (revoke if
+        /// GENERATED, else cancel).
         /// Expected sandbox order count: 1.
         /// </summary>
         [SkippableFact]
@@ -396,10 +397,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Places one V2 OV SSL order (<see cref="Constants.Products.OvSsl"/>); productVariant
         /// "ov" and the organization block are both derived/required automatically by
-        /// EnrollV2Async (issues 0028, 0059) from the connector's OrganizationNumber. Sandbox
-        /// OV orders commonly park in a pending-vetting state rather than auto-issuing — this
-        /// test asserts on whatever state machine is actually observed (only FAILED at submission
-        /// is treated as a hard failure) rather than forcing GENERATED. See
+        /// EnrollV2Async from the connector's OrganizationNumber. Sandbox OV orders commonly
+        /// park in a pending-vetting state rather than auto-issuing — this test asserts on
+        /// whatever state machine actually results (only FAILED at submission is treated as a
+        /// hard failure) rather than forcing GENERATED. See
         /// <see cref="OvEvCreateTimeoutTarget"/> for the 120s-vs-300s client timeout caveat.
         /// Expected sandbox order count: 1.
         /// </summary>
@@ -439,9 +440,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     string sweepResult = await TryCancelOrphanByWindowAsync(domain, windowStart, probeTag);
                     Skip.If(true,
                         "OV order creation did not return within the plugin's hard-coded 120s V2 HTTP client " +
-                        "timeout. Per issue 0064 (closed won't-fix) that timeout stays as-is, so this is an " +
-                        "expected skip rather than a production bug on its own — but a client timeout does not " +
-                        $"prove the CA never created the order; it likely did. {sweepResult}. " +
+                        "timeout. That timeout is a known client-side limitation rather than a CA-side " +
+                        "rejection, so this is an expected skip — but a client timeout does not prove the CA " +
+                        $"never created the order; it likely did. {sweepResult}. " +
                         $"Observed: {ex.GetType().Name}: {ex.Message}");
                     return;
                 }
@@ -455,7 +456,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
                 var tracked = await plugin.GetSingleRecord(orderId);
                 tracked.Should().NotBeNull();
-                _output.WriteLine($"Tracked OV order {orderId}: Status={tracked.Status} (OV sandbox orders commonly sit in a pending-vetting state — this is the observed, not forced, state machine).");
+                _output.WriteLine($"Tracked OV order {orderId}: Status={tracked.Status} (OV sandbox orders commonly sit in a pending-vetting state rather than a forced GENERATED state).");
 
                 var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddHours(-1), fullSync: false);
                 synced.Should().Contain(r => r.CARequestID == orderId,
@@ -474,9 +475,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Places one V2 OV SSL UCC order (<see cref="Constants.Products.OvSslUcc"/>) — the
         /// organization-block requirement (OV/EV) and the UCC multi-SAN path (additionalDomains)
-        /// are exercised together, which neither <c>OrganizationBlockV2ProbeTests</c> nor
-        /// <c>UccPendingSanOrderProbeTests</c> combined into one order. Same pending-vetting
-        /// observation and timeout caveat as the plain OV test above.
+        /// are exercised together in one order. Same pending-vetting behavior and timeout
+        /// caveat as the plain OV test above.
         /// Expected sandbox order count: 1.
         /// </summary>
         [SkippableFact]
@@ -519,9 +519,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     string sweepResult = await TryCancelOrphanByWindowAsync(primary, windowStart, probeTag);
                     Skip.If(true,
                         "OV UCC order creation did not return within the plugin's hard-coded 120s V2 HTTP client " +
-                        "timeout — same accepted-stays-as-is condition as the plain OV test (issue 0064, closed " +
-                        "won't-fix). A client timeout does not prove the CA never created the order; it likely " +
-                        $"did. {sweepResult}. Observed: {ex.GetType().Name}: {ex.Message}");
+                        "timeout — same known client-side limitation as the plain OV test. A client timeout " +
+                        $"does not prove the CA never created the order; it likely did. {sweepResult}. " +
+                        $"Observed: {ex.GetType().Name}: {ex.Message}");
                     return;
                 }
 
@@ -552,9 +552,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Places one V2 EV SSL order (<see cref="Constants.Products.EvSsl"/>) — same
-        /// organization-block requirement as OV (issue 0028/0059's ProductVariantsV2 mapping
-        /// resolves "ev" automatically), same pending-vetting observation, same client-timeout
-        /// caveat. Uses <c>CERTINEXT_EV_ORG_NUMBER</c> — NOT <c>CERTINEXT_ORG_NUMBER</c>/
+        /// organization-block requirement as OV (ProductVariantsV2 mapping resolves "ev"
+        /// automatically), same pending-vetting behavior, same client-timeout caveat. Uses
+        /// <c>CERTINEXT_EV_ORG_NUMBER</c> — NOT <c>CERTINEXT_ORG_NUMBER</c>/
         /// <see cref="IntegrationTestFixture.OrgNumber"/>, which is only pre-vetted for OV. EV
         /// requires its own, separately-vetted organization number that this account does not
         /// currently have; the test skips cleanly rather than guessing.
@@ -594,7 +594,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 {
                     Skip.If(true,
                         $"EV order creation did not return within the plugin's hard-coded 120s V2 HTTP " +
-                        $"client timeout — same production gap flagged for OV (issue 0064). " +
+                        $"client timeout — same known client-side limitation flagged for OV. " +
                         $"Observed: {ex.GetType().Name}: {ex.Message}");
                     return;
                 }
@@ -626,9 +626,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Resolves the wildcard domain to use: <c>CERTINEXT_V2_WILDCARD_DOMAIN</c> if set,
-        /// else the literal <c>*.dcv-test.scrup.org</c> named in the task brief — this repo's own
-        /// always-reused sandbox base domain (see UccPendingSanOrderProbeTests' header comment),
-        /// not customer data.
+        /// else the literal <c>*.dcv-test.scrup.org</c> — this repo's own always-reused sandbox
+        /// base domain, not customer data.
         /// </summary>
         private static string ResolveWildcardDomain() =>
             Environment.GetEnvironmentVariable("CERTINEXT_V2_WILDCARD_DOMAIN") ?? "*.dcv-test.scrup.org";
@@ -681,18 +680,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Wildcard+apex CSR shape: CN is the wildcard, SAN dictionary carries BOTH the wildcard
         /// and its bare apex domain. The non-UCC V2 SAN guard (CERTInextCAPlugin.cs, EnrollV2Async)
-        /// now explicitly exempts exactly this shape for a wildcard product (fix: 1f1de1b) — the
-        /// guard computes <c>domain</c> as the literal CN ("*.dcv-test.scrup.org" here), and
-        /// without the exemption the apex ("dcv-test.scrup.org") would match neither that nor its
-        /// "www." variant and be treated as a disallowed "extra SAN", even though a wildcard+apex
+        /// explicitly exempts exactly this shape for a wildcard product — the guard computes
+        /// <c>domain</c> as the literal CN ("*.dcv-test.scrup.org" here), and without the
+        /// exemption the apex ("dcv-test.scrup.org") would match neither that nor its "www."
+        /// variant and be treated as a disallowed "extra SAN", even though a wildcard+apex
         /// pairing is an extremely common, legitimate certificate shape. The order is therefore
-        /// expected to be accepted and issued. This test still RECORDS the actual observed
-        /// behavior rather than hard-asserting on it everywhere: if the order is rejected anyway,
+        /// expected to be accepted and issued. This test records the actual resulting behavior
+        /// rather than hard-asserting on it everywhere: if the order is rejected anyway,
         /// it asserts the rejection is specifically this guard's (by message content) rather than
         /// some unrelated failure; if accepted and issued, it parses the issued leaf (BouncyCastle)
         /// and logs — as an observation only, not an assertion — whether the apex is covered by
         /// the certificate's own SAN list (CERTInext may or may not add the apex to
-        /// additionalDomains automatically for a non-UCC wildcard product; unconfirmed live).
+        /// additionalDomains automatically for a non-UCC wildcard product).
         /// Expected sandbox order count: 0 or 1 (0 if CERTInext itself rejects a FAILED result
         /// before any order is ever placed — see the FAILED branch below).
         /// </summary>
@@ -739,7 +738,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 {
                     _output.WriteLine(
                         "RESULT: wildcard+apex was ACCEPTED — the non-UCC single-domain SAN guard's " +
-                        "wildcard-apex exemption (fix: 1f1de1b) allows the bare apex alongside the wildcard CN.");
+                        "wildcard-apex exemption allows the bare apex alongside the wildcard CN.");
                     enrollResult.CARequestID.Should().NotBeNullOrWhiteSpace();
                     orderId = enrollResult.CARequestID;
 
@@ -750,14 +749,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     if (tracked.Status == (int)EndEntityStatus.GENERATED && !string.IsNullOrWhiteSpace(tracked.Certificate))
                     {
                         var sans = ExtractDnsSansOrEmpty(tracked.Certificate);
-                        _output.WriteLine($"OBSERVATION: issued certificate SAN list: [{string.Join(", ", sans)}]");
+                        _output.WriteLine($"Issued certificate SAN list: [{string.Join(", ", sans)}]");
 
                         bool apexCovered = sans.Any(s => string.Equals(s, apex, StringComparison.OrdinalIgnoreCase));
                         _output.WriteLine(apexCovered
-                            ? $"OBSERVATION: the apex '{apex}' IS covered by the issued certificate's SAN list."
-                            : $"OBSERVATION: the apex '{apex}' is NOT covered by the issued certificate's SAN " +
-                              "list (observation only, not asserted — whether CERTInext adds the apex to " +
-                              "additionalDomains automatically for a non-UCC wildcard product is unconfirmed live).");
+                            ? $"The apex '{apex}' IS covered by the issued certificate's SAN list."
+                            : $"The apex '{apex}' is NOT covered by the issued certificate's SAN list " +
+                              "(not asserted — CERTInext may or may not add the apex to additionalDomains " +
+                              "automatically for a non-UCC wildcard product).");
                     }
                     else
                     {
@@ -783,13 +782,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// EnrollV2Async never branches on enrollmentType beyond logging it — every enrollment
         /// type is dispatched identically (CERTInextCAPlugin.cs: "V2 path: all enrollment types
         /// go through EnrollV2Async", and EnrollV2Async itself never reads PriorCertSN or
-        /// enrollmentType except in log statements). This test records the real observed
-        /// behavior (distinct CARequestIDs, original never implicitly revoked) but — unlike an
-        /// earlier version of this test — does NOT pass merely because the CA accepted each
-        /// submission; a FAILED order at the CA (e.g. the product-selection bug this plugin's own
-        /// catalog code resolves — now a separate, actively-fixed issue) must still fail this
-        /// test, since "records actual behavior" was never meant to license "observe FAILED
-        /// three times and call it a pass."
+        /// enrollmentType except in log statements). This test records the actual resulting
+        /// behavior (distinct CARequestIDs, original never implicitly revoked) but does NOT pass
+        /// merely because the CA accepted each submission; a FAILED order at the CA must still
+        /// fail this test, since "records actual behavior" was never meant to license "observe
+        /// FAILED three times and call it a pass."
         /// Expected sandbox order count: up to 3 (original + renew + reissue).
         /// </summary>
         [SkippableFact]

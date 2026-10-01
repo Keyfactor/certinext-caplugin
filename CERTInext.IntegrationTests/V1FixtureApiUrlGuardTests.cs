@@ -21,13 +21,13 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 {
     /// <summary>
-    /// Pure offline regression tests for issue 0017 (no live-API dependency, no process-env
-    /// mutation, so they are safe to run in parallel with every other class):
+    /// Pure offline regression tests (no live-API dependency, no process-env mutation, so they
+    /// are safe to run in parallel with every other class):
     /// <list type="bullet">
-    ///   <item>(D) the V1 fixture's <see cref="IntegrationTestFixture.EnsureV1ApiUrl"/> guard
+    ///   <item>the V1 fixture's <see cref="IntegrationTestFixture.EnsureV1ApiUrl"/> guard
     ///   rejects a V2 base URL with an actionable message that never echoes secrets;</item>
-    ///   <item>(B) <see cref="V2EnvHelper.PromotableKeys"/> never promotes a key the V1 side reads,
-    ///   nor any of the fixture's opt-in-only flags (issue 0058).</item>
+    ///   <item><see cref="V2EnvHelper.PromotableKeys"/> never promotes a key the V1 side reads,
+    ///   nor any of the fixture's opt-in-only flags.</item>
     /// </list>
     /// </summary>
     public class V1FixtureApiUrlGuardTests
@@ -83,7 +83,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         /// <summary>
-        /// End-to-end offline composition of the 0017 shell-overlay path: a correct V1 file, a
+        /// End-to-end offline composition of the shell-overlay path: a correct V1 file, a
         /// V2 <c>CERTINEXT_API_URL</c> in the (simulated) process environment. Real env vars keep
         /// precedence (documented behaviour), and the guard then rejects the leaked value — the
         /// same two steps the fixture constructor runs before it builds any client.
@@ -91,7 +91,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         [Fact]
         public void LoadEnvFile_ProcessEnvV2UrlOverridesV1File_GuardRejectsIt()
         {
-            string path = Path.Combine(Path.GetTempPath(), $"certinext-0017-{Guid.NewGuid():N}.env");
+            string path = Path.Combine(Path.GetTempPath(), $"certinext-v1url-{Guid.NewGuid():N}.env");
             try
             {
                 File.WriteAllLines(path, new[]
@@ -140,14 +140,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         /// <summary>
-        /// Issue 0058: if a developer ever left one of the fixture's opt-in-only flags (e.g.
+        /// If a developer ever left one of the fixture's opt-in-only flags (e.g.
         /// CERTINEXT_V2_GAP_PROBES, CERTINEXT_PRIVATE_PKI_LIVE) in ~/.env_certinext_v2, it must
         /// NOT come back out of <see cref="V2EnvHelper.PromotableKeys"/> — otherwise the first
         /// test class constructed in a run reads the flag as unset, then promotes it into real
         /// process env, silently arming every later-constructed test class in the same run even
         /// though nothing was ever exported in the shell. Covers every flag in
-        /// <see cref="IntegrationTestFixture._optInOnlyFlags"/>, not just the two named in the
-        /// issue, so a future addition to that set is covered automatically.
+        /// <see cref="IntegrationTestFixture._optInOnlyFlags"/>, so a future addition to that set
+        /// is covered automatically.
         /// </summary>
         [Fact]
         public void PromotableKeys_ExcludesEveryOptInOnlyFlag()

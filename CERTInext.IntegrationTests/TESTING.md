@@ -95,9 +95,10 @@ The file is parsed line by line:
 - Values are not quoted — do not surround values with `"` or `'`.
 - Real environment variables override file values (useful for CI injection).
 - Exception: the fixture fails fast if the resolved `CERTINEXT_API_URL` lacks `/emSignHub-API`
-  (a V2 base URL leaked in, issue 0017). Source only `~/.env_certinext` into the shell, never
-  `~/.env_certinext_v2`. The V2 test classes read that file from disk themselves and never write
-  V1-shared keys (`CERTINEXT_API_URL`, `CERTINEXT_ACCESS_KEY`, ...) into the process environment.
+  (indicating a V2 base URL was used instead). Source only `~/.env_certinext` into the shell,
+  never `~/.env_certinext_v2`. The V2 test classes read that file from disk themselves and never
+  write V1-shared keys (`CERTINEXT_API_URL`, `CERTINEXT_ACCESS_KEY`, ...) into the process
+  environment.
 
 ---
 
@@ -158,7 +159,7 @@ Verifies product discovery.
 | Test | What it checks |
 |------|---------------|
 | `GetProductDetails_ReturnsProducts` | Calls `GetProductDetails`; asserts the call succeeds without throwing; when products are returned, asserts the expected product code from `CERTINEXT_PRODUCT_CODE` is among them |
-| `ValidateProductInfo_V1_AcceptsConfiguredProductCode` | (issue 0025) Drives `CERTInextCAPlugin.ValidateProductInfo` (not just the client) in V1 mode with `CERTINEXT_PRODUCT_CODE`; asserts no throw. Skips if not configured or `CERTINEXT_PRODUCT_CODE` unset |
+| `ValidateProductInfo_V1_AcceptsConfiguredProductCode` | Drives `CERTInextCAPlugin.ValidateProductInfo` (not just the client) in V1 mode with `CERTINEXT_PRODUCT_CODE`; asserts no throw. Skips if not configured or `CERTINEXT_PRODUCT_CODE` unset |
 
 Note: some CERTInext accounts return an empty list from `GetProductDetails` even though
 orders using those product codes are visible in `GetOrderReport`.  An empty list is
