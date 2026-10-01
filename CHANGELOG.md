@@ -66,6 +66,7 @@
 
 ## Chores
 - chore(tests): regression tests for the wildcard DCV hostname fix — hostname derivation, apex/wildcard hostname dedupe and single cleanup, and non-wildcard-unchanged, across V1 and V2 single/multi-domain paths.
+- chore(tests): the V2 fresh-DCV integration tests now target a sibling of a genuinely unverified parent (`CERTINEXT_V2_FRESH_DCV_PARENT`) instead of a subdomain of `CERTINEXT_DCV_DOMAIN`, which that domain's own prior DCV already covers and could never actually exercise the publish path.
 - docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).
 - docs(v2): correct stale V2 claims about UCC, credentials, order IDs, idempotency, sync, revoke reasons, and product codes (0038).
 - chore(scripts): `scripts/v2/*.sh` dev helpers now use `CERTINEXT_API_URL` + OAuth2 `client_credentials` from `~/.env_certinext_v2`; mutating scripts require `--yes-mutate` (0048).

@@ -22,6 +22,7 @@
 #if SUPPORTS_DCV
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using FluentAssertions;
 using Keyfactor.AnyGateway.Extensions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
@@ -46,6 +47,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private readonly string _v2ClientId;
         private readonly string _v2ClientSecret;
         private readonly string _v2Domain;
+        private readonly string _freshDcvParent;
         private readonly bool _v2Enabled;
         private readonly string _cfApiToken;
         private readonly string _cfZoneId;
@@ -65,6 +67,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _cfApiToken     = V2EnvHelper.GetEnv(env, "CERTINEXT_CF_API_TOKEN");
             _cfZoneId       = V2EnvHelper.GetEnv(env, "CERTINEXT_CF_ZONE_ID");
 
+            // A fresh subdomain of CERTINEXT_DCV_DOMAIN is NOT genuinely unverified — this
+            // sandbox account has already completed DCV for CERTINEXT_DCV_DOMAIN itself, and
+            // CERTInext (like most DCV implementations) treats that as covering every
+            // subdomain beneath it. A dcv-fresh-<ts> name built under CERTINEXT_DCV_DOMAIN
+            // therefore never actually exercises the publish path (staged stays 0) — it is
+            // simply inheriting the parent's prior verification. A sibling domain under a
+            // DIFFERENT, still-unverified parent is required instead. Defaults to
+            // CERTINEXT_DCV_DOMAIN with its first label stripped (e.g.
+            // "dcv-test.scrup.org" -> "scrup.org"), which this sandbox account has never
+            // itself completed DCV against.
+            _freshDcvParent = V2EnvHelper.GetEnv(env, "CERTINEXT_V2_FRESH_DCV_PARENT", DeriveDefaultFreshDcvParent(_v2Domain));
+
             _v2Enabled = !string.IsNullOrWhiteSpace(V2EnvHelper.GetEnv(env, "CERTINEXT_USE_V2_API"))
                          && !string.IsNullOrWhiteSpace(_v2ApiUrl)
                          && !string.IsNullOrWhiteSpace(_v2ClientId)
@@ -73,6 +87,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _dcvEnabled = _v2Enabled
                           && !string.IsNullOrWhiteSpace(_cfApiToken)
                           && !string.IsNullOrWhiteSpace(_cfZoneId);
+        }
+
+        /// <summary>
+        /// Strips the first DNS label from <paramref name="domain"/> (e.g.
+        /// "dcv-test.scrup.org" -&gt; "scrup.org") to derive a default value for
+        /// <c>CERTINEXT_V2_FRESH_DCV_PARENT</c> when it is unset — a sibling built under this
+        /// parent is not covered by the DCV domain's own prior verification. Falls back to the
+        /// input unchanged if it has no "." to strip.
+        /// </summary>
+        private static string DeriveDefaultFreshDcvParent(string domain)
+        {
+            if (string.IsNullOrWhiteSpace(domain)) return domain;
+            int dot = domain.IndexOf('.');
+            return dot >= 0 && dot < domain.Length - 1 ? domain.Substring(dot + 1) : domain;
         }
 
         public void Dispose()
@@ -182,14 +210,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Enrolls a DV order for a freshly-generated subdomain of CERTINEXT_DCV_DOMAIN that has
-        /// never been requested on this sandbox account before, with DcvEnabled=true and a real
-        /// Cloudflare-backed <see cref="IDomainValidatorFactory"/> wrapped in
-        /// <see cref="RecordingDomainValidatorFactory"/>. Because the domain is guaranteed unseen,
-        /// this is the one DCV test in the V2 suite that actually exercises the publish path:
-        /// every existing V2DcvLifecycleTests case targets the long-reused CERTINEXT_DCV_DOMAIN,
-        /// which this account has verified account-wide, so those always take the reuse path
-        /// (issue 0020) and observe staged=0. Asserts staged&gt;0 and cleaned&gt;0.
+        /// Enrolls a DV order for a freshly-generated subdomain of a genuinely unverified parent
+        /// (<c>CERTINEXT_V2_FRESH_DCV_PARENT</c>, NOT a subdomain of CERTINEXT_DCV_DOMAIN itself
+        /// — that domain's own prior DCV covers every subdomain beneath it, so a
+        /// dcv-fresh-&lt;ts&gt;.CERTINEXT_DCV_DOMAIN name never actually exercises the publish
+        /// path), with DcvEnabled=true and a real Cloudflare-backed
+        /// <see cref="IDomainValidatorFactory"/> wrapped in <see cref="RecordingDomainValidatorFactory"/>.
+        /// Because the domain is guaranteed unseen, this is the one DCV test in the V2 suite that
+        /// actually exercises the publish path: every existing V2DcvLifecycleTests case targets
+        /// the long-reused CERTINEXT_DCV_DOMAIN, which this account has verified account-wide, so
+        /// those always take the reuse path (issue 0020) and observe staged=0. Asserts staged&gt;0
+        /// and cleaned==staged.
         /// Expected sandbox order count: 1.
         /// </summary>
         [SkippableFact]
@@ -201,7 +232,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_FRESH_DCV") != "1",
                 "CERTINEXT_V2_LIFECYCLE_FRESH_DCV=1 not set — this places a real sandbox order and publishes a live DNS TXT record. Skipping.");
 
-            string freshDomain = $"dcv-fresh-{DateTime.UtcNow:yyyyMMddHHmmssfff}.{_v2Domain}";
+            string freshDomain = $"dcv-fresh-{DateTime.UtcNow:yyyyMMddHHmmssfff}.{_freshDcvParent}";
 
             var config = BuildV2Config();
             var recordingFactory = new RecordingDomainValidatorFactory(BuildV2DnsFactory());
@@ -221,19 +252,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 result.Should().NotBeNull();
                 result.CARequestID.Should().NotBeNullOrWhiteSpace("Enroll must return a CARequestID even if DCV verification does not complete inline");
                 orderId = result.CARequestID;
-                _output.WriteLine($"Fresh-domain order {orderId} for '{freshDomain}': Status={result.Status}, Message={result.StatusMessage}");
+                _output.WriteLine($"Fresh-domain order {orderId} for '{freshDomain}' (parent={_freshDcvParent}): Status={result.Status}, Message={result.StatusMessage}");
 
                 var staged = recordingFactory.StagedCalls;
                 var cleaned = recordingFactory.CleanedUpFqdns;
                 _output.WriteLine($"DNS provider calls: staged={staged.Count}, cleaned={cleaned.Count}");
 
                 staged.Should().NotBeEmpty(
-                    $"domain '{freshDomain}' is freshly generated and cannot already be VERIFIED on this " +
-                    "account — unlike every pre-existing V2DcvLifecycleTests case (which targets the " +
-                    "long-reused CERTINEXT_DCV_DOMAIN and always observes staged=0 via the reuse path, " +
-                    "issue 0020), Enroll must actually stage a TXT record here.");
-                cleaned.Should().NotBeEmpty(
-                    "a staged DCV TXT record for a fresh domain must be cleaned up after the attempt.");
+                    $"domain '{freshDomain}' is freshly generated under a genuinely unverified parent " +
+                    "and cannot already be VERIFIED on this account — unlike every pre-existing " +
+                    "V2DcvLifecycleTests case (which targets the long-reused CERTINEXT_DCV_DOMAIN and " +
+                    "always observes staged=0 via the reuse path, issue 0020), Enroll must actually stage " +
+                    "a TXT record here.");
+                cleaned.Count.Should().Be(staged.Count,
+                    "every staged DCV TXT record for a fresh domain must be cleaned up after the attempt.");
 
                 new[] { (int)EndEntityStatus.EXTERNALVALIDATION, (int)EndEntityStatus.GENERATED }
                     .Should().Contain(result.Status,
@@ -251,19 +283,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Wildcard-only CSR shape (CN = SAN = the wildcard) on a freshly-generated,
-        /// never-before-seen subdomain — same freshness rationale as
-        /// <see cref="EnrollWithDcvOn_V2_FreshUnverifiedSubdomain_StagesAndCleansUpTxt"/> above,
-        /// but for <see cref="Constants.Products.DvSslWildcard"/>. What TXT hostname CERTInext's
-        /// DCV flow actually stages for a wildcard domain (does it strip the leading "*." before
-        /// handing the plugin a record name, or pass it through literally — which would be an
-        /// invalid DNS label?) is NOT confirmed live by any existing test in this repo, so this
-        /// test does not assert on that shape. It only records: (a) the FQDN
-        /// <see cref="RecordingDomainValidatorFactory.StagedCalls"/> shows the plugin actually
-        /// called <c>StageValidation</c> with, flagging whether it contains a literal '*', and
-        /// (b) what Track Order's <c>verifications.domain.domains[].domain</c> echoes back for
-        /// the same order. The only hard assertion is that cleanup (revoke-if-issued or cancel)
-        /// succeeds, so this probe never leaks a live order on the sandbox regardless of what the
-        /// TXT-hostname observation turns out to be.
+        /// never-before-seen subdomain of a genuinely unverified parent
+        /// (<c>CERTINEXT_V2_FRESH_DCV_PARENT</c>, same freshness rationale as
+        /// <see cref="EnrollWithDcvOn_V2_FreshUnverifiedSubdomain_StagesAndCleansUpTxt"/> above),
+        /// for <see cref="Constants.Products.DvSslWildcard"/>. Asserts the staged TXT hostname
+        /// does NOT contain a literal '*' (a wildcard's "*." label is not a queryable DNS name —
+        /// see the base-domain hostname fix). Does not fail solely on CA verification timing —
+        /// EXTERNALVALIDATION (still pending DCV when this test's wait elapses) is an accepted
+        /// outcome — but DOES fail if the order ends FAILED. Also records what Track Order's
+        /// <c>verifications.domain.domains[].domain</c> echoes back for the same order, and
+        /// whether any domain entry reached VERIFIED within the wait. Cleanup (revoke-if-issued
+        /// or cancel) must succeed regardless of outcome, so this probe never leaks a live order.
         /// Expected sandbox order count: 1.
         /// </summary>
         [SkippableFact]
@@ -275,7 +305,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_FRESH_DCV") != "1",
                 "CERTINEXT_V2_LIFECYCLE_FRESH_DCV=1 not set — this places a real sandbox order and publishes a live DNS TXT record. Skipping.");
 
-            string freshSubdomain = $"dcv-fresh-{DateTime.UtcNow:yyyyMMddHHmmssfff}.{_v2Domain}";
+            string freshSubdomain = $"dcv-fresh-{DateTime.UtcNow:yyyyMMddHHmmssfff}.{_freshDcvParent}";
             string wildcard = $"*.{freshSubdomain}";
 
             var config = BuildV2Config();
@@ -295,20 +325,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     enrollmentType: EnrollmentType.New);
 
                 result.Should().NotBeNull();
-                _output.WriteLine($"Wildcard fresh-subdomain order ({wildcard}): Status={result.Status}, Message={result.StatusMessage}");
+                _output.WriteLine($"Wildcard fresh-subdomain order ({wildcard}, parent={_freshDcvParent}): Status={result.Status}, Message={result.StatusMessage}");
 
                 if (!string.IsNullOrWhiteSpace(result.CARequestID))
                     orderId = result.CARequestID;
+
+                // Don't fail solely on CA verification timing (EXTERNALVALIDATION is fine) —
+                // but a FAILED order (CERTInext rejected/cancelled it) is a real problem, not a
+                // timing artifact.
+                result.Status.Should().NotBe((int)EndEntityStatus.FAILED,
+                    $"the order must not end FAILED; Message: {result.StatusMessage}");
 
                 var staged = recordingFactory.StagedCalls;
                 var cleaned = recordingFactory.CleanedUpFqdns;
                 _output.WriteLine($"DNS provider calls: staged={staged.Count}, cleaned={cleaned.Count}");
                 foreach (var call in staged)
-                    _output.WriteLine(
-                        $"OBSERVATION: staged TXT hostname Fqdn='{call.Fqdn}' " +
-                        $"(contains literal '*': {call.Fqdn?.Contains('*') == true} — UNVERIFIED territory, see this test's doc comment).");
+                    _output.WriteLine($"OBSERVATION: staged TXT hostname Fqdn='{call.Fqdn}'.");
                 foreach (var fqdn in cleaned)
                     _output.WriteLine($"Cleaned-up TXT hostname: Fqdn='{fqdn}'.");
+
+                staged.Should().OnlyContain(call => call.Fqdn == null || !call.Fqdn.Contains('*'),
+                    "a literal '*' DNS label is not queryable by the CA and must never be staged — " +
+                    "see the wildcard base-domain hostname fix.");
 
                 if (!string.IsNullOrWhiteSpace(orderId))
                 {
@@ -321,6 +359,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                             foreach (var entry in domainEntries)
                                 _output.WriteLine(
                                     $"OBSERVATION: Track Order verifications.domain.domains[]: domain='{entry.Domain}', dcvStatus={entry.DcvStatus ?? "<none>"}.");
+
+                            bool anyVerified = domainEntries.Any(e =>
+                                string.Equals(e.DcvStatus, "VERIFIED", StringComparison.OrdinalIgnoreCase));
+                            _output.WriteLine(anyVerified
+                                ? "OBSERVATION: at least one domain entry reached VERIFIED within this test's wait — " +
+                                  "CA-side acceptance of a base-domain TXT record for a wildcard domain entry is CONFIRMED live."
+                                : "OBSERVATION: no domain entry reached VERIFIED within this test's wait (CA-side " +
+                                  "timing, or the base-domain TXT record is not accepted for a wildcard domain entry " +
+                                  "— still UNVERIFIED; this is an observation, not a test failure).");
                         }
                         else
                         {
