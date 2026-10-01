@@ -33,7 +33,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // filter (issues/0031) — every one must map explicitly, not fall through the
         // "unmapped" default arm, even where the resulting disposition (FAILED) is the
         // same as the default's. `unknown-future`/empty/null exercise the true default
-        // arm below.
+        // arm below. `expired` is a deliberate GENERATED mapping (see test below), not a
+        // default-arm case.
         [Theory]
         [InlineData("issued",                             (int)EndEntityStatus.GENERATED)]
         [InlineData("ISSUED",                              (int)EndEntityStatus.GENERATED)]  // case-insensitive
@@ -46,7 +47,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData("revoked",                              (int)EndEntityStatus.REVOKED)]
         [InlineData("cancelled",                             (int)EndEntityStatus.FAILED)]
         [InlineData("rejected",                              (int)EndEntityStatus.FAILED)]
-        [InlineData("expired",                               (int)EndEntityStatus.FAILED)]
+        // Expired-but-not-revoked certs remain issued inventory — mirrors V1's
+        // ToRequestDisposition convention and the sync/report path's own "expired" case.
+        [InlineData("expired",                               (int)EndEntityStatus.GENERATED)]
         // Issue 0039: the spec-documented `unknown` means "may still be live" — pending, not FAILED.
         [InlineData("unknown",                               (int)EndEntityStatus.EXTERNALVALIDATION)]
         [InlineData("UNKNOWN",                               (int)EndEntityStatus.EXTERNALVALIDATION)]  // case-insensitive
@@ -61,7 +64,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // values must still degrade gracefully to FAILED via the default arm, rather
         // than throwing or being silently treated as "still pending". This is the
         // "truly unrecognized" case, distinct from the deliberate FAILED mappings
-        // (cancelled/rejected/expired) tested above.
+        // (cancelled/rejected) tested above.
         // ---------------------------------------------------------------------------
 
         [Theory]

@@ -207,9 +207,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <c>status</c> filter (issues/0031). <c>pending-organization-verification</c>,
         /// <c>pending-documents</c>, and <c>pending-approval</c> join the existing
         /// pending-* values as EXTERNALVALIDATION — they are OV/EV/DV orders still
-        /// actively progressing toward issuance, not failures. <c>rejected</c> and
-        /// <c>expired</c> are terminal negative outcomes mapped to FAILED deliberately,
-        /// same as the pre-existing <c>cancelled</c>. The spec-documented <c>unknown</c> maps to
+        /// actively progressing toward issuance, not failures. <c>rejected</c> is a
+        /// terminal negative outcome mapped to FAILED deliberately, same as the
+        /// pre-existing <c>cancelled</c>. <c>expired</c> maps to GENERATED instead —
+        /// an expired-but-not-revoked certificate remains issued inventory, mirroring
+        /// <see cref="ToRequestDisposition"/>'s V1 convention and the sync/report path's
+        /// own "expired" case (<c>CERTInextCAPlugin.TryMapV2ReportDisplayStatus</c>). The
+        /// spec-documented <c>unknown</c> maps to
         /// EXTERNALVALIDATION (issue 0039): the order may still be live. Any value not in this list falls
         /// through to the default arm, which also returns FAILED but logs a warning —
         /// see issues/0031 for why "deliberately FAILED" and "unmapped, degrading to
@@ -222,6 +226,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
             switch (v2Status?.ToLowerInvariant())
             {
                 case Constants.ApiV2.StatusIssued:
+                // Expired-but-not-revoked certs remain in inventory as GENERATED —
+                // mirrors StatusMapper.ToRequestDisposition's V1 convention and the
+                // sync/report path's own "expired" case.
+                case Constants.ApiV2.StatusExpired:
                     return (int)EndEntityStatus.GENERATED;
 
                 case Constants.ApiV2.StatusPendingDcv:
@@ -237,7 +245,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 
                 case Constants.ApiV2.StatusCancelled:
                 case Constants.ApiV2.StatusRejected:
-                case Constants.ApiV2.StatusExpired:
                     return (int)EndEntityStatus.FAILED;
 
                 case Constants.ApiV2.StatusUnknown:

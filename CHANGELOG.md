@@ -57,6 +57,7 @@
 - fix(v2): V2 order create now omits `X-Product-Code` entirely for a null/blank product code instead of sending it empty (0054).
 - fix(v2): non-UCC V2 enrollment now rejects extra SANs from Command's SAN dictionary instead of silently dropping them (0061).
 - fix(v2): V2 SSL enrollment now derives `productVariant` from the product and rejects a mismatched override, instead of always sending `dv` (0059).
+- fix(sync): V2 order status `expired` now maps to GENERATED instead of FAILED, matching V1 and the sync/report path.
 
 ## Chores
 - docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).
