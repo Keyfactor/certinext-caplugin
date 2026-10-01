@@ -3147,10 +3147,37 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Revokes a certificate via the V2 REST API. If Command supplies no specific
-        /// reason (CRL reason 0, "unspecified"), and CERTInext rejects that value with its
-        /// "Invalid Revoke Reason ID" 422, retries once with "cessation-of-operation" —
-        /// see issues/0026 for why that value and not V1's "key-compromise" fallback.
+        /// Maps a V2 revoke reason that CERTInext rejects live with "Invalid Revoke Reason
+        /// ID" to an accepted fallback, or <c>null</c> if <paramref name="rejectedV2Reason"/>
+        /// is not one of the known-rejected values. Per issues/0026's live-confirmed 9-value
+        /// matrix, only <c>key-compromise</c>, <c>affiliation-changed</c>, <c>superseded</c>,
+        /// <c>cessation-of-operation</c>, and <c>privilege-withdrawn</c> are actually accepted
+        /// (the same restriction V1's <see cref="StatusMapper.ToRevocationReasonId"/> has
+        /// always documented) — <c>unspecified</c>, <c>ca-compromise</c>,
+        /// <c>certificate-hold</c>, and <c>aa-compromise</c> are all rejected.
+        /// <c>key-compromise</c> is the fallback for the two *-compromise reasons (closest
+        /// semantic match); <c>cessation-of-operation</c> is the fallback for
+        /// <c>unspecified</c> and <c>certificate-hold</c>, neither of which implies an actual
+        /// key compromise — <c>key-compromise</c> there would misrepresent the revoke and
+        /// trigger the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation for no reason.
+        /// </summary>
+        private static string ResolveRejectedRevokeReasonFallback(string rejectedV2Reason) =>
+            rejectedV2Reason switch
+            {
+                Constants.RevocationReasonV2.Unspecified => Constants.RevocationReasonV2.CessationOfOperation,
+                Constants.RevocationReasonV2.CertificateHold => Constants.RevocationReasonV2.CessationOfOperation,
+                Constants.RevocationReasonV2.CACompromise => Constants.RevocationReasonV2.KeyCompromise,
+                Constants.RevocationReasonV2.AACompromise => Constants.RevocationReasonV2.KeyCompromise,
+                _ => null
+            };
+
+        /// <summary>
+        /// Revokes a certificate via the V2 REST API. If CERTInext rejects the resolved
+        /// reason with its "Invalid Revoke Reason ID" 422 and the reason is one of the four
+        /// known-rejected values (<see cref="ResolveRejectedRevokeReasonFallback"/>), retries
+        /// exactly once with an accepted fallback — see issues/0026 for the live-confirmed
+        /// accepted/rejected reason matrix. Any other revoke failure (including a 422 for a
+        /// reason not in that set) is surfaced as-is, with no retry.
         /// </summary>
         private async Task<int> RevokeV2Async(string caRequestID, string hexSerialNumber, uint revocationReason)
         {
@@ -3213,7 +3240,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Note   = $"Revoked via Keyfactor Command. CRL reason code: {revocationReason} ({v2Reason})."
             };
 
-            bool retriedAsCessationOfOperation = false;
+            string retriedFromReason = null;
             try
             {
                 await _client.RevokeOrderV2Async(resolvedFamily, caRequestID, revokeReq);
@@ -3236,28 +3263,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     $"CERTInext reports it as not found or not in a revokable state. {knf.Message}");
             }
             catch (InvalidOperationException ioe) when (
-                v2Reason == Constants.RevocationReasonV2.Unspecified &&
+                ResolveRejectedRevokeReasonFallback(v2Reason) != null &&
                 ioe.Message.IndexOf("Invalid Revoke Reason ID", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                // CERTInext's V2 API rejects the spec-documented "unspecified" reason value
-                // outright (422 "Invalid Revoke Reason ID") — confirmed live against a
-                // directly-placed sandbox order, independent of this plugin (issues/0026).
-                // Only 5 of the 9 spec-documented reason strings are actually accepted:
-                // key-compromise, affiliation-changed, superseded, cessation-of-operation,
-                // privilege-withdrawn — the same restriction V1's ToRevocationReasonId has
-                // always been documented against. "Unspecified" (CRL reason 0) is Command's
-                // default when no real reason is supplied, so failing outright here would
-                // break the single most common revoke case. Retry once with
-                // "cessation-of-operation" rather than "key-compromise" (V1's fallback):
-                // key-compromise carries the spec's own BR 4.9.1.1 24-hour CRL-turnaround
-                // obligation, which would misrepresent a revoke that was never actually a
-                // key compromise.
+                // CERTInext's V2 API rejects several of the spec-documented reason values
+                // outright (422 "Invalid Revoke Reason ID") — confirmed live, independent of
+                // this plugin (issues/0026). Only 5 of the 9 spec-documented reason strings
+                // are actually accepted: key-compromise, affiliation-changed, superseded,
+                // cessation-of-operation, privilege-withdrawn — the same restriction V1's
+                // ToRevocationReasonId has always been documented against. Retry exactly once
+                // with the accepted fallback ResolveRejectedRevokeReasonFallback resolved for
+                // this reason, rather than failing outright on what may be Command's default
+                // revoke call.
+                string originalReason = v2Reason;
+                string fallbackReason = ResolveRejectedRevokeReasonFallback(v2Reason);
                 _logger.LogWarning(
-                    "V2 revoke rejected reason 'unspecified' as invalid (CARequestID={Id}, Family={Family}, " +
-                    "HttpStatus={HttpStatus}, EmsCode={EmsCode}); retrying once with 'cessation-of-operation' " +
+                    "V2 revoke rejected reason '{OriginalReason}' as invalid (CARequestID={Id}, Family={Family}, " +
+                    "HttpStatus={HttpStatus}, EmsCode={EmsCode}); retrying once with '{FallbackReason}' " +
                     "per issues/0026.",
-                    caRequestID, resolvedFamily, 422, ExtractEmsCode(ioe.Message) ?? "(none)");
-                v2Reason = Constants.RevocationReasonV2.CessationOfOperation;
+                    originalReason, caRequestID, resolvedFamily, 422, ExtractEmsCode(ioe.Message) ?? "(none)",
+                    fallbackReason);
+                v2Reason = fallbackReason;
                 revokeReq = new V2RevokeRequest
                 {
                     // CERTInext's "note" field silently rejects a semicolon with the same
@@ -3265,9 +3291,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     // comma/period/slash/parens are all fine; only ';' triggers it — see
                     // issues/0026). Avoid semicolons in this string.
                     Reason = v2Reason,
-                    Note = "Revoked via Command, reason unspecified, retried as cessation-of-operation (see issues/0026)."
+                    Note = $"Revoked via Command, reason {originalReason} rejected, retried as {fallbackReason} (see issues/0026)."
                 };
-                retriedAsCessationOfOperation = true;
+                retriedFromReason = originalReason;
                 try
                 {
                     await _client.RevokeOrderV2Async(resolvedFamily, caRequestID, revokeReq);
@@ -3278,15 +3304,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     // CA and must leave an audit record on failure, not just succeed silently or
                     // vanish into the caller's exception.
                     _logger.LogError(retryEx,
-                        "V2 revocation retry (cessation-of-operation) failed. CARequestID={Id}, Family={Family}",
-                        caRequestID, resolvedFamily);
+                        "V2 revocation retry ({FallbackReason}) failed. CARequestID={Id}, Family={Family}",
+                        fallbackReason, caRequestID, resolvedFamily);
                     throw;
                 }
             }
             catch (InvalidOperationException ioe)
             {
                 // Any 422 not matched by the retry-eligible case above (e.g. a distinct EMS
-                // code/detail) — audit the denial and rethrow unchanged.
+                // code/detail, or a reason not in the known-rejected set) — audit the denial
+                // and rethrow unchanged. Never more than the one retry above.
                 _logger.LogWarning(
                     "V2 revocation denied. CARequestID={Id}, Family={Family}, HttpStatus={HttpStatus}, " +
                     "EmsCode={EmsCode}, Detail={Detail}",
@@ -3296,8 +3323,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             _logger.LogInformation(
                 "V2 revocation complete. CARequestID={Id}, HexSerialNumber={Serial}, V2Reason={V2Reason}, " +
-                "Family={Family}, RetriedFromUnspecified={Retried}",
-                caRequestID, hexSerialNumber, v2Reason, resolvedFamily, retriedAsCessationOfOperation);
+                "Family={Family}, RetriedFromReason={RetriedFromReason}",
+                caRequestID, hexSerialNumber, v2Reason, resolvedFamily, retriedFromReason ?? "(none)");
             _logger.MethodExit(LogLevel.Debug);
             return (int)EndEntityStatus.REVOKED;
         }

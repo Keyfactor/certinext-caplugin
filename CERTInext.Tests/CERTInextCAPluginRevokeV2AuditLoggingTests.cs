@@ -224,7 +224,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             thrown.Should().BeNull();
             string retryWarn = FindLine(messages, orderId, "retrying once with 'cessation-of-operation'", "HttpStatus=422");
             retryWarn.Should().NotBeNull("the first rejection must be audited before the retry is attempted");
-            string completeLine = FindLine(messages, orderId, "V2 revocation complete", "RetriedFromUnspecified=True");
+            string completeLine = FindLine(messages, orderId, "V2 revocation complete", "RetriedFromReason=unspecified");
             completeLine.Should().NotBeNull("a successful retry must be reflected in the completion audit line");
         }
 

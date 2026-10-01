@@ -554,14 +554,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Reason code fallback (issues/0026): CERTInext rejects the spec-documented
-        // "unspecified" reason value (422 "Invalid Revoke Reason ID"), confirmed live.
-        // Command defaults to CRL reason 0 (unspecified) when no reason is given, so
-        // the plugin retries once with "cessation-of-operation" for that specific case.
+        // Reason code fallback (issues/0026): CERTInext rejects 4 of the 9 spec-documented
+        // reason values (422 "Invalid Revoke Reason ID"), confirmed live — unspecified (CRL
+        // 0), ca-compromise (CRL 2), certificate-hold (CRL 6), aa-compromise (CRL 10). The
+        // plugin retries exactly once with an accepted fallback for each: cessation-of-
+        // operation for unspecified/certificate-hold, key-compromise for the two
+        // *-compromise reasons. A reason outside that known-rejected set is never retried.
         // ---------------------------------------------------------------------------
 
-        [Fact]
-        public async Task Revoke_V2Enabled_UnspecifiedReasonRejected_RetriesWithCessationOfOperation()
+        private static Mock<ICERTInextClient> SetupRevokeReasonRejectionMock(List<string> seenReasons)
         {
             var mock = new Mock<ICERTInextClient>();
             mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
@@ -572,30 +573,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Status  = "issued"
                 }));
 
-            var seenReasons = new List<string>();
             mock.Setup(c => c.RevokeOrderV2Async(
                     Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1,
                     It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()))
                 .Returns((string family, string orderId, V2RevokeRequest req, CancellationToken ct) =>
                 {
                     seenReasons.Add(req.Reason);
-                    if (req.Reason == Constants.RevocationReasonV2.Unspecified)
+                    bool firstAttemptRejected =
+                        req.Reason == Constants.RevocationReasonV2.Unspecified ||
+                        req.Reason == Constants.RevocationReasonV2.CACompromise ||
+                        req.Reason == Constants.RevocationReasonV2.CertificateHold ||
+                        req.Reason == Constants.RevocationReasonV2.AACompromise;
+                    if (firstAttemptRejected && seenReasons.Count == 1)
                         throw new InvalidOperationException("V2 revoke rejected. Unprocessable Entity: Invalid Revoke Reason ID");
                     return Task.CompletedTask;
                 });
+            return mock;
+        }
+
+        [Theory]
+        // Command's default when no explicit reason is given.
+        [InlineData(0u, Constants.RevocationReasonV2.Unspecified, Constants.RevocationReasonV2.CessationOfOperation)]
+        [InlineData(2u, Constants.RevocationReasonV2.CACompromise, Constants.RevocationReasonV2.KeyCompromise)]
+        [InlineData(6u, Constants.RevocationReasonV2.CertificateHold, Constants.RevocationReasonV2.CessationOfOperation)]
+        [InlineData(10u, Constants.RevocationReasonV2.AACompromise, Constants.RevocationReasonV2.KeyCompromise)]
+        public async Task Revoke_V2Enabled_KnownRejectedReason_RetriesWithExpectedFallback(
+            uint crlReason, string expectedOriginal, string expectedFallback)
+        {
+            var seenReasons = new List<string>();
+            var mock = SetupRevokeReasonRejectionMock(seenReasons);
 
             var plugin = BuildV2Plugin(mock.Object);
-            // Reason code 0 (unspecified) is Command's default when no explicit reason is given.
-            var status = await plugin.Revoke(MockCertificateData.V2OrderId1, "AABB", 0u);
+            var status = await plugin.Revoke(MockCertificateData.V2OrderId1, "AABB", crlReason);
 
             status.Should().Be((int)EndEntityStatus.REVOKED);
-            seenReasons.Should().Equal(
-                Constants.RevocationReasonV2.Unspecified,
-                Constants.RevocationReasonV2.CessationOfOperation);
+            seenReasons.Should().Equal(expectedOriginal, expectedFallback);
         }
 
         [Fact]
-        public async Task Revoke_V2Enabled_NonUnspecifiedReasonRejected_DoesNotRetry()
+        public async Task Revoke_V2Enabled_RejectedReasonNotInFallbackSet_DoesNotRetry()
         {
             var mock = new Mock<ICERTInextClient>();
             mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
@@ -606,9 +622,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Status  = "issued"
                 }));
 
-            // CRL reason 6 (certificateHold) maps to "certificate-hold", which is also
-            // rejected live (issues/0026) — but since it isn't "unspecified", the plugin
-            // must surface the failure as-is rather than retry.
+            // CRL reason 4 (superseded) maps to "superseded", which issues/0026 confirms is
+            // actually accepted live — it is not in the known-rejected fallback set, so even
+            // if the CA somehow rejected it with the same "Invalid Revoke Reason ID" message,
+            // the plugin must surface the failure as-is rather than retry.
             mock.Setup(c => c.RevokeOrderV2Async(
                     Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1,
                     It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()))
@@ -616,7 +633,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var plugin = BuildV2Plugin(mock.Object);
             var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-                () => plugin.Revoke(MockCertificateData.V2OrderId1, "AABB", 6u));
+                () => plugin.Revoke(MockCertificateData.V2OrderId1, "AABB", 4u));
 
             ex.Message.Should().Contain("Invalid Revoke Reason ID");
             mock.Verify(c => c.RevokeOrderV2Async(

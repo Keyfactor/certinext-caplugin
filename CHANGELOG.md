@@ -59,6 +59,7 @@
 - fix(v2): V2 SSL enrollment now derives `productVariant` from the product and rejects a mismatched override, instead of always sending `dv` (0059).
 - fix(sync): V2 order status `expired` now maps to GENERATED instead of FAILED, matching V1 and the sync/report path.
 - fix(config): `ApiUrl` now requires `https` (credentials would otherwise go out in cleartext); `http` remains allowed for loopback hosts only, for local test servers.
+- fix(revoke): V2 revoke's reason-rejection retry now covers all 4 live-rejected CRL reasons (0, 2, 6, 10), not just "unspecified"; each retries once with an accepted fallback (0026).
 
 ## Chores
 - docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).
