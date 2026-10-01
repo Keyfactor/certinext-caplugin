@@ -82,6 +82,7 @@
 - chore(tests): regression coverage for the V2 bodyless-REVOKED guard — gateway-holds-body, no-body, no-row, reader-failure, and GENERATED-unaffected cases, in both `Synchronize` and `GetSingleRecord` (0049).
 - chore(tests): regression coverage for the V2 `Enroll` REVOKED→FAILED normalization — post-CSR-submit, mid-pickup-poll, post-DCV-recheck, and FAILED/GENERATED-unaffected cases (0052).
 - chore(tests): regression coverage for `RedactPersonalData`/`ApplyLoggingRedaction` against realistic V1/V2 order payloads, `LogSanitizer.MaskEmail`, the `LogSensitiveRequestData` config default/annotation, and the flag's on/off behavior in `Enroll`'s audit log line (0040).
+- chore(tests): opt-in live V2 lifecycle coverage for DV UCC, OV, OV UCC, EV, wildcard DV (both CSR shapes), renew/reissue, and DCV against a fresh unverified domain — product shapes the V2 suite had no assertion-bearing live test for.
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 
