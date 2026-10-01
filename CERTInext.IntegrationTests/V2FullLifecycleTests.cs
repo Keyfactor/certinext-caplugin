@@ -680,17 +680,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Wildcard+apex CSR shape: CN is the wildcard, SAN dictionary carries BOTH the wildcard
-        /// and its bare apex domain. A review of CERTInextCAPlugin.cs:1896-1911 (the non-UCC V2
-        /// SAN guard) suspects this is wrongly rejected: the guard computes <c>domain</c> as the
-        /// literal CN ("*.dcv-test.scrup.org" here) and only allows SAN values equal to that
-        /// exact string or "www." + that string — so the apex ("dcv-test.scrup.org") matches
-        /// neither and is treated as a disallowed "extra SAN" on a non-UCC product, even though a
-        /// wildcard+apex pairing is an extremely common, legitimate certificate shape. This test
-        /// RECORDS the actual observed behavior rather than assuming the suspected bug is real:
-        /// if the order is rejected, it asserts the rejection is specifically this guard's
-        /// (by message content) rather than some unrelated failure; if accepted, it records that
-        /// the suspicion was not reproduced. Either branch is a pass — this test exists to produce
-        /// ground truth for issue triage, not to enforce one outcome.
+        /// and its bare apex domain. The non-UCC V2 SAN guard (CERTInextCAPlugin.cs, EnrollV2Async)
+        /// now explicitly exempts exactly this shape for a wildcard product (fix: 1f1de1b) — the
+        /// guard computes <c>domain</c> as the literal CN ("*.dcv-test.scrup.org" here), and
+        /// without the exemption the apex ("dcv-test.scrup.org") would match neither that nor its
+        /// "www." variant and be treated as a disallowed "extra SAN", even though a wildcard+apex
+        /// pairing is an extremely common, legitimate certificate shape. The order is therefore
+        /// expected to be accepted and issued. This test still RECORDS the actual observed
+        /// behavior rather than hard-asserting on it everywhere: if the order is rejected anyway,
+        /// it asserts the rejection is specifically this guard's (by message content) rather than
+        /// some unrelated failure; if accepted and issued, it parses the issued leaf (BouncyCastle)
+        /// and logs — as an observation only, not an assertion — whether the apex is covered by
+        /// the certificate's own SAN list (CERTInext may or may not add the apex to
+        /// additionalDomains automatically for a non-UCC wildcard product; unconfirmed live).
         /// Expected sandbox order count: 0 or 1 (0 if CERTInext itself rejects a FAILED result
         /// before any order is ever placed — see the FAILED branch below).
         /// </summary>
@@ -724,9 +726,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 if (enrollResult.Status == (int)EndEntityStatus.FAILED)
                 {
                     _output.WriteLine(
-                        "RESULT: wildcard+apex was REJECTED before any CA call — consistent with the " +
-                        "suspected non-UCC SAN guard bug (CERTInextCAPlugin.cs:1896-1911): domain==CN==" +
-                        $"'{wildcard}', and the apex '{apex}' matches neither that nor its 'www.' variant.");
+                        "RESULT: wildcard+apex was REJECTED before any CA call — the non-UCC SAN guard's " +
+                        $"wildcard-apex exemption did not cover this case: domain==CN=='{wildcard}', and the " +
+                        $"apex '{apex}' matched neither that nor its 'www.' variant.");
                     enrollResult.StatusMessage.Should().Contain("SAN",
                         "a FAILED result here must specifically be the non-UCC multi-SAN guard's rejection " +
                         "(StatusMessage mentions SAN/domain count), not some unrelated failure masquerading as it");
@@ -735,13 +737,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 else
                 {
-                    _output.WriteLine("RESULT: wildcard+apex was ACCEPTED — suspected guard bug NOT reproduced on this account/catalog.");
+                    _output.WriteLine(
+                        "RESULT: wildcard+apex was ACCEPTED — the non-UCC single-domain SAN guard's " +
+                        "wildcard-apex exemption (fix: 1f1de1b) allows the bare apex alongside the wildcard CN.");
                     enrollResult.CARequestID.Should().NotBeNullOrWhiteSpace();
                     orderId = enrollResult.CARequestID;
 
                     var tracked = await plugin.GetSingleRecord(orderId);
                     tracked.Should().NotBeNull();
                     _output.WriteLine($"Tracked: Status={tracked.Status}");
+
+                    if (tracked.Status == (int)EndEntityStatus.GENERATED && !string.IsNullOrWhiteSpace(tracked.Certificate))
+                    {
+                        var sans = ExtractDnsSansOrEmpty(tracked.Certificate);
+                        _output.WriteLine($"OBSERVATION: issued certificate SAN list: [{string.Join(", ", sans)}]");
+
+                        bool apexCovered = sans.Any(s => string.Equals(s, apex, StringComparison.OrdinalIgnoreCase));
+                        _output.WriteLine(apexCovered
+                            ? $"OBSERVATION: the apex '{apex}' IS covered by the issued certificate's SAN list."
+                            : $"OBSERVATION: the apex '{apex}' is NOT covered by the issued certificate's SAN " +
+                              "list (observation only, not asserted — whether CERTInext adds the apex to " +
+                              "additionalDomains automatically for a non-UCC wildcard product is unconfirmed live).");
+                    }
+                    else
+                    {
+                        _output.WriteLine(
+                            $"Order not yet issued (Status={tracked.Status}) — skipping the SAN-coverage observation.");
+                    }
                 }
             }
             finally
@@ -886,6 +908,53 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 return string.Empty;
             }
+        }
+
+        /// <summary>
+        /// Extracts the issued certificate's dNSName SAN entries using BouncyCastle (never BCL
+        /// System.Security.Cryptography) — mirrors the main plugin's own <c>GeneralNameToSanEntry</c>
+        /// dNSName handling, but reading the ISSUED certificate's own SAN extension rather than a
+        /// CSR's. Returns an empty list when <paramref name="certPem"/> is null/blank/unparseable,
+        /// or the certificate carries no SAN extension.
+        /// </summary>
+        private static List<string> ExtractDnsSansOrEmpty(string certPem)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrWhiteSpace(certPem))
+                return result;
+
+            try
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(
+                    certPem,
+                    @"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----",
+                    System.Text.RegularExpressions.RegexOptions.Singleline);
+                if (!match.Success)
+                    return result;
+
+                string b64 = match.Groups[1].Value.Replace("\r", string.Empty).Replace("\n", string.Empty).Trim();
+                var cert = new Org.BouncyCastle.X509.X509CertificateParser().ReadCertificate(Convert.FromBase64String(b64));
+
+                var sanExtensionOctets = cert.GetExtensionValue(X509Extensions.SubjectAlternativeName)?.GetOctets();
+                if (sanExtensionOctets == null)
+                    return result;
+
+                var generalNames = GeneralNames.GetInstance(
+                    Org.BouncyCastle.Asn1.Asn1Object.FromByteArray(sanExtensionOctets));
+
+                foreach (var generalName in generalNames.GetNames())
+                {
+                    if (generalName.TagNo == GeneralName.DnsName)
+                        result.Add(Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString());
+                }
+            }
+            catch
+            {
+                // Observation-only helper — an unparseable cert/extension just yields no SAN
+                // observations rather than failing the test.
+            }
+
+            return result;
         }
     }
 }
