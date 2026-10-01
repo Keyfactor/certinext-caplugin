@@ -52,7 +52,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             string requestorIsdCode = null,
             string requestorMobileNumber = null,
             ICertificateDataReader certDataReader = null,
-            string organizationNumber = null) =>
+            string organizationNumber = null,
+            string defaultProductCode = null) =>
             new CERTInextCAPlugin(client, new CERTInextConfig
             {
                 UseV2Api        = true,
@@ -67,6 +68,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 SignerIp        = "1.2.3.4",
                 SignerPlace     = "New York",
                 OrganizationNumber = organizationNumber,
+                DefaultProductCode = defaultProductCode,
                 PickupRetries   = 0,
                 IgnoreExpired   = ignoreExpired,
                 DcvTxtRecordTemplate  = dcvTxtRecordTemplate,
@@ -387,6 +389,150 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.Status.Should().Be((int)EndEntityStatus.FAILED);
             result.StatusMessage.Should().Contain("could not resolve a live product code");
+            mock.Verify(c => c.PlaceOrderV2Async(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Product-selection ambiguity (sandbox-confirmed): the live catalog can carry MORE
+        // THAN ONE entry with the same productTypeID — e.g. two type-13 DV SSL entries, "917
+        // SSL DV 1 month" (listed first) and "842 DV SSL Certificate". Picking the first match
+        // (the old behavior) silently ordered "917" on sandbox, which PUT /csr then rejected
+        // 422 "PFX based certificate orders are not allowed" — failing every ProductId-only DV
+        // SSL enrollment. No explicit ProductCode + multiple matches must only resolve via the
+        // connector's DefaultProductCode, or reject naming the candidates.
+        // ---------------------------------------------------------------------------
+
+        private static Mock<ICERTInextClient> StubAmbiguousDvCatalog()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "917", ProductName = "SSL DV 1 month", ProductTypeId = "13", Active = true },
+                    new ProductDetail { ProductCode = "842", ProductName = "DV SSL Certificate", ProductTypeId = "13", Active = true },
+                });
+            return mock;
+        }
+
+        private static EnrollmentProductInfo MakeDvProductInfoNoExplicitCode() => new EnrollmentProductInfo
+        {
+            ProductID = Constants.Products.DvSsl,
+            ProductParameters = new Dictionary<string, string>
+            {
+                ["ProductFamily"] = "ssl",
+                ["DomainName"]    = "example.com"
+            }
+        };
+
+        [Fact]
+        public async Task Enroll_V2_NoExplicitProductCode_MultipleCatalogMatches_NoDefaultProductCode_RejectsWithCandidates()
+        {
+            var mock = StubAmbiguousDvCatalog();
+            var plugin = BuildV2Plugin(mock.Object); // no DefaultProductCode configured
+
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem,
+                "CN=example.com, O=Acme",
+                new Dictionary<string, string[]>(),
+                MakeDvProductInfoNoExplicitCode(),
+                RequestFormat.PKCS10,
+                EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().ContainEquivalentOf("multiple CERTInext catalog products match");
+            result.StatusMessage.Should().Contain("917").And.Contain("842");
+            mock.Verify(c => c.PlaceOrderV2Async(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never,
+                "an ambiguous product match must never reach order placement — no silent first-pick");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_NoExplicitProductCode_MultipleCatalogMatches_DefaultProductCodeMatchesOne_Resolves()
+        {
+            var mock = StubAmbiguousDvCatalog();
+            string capturedProductCode = null;
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>(
+                    (_, code, __, ___) => capturedProductCode = code)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_amb_001", Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_amb_001", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_amb_001", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_amb_001", Status = "pending-dcv" });
+
+            var plugin = BuildV2Plugin(mock.Object, defaultProductCode: "842");
+
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem,
+                "CN=example.com, O=Acme",
+                new Dictionary<string, string[]>(),
+                MakeDvProductInfoNoExplicitCode(),
+                RequestFormat.PKCS10,
+                EnrollmentType.New);
+
+            result.CARequestID.Should().Be("ord_amb_001");
+            capturedProductCode.Should().Be("842",
+                "DefaultProductCode names one of the ambiguous matches, so it must be used instead of rejecting");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_NoExplicitProductCode_MultipleCatalogMatches_DefaultProductCodeIsWrongType_RejectsWithCandidates()
+        {
+            // DefaultProductCode is configured, but it names a product of a DIFFERENT
+            // productTypeID than the one being resolved — must not be treated as a match.
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "917", ProductName = "SSL DV 1 month", ProductTypeId = "13", Active = true },
+                    new ProductDetail { ProductCode = "842", ProductName = "DV SSL Certificate", ProductTypeId = "13", Active = true },
+                    new ProductDetail { ProductCode = "846", ProductName = "OV SSL Certificate", ProductTypeId = "16", Active = true },
+                });
+            var plugin = BuildV2Plugin(mock.Object, defaultProductCode: "846"); // OV, not DV
+
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem,
+                "CN=example.com, O=Acme",
+                new Dictionary<string, string[]>(),
+                MakeDvProductInfoNoExplicitCode(),
+                RequestFormat.PKCS10,
+                EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().ContainEquivalentOf("multiple CERTInext catalog products match");
+            mock.Verify(c => c.PlaceOrderV2Async(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Enroll_V2_NoExplicitProductCode_CatalogFetchFailed_BehaviorUnchanged_RejectsAsNotFound()
+        {
+            // A catalog-fetch failure must still fail the same way it did before ambiguity
+            // handling was added — "could not resolve", not an ambiguity-shaped message.
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("catalog unreachable"));
+
+            var plugin = BuildV2Plugin(mock.Object);
+
+            var result = await plugin.Enroll(
+                MockCertificateData.FakeCsrPem,
+                "CN=example.com, O=Acme",
+                new Dictionary<string, string[]>(),
+                MakeDvProductInfoNoExplicitCode(),
+                RequestFormat.PKCS10,
+                EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().Contain("could not resolve a live product code");
+            result.StatusMessage.Should().NotContainEquivalentOf("multiple CERTInext catalog products match");
             mock.Verify(c => c.PlaceOrderV2Async(
                 It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never);
@@ -1608,13 +1754,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     .WithBody(MockCertificateData.V2TokenResponseJson()));
         }
 
-        private static Dictionary<string, object> BuildV2ConnectionInfo(string apiUrl) => new Dictionary<string, object>
+        private static Dictionary<string, object> BuildV2ConnectionInfo(string apiUrl, string defaultProductCode = null)
         {
-            ["UseV2Api"] = true,
-            ["ApiUrl"] = apiUrl,
-            ["OAuthClientId"] = "my-client",
-            ["OAuthClientSecret"] = "my-secret"
-        };
+            var info = new Dictionary<string, object>
+            {
+                ["UseV2Api"] = true,
+                ["ApiUrl"] = apiUrl,
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+            };
+            if (!string.IsNullOrWhiteSpace(defaultProductCode))
+                info["DefaultProductCode"] = defaultProductCode;
+            return info;
+        }
 
         private static EnrollmentProductInfo BuildProductInfo(string productCode) => new EnrollmentProductInfo
         {
@@ -1807,6 +1959,125 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().ThrowAsync<AnyCAValidationException>()
                 .WithMessage("*Could not find a CERTInext V2 catalog entry*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Product-selection ambiguity (sandbox-confirmed: two type-13 DV SSL entries,
+        // "917 SSL DV 1 month" listed before "842 DV SSL Certificate"). No explicit
+        // ProductCode + multiple catalog entries sharing the expected productTypeID must not
+        // silently pick the first match — only resolve via the connector's DefaultProductCode,
+        // or reject naming the candidates. Mirrors EnrollV2Async's own handling.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Throws_WhenMultipleCatalogEntriesShareProductTypeId_AndNoDefaultProductCode()
+        {
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[{""productCode"":""917"",""productName"":""SSL DV 1 month"",""productTypeID"":""13""}," +
+                               @"{""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13""}]"));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]); // no DefaultProductCode configured
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.DvSsl,
+                ProductParameters = new Dictionary<string, string>()
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            var ex = await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*Multiple CERTInext catalog products match*");
+            ex.Which.Message.Should().Contain("917").And.Contain("842");
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Succeeds_WhenMultipleCatalogEntriesShareProductTypeId_AndDefaultProductCodeMatchesOne()
+        {
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[{""productCode"":""917"",""productName"":""SSL DV 1 month"",""productTypeID"":""13""}," +
+                               @"{""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13""}]"));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0], defaultProductCode: "842");
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.DvSsl,
+                ProductParameters = new Dictionary<string, string>()
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().NotThrowAsync();
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Throws_WhenMultipleCatalogEntriesShareProductTypeId_AndDefaultProductCodeIsWrongType()
+        {
+            // DefaultProductCode is configured, but it names a product of a DIFFERENT
+            // productTypeID than the one being resolved — must not be treated as a match.
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[{""productCode"":""917"",""productName"":""SSL DV 1 month"",""productTypeID"":""13""}," +
+                               @"{""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13""}," +
+                               @"{""productCode"":""846"",""productName"":""OV SSL Certificate"",""productTypeID"":""16""}]"));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0], defaultProductCode: "846"); // OV, not DV
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.DvSsl,
+                ProductParameters = new Dictionary<string, string>()
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*Multiple CERTInext catalog products match*");
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_Succeeds_WhenExactlyOneCatalogEntryMatchesProductTypeId()
+        {
+            // Single match for the productTypeID — must resolve automatically, same as before
+            // ambiguity handling was added (regression guard for the single-match case).
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[{""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13""}]"));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.DvSsl,
+                ProductParameters = new Dictionary<string, string>()
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().NotThrowAsync();
         }
 
         // ---------------------------------------------------------------------------

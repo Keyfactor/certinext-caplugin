@@ -750,9 +750,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 "mapping for this product.");
                         }
 
-                        bool matched = products.Any(p =>
-                            string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase));
-                        if (!matched)
+                        // Mirrors EnrollV2Async's own ambiguity handling (so a template is
+                        // rejected/flagged at save time, not only discovered at enroll time):
+                        // the live catalog can carry MORE THAN ONE entry with this productTypeID
+                        // (sandbox-confirmed for type 13/DV SSL). Resolve automatically only when
+                        // exactly one match exists, or when the connector's DefaultProductCode
+                        // names one of several matches; otherwise reject with the candidates
+                        // listed.
+                        var matchingProducts = products
+                            .Where(p => string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
+                            .ToList();
+
+                        if (matchingProducts.Count == 0)
                         {
                             _logger.LogWarning(
                                 "Product/profile validation failed — no CERTInext V2 catalog entry has " +
@@ -762,6 +771,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 $"Could not find a CERTInext V2 catalog entry for product '{params_.ProductId}' " +
                                 $"(expected productTypeID '{expectedTypeId}'). Verify the account is entitled to " +
                                 "this product.");
+                        }
+
+                        if (matchingProducts.Count > 1)
+                        {
+                            bool resolvedByDefault = matchingProducts.Any(p =>
+                                !string.IsNullOrWhiteSpace(tempConfig.DefaultProductCode) &&
+                                string.Equals(p.ProductCode, tempConfig.DefaultProductCode, StringComparison.OrdinalIgnoreCase));
+
+                            if (!resolvedByDefault)
+                            {
+                                string candidates = string.Join(", ",
+                                    matchingProducts.Select(p => $"{p.ProductCode} ('{p.ProductName}')"));
+                                _logger.LogWarning(
+                                    "Product/profile validation failed — multiple CERTInext V2 catalog entries " +
+                                    "share productTypeID '{ExpectedTypeId}' for ProductID '{ProductID}', and none " +
+                                    "match the configured DefaultProductCode ('{DefaultProductCode}'). " +
+                                    "Candidates=[{Candidates}]",
+                                    expectedTypeId, params_.ProductId,
+                                    string.IsNullOrWhiteSpace(tempConfig.DefaultProductCode) ? "(not set)" : tempConfig.DefaultProductCode,
+                                    candidates);
+                                throw new AnyCAValidationException(
+                                    $"Multiple CERTInext catalog products match ProductID '{params_.ProductId}' " +
+                                    $"(productTypeID '{expectedTypeId}'): {candidates}. Set the ProductCode " +
+                                    "template parameter explicitly, or set the CA connector's DefaultProductCode " +
+                                    "to one of these codes, to disambiguate.");
+                            }
                         }
 
                         found = true;
@@ -1839,8 +1874,56 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     };
                 }
 
-                var matchedProduct = catalog?.FirstOrDefault(p =>
-                    string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase));
+                // Sandbox-confirmed: the live catalog can carry MORE THAN ONE entry with the
+                // same productTypeID (e.g. two type-13 DV SSL entries, "917 SSL DV 1 month"
+                // and "842 DV SSL Certificate") — picking the catalog's first-listed match
+                // (the old behavior) is not safe: on sandbox it silently ordered "917", which
+                // PUT /csr then rejected 422 "PFX based certificate orders are not allowed",
+                // failing every ProductId-only DV SSL enrollment. When more than one catalog
+                // entry shares the expected productTypeID, only resolve automatically if the
+                // connector's DefaultProductCode names one of them; otherwise reject with a
+                // clear message listing the candidates rather than guessing.
+                var matchingProducts = (catalog ?? new List<ProductDetail>())
+                    .Where(p => string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                ProductDetail matchedProduct = null;
+                if (matchingProducts.Count == 1)
+                {
+                    matchedProduct = matchingProducts[0];
+                }
+                else if (matchingProducts.Count > 1)
+                {
+                    matchedProduct = matchingProducts.FirstOrDefault(p =>
+                        !string.IsNullOrWhiteSpace(_config.DefaultProductCode) &&
+                        string.Equals(p.ProductCode, _config.DefaultProductCode, StringComparison.OrdinalIgnoreCase));
+
+                    if (matchedProduct == null)
+                    {
+                        string candidates = string.Join(", ",
+                            matchingProducts.Select(p => $"{p.ProductCode} ('{p.ProductName}')"));
+                        _logger.LogWarning(
+                            "EnrollV2Async rejected an order — multiple CERTInext V2 catalog entries share " +
+                            "productTypeID '{ExpectedTypeId}' for ProductId={ProductId}, and none match the " +
+                            "configured DefaultProductCode ('{DefaultProductCode}'). Candidates=[{Candidates}]",
+                            expectedTypeId, ep.ProductId,
+                            string.IsNullOrWhiteSpace(_config.DefaultProductCode) ? "(not set)" : _config.DefaultProductCode,
+                            candidates);
+                        _logger.MethodExit(LogLevel.Debug);
+                        return new EnrollmentResult
+                        {
+                            CARequestID   = string.Empty,
+                            Certificate   = null,
+                            Status        = (int)EndEntityStatus.FAILED,
+                            StatusMessage = $"V2 enrollment rejected: multiple CERTInext catalog products match " +
+                                            $"ProductID '{ep.ProductId}' (productTypeID '{expectedTypeId}'): " +
+                                            $"{candidates}. Set the ProductCode template parameter explicitly, " +
+                                            "or set the CA connector's DefaultProductCode to one of these codes, " +
+                                            "to disambiguate."
+                        };
+                    }
+                }
+
                 if (matchedProduct == null || string.IsNullOrWhiteSpace(matchedProduct.ProductCode))
                 {
                     _logger.LogError(
