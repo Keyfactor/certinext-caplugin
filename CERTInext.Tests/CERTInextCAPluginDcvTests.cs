@@ -1338,5 +1338,150 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             validator.CleanedUpKeys.Should().NotContain(badHostname,
                 "the bad domain was never staged, so there is nothing to clean up for it");
         }
+
+        // ---------------------------------------------------------------------------
+        // Wildcard domains — TXT hostname must be derived from the BASE domain
+        // ---------------------------------------------------------------------------
+        //
+        // Live evidence (sandbox, 2026-10-01): a wildcard DV order's TXT host was staged as
+        // "_emsign-validation.*.dcv-fresh-<ts>...scrup.org" — a literal '*' DNS label, which is
+        // not queryable and left the order stuck pending. CERTInext's own GetDcv/VerifyDcv/
+        // TrackOrder calls must still use the original "*."-prefixed domain string (that is what
+        // Track Order reports back per-domain); only the DNS-side hostname/zone resolution uses
+        // the base domain.
+
+        /// <summary>Builds a verified-status multi-domain TrackOrder response, mirroring
+        /// <see cref="DcvPendingTrackResponseMultiDomain"/> but with every listed domain already
+        /// validated — used to drive <c>WaitForDcvVerificationAsync</c>'s post-stage poll.</summary>
+        private static TrackOrderResponse DcvVerifiedTrackResponseMultiDomain(
+            string orderNumber, params string[] domains)
+        {
+            var detail = DcvDetail(Constants.Dcv.StatusValidated);
+            var raw = new Dictionary<string, System.Text.Json.JsonElement>();
+            foreach (string d in domains)
+                raw[d] = detail;
+
+            return new TrackOrderResponse
+            {
+                OrderDetails = new TrackOrderResponseDetails
+                {
+                    OrderStatusId       = "2",
+                    CertificateStatusId = "24",
+                    DomainVerification  = new TrackOrderDomainVerification
+                    {
+                        Status           = Constants.Dcv.StatusValidated,
+                        RawDomainEntries = raw
+                    }
+                }
+            };
+        }
+
+        [Fact]
+        public async Task Dcv_WildcardDomain_StagesBaseDomainHostname_ButCallsCaWithWildcardDomain()
+        {
+            const string order    = MockCertificateData.DcvOrderId;
+            const string baseName = MockCertificateData.DcvDomain;
+            string wildcard        = "*." + baseName;
+
+            var (mock, validator) = HappyPathMocks(orderNumber: order, domain: wildcard);
+
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+
+            // The TXT hostname must be built from the base domain, not the literal "*.example.com"
+            // — a "*" DNS label is not queryable.
+            string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, baseName);
+            validator.StagedRecords.Should().ContainSingle()
+                .Which.key.Should().Be(expectedHostname);
+            validator.StagedRecords.Should().OnlyContain(r => !r.key.Contains('*'),
+                "a literal '*' DNS label can never be queried by the CA");
+
+            validator.CleanedUpKeys.Should().ContainSingle().Which.Should().Be(expectedHostname);
+
+            // CERTInext's own API must still see the original wildcard domain string — that is
+            // what Track Order reports back per-domain.
+            mock.Verify(c => c.GetDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()),
+                Times.Once);
+            mock.Verify(c => c.VerifyDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+
+        [Fact]
+        public async Task Dcv_NonWildcardDomain_HostnameDerivationUnchanged()
+        {
+            // Baseline/regression guard: an ordinary (non-wildcard) domain must stage a TXT
+            // hostname built from the domain exactly as before — StripWildcardPrefix is a no-op
+            // when there is no leading "*.".
+            var (mock, validator) = HappyPathMocks();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, MockCertificateData.DcvDomain);
+            validator.StagedRecords.Should().ContainSingle()
+                .Which.Should().Be((expectedHostname, MockCertificateData.DcvToken));
+        }
+
+        [Fact]
+        public async Task Dcv_MultiDomain_ApexAndWildcardShareHostname_StagesOnceAndCleansUpOnce_ButVerifiesBothWithCa()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            const string apex  = MockCertificateData.DcvDomain;
+            string wildcard     = "*." + apex;
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+
+            mock.SetupSequence(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, apex, wildcard))
+                .ReturnsAsync(DcvVerifiedTrackResponseMultiDomain(order, apex, wildcard));
+
+            mock.Setup(c => c.GetDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-apex"));
+            mock.Setup(c => c.GetDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-wildcard"));
+
+            mock.Setup(c => c.VerifyDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.VerifyDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            mock.Setup(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(order));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+
+            // Both domains collapse to the same base-domain TXT hostname — exactly ONE record
+            // must be staged (and cleaned up), not two, even though the order lists both the
+            // apex and its wildcard as separate domain entries.
+            string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, apex);
+            validator.StagedRecords.Should().ContainSingle(
+                "the apex and wildcard domains share one base-domain TXT hostname")
+                .Which.key.Should().Be(expectedHostname);
+            validator.CleanedUpKeys.Should().ContainSingle(
+                "the shared hostname must be cleaned up exactly once, not once per domain that used it")
+                .Which.Should().Be(expectedHostname);
+
+            // CERTInext tracks DCV per domain entry, so both the apex and the wildcard still need
+            // their own CA-side GetDcv/VerifyDcv call even though they share one TXT record.
+            mock.Verify(c => c.GetDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.GetDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.VerifyDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.VerifyDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
+        }
     }
 }

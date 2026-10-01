@@ -3785,6 +3785,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             return hasPhrase && !hasOtherEmsCode;
         }
 
+        /// <summary>
+        /// Strips a leading wildcard label (<c>"*."</c>) so a domain can be used to pick a DNS
+        /// zone / <see cref="Keyfactor.AnyGateway.Extensions.IDomainValidator"/> and to build the
+        /// DCV TXT record hostname. A literal <c>"*"</c> is not a queryable DNS label, so staging
+        /// a record at e.g. <c>_emsign-validation.*.example.com</c> for a wildcard domain can never
+        /// be seen by the CA — confirmed live 2026-10-01 (a <c>*.dcv-fresh-&lt;ts&gt;...</c> order
+        /// stayed pending with a literal-asterisk TXT host staged). Callers must keep using the
+        /// ORIGINAL domain string (including <c>"*."</c>) for every CERTInext API call
+        /// (GetDcv/VerifyDcv/TrackOrder) — that is what the CA itself tracks and reports back
+        /// per-domain; only the DNS-side hostname/zone-resolution inputs use the base domain.
+        ///
+        /// Whether CERTInext's own DCV actually accepts a base-domain TXT record as proof for a
+        /// wildcard domain entry is UNVERIFIED against the live API as of this change — pending
+        /// the principal's live run.
+        /// </summary>
+        private static string StripWildcardPrefix(string domain)
+        {
+            if (string.IsNullOrEmpty(domain))
+                return domain;
+            return domain.StartsWith("*.", StringComparison.Ordinal)
+                ? domain.Substring(2)
+                : domain;
+        }
+
         // (`DomainValidatorConfigProvider` nested helper removed — it declared an
         // implementation of `Keyfactor.AnyGateway.Extensions.IDomainValidatorConfigProvider`,
         // a v3.3-only interface, but the type was never instantiated anywhere in the
@@ -4082,6 +4106,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var stagedValidations = new List<(string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator)>();
 
+            // Every domain that got through staging this pass — whether it freshly published a
+            // TXT record or shared an already-staged hostname with a sibling (see
+            // stagedHostnames below). Drives the per-domain CERTInext Verify calls; kept separate
+            // from stagedValidations (which holds only ONE entry per unique hostname) so a
+            // wildcard/apex pair sharing a base-domain hostname still each get their own CA-side
+            // VerifyDcv, without staging — or cleaning up — the shared TXT record twice.
+            var verifyDomains = new List<string>();
+
+            // TXT hostname -> the first domain that staged it this pass. A UCC order can list
+            // both "example.com" and "*.example.com"; StripWildcardPrefix collapses both to the
+            // same base-domain hostname, so the second domain to reach it must reuse the
+            // already-staged record instead of publishing (and later cleaning up) a duplicate.
+            var stagedHostnames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
             // Domains this pass could not stage, with why — purely for the summary LogError after
             // the loop. Every failure mode below is loud (its own LogError, sanitized) before being
             // skipped, so nothing here is silent; this list just avoids repeating that detail twice.
@@ -4245,9 +4283,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
                         ? Constants.Dcv.DefaultTxtRecordTemplate
                         : _config.DcvTxtRecordTemplate;
-                    string hostname = string.Format(template, domain);
+                    // DCV publishes/looks up the TXT record under the BASE domain — a wildcard's
+                    // "*." label is not a queryable DNS name. CERTInext's own GetDcv/VerifyDcv
+                    // calls above/below still use the original `domain` (including "*."), since
+                    // that is what Track Order reports back per-domain.
+                    string baseDomain = StripWildcardPrefix(domain);
+                    string hostname = string.Format(template, baseDomain);
 
-                    var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
+                    if (stagedHostnames.TryGetValue(hostname, out string sharedWithDomain))
+                    {
+                        // Sibling domain (e.g. the wildcard/apex pair of the same base domain)
+                        // already staged this exact TXT hostname this pass — reuse it instead of
+                        // publishing a second record at the same name. This domain still gets its
+                        // own CA-side GetDcv/VerifyDcv (CERTInext tracks DCV per domain entry); it
+                        // just doesn't need its own TXT record.
+                        _logger.LogInformation(
+                            "DCV hostname {Hostname} for domain {Domain} on order {OrderNumber} is already " +
+                            "staged (shared with {SharedWith}); reusing it instead of publishing a second " +
+                            "TXT record.",
+                            LogSanitizer.Strip(hostname), LogSanitizer.Strip(domain), orderNumber,
+                            LogSanitizer.Strip(sharedWithDomain));
+                        verifyDomains.Add(domain);
+                        continue;
+                    }
+
+                    var validator = DomainValidatorFactory.ResolveDomainValidator(baseDomain, "dns-01");
                     if (validator == null)
                     {
                         // The canonical case: an IP-literal SAN (or a non-DNS Subject CN) satisfies
@@ -4298,7 +4358,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         continue;
                     }
 
+                    stagedHostnames[hostname] = domain;
                     stagedValidations.Add((domain, hostname, validator));
+                    verifyDomains.Add(domain);
                 }
             }
             catch (Exception ex)
@@ -4349,7 +4411,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     delaySeconds, orderNumber);
                 await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
 
-                foreach (var (domain, hostname, _) in stagedValidations)
+                // Every domain that got through staging — including hostname-sharing siblings —
+                // still gets its own CA-side verify call; CERTInext tracks DCV per domain entry
+                // even when two domains share one TXT record.
+                foreach (var domain in verifyDomains)
                 {
                     _logger.LogInformation(
                         "Triggering CERTInext DCV verification. OrderNumber={OrderNumber}, Domain={Domain}",
@@ -4360,7 +4425,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // Poll TrackOrder until CERTInext confirms all staged domains are verified
                 // before removing TXT records — VerifyDcv triggers an async DNS lookup on
                 // their side, so cleanup must wait for dcvStatus=1 on every domain.
-                await WaitForDcvVerificationAsync(orderNumber, stagedValidations.Select(s => s.domain).ToList(), ct);
+                await WaitForDcvVerificationAsync(orderNumber, verifyDomains, ct);
             }
             finally
             {
@@ -4539,13 +4604,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // TXT record hostname template — config-driven, mirroring V1's
                 // PerformDcvIfNeededAsync (issues/0027, item 5a). Falls back to the same
                 // Constants.Dcv.DefaultTxtRecordTemplate default V1 uses when unconfigured;
-                // {0} is substituted with the bare domain name via string.Format, same as V1.
+                // {0} is substituted with the BASE domain name via string.Format, same as V1 —
+                // a wildcard's "*." label is not a queryable DNS name, so the DNS-side hostname
+                // and zone resolution use StripWildcardPrefix(domain); the CERTInext calls above
+                // and below keep using the original `domain` string, since that is what Track
+                // Order reports back.
                 string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
                     ? Constants.Dcv.DefaultTxtRecordTemplate
                     : _config.DcvTxtRecordTemplate;
-                hostname = string.Format(template, domain);
+                string baseDomain = StripWildcardPrefix(domain);
+                hostname = string.Format(template, baseDomain);
 
-                validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
+                validator = DomainValidatorFactory.ResolveDomainValidator(baseDomain, "dns-01");
                 if (validator == null)
                 {
                     _dcvInFlight.TryRemove(orderId, out _);
@@ -4736,6 +4806,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var verifiedDomains = new List<string>();
             var failedDomains = new List<(string domain, string reason)>();
 
+            // Every domain that got through staging this pass — whether it freshly published a
+            // TXT record or shared an already-staged hostname with a sibling (see
+            // stagedHostnames below). Drives the per-domain CA Verify calls in Phase 2; kept
+            // separate from `staged` (which holds only ONE entry per unique hostname, for
+            // cleanup) so a wildcard/apex pair sharing a base-domain hostname still each get
+            // their own VerifyDcv call without staging — or cleaning up — the shared TXT record
+            // twice.
+            var verifyCandidates = new List<string>();
+
+            // TXT hostname -> the first domain that staged it this pass. A UCC order can list
+            // both "example.com" and "*.example.com"; StripWildcardPrefix collapses both to the
+            // same base-domain hostname, so the second domain to reach it must reuse the
+            // already-staged record instead of publishing (and later cleaning up) a duplicate.
+            var stagedHostnames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
             async Task CleanupStagedAsync()
             {
                 // Concurrent, not sequential — mirrors the V1 multi-SAN cleanup rationale
@@ -4802,9 +4887,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
                         ? Constants.Dcv.DefaultTxtRecordTemplate
                         : _config.DcvTxtRecordTemplate;
-                    string hostname = string.Format(template, d);
+                    // DCV publishes/looks up the TXT record under the BASE domain — a wildcard's
+                    // "*." label is not a queryable DNS name. CERTInext's own GetDcv/VerifyDcv
+                    // calls keep using the original `d` string, since that is what Track Order
+                    // reports back per-domain.
+                    string baseDomain = StripWildcardPrefix(d);
+                    string hostname = string.Format(template, baseDomain);
 
-                    var validator = DomainValidatorFactory.ResolveDomainValidator(d, "dns-01");
+                    if (stagedHostnames.TryGetValue(hostname, out string sharedWithDomain))
+                    {
+                        // Sibling domain (e.g. the wildcard/apex pair of the same base domain)
+                        // already staged this exact TXT hostname this pass — reuse it instead of
+                        // publishing a second record at the same name. This domain still gets its
+                        // own CA-side VerifyDcv in Phase 2 below.
+                        _logger.LogInformation(
+                            "V2 DCV hostname {Hostname} for domain {Domain} on order {OrderId} is already " +
+                            "staged (shared with {SharedWith}); reusing it instead of publishing a second " +
+                            "TXT record.",
+                            LogSanitizer.Strip(hostname), LogSanitizer.Strip(d), orderId,
+                            LogSanitizer.Strip(sharedWithDomain));
+                        verifyCandidates.Add(d);
+                        continue;
+                    }
+
+                    var validator = DomainValidatorFactory.ResolveDomainValidator(baseDomain, "dns-01");
                     if (validator == null)
                     {
                         _logger.LogError(
@@ -4848,7 +4954,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         continue;
                     }
 
+                    stagedHostnames[hostname] = d;
                     staged.Add((d, hostname, validator));
+                    verifyCandidates.Add(d);
                 }
             }
             catch (Exception ex)
@@ -4864,7 +4972,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 throw;
             }
 
-            if (staged.Count > 0)
+            if (verifyCandidates.Count > 0)
             {
                 try
                 {
@@ -4872,14 +4980,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
                     _logger.LogInformation(
                         "Waiting {Delay}s for DNS propagation before V2 DCV verify. OrderId={OrderId}, DomainCount={Count}",
-                        delaySeconds, orderId, staged.Count);
+                        delaySeconds, orderId, verifyCandidates.Count);
                     await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
 
-                    // Phase 2: verify each staged domain individually — the spec's Verify DCV
-                    // body takes a single `domain`, mirroring Get DCV Challenges' per-domain
-                    // shape (per-SAN semantics unconfirmed live end-to-end — see
-                    // v2-api-support-questions.md Finding 9, question 3).
-                    foreach (var (d, _, _) in staged)
+                    // Phase 2: verify each domain that got through staging individually — the
+                    // spec's Verify DCV body takes a single `domain`, mirroring Get DCV
+                    // Challenges' per-domain shape (per-SAN semantics unconfirmed live
+                    // end-to-end — see v2-api-support-questions.md Finding 9, question 3). This
+                    // includes hostname-sharing siblings (verifyCandidates), not just the domains
+                    // that staged a fresh TXT record (staged) — CERTInext tracks DCV per domain
+                    // entry even when two domains share one TXT record.
+                    foreach (var d in verifyCandidates)
                     {
                         try
                         {
@@ -4932,7 +5043,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     // (WaitForDcvVerificationAsync): VerifyDcv's synchronous response may not yet
                     // be reflected by the CA's own async DNS lookup.
                     var stagedDomainNames = new HashSet<string>(
-                        staged.Select(s => s.domain), StringComparer.OrdinalIgnoreCase);
+                        verifyCandidates, StringComparer.OrdinalIgnoreCase);
                     var justVerifiedStaged = verifiedDomains
                         .Where(d => stagedDomainNames.Contains(d))
                         .ToList();

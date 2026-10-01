@@ -1162,5 +1162,160 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 && r.Status == (int)EndEntityStatus.EXTERNALVALIDATION);
             VerifyNoDcvCalls(mock, validator);
         }
+
+        // ---------------------------------------------------------------------------
+        // Wildcard domains — TXT hostname must be derived from the BASE domain
+        // ---------------------------------------------------------------------------
+        //
+        // Live evidence (sandbox, 2026-10-01): a wildcard V2 DV order's TXT host was staged as
+        // "_emsign-validation.*.dcv-fresh-<ts>...scrup.org" — a literal '*' DNS label, which is
+        // not queryable and left the order stuck pending. CERTInext's own GetDcvV2/VerifyDcvV2/
+        // TrackOrderV2 calls must still use the original "*."-prefixed domain string; only the
+        // DNS-side hostname/zone resolution uses the base domain.
+
+        [Fact]
+        public async Task PerformDcvV2_WildcardSingleDomain_StagesBaseDomainHostname_ButCallsCaWithWildcardDomain()
+        {
+            const string baseName = "example.com";
+            string wildcard         = "*." + baseName;
+
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "pending-dcv", Domain = wildcard })
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "issued", Domain = wildcard })
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "issued", Domain = wildcard });
+
+            mock.Setup(c => c.GetDcvV2Async(OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "wildcard-token", TokenExpiryDate = "2026-12-31 23:59:59" });
+
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            mock.Setup(c => c.DownloadCertificateV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DownloadResponse());
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = "DV SSL",
+                ProductParameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["ProductCode"]    = "842",
+                    ["ProductFamily"]  = "ssl",
+                    ["ProductVariant"] = "dv",
+                    ["DomainName"]     = wildcard
+                }
+            };
+
+            var result = await plugin.Enroll(
+                csr:            MockCertificateData.FakeCsrPem,
+                subject:        $"CN={wildcard}",
+                san:            new Dictionary<string, string[]> { ["dns"] = new[] { wildcard } },
+                productInfo:    productInfo,
+                requestFormat:  RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+
+            // The TXT hostname must be built from the base domain, not the literal
+            // "*.example.com" — a "*" DNS label is not queryable.
+            validator.StagedRecords.Should().ContainSingle()
+                .Which.key.Should().Be($"_emsign-validation.{baseName}");
+            validator.StagedRecords.Should().OnlyContain(r => !r.key.Contains('*'),
+                "a literal '*' DNS label can never be queried by the CA");
+
+            // CERTInext's own API must still see the original wildcard domain string.
+            mock.Verify(c => c.VerifyDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+
+        [Fact]
+        public async Task PerformDcvV2_Ucc_ApexAndWildcardShareHostname_StagesOnceAndCleansUpOnce_ButVerifiesBothWithCa()
+        {
+            const string apex = "example.com";
+            string wildcard    = "*." + apex;
+
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            // 1st call (post-CSR check): both the apex and its wildcard are pending. Every later
+            // call (WaitForDomainsVerifiedV2Async's poll, and EnrollV2Async's post-DCV re-check)
+            // sees the order fully issued with both VERIFIED.
+            int trackCalls = 0;
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() =>
+                {
+                    trackCalls++;
+                    return trackCalls == 1
+                        ? StatusWithDomains("pending-dcv",
+                            DomainEntry(apex, "PENDING"),
+                            DomainEntry(wildcard, "PENDING"))
+                        : StatusWithDomains("issued",
+                            DomainEntry(apex, "VERIFIED", "dns-txt"),
+                            DomainEntry(wildcard, "VERIFIED", "dns-txt"));
+                });
+
+            mock.Setup(c => c.GetDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-apex", TokenExpiryDate = "2026-12-31 23:59:59" });
+            mock.Setup(c => c.GetDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-wildcard", TokenExpiryDate = "2026-12-31 23:59:59" });
+
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            mock.Setup(c => c.DownloadCertificateV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DownloadResponse());
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+
+            // The apex and its wildcard collapse to the same base-domain TXT hostname — exactly
+            // ONE record must be staged (and cleaned up), not two.
+            validator.StagedRecords.Should().ContainSingle(
+                "the apex and wildcard domains share one base-domain TXT hostname")
+                .Which.key.Should().Be($"_emsign-validation.{apex}");
+            validator.CleanedUpKeys.Should().ContainSingle(
+                "the shared hostname must be cleaned up exactly once, not once per domain that used it")
+                .Which.Should().Be($"_emsign-validation.{apex}");
+
+            // CERTInext tracks DCV per domain entry, so both the apex and the wildcard still need
+            // their own CA-side GetDcv/VerifyDcv call even though they share one TXT record.
+            mock.Verify(c => c.GetDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.GetDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.VerifyDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.VerifyDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+        }
     }
 }

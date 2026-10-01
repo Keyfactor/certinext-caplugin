@@ -62,8 +62,10 @@
 - fix(revoke): V2 revoke's reason-rejection retry now covers all 4 live-rejected CRL reasons (0, 2, 6, 10), not just "unspecified"; each retries once with an accepted fallback (0026).
 - fix(enroll): V2 product resolution (no explicit ProductCode) now rejects an ambiguous catalog match instead of silently picking the first-listed entry, which on sandbox ordered an unorderable DV SSL variant; `DefaultProductCode` can disambiguate. Mirrored in `ValidateProductInfo`.
 - fix(enroll): the V2 single-domain SAN guard now exempts a wildcard product's bare apex (e.g. `example.com` alongside `*.example.com`) instead of rejecting it as an extra SAN; the rejection message for wildcard products no longer suggests a UCC product.
+- fix(crypto): DCV now derives the TXT record hostname (and DNS validator zone) from a wildcard domain's base domain instead of staging a literal `*.` DNS label, across the V1 and V2 single/multi-domain DCV paths; a UCC order listing both the apex and its wildcard now stages and cleans up one shared TXT record instead of two. CA-side acceptance of a base-domain TXT record for a wildcard domain entry is unverified against the live API.
 
 ## Chores
+- chore(tests): regression tests for the wildcard DCV hostname fix — hostname derivation, apex/wildcard hostname dedupe and single cleanup, and non-wildcard-unchanged, across V1 and V2 single/multi-domain paths.
 - docs(v2): V2 renewal/reissue places a new order by design; the CA's `/reissue` endpoint is intentionally unused (0021, 0038).
 - docs(v2): correct stale V2 claims about UCC, credentials, order IDs, idempotency, sync, revoke reasons, and product codes (0038).
 - chore(scripts): `scripts/v2/*.sh` dev helpers now use `CERTINEXT_API_URL` + OAuth2 `client_credentials` from `~/.env_certinext_v2`; mutating scripts require `--yes-mutate` (0048).
