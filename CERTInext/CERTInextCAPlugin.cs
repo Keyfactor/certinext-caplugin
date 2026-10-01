@@ -1825,6 +1825,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // apply (ValidateProductInfo checks the code's productTypeID at template save time).
             string productCode;
             bool isUccProduct = false;
+            bool isWildcardProduct = false;
             List<ProductDetail> catalog = null;
             if (!isPrivatePki)
             {
@@ -1853,6 +1854,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 isUccProduct = matchedProduct != null
                     && !string.IsNullOrWhiteSpace(matchedProduct.ProductTypeId)
                     && Constants.ApiV2.UccProductTypeIds.Contains(matchedProduct.ProductTypeId);
+                isWildcardProduct = matchedProduct != null
+                    && !string.IsNullOrWhiteSpace(matchedProduct.ProductTypeId)
+                    && Constants.ApiV2.WildcardProductTypeIds.Contains(matchedProduct.ProductTypeId);
             }
             else
             {
@@ -1945,6 +1949,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 productCode = matchedProduct.ProductCode;
                 isUccProduct = Constants.ApiV2.UccProductTypeIds.Contains(expectedTypeId);
+                isWildcardProduct = Constants.ApiV2.WildcardProductTypeIds.Contains(expectedTypeId);
 
                 _logger.LogInformation(
                     "EnrollV2Async: resolved V2 product code from live catalog. ProductId={ProductId}, " +
@@ -1986,8 +1991,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // SSL-only (issue 0033): a private-pki order carries its SANs in additionalHosts,
             // which the spec defines as a multi-entry "SAN list (DNS names or IPv4 / IPv6)" for
             // every Private PKI variant, so the single-domain restriction does not apply.
+            //
+            // Wildcard apex exemption: a non-UCC wildcard product's `domain` is the literal
+            // wildcard value (e.g. "*.example.com"), and a wildcard CSR/SAN dictionary
+            // routinely also carries the bare apex ("example.com") alongside it — rejecting
+            // that apex as an "extra SAN" would make every ordinary wildcard CSR unenrollable
+            // via this guard. Exempt exactly the apex (the wildcard domain with its leading
+            // "*." stripped) for wildcard products (productTypeID 14/17,
+            // Constants.ApiV2.WildcardProductTypeIds) — any other extra SAN is still rejected.
+            // NOTE (unverified): this only widens what the guard *accepts*; it does not change
+            // what is sent to the CA for the apex — additionalDomains is still not populated
+            // for non-UCC products below, exactly as before this fix. Whether CERTInext's V2
+            // order create needs the apex added to additionalDomains (or handles it
+            // automatically for a wildcard product) has not been confirmed live and is left
+            // to the principal to verify.
             if (!isPrivatePki && !isUccProduct)
             {
+                string wildcardApexDomain = isWildcardProduct && domain != null
+                    && domain.StartsWith("*.", StringComparison.Ordinal)
+                    ? domain.Substring(2)
+                    : null;
+
                 var csrSanEntries = ExtractSanEntriesFromCsr(csr, out _);
                 // CollectRequestedSanEntries(san, csr: null, ...) yields exactly the SAN
                 // dictionary's own (MapSanType-normalized) entries: when san is non-null the
@@ -2002,6 +2026,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     .Where(v => !string.IsNullOrWhiteSpace(v))
                     .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
                     .Where(v => !string.Equals(v, "www." + domain, StringComparison.OrdinalIgnoreCase))
+                    .Where(v => wildcardApexDomain == null || !string.Equals(v, wildcardApexDomain, StringComparison.OrdinalIgnoreCase))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
@@ -2016,18 +2041,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         LogSanitizer.Strip(domain),
                         LogSanitizer.Strip(string.Join(", ", extraSans)));
                     _logger.MethodExit(LogLevel.Debug);
+                    // Wildcard products get their own wording: unlike a plain single-domain
+                    // product, a wildcard product cannot be made to accept extra SANs by
+                    // switching to a UCC product on this same domain, so the rejection must not
+                    // suggest that.
+                    string statusMessage = isWildcardProduct
+                        ? $"V2 enrollment rejected: {extraSans.Count} SAN(s) beyond the primary wildcard " +
+                          $"domain ('{domain}') and its www. variant were requested (via the CSR and/or " +
+                          "Command's SAN dictionary). Only the primary wildcard domain and its bare apex " +
+                          "are supported via the V2 API for this product. Resubmit with a CSR/SAN set " +
+                          "carrying only those, and no other SANs."
+                        : $"V2 enrollment rejected: {extraSans.Count} SAN(s) beyond the primary domain " +
+                          $"('{domain}') and its www. variant were requested (via the CSR and/or Command's " +
+                          "SAN dictionary). This product only supports a single domain via the V2 API " +
+                          "(UCC/multi-domain products are the exception). Resubmit with a single-domain " +
+                          "CSR and no additional SANs, or enroll against a UCC product if additional " +
+                          "domains are required.";
                     return new EnrollmentResult
                     {
                         CARequestID   = string.Empty,
                         Certificate   = null,
                         Status        = (int)EndEntityStatus.FAILED,
-                        StatusMessage = $"V2 enrollment rejected: {extraSans.Count} SAN(s) beyond " +
-                                        $"the primary domain ('{domain}') and its www. variant were requested " +
-                                        "(via the CSR and/or Command's SAN dictionary). " +
-                                        "This product only supports a single domain via the V2 API " +
-                                        "(UCC/multi-domain products are the exception). " +
-                                        "Resubmit with a single-domain CSR and no additional SANs, or enroll " +
-                                        "against a UCC product if additional domains are required."
+                        StatusMessage = statusMessage
                     };
                 }
             }

@@ -540,6 +540,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public static readonly System.Collections.Generic.HashSet<string> UccProductTypeIds =
                 new System.Collections.Generic.HashSet<string> { "15", "18", "20", "21", "22" };
 
+            // Non-UCC wildcard product family detection — from the live Catalog response's
+            // productTypeID field: 14=DV SSL Wildcard, 17=OV SSL Wildcard
+            // (Constants.Products.ProductTypeIdsV2). Deliberately excludes the UCC wildcard
+            // type IDs (21/22, in UccProductTypeIds above) — those are already exempt from
+            // the single-domain SAN guard by virtue of being UCC, and their additionalDomains
+            // handling is unrelated to the apex-SAN exemption this set is used for (the V2
+            // single-domain enrollment guard in EnrollV2Async).
+            public static readonly System.Collections.Generic.HashSet<string> WildcardProductTypeIds =
+                new System.Collections.Generic.HashSet<string> { "14", "17" };
+
             // Orders report (Synchronize, V2 mode) — GET /api/certinext/v2/reports/orders.
             // Spring-style page envelope: content/page/size/totalPages/totalElements.
             // Paging is 1-based; size is clamped to 100 server-side; page=0 is treated as
