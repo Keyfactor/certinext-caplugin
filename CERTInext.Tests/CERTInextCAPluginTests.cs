@@ -285,6 +285,92 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .WithMessage("*OAuthTokenUrl*required*");
         }
 
+        // M2 compliance fix: OAuthTokenUrl receives the OAuth client secret on every token
+        // refresh (CERTInextClient.GetOrRefreshTokenAsync POSTs it there) — it must be held to
+        // the same https-or-loopback rule as ApiUrl, not just a non-empty check.
+        [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenOAuthTokenUrlIsHttp_NonLoopback()
+        {
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = "https://ca.example.com",
+                ["AccountNumber"] = "12345",
+                ["AuthMode"] = "OAuth",
+                ["OAuthTokenUrl"] = "http://token.example.com",
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            var ex = await act.Should().ThrowAsync<AnyCAValidationException>();
+            ex.Which.Message.Should().Contain("OAuthTokenUrl").And.Contain("https");
+            mock.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenOAuthTokenUrlIsNotUri()
+        {
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = "https://ca.example.com",
+                ["AccountNumber"] = "12345",
+                ["AuthMode"] = "OAuth",
+                ["OAuthTokenUrl"] = "not-a-url",
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            var ex = await act.Should().ThrowAsync<AnyCAValidationException>();
+            ex.Which.Message.Should().Contain("OAuthTokenUrl").And.Contain("valid absolute URI");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_AllowsHttp_ForLoopbackOAuthTokenUrl()
+        {
+            // Full round trip through a loopback WireMock server standing in for both the
+            // OAuth token endpoint (OAuthTokenUrl is used as-is, no path appended — see
+            // CERTInextClient.GetOrRefreshTokenAsync) and the V1 ValidateCredentials ping —
+            // proves http-loopback is accepted end to end, not just by the synchronous guard.
+            using var server = WireMockServer.Start();
+            server
+                .Given(Request.Create().WithPath("/").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"access_token\":\"test-token\",\"expires_in\":3600}"));
+            server
+                .Given(Request.Create().WithPath("/ValidateCredentials").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"meta\":{\"status\":\"1\"}}"));
+
+            var plugin = BuildPlugin(NewMock().Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = server.Urls[0] + "/",
+                ["AccountNumber"] = "12345",
+                ["AuthMode"] = "OAuth",
+                ["OAuthTokenUrl"] = server.Urls[0],
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().NotThrowAsync();
+        }
+
         [Fact]
         public async Task ValidateCAConnectionInfo_Throws_WhenAuthModeIsInvalid()
         {

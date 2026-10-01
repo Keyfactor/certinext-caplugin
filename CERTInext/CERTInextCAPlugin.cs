@@ -233,6 +233,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _config = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig)
                 ?? throw new InvalidOperationException("Failed to deserialize CERTInext plugin configuration.");
 
+            // Compliance gap fix: ValidateCAConnectionInfo enforces https-or-loopback on ApiUrl
+            // (and, in V1 OAuth mode, OAuthTokenUrl) at connection-test time, but a connector
+            // saved before that enforcement existed would otherwise sail straight through here
+            // on every gateway restart and keep sending its API key / OAuth client secret in
+            // cleartext. Re-check the config itself (not just the client we're about to build)
+            // before any client is built or used — this applies even when a test has already
+            // injected a mock client via `_client ??=` below, because the gap is in the saved
+            // config, not in which ICERTInextClient instance ends up talking to it.
+            void EnsureValidUrl(string fieldName, string url, string requiredSuffix)
+            {
+                string error = string.IsNullOrWhiteSpace(url)
+                    ? $"'{fieldName}' is required{requiredSuffix}."
+                    : ValidateHttpsOrLoopbackUrl(fieldName, url);
+                if (error == null)
+                    return;
+
+                _logger.LogError(
+                    "CERTInext plugin initialization failed — invalid configuration. {Error}", error);
+                throw new InvalidOperationException(error);
+            }
+
+            EnsureValidUrl(Constants.Config.ApiUrl, _config.ApiUrl, string.Empty);
+
+            string authModeUpper = (_config.AuthMode ?? string.Empty).Trim().ToUpperInvariant();
+            bool isV1OAuth = !_config.UseV2Api && (authModeUpper == "OAUTH" || authModeUpper == "OAUTH2");
+            if (isV1OAuth)
+                EnsureValidUrl(Constants.Config.OAuth2TokenUrl, _config.OAuth2TokenUrl, " when AuthMode is 'OAuth'");
+
             // Only create a real client if one wasn't injected (test scenario)
             _client ??= new CERTInextClient(_config);
 
@@ -431,18 +459,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string apiUrl = GetStringValue(connectionInfo, Constants.Config.ApiUrl);
             if (string.IsNullOrWhiteSpace(apiUrl))
                 errors.Add($"'{Constants.Config.ApiUrl}' is required.");
-            else if (!Uri.TryCreate(apiUrl, UriKind.Absolute, out Uri parsedApiUrl))
-                errors.Add($"'{Constants.Config.ApiUrl}' is not a valid absolute URI.");
-            else if (!string.Equals(parsedApiUrl.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-                     && !parsedApiUrl.IsLoopback)
+            else
+            {
                 // The OAuth client secret (V2) / API key (V1) is sent to this URL on every
                 // request; http would transmit it in cleartext. http is allowed only for
                 // loopback hosts (localhost/127.0.0.1/::1) so local mock-server tests keep
-                // working without a real TLS endpoint.
-                errors.Add($"'{Constants.Config.ApiUrl}' must use https — credentials (the OAuth client " +
-                           "secret or API key) are sent to this URL on every request, and http would " +
-                           "transmit them in cleartext. http is only allowed for a loopback host " +
-                           "(localhost/127.0.0.1/::1).");
+                // working without a real TLS endpoint. Shared with the OAuthTokenUrl check
+                // below and with Initialize's config-time enforcement of the same rule.
+                string apiUrlError = ValidateHttpsOrLoopbackUrl(Constants.Config.ApiUrl, apiUrl);
+                if (apiUrlError != null)
+                    errors.Add(apiUrlError);
+            }
 
             bool useV2 = connectionInfo.TryGetValue(Constants.ConfigV2.UseV2Api, out object v2Obj)
                          && v2Obj is bool v2Bool && v2Bool;
@@ -497,6 +524,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         string clientSecret = GetStringValue(connectionInfo, Constants.Config.OAuth2ClientSecret);
                         if (string.IsNullOrWhiteSpace(tokenUrl))
                             errors.Add($"'{Constants.Config.OAuth2TokenUrl}' is required when AuthMode is 'OAuth'.");
+                        else
+                        {
+                            // The OAuth client secret is POSTed to this URL on every token
+                            // refresh (CERTInextClient.GetOrRefreshTokenAsync) — same cleartext-
+                            // credential exposure as ApiUrl, so it gets the same https-or-loopback
+                            // rule.
+                            string tokenUrlError = ValidateHttpsOrLoopbackUrl(Constants.Config.OAuth2TokenUrl, tokenUrl);
+                            if (tokenUrlError != null)
+                                errors.Add(tokenUrlError);
+                        }
                         if (string.IsNullOrWhiteSpace(clientId))
                             errors.Add($"'{Constants.Config.OAuth2ClientId}' is required when AuthMode is 'OAuth'.");
                         if (string.IsNullOrWhiteSpace(clientSecret))
@@ -2009,7 +2046,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 string wildcardApexDomain = isWildcardProduct && domain != null
                     && domain.StartsWith("*.", StringComparison.Ordinal)
-                    ? domain.Substring(2)
+                    ? StripWildcardPrefix(domain)
                     : null;
 
                 var csrSanEntries = ExtractSanEntriesFromCsr(csr, out _);
@@ -6357,6 +6394,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (dict.TryGetValue(key, out object val) && val != null)
                 return val.ToString()!;
             return defaultValue;
+        }
+
+        /// <summary>
+        /// Validates that <paramref name="url"/> is an absolute URI using https, or http only
+        /// when the host is loopback (localhost/127.0.0.1/::1). Shared by every config field
+        /// that receives a credential on every outbound request — currently <c>ApiUrl</c>
+        /// (<see cref="ValidateCAConnectionInfo"/>, <see cref="Initialize"/>) and, in V1 OAuth
+        /// mode, <c>OAuthTokenUrl</c> (same two call sites) — so the http-cleartext rule can
+        /// never drift between connection-test time and actual startup. Does NOT check for
+        /// null/empty; callers that need a distinct "is required" message should check that
+        /// first and only call this helper once the value is known to be non-blank.
+        /// </summary>
+        /// <returns><c>null</c> when <paramref name="url"/> passes; otherwise an actionable
+        /// error message naming <paramref name="fieldName"/>.</returns>
+        private static string ValidateHttpsOrLoopbackUrl(string fieldName, string url)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri parsed))
+                return $"'{fieldName}' is not a valid absolute URI.";
+
+            if (!string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                && !parsed.IsLoopback)
+            {
+                return $"'{fieldName}' must use https — credentials (the OAuth client secret or API " +
+                       "key) are sent to this URL on every request, and http would transmit them in " +
+                       "cleartext. http is only allowed for a loopback host (localhost/127.0.0.1/::1).";
+            }
+
+            return null;
         }
 
         /// <summary>

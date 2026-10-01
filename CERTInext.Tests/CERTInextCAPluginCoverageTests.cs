@@ -791,6 +791,188 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
+        // M1 compliance fix: Initialize must enforce the same https-or-loopback rule as
+        // ValidateCAConnectionInfo on ApiUrl (and, in V1 OAuth mode, OAuthTokenUrl) — a
+        // connector saved before that rule existed would otherwise sail through on every
+        // gateway restart and keep sending credentials in cleartext.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public void Initialize_Throws_WhenApiUrlIsHttp_NonLoopback()
+        {
+            var configProviderMock = new Mock<IAnyCAPluginConfigProvider>(MockBehavior.Strict);
+            var certReaderMock = NewReaderMock();
+
+            configProviderMock.Setup(p => p.CAConnectionData)
+                .Returns(new Dictionary<string, object>
+                {
+                    ["ApiUrl"] = "http://ca.example.com",
+                    ["AuthMode"] = "ApiKey",
+                    ["ApiKey"] = "test-api-key-value",
+                    ["Enabled"] = true
+                });
+
+            var plugin = new CERTInextCAPlugin();
+
+            Action act = () => plugin.Initialize(configProviderMock.Object, certReaderMock.Object);
+
+            act.Should().Throw<InvalidOperationException>()
+                .WithMessage("*ApiUrl*https*");
+        }
+
+        [Fact]
+        public void Initialize_Throws_WhenApiUrlIsHttp_NonLoopback_EvenWithInjectedClient()
+        {
+            // _client ??= in Initialize lets tests inject a mock client and skip building a
+            // real CERTInextClient — but the config validation itself must still run
+            // unconditionally; an injected client must not bypass the cleartext-credential
+            // check on the saved config.
+            var configProviderMock = new Mock<IAnyCAPluginConfigProvider>(MockBehavior.Strict);
+            var certReaderMock = NewReaderMock();
+
+            configProviderMock.Setup(p => p.CAConnectionData)
+                .Returns(new Dictionary<string, object>
+                {
+                    ["ApiUrl"] = "http://ca.example.com",
+                    ["AuthMode"] = "ApiKey",
+                    ["ApiKey"] = "test-api-key-value",
+                    ["Enabled"] = true
+                });
+
+            var plugin = new CERTInextCAPlugin(NewMock().Object);
+
+            Action act = () => plugin.Initialize(configProviderMock.Object, certReaderMock.Object);
+
+            act.Should().Throw<InvalidOperationException>()
+                .WithMessage("*ApiUrl*https*");
+        }
+
+        [Theory]
+        [InlineData("http://localhost:8080")]
+        [InlineData("http://127.0.0.1:8080")]
+        [InlineData("http://[::1]:8080")]
+        public void Initialize_Succeeds_WhenApiUrlIsHttp_Loopback(string apiUrl)
+        {
+            var configProviderMock = new Mock<IAnyCAPluginConfigProvider>(MockBehavior.Strict);
+            var certReaderMock = NewReaderMock();
+
+            configProviderMock.Setup(p => p.CAConnectionData)
+                .Returns(new Dictionary<string, object>
+                {
+                    ["ApiUrl"] = apiUrl,
+                    ["AuthMode"] = "ApiKey",
+                    ["ApiKey"] = "test-api-key-value",
+                    ["Enabled"] = true
+                });
+
+            var plugin = new CERTInextCAPlugin();
+
+            Action act = () => plugin.Initialize(configProviderMock.Object, certReaderMock.Object);
+
+            act.Should().NotThrow();
+        }
+
+        [Fact]
+        public void Initialize_Succeeds_WhenApiUrlIsHttps()
+        {
+            var configProviderMock = new Mock<IAnyCAPluginConfigProvider>(MockBehavior.Strict);
+            var certReaderMock = NewReaderMock();
+
+            configProviderMock.Setup(p => p.CAConnectionData)
+                .Returns(new Dictionary<string, object>
+                {
+                    ["ApiUrl"] = "https://ca.example.com",
+                    ["AuthMode"] = "ApiKey",
+                    ["ApiKey"] = "test-api-key-value",
+                    ["Enabled"] = true
+                });
+
+            var plugin = new CERTInextCAPlugin();
+
+            Action act = () => plugin.Initialize(configProviderMock.Object, certReaderMock.Object);
+
+            act.Should().NotThrow();
+        }
+
+        [Fact]
+        public void Initialize_Throws_WhenOAuthTokenUrlIsHttp_NonLoopback()
+        {
+            var configProviderMock = new Mock<IAnyCAPluginConfigProvider>(MockBehavior.Strict);
+            var certReaderMock = NewReaderMock();
+
+            configProviderMock.Setup(p => p.CAConnectionData)
+                .Returns(new Dictionary<string, object>
+                {
+                    ["ApiUrl"] = "https://ca.example.com",
+                    ["AccountNumber"] = "12345",
+                    ["AuthMode"] = "OAuth",
+                    ["OAuthTokenUrl"] = "http://token.example.com",
+                    ["OAuthClientId"] = "my-client",
+                    ["OAuthClientSecret"] = "my-secret",
+                    ["Enabled"] = true
+                });
+
+            var plugin = new CERTInextCAPlugin();
+
+            Action act = () => plugin.Initialize(configProviderMock.Object, certReaderMock.Object);
+
+            act.Should().Throw<InvalidOperationException>()
+                .WithMessage("*OAuthTokenUrl*https*");
+        }
+
+        [Fact]
+        public void Initialize_Succeeds_WhenOAuthTokenUrlIsHttp_Loopback()
+        {
+            var configProviderMock = new Mock<IAnyCAPluginConfigProvider>(MockBehavior.Strict);
+            var certReaderMock = NewReaderMock();
+
+            configProviderMock.Setup(p => p.CAConnectionData)
+                .Returns(new Dictionary<string, object>
+                {
+                    ["ApiUrl"] = "https://ca.example.com",
+                    ["AccountNumber"] = "12345",
+                    ["AuthMode"] = "OAuth",
+                    ["OAuthTokenUrl"] = "http://localhost:9999",
+                    ["OAuthClientId"] = "my-client",
+                    ["OAuthClientSecret"] = "my-secret",
+                    ["Enabled"] = true
+                });
+
+            var plugin = new CERTInextCAPlugin();
+
+            Action act = () => plugin.Initialize(configProviderMock.Object, certReaderMock.Object);
+
+            act.Should().NotThrow();
+        }
+
+        [Fact]
+        public void Initialize_DoesNotCheckOAuthTokenUrl_WhenAuthModeIsNotOAuth()
+        {
+            // AccessKey mode never reads OAuthTokenUrl (CERTInextClient only builds the OAuth
+            // authenticator when AuthMode is OAuth/OAuth2) — a stray http OAuthTokenUrl value
+            // left over in a connector's saved config from a prior AuthMode switch must not
+            // block startup.
+            var configProviderMock = new Mock<IAnyCAPluginConfigProvider>(MockBehavior.Strict);
+            var certReaderMock = NewReaderMock();
+
+            configProviderMock.Setup(p => p.CAConnectionData)
+                .Returns(new Dictionary<string, object>
+                {
+                    ["ApiUrl"] = "https://ca.example.com",
+                    ["AuthMode"] = "ApiKey",
+                    ["ApiKey"] = "test-api-key-value",
+                    ["OAuthTokenUrl"] = "http://token.example.com",
+                    ["Enabled"] = true
+                });
+
+            var plugin = new CERTInextCAPlugin();
+
+            Action act = () => plugin.Initialize(configProviderMock.Object, certReaderMock.Object);
+
+            act.Should().NotThrow();
+        }
+
+        // ---------------------------------------------------------------------------
         // C3a: Enroll passes ValidityDays, AutoApprove, RequesterName, RequesterEmail, KeyType
         // ---------------------------------------------------------------------------
 

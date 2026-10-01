@@ -63,6 +63,8 @@
 - fix(enroll): V2 product resolution (no explicit ProductCode) now rejects an ambiguous catalog match instead of silently picking the first-listed entry, which on sandbox ordered an unorderable DV SSL variant; `DefaultProductCode` can disambiguate. Mirrored in `ValidateProductInfo`.
 - fix(enroll): the V2 single-domain SAN guard now exempts a wildcard product's bare apex (e.g. `example.com` alongside `*.example.com`) instead of rejecting it as an extra SAN; the rejection message for wildcard products no longer suggests a UCC product.
 - fix(crypto): DCV now derives the TXT record hostname (and DNS validator zone) from a wildcard domain's base domain instead of staging a literal `*.` DNS label, across the V1 and V2 single/multi-domain DCV paths; a UCC order listing both the apex and its wildcard now stages and cleans up one shared TXT record instead of two. CA-side acceptance of a base-domain TXT record for a wildcard domain entry is unverified against the live API.
+- fix(config): `Initialize` now enforces the same https-or-loopback rule on `ApiUrl`/`OAuthTokenUrl` as `ValidateCAConnectionInfo`, closing a gap where a connector saved before that check existed kept sending credentials in cleartext on every gateway restart.
+- fix(config): `OAuthTokenUrl` (V1 OAuth mode) now requires https-or-loopback, matching `ApiUrl`; it previously only checked for non-empty.
 
 ## Chores
 - chore(tests): regression tests for the wildcard DCV hostname fix — hostname derivation, apex/wildcard hostname dedupe and single cleanup, and non-wildcard-unchanged, across V1 and V2 single/multi-domain paths.
