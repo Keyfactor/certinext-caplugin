@@ -1282,6 +1282,77 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 });
 
             mock.Setup(c => c.GetDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-shared", TokenExpiryDate = "2026-12-31 23:59:59" });
+            mock.Setup(c => c.GetDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-shared", TokenExpiryDate = "2026-12-31 23:59:59" });
+
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+            mock.Setup(c => c.VerifyDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2DcvVerifyResponse { OverallStatus = "VERIFIED" });
+
+            mock.Setup(c => c.DownloadCertificateV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DownloadResponse());
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+
+            // The apex and its wildcard collapse to the same base-domain TXT hostname AND carry the
+            // same token — exactly ONE record must be staged (and cleaned up), not two.
+            validator.StagedRecords.Should().ContainSingle(
+                "the apex and wildcard domains share one base-domain TXT hostname")
+                .Which.key.Should().Be($"_emsign-validation.{apex}");
+            validator.CleanedUpKeys.Should().ContainSingle(
+                "the shared hostname must be cleaned up exactly once, not once per domain that used it")
+                .Which.Should().Be($"_emsign-validation.{apex}");
+
+            // CERTInext tracks DCV per domain entry, so both the apex and the wildcard still need
+            // their own CA-side GetDcv/VerifyDcv call even though they share one TXT record.
+            mock.Verify(c => c.GetDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.GetDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.VerifyDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.VerifyDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task PerformDcvV2_Ucc_ApexAndWildcardShareHostnameButDifferentTokens_StagesBothAndCleansUpBoth()
+        {
+            const string apex = "example.com";
+            string wildcard    = "*." + apex;
+
+            var mock = NewMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail>
+                {
+                    new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }
+                });
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            int trackCalls = 0;
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() =>
+                {
+                    trackCalls++;
+                    return trackCalls == 1
+                        ? StatusWithDomains("pending-dcv",
+                            DomainEntry(apex, "PENDING"),
+                            DomainEntry(wildcard, "PENDING"))
+                        : StatusWithDomains("issued",
+                            DomainEntry(apex, "VERIFIED", "dns-txt"),
+                            DomainEntry(wildcard, "VERIFIED", "dns-txt"));
+                });
+
+            mock.Setup(c => c.GetDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-apex", TokenExpiryDate = "2026-12-31 23:59:59" });
             mock.Setup(c => c.GetDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2DcvChallengeResponse { Token = "token-wildcard", TokenExpiryDate = "2026-12-31 23:59:59" });
@@ -1301,19 +1372,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.Status.Should().Be((int)EndEntityStatus.GENERATED);
 
-            // The apex and its wildcard collapse to the same base-domain TXT hostname — exactly
-            // ONE record must be staged (and cleaned up), not two.
-            validator.StagedRecords.Should().ContainSingle(
-                "the apex and wildcard domains share one base-domain TXT hostname")
-                .Which.key.Should().Be($"_emsign-validation.{apex}");
-            validator.CleanedUpKeys.Should().ContainSingle(
-                "the shared hostname must be cleaned up exactly once, not once per domain that used it")
-                .Which.Should().Be($"_emsign-validation.{apex}");
+            // Same base-domain hostname but two different CA tokens: a single record cannot satisfy
+            // both, so BOTH values must be staged at that hostname and both cleaned up.
+            string hostname = $"_emsign-validation.{apex}";
+            validator.StagedRecords.Should().HaveCount(2);
+            validator.StagedRecords.Select(r => r.key).Should().OnlyContain(k => k == hostname);
+            validator.StagedRecords.Select(r => r.value).Should().BeEquivalentTo(new[] { "token-apex", "token-wildcard" });
+            validator.CleanedUpKeys.Should().HaveCount(2);
+            validator.CleanedUpKeys.Should().OnlyContain(k => k == hostname);
 
-            // CERTInext tracks DCV per domain entry, so both the apex and the wildcard still need
-            // their own CA-side GetDcv/VerifyDcv call even though they share one TXT record.
-            mock.Verify(c => c.GetDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
-            mock.Verify(c => c.GetDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
             mock.Verify(c => c.VerifyDcvV2Async(OrderId, apex, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
             mock.Verify(c => c.VerifyDcvV2Async(OrderId, wildcard, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
         }

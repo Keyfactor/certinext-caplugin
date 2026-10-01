@@ -4290,7 +4290,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     string baseDomain = StripWildcardPrefix(domain);
                     string hostname = string.Format(template, baseDomain);
 
-                    if (stagedHostnames.TryGetValue(hostname, out string sharedWithDomain))
+                    if (stagedHostnames.TryGetValue(hostname + "|" + token, out string sharedWithDomain))
                     {
                         // Sibling domain (e.g. the wildcard/apex pair of the same base domain)
                         // already staged this exact TXT hostname this pass — reuse it instead of
@@ -4358,7 +4358,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         continue;
                     }
 
-                    stagedHostnames[hostname] = domain;
+                    stagedHostnames[hostname + "|" + token] = domain;
                     stagedValidations.Add((domain, hostname, validator));
                     verifyDomains.Add(domain);
                 }
@@ -4894,7 +4894,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     string baseDomain = StripWildcardPrefix(d);
                     string hostname = string.Format(template, baseDomain);
 
-                    if (stagedHostnames.TryGetValue(hostname, out string sharedWithDomain))
+                    if (stagedHostnames.TryGetValue(hostname + "|" + token, out string sharedWithDomain))
                     {
                         // Sibling domain (e.g. the wildcard/apex pair of the same base domain)
                         // already staged this exact TXT hostname this pass — reuse it instead of
@@ -4954,7 +4954,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         continue;
                     }
 
-                    stagedHostnames[hostname] = d;
+                    stagedHostnames[hostname + "|" + token] = d;
                     staged.Add((d, hostname, validator));
                     verifyCandidates.Add(d);
                 }

@@ -4,6 +4,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -1445,9 +1446,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ReturnsAsync(DcvVerifiedTrackResponseMultiDomain(order, apex, wildcard));
 
             mock.Setup(c => c.GetDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
-                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-apex"));
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-shared"));
             mock.Setup(c => c.GetDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
-                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-wildcard"));
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-shared"));
 
             mock.Setup(c => c.VerifyDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
@@ -1480,6 +1481,56 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // their own CA-side GetDcv/VerifyDcv call even though they share one TXT record.
             mock.Verify(c => c.GetDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
             mock.Verify(c => c.GetDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.VerifyDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.VerifyDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Dcv_MultiDomain_ApexAndWildcardShareHostnameButDifferentTokens_StagesBothAndCleansUpBoth()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            const string apex  = MockCertificateData.DcvDomain;
+            string wildcard     = "*." + apex;
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+
+            mock.SetupSequence(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, apex, wildcard))
+                .ReturnsAsync(DcvVerifiedTrackResponseMultiDomain(order, apex, wildcard));
+
+            mock.Setup(c => c.GetDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-apex"));
+            mock.Setup(c => c.GetDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse("token-wildcard"));
+
+            mock.Setup(c => c.VerifyDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.VerifyDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+            mock.Setup(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(order));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+
+            // Same base-domain hostname but two different CA tokens: a single record cannot satisfy
+            // both, so BOTH values must be staged at that hostname and both cleaned up.
+            string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, apex);
+            validator.StagedRecords.Should().HaveCount(2);
+            validator.StagedRecords.Select(r => r.key).Should().OnlyContain(k => k == expectedHostname);
+            validator.StagedRecords.Select(r => r.value).Should().BeEquivalentTo(new[] { "token-apex", "token-wildcard" });
+            validator.CleanedUpKeys.Should().HaveCount(2);
+            validator.CleanedUpKeys.Should().OnlyContain(k => k == expectedHostname);
+
             mock.Verify(c => c.VerifyDcvAsync(order, apex, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
             mock.Verify(c => c.VerifyDcvAsync(order, wildcard, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
         }
