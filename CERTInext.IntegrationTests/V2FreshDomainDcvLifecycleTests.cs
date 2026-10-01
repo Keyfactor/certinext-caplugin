@@ -117,6 +117,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 ApiUrl            = _v2ApiUrl,
                 UseV2Api          = true,
+                DefaultProductCode = Environment.GetEnvironmentVariable("CERTINEXT_PRODUCT_CODE") ?? "842",
                 OAuthClientId     = _v2ClientId,
                 OAuthClientSecret = _v2ClientSecret,
 
