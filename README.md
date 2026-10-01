@@ -249,7 +249,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 
 | Field | Required / Optional | Description | Where to find it | Example |
 |---|---|---|---|---|
-| `ApiUrl` | Required | CERTInext API base URL. In V1 mode (default), must include the `/emSignHub-API/` path segment. When `UseV2Api` is `true` (see [V2 API](#v2-api-preview) below), this is instead the bare V2 host with no trailing slash or path suffix — the two APIs are hosted differently, so this value changes when `UseV2Api` is toggled. | See the environments table above. | `https://api.certinext.io/emSignHub-API/` |
+| `ApiUrl` | Required | CERTInext API base URL. In V1 mode (default), must include the `/emSignHub-API/` path segment. When `UseV2Api` is `true` (see [V2 API](#v2-api-preview) below), this is instead the bare V2 host with no trailing slash or path suffix — the two APIs are hosted differently, so this value changes when `UseV2Api` is toggled. Must use `https` — the OAuth client secret (V2) or API key (V1) is sent to this URL on every request, and `http` would transmit it in cleartext. `http` is rejected at connection-validation time except for a loopback host (`localhost`/`127.0.0.1`/`::1`), which is allowed for local test servers only. | See the environments table above. | `https://api.certinext.io/emSignHub-API/` |
 | `AccountNumber` | Required | Your CERTInext account number (numeric string). Included in the `meta` block of every API request. | Portal → click your name or avatar → **Account Settings** or **My Profile**. | `1234567890` |
 | `AuthMode` | Required | Authentication mode. `AccessKey` uses HMAC signing (recommended). `OAuth` uses a bearer token. | N/A — choose based on the credential type you created. | `AccessKey` |
 | `ApiKey` | Conditional | The REST API Access Key generated in the CERTInext portal. Used to compute `authKey = SHA256(accessKey + ts + txn)`. The raw key is never transmitted. Required when `AuthMode` is `AccessKey`. This field is masked in the UI. | Portal → **Integrations → APIs** → generate or view the credential row. | *(generated, masked in UI)* |
@@ -273,7 +273,7 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 | `SubscriptionRenewCriteriaDays` | Optional | Days before expiry at which CERTInext auto-renews. Only honored when `SubscriptionAutoRenew` is `1`. Default: `30`. | N/A | `30` |
 | `AutoSecureWww` | Optional | If `1`, CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. Default: `0`. | N/A | `0` |
 | `SubmitNonDnsSans` | Optional | If `true` (default), SANs that aren't DNS names (IP address, email, URI) are submitted to CERTInext instead of silently dropped. CERTInext can't validate them, so such an order won't issue until they're removed. Set to `false` to restore the pre-1.0.1 behavior of submitting DNS names only. Default: `true`. | N/A | `true` |
-| `DefaultProductCode` | Optional, but effectively required if you use renewals | Numeric product code used for **renewals only** — CERTInext's `TrackOrder` doesn't return the prior order's product code, so the renewal path sends this value verbatim, ignoring the template's `ProductCode`/`ProfileId`. If left blank, renewals go out with an empty product code. Has **no effect on new enrollments** — the `ProductCode`/`ProfileId` template resolution never falls back to it. See [issue tracking this](https://github.com/Keyfactor/certinext-caplugin/issues/26). | Call `GetProductDetails` against your account/environment (see product code table below). | `842` |
+| `DefaultProductCode` | Optional, but effectively required if you use renewals (V1), or ProductId-only templates against an ambiguous V2 catalog | **V1 mode:** used for renewals only — CERTInext's `TrackOrder` doesn't return the prior order's product code, so the renewal path sends this value verbatim, ignoring the template's `ProductCode`/`ProfileId`. If left blank, renewals go out with an empty product code. Has no effect on new V1 enrollments. **V2 mode:** also used to disambiguate a template that sets only `ProductId` (no explicit `ProductCode`) when the live V2 catalog has more than one product sharing the product's expected assurance level — if this value doesn't match one of the candidate codes, that enrollment (and template save-time validation) fails with an error listing them. See [issue tracking the V1 renewal behavior](https://github.com/Keyfactor/certinext-caplugin/issues/26). | Call `GetProductDetails` against your account/environment (see product code table below). | `842` |
 | `IgnoreExpired` | Optional | If `true`, expired certificates are skipped during synchronization and are not imported into Keyfactor Command. Default: `false`. | N/A | `false` |
 | `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500`. Reduce this value if synchronization requests time out. | N/A | `100` |
 | `Enabled` | Optional | Enables or disables the CA connector. Setting this to `false` allows the connector record to be created before all credentials are available, without triggering a live connectivity test. Default: `true`. | N/A | `true` |
@@ -412,9 +412,21 @@ When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
 | `ProductFamily` | Optional | String | CERTInext V2 product family. Supported for enrollment: `ssl` (SSL/TLS) and `private-pki` (Private PKI — see [V2 Private PKI Orders](#v2-private-pki-orders)). `signature` (Document Signer) is accepted by the parameter, but Document Signer enrollment is not yet supported: a `signature` enrollment fails before any order is placed. Default: `ssl`. | `ssl` |
-| `ProductVariant` | Optional | String | Product variant within the family. `ssl`: `dv`, `ov`, or `ev` (default `dv`). `private-pki`: `intranet-ssl` or `igtf-host` — required, with no default (the SSL default `dv` is rejected). | `dv` |
+| `ProductVariant` | Optional | String | Product variant within the family. `ssl`: `dv`, `ov`, or `ev`. If omitted, the plugin derives it from the selected product (e.g. an OV product sends `ov`, an EV product sends `ev`) rather than always defaulting to `dv`; an explicit override that contradicts the product's derived variant fails enrollment with an actionable error instead of being sent as-is. `private-pki`: `intranet-ssl` or `igtf-host` — required, with no default. | `dv` |
 
 `ProductCode` continues to carry the numeric product code and is sent in the `X-Product-Code` header on V2 order placement.
+
+### V2 Product Code Resolution
+
+When `UseV2Api` is `true`, the numeric product code sent to CERTInext is resolved as follows:
+
+1. **Explicit `ProductCode` (or the deprecated `ProfileId` alias) on the template** — sent as-is in the `X-Product-Code` header, after template save-time validation confirms it exists in the live V2 catalog.
+2. **No explicit code set** — the plugin maps the template's selected product to the catalog's expected `productTypeID` and looks for catalog entries sharing it:
+   - **Exactly one match** — used automatically.
+   - **No match** — enrollment (and template save-time validation) fails; the account may not be entitled to the product.
+   - **More than one match** — the live catalog can carry several entries at the same assurance level (e.g. two DV SSL entries with different billing terms). The connector's `DefaultProductCode` must name one of them, or enrollment fails with an error listing every candidate code and name. Set `ProductCode` explicitly on the template, or set `DefaultProductCode` on the connector, to disambiguate.
+
+This differs from V1, where `DefaultProductCode` only affects renewals (see the [`DefaultProductCode` field](#ca-configuration) above) — in V2 mode it also disambiguates new enrollments and template validation for a `ProductId`-only template.
 
 ### V2 Private PKI Orders
 
@@ -445,13 +457,17 @@ V2 status strings map to Keyfactor enrollment statuses as follows:
 | `revoked` | Revoked | Order has been revoked. |
 | `cancelled` | Failed | Order was cancelled; a new enrollment is required. |
 | `rejected` | Failed | Order was rejected by the CA/LRA; a new enrollment is required. |
-| `expired` | Failed | Order expired before completion; a new enrollment is required. |
+| `expired` | Issued | An expired-but-not-revoked order is reported as issued (GENERATED), matching V1's convention — it remains visible in Command's inventory rather than disappearing as a failure. |
 
 Any V2 status not in this table (e.g. a value CERTInext adds in the future) also maps to Failed, but the
 plugin logs a warning distinguishing "unmapped status" from the statuses above that are deliberately
 mapped to Failed — see the gateway trace log if certificates unexpectedly show as failed.
 
 V2 has no *renew* endpoint. CERTInext does document a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious`/`revokeReason`), but the plugin does not use it by design — all three enrollment types (New, Reissue, RenewOrReissue) place a fresh V2 order, and the prior order/certificate is left issued rather than auto-revoked.
+
+### V2 Revocation Reason Handling
+
+CERTInext's V2 revoke endpoint accepts only a subset of its own documented reason enum. When Command's revoke reason maps to one CERTInext rejects, the plugin substitutes an accepted reason and retries once, rather than failing the revoke outright: CA-compromise and AA-compromise are retried as key-compromise; unspecified (Command's default when no reason is given) and certificate-hold are retried as cessation-of-operation. See [Revocation Reason Codes](#revocation-reason-codes) in the migration guide below for the full accepted/rejected matrix.
 
 ## Migrating from V1 to V2
 
@@ -516,7 +532,7 @@ behavior without disrupting V1 traffic.
 
 | V1 field | What happens when you set `UseV2Api = true` |
 |---|---|
-| `ApiUrl` | **Must change format.** V1 requires the `/emSignHub-API/` path segment (e.g. `https://us-api.certinext.io/emSignHub-API/`); V2 is the bare host with no trailing slash or path suffix (e.g. `https://us-api.certinext.io`). Using the V1-style URL under V2 (or vice versa) will fail every call. |
+| `ApiUrl` | **Must change format.** V1 requires the `/emSignHub-API/` path segment (e.g. `https://us-api.certinext.io/emSignHub-API/`); V2 is the bare host with no trailing slash or path suffix (e.g. `https://us-api.certinext.io`). Using the V1-style URL under V2 (or vice versa) will fail every call. In both modes, `ApiUrl` must use `https` — `http` is rejected at connection-validation time except for a loopback host, which stays allowed for local test servers. |
 | `AccountNumber` | Not required, and not read by any V2 code path. V2 authenticates with `OAuthClientId`; the plugin doesn't reuse `AccountNumber` as the OAuth `client_id` (see Step 1). |
 | `AuthMode` | Not required. V2 always authenticates via OAuth2 `client_credentials`, regardless of this setting. |
 | `ApiKey` | Not required. V2 never computes an `authKey`. |
@@ -544,22 +560,34 @@ above.
 
 For each template you're migrating:
 
-1. Add `ProductFamily` (default `ssl`) and `ProductVariant` (`dv`/`ov`/`ev`) if not already present —
-   these are V2-only parameters with no V1 equivalent. For a Private PKI template, set
-   `ProductFamily=private-pki`, `ProductVariant` to `intranet-ssl` or `igtf-host`, and an explicit
-   `ProductCode` (see [V2 Private PKI Orders](#v2-private-pki-orders)). `ProductFamily=signature`
-   (Document Signer) enrollment is not yet supported.
-2. Re-verify `ProductCode` against the V2 catalog. V1 and V2 product codes are not guaranteed to be
-   the same numeric values on your account — call `GetProductDetailsV2Async` (or the equivalent live
-   probe) rather than assuming the V1 code carries over. Template validation (`ValidateProductInfo`)
-   automatically checks `ProductCode` against the V2 catalog once `UseV2Api=true`, so an incorrect
-   code will be caught at template save time, not silently at enrollment.
-3. If the template enrolls for a UCC (multi-domain) product, test it on the sandbox first. The plugin
+1. **If the template sets only `ProductId` (no explicit `ProductCode`), check whether the live V2
+   catalog has more than one product at that assurance level.** The plugin resolves the numeric code
+   automatically from the catalog when exactly one entry matches; when the catalog has several (e.g.
+   two DV SSL entries with different billing terms), you must either set `ProductCode` explicitly on
+   the template or set the connector's `DefaultProductCode` to one of the candidates — otherwise every
+   enrollment against that template fails with an error listing the candidate codes. See
+   [V2 Product Code Resolution](configuration.md#v2-product-code-resolution) for the full resolution
+   order.
+2. Add `ProductFamily` (default `ssl`) if not already present — this is a V2-only parameter with no
+   V1 equivalent. `ProductVariant` (`dv`/`ov`/`ev`) is optional for `ssl`: if left unset, the plugin
+   derives it from the selected product (an OV product sends `ov`, an EV product sends `ev`) instead
+   of defaulting to `dv`; set it explicitly only to override. For a Private PKI template, set
+   `ProductFamily=private-pki`, `ProductVariant` to `intranet-ssl` or `igtf-host` (required, no
+   default), and an explicit `ProductCode` (see [V2 Private PKI Orders](#v2-private-pki-orders)).
+   `ProductFamily=signature` (Document Signer) enrollment is not yet supported.
+3. Re-verify `ProductCode` (if set explicitly) against the V2 catalog. V1 and V2 product codes are not
+   guaranteed to be the same numeric values on your account — call `GetProductDetailsV2Async` (or the
+   equivalent live probe) rather than assuming the V1 code carries over. Template validation
+   (`ValidateProductInfo`) automatically checks `ProductCode` against the V2 catalog once
+   `UseV2Api=true`, so an incorrect code will be caught at template save time, not silently at
+   enrollment.
+4. If the template enrolls for a UCC (multi-domain) product, test it on the sandbox first. The plugin
    runs DCV for each SAN, but CERTInext hasn't confirmed that behavior yet (see
    [Before You Begin](#before-you-begin-confirm-v2-will-work-for-your-templates)).
-4. If `ProductVariant` is `ov` or `ev`, set `OrganizationNumber` on the CA connector (a pre-vetted
-   organization number from CERTInext's Accounts → List Organizations). It is mandatory for OV/EV
-   under V2 — enrollment fails fast with a clear error if it's missing, rather than reaching the CA
+5. If the product is OV or EV (whether `ProductVariant` is set explicitly or left to be derived), set
+   `OrganizationNumber` on the CA connector (a pre-vetted organization number from CERTInext's
+   Accounts → List Organizations). It is mandatory for OV/EV under V2 — enrollment fails fast with a
+   clear error if it's missing, rather than reaching the CA
    and getting back an opaque 422.
 
 ### Step 4 — Test Before Cutting Over
@@ -608,16 +636,21 @@ migration decision if you rely on CERTInext's free-renewal-within-subscription b
 ### Revocation Reason Codes
 
 V1 sends CERTInext a numeric `revokeReasonId`; V2 sends a kebab-case string reason. The plugin
-handles this translation automatically, including retrying once with `cessation-of-operation` when
-CERTInext rejects the RFC 5280 "unspecified" reason (Command's default when no reason is given) — no
-customer action needed for that case. On SSL/TLS orders, only `key-compromise` (1),
+handles this translation automatically. On SSL/TLS orders, only `key-compromise` (1),
 `affiliation-changed` (3), `superseded` (4), `cessation-of-operation` (5), and `privilege-withdrawn`
-(9) were accepted in live sandbox testing. `ca-compromise` (2) and `certificate-hold` (6) are listed
-in the spec for SSL/TLS but were rejected with `"Invalid Revoke Reason ID"`. `aa-compromise` (10)
-isn't listed for SSL/TLS at all and was also rejected. The plugin surfaces those failures as-is,
-without a retry. Revoke reasons for Private PKI orders haven't been tested live. Separately, a revoke
-note containing a semicolon (`;`) is rejected with `"Invalid Revoke Remarks"`. The plugin's own
-generated notes avoid semicolons, but a future customer-supplied note would need to avoid them too.
+(9) were accepted in live sandbox testing. `unspecified` (0, Command's default when no reason is
+given), `ca-compromise` (2), `certificate-hold` (6), and `aa-compromise` (10) are all rejected live
+with `"Invalid Revoke Reason ID"` — `ca-compromise` and `certificate-hold` are listed in the spec for
+SSL/TLS, `aa-compromise` isn't listed for SSL/TLS at all, but the live sandbox rejects all four the
+same way. Rather than fail the revoke, the plugin retries each once with a close accepted
+substitute: `ca-compromise` and `aa-compromise` retry as `key-compromise`; `unspecified` and
+`certificate-hold` retry as `cessation-of-operation` (chosen over `key-compromise` for those two
+because neither implies an actual key compromise, and `key-compromise` carries the spec's own BR
+§4.9.1.1 24-hour CRL-turnaround obligation that would misrepresent the revoke). No customer action is
+needed for any of these four cases. Any other revoke failure is surfaced as-is, without a retry.
+Revoke reasons for Private PKI orders haven't been tested live. Separately, a revoke note containing
+a semicolon (`;`) is rejected with `"Invalid Revoke Remarks"`. The plugin's own generated notes avoid
+semicolons, but a future customer-supplied note would need to avoid them too.
 
 ## Known Gaps
 
@@ -1011,16 +1044,16 @@ succeeded: `key-compromise`, `affiliation-changed`, `superseded`, `cessation-of-
 `certificate-hold`, returned a 422 "Invalid Revoke Reason ID". So did the undocumented `aa-compromise`.
 Revoke reasons for Private PKI and Document Signer orders haven't been tested live.
 
-Since Keyfactor Command defaults to `unspecified` (CRL reason 0) when no explicit reason is given — by far the most common revoke case —
-the plugin retries once with `cessation-of-operation` whenever CERTInext rejects `unspecified` this
-way. `cessation-of-operation` was chosen over V1's existing `key-compromise` fallback because
+Rather than surface any of these four rejections to the caller, the plugin retries each once with a
+close accepted substitute: `unspecified` (CRL reason 0, Command's default when no explicit reason is
+given — by far the most common revoke case) and `certificate-hold` (CRL reason 6) retry as
+`cessation-of-operation`; `ca-compromise` (CRL reason 2) and `aa-compromise` (CRL reason 10) retry as
+`key-compromise`. `cessation-of-operation` was chosen over `key-compromise` for the first pair
+because neither `unspecified` nor `certificate-hold` implies an actual key compromise, and
 `key-compromise` carries the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation, which would
-misrepresent a revoke that was never actually a key compromise. Only the exact "unspecified" +
-"Invalid Revoke Reason ID" combination triggers the retry; any other revoke failure is surfaced as-is.
-That includes the other rejected values, which the plugin sends for CRL reasons 2 (`ca-compromise`),
-6 (`certificate-hold`), and 10 (`aa-compromise`). See
-`issues/0026` for the full reason-value test matrix and the open question to CERTInext support about
-whether the documented reason enum is intentional.
+misrepresent the revoke. Only these four specific rejections trigger a retry; any other revoke
+failure is surfaced as-is. See `issues/0026` for the full reason-value test matrix and the open
+question to CERTInext support about whether the documented reason enum is intentional.
 
 **Note field quirk:** CERTInext's revoke `note` (audit remarks) field rejects a semicolon (`;`) with a
 separate 422, "Invalid Revoke Remarks." — confirmed live that comma, period, slash, and parentheses are
