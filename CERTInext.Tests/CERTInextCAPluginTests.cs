@@ -180,6 +180,53 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenApiUrlIsHttp_NonLoopback()
+        {
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = "http://ca.example.com",
+                ["AuthMode"] = "ApiKey",
+                ["ApiKey"] = "some-key"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*ApiUrl*https*");
+        }
+
+        [Theory]
+        [InlineData("http://localhost:8080")]
+        [InlineData("http://127.0.0.1:8080")]
+        [InlineData("http://[::1]:8080")]
+        public async Task ValidateCAConnectionInfo_AllowsHttp_ForLoopbackHosts(string apiUrl)
+        {
+            // Loopback http is allowed (e.g. a local WireMock/mock server in tests); this test
+            // only confirms the scheme check doesn't reject it — ApiKey mode fails on the next
+            // field it's missing (ApiKey), which still proves the ApiUrl check itself passed.
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = apiUrl,
+                ["AuthMode"] = "ApiKey",
+                ["ApiKey"] = "some-key"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            // No exception about ApiUrl specifically — any failure must come from the live
+            // connectivity check (NewMock's PingAsync is unstubbed under MockBehavior.Strict),
+            // not from the https scheme guard.
+            var ex = await act.Should().ThrowAsync<Exception>();
+            ex.Which.Message.Should().NotContain("ApiUrl");
+        }
+
+        [Fact]
         public async Task ValidateCAConnectionInfo_Throws_WhenApiKeyMissingForApiKeyMode()
         {
             var mock = NewMock();

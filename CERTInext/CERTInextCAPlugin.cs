@@ -431,8 +431,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string apiUrl = GetStringValue(connectionInfo, Constants.Config.ApiUrl);
             if (string.IsNullOrWhiteSpace(apiUrl))
                 errors.Add($"'{Constants.Config.ApiUrl}' is required.");
-            else if (!Uri.TryCreate(apiUrl, UriKind.Absolute, out _))
+            else if (!Uri.TryCreate(apiUrl, UriKind.Absolute, out Uri parsedApiUrl))
                 errors.Add($"'{Constants.Config.ApiUrl}' is not a valid absolute URI.");
+            else if (!string.Equals(parsedApiUrl.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                     && !parsedApiUrl.IsLoopback)
+                // The OAuth client secret (V2) / API key (V1) is sent to this URL on every
+                // request; http would transmit it in cleartext. http is allowed only for
+                // loopback hosts (localhost/127.0.0.1/::1) so local mock-server tests keep
+                // working without a real TLS endpoint.
+                errors.Add($"'{Constants.Config.ApiUrl}' must use https — credentials (the OAuth client " +
+                           "secret or API key) are sent to this URL on every request, and http would " +
+                           "transmit them in cleartext. http is only allowed for a loopback host " +
+                           "(localhost/127.0.0.1/::1).");
 
             bool useV2 = connectionInfo.TryGetValue(Constants.ConfigV2.UseV2Api, out object v2Obj)
                          && v2Obj is bool v2Bool && v2Bool;
