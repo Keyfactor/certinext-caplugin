@@ -2113,51 +2113,119 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // The V2 API creates the order in 'pending-csr' and requires a separate PUT to submit
             // the CSR before the order can progress to validation or issuance.
-            // Issue 0039: if Submit CSR throws, the order already exists at pending-csr and Command
-            // would otherwise never learn its ID. Cancel it once (best effort) and fail.
+            // Issue 0039 / review finding (B): if Submit CSR throws, the order already exists at
+            // pending-csr and Command would otherwise never learn its ID. A *definitive* CA
+            // rejection (a real HTTP 4xx response body) keeps the original single-best-effort-
+            // cancel-and-FAILED behavior. But a transport-level failure or timeout tells us
+            // nothing about whether CERTInext actually received and recorded the CSR — cancelling
+            // unconditionally on any exception here can orphan a CSR the CA genuinely accepted.
+            // For that ambiguous case, track the order first and only cancel if it is still
+            // pending-csr; if tracking itself fails, don't cancel — return pending so sync resolves
+            // it later.
+            V2OrderStatusResponse postCsrStatus = null;
+            int disposition = 0;
+            // Raw CA status string behind the current `disposition` value — kept in step with it
+            // (reassigned everywhere `disposition` is recomputed from a fresh TrackOrderV2Async
+            // call) purely so a terminal REVOKED result can be logged/reported with the CA's own
+            // status text (issue 0052), not just Command's mapped disposition.
+            string lastKnownCaStatus = null;
+            bool csrStatusResolvedAfterFailure = false;
             try
             {
                 await _client.SubmitCsrV2Async(ep.ProductFamilySlug, orderId, csr);
             }
             catch (Exception csrEx)
             {
-                var orphanResult = await CancelOrphanedV2OrderAfterCsrFailureAsync(
-                    ep.ProductFamilySlug, orderId, csrEx);
-                _logger.MethodExit(LogLevel.Debug);
-                return orphanResult;
-            }
-            _logger.LogInformation("V2 CSR submitted. OrderId={OrderId}", orderId);
-
-            // Re-read status after CSR submission — the order advances past pending-csr.
-            // Guard: if TrackOrderV2Async fails transiently here the order is already
-            // placed and the CSR submitted; return pending with the known orderId so Command
-            // has a CARequestID and the next sync can resolve the status.
-            V2OrderStatusResponse postCsrStatus;
-            int disposition;
-            // Raw CA status string behind the current `disposition` value — kept in step with it
-            // (reassigned everywhere `disposition` is recomputed from a fresh TrackOrderV2Async
-            // call) purely so a terminal REVOKED result can be logged/reported with the CA's own
-            // status text (issue 0052), not just Command's mapped disposition.
-            string lastKnownCaStatus;
-            try
-            {
-                postCsrStatus = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
-                disposition = StatusMapper.V2StatusToRequestDisposition(postCsrStatus.Status);
-                lastKnownCaStatus = postCsrStatus.Status;
-            }
-            catch (Exception trackEx)
-            {
-                _logger.LogWarning(trackEx,
-                    "V2 TrackOrderV2Async failed after CSR submission for order {OrderId}; " +
-                    "returning pending so sync can pick it up.", orderId);
-                _logger.MethodExit(LogLevel.Debug);
-                return new EnrollmentResult
+                if (!IsTransportLevelCsrFailure(csrEx))
                 {
-                    CARequestID   = orderId,
-                    Certificate   = null,
-                    Status        = (int)EndEntityStatus.EXTERNALVALIDATION,
-                    StatusMessage = "V2 order placed and CSR submitted; status check failed transiently — sync will resolve."
-                };
+                    // Definitive CA rejection (a real 4xx response) — unchanged behavior.
+                    var orphanResult = await CancelOrphanedV2OrderAfterCsrFailureAsync(
+                        ep.ProductFamilySlug, orderId, csrEx);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return orphanResult;
+                }
+
+                _logger.LogWarning(csrEx,
+                    "V2 SubmitCsrV2Async failed with a transport-level or timeout error for order " +
+                    "{OrderId}; tracking the order before deciding whether to cancel it (CERTInext " +
+                    "may have already accepted the CSR).", orderId);
+
+                V2OrderStatusResponse trackedAfterCsrFailure;
+                try
+                {
+                    trackedAfterCsrFailure = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+                }
+                catch (Exception trackEx)
+                {
+                    // Tracking itself failed — we still don't know whether the CSR landed. Do not
+                    // cancel (that risks orphaning an order CERTInext may have already advanced);
+                    // return pending with the known orderId so the next sync resolves it.
+                    _logger.LogWarning(trackEx,
+                        "V2 TrackOrderV2Async also failed while resolving an ambiguous CSR-submit " +
+                        "failure for order {OrderId}; returning pending without cancelling.", orderId);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = orderId,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.EXTERNALVALIDATION,
+                        StatusMessage = $"V2 order {orderId} placed; CSR submission result is unknown " +
+                                        "after a transport error and the follow-up status check also " +
+                                        "failed — sync will resolve."
+                    };
+                }
+
+                if (string.Equals(trackedAfterCsrFailure.Status, Constants.ApiV2.StatusPendingCsr,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    // Confirmed: the CSR never landed. Cancel exactly as before.
+                    var orphanResult = await CancelOrphanedV2OrderAfterCsrFailureAsync(
+                        ep.ProductFamilySlug, orderId, csrEx);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return orphanResult;
+                }
+
+                // The order progressed past pending-csr — CERTInext did receive the CSR despite the
+                // transport error on our side. Continue the normal post-CSR flow below instead of
+                // cancelling a valid order.
+                _logger.LogInformation(
+                    "V2 CSR submission actually succeeded despite a transport-level error — order " +
+                    "{OrderId} progressed to status {Status}. Continuing normal post-CSR flow.",
+                    orderId, trackedAfterCsrFailure.Status);
+                postCsrStatus = trackedAfterCsrFailure;
+                disposition = StatusMapper.V2StatusToRequestDisposition(trackedAfterCsrFailure.Status);
+                lastKnownCaStatus = trackedAfterCsrFailure.Status;
+                csrStatusResolvedAfterFailure = true;
+            }
+
+            if (!csrStatusResolvedAfterFailure)
+            {
+                _logger.LogInformation("V2 CSR submitted. OrderId={OrderId}", orderId);
+
+                // Re-read status after CSR submission — the order advances past pending-csr.
+                // Guard: if TrackOrderV2Async fails transiently here the order is already
+                // placed and the CSR submitted; return pending with the known orderId so Command
+                // has a CARequestID and the next sync can resolve the status.
+                try
+                {
+                    postCsrStatus = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+                    disposition = StatusMapper.V2StatusToRequestDisposition(postCsrStatus.Status);
+                    lastKnownCaStatus = postCsrStatus.Status;
+                }
+                catch (Exception trackEx)
+                {
+                    _logger.LogWarning(trackEx,
+                        "V2 TrackOrderV2Async failed after CSR submission for order {OrderId}; " +
+                        "returning pending so sync can pick it up.", orderId);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = orderId,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.EXTERNALVALIDATION,
+                        StatusMessage = "V2 order placed and CSR submitted; status check failed transiently — sync will resolve."
+                    };
+                }
             }
 
             // Whether the inline DCV block below took ownership of the in-call issuance wait for
@@ -2266,6 +2334,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             _logger.MethodExit(LogLevel.Debug);
             return finalResult;
+        }
+
+        /// <summary>
+        /// Review finding (B): true when <paramref name="ex"/> (thrown by <c>SubmitCsrV2Async</c>)
+        /// represents a transport-level failure, timeout, or cancellation — i.e. whether CERTInext
+        /// actually received and recorded the CSR is unknown — rather than a definitive CA-side
+        /// rejection (a real HTTP 4xx response CERTInext returned after processing the request).
+        /// <c>CERTInextClient</c> is built with <c>ThrowOnAnyError=false</c>, so a connection
+        /// failure/timeout never received a response and instead renders through
+        /// <c>ThrowOnV2Failure</c>'s generic fallback as <c>"... HTTP 0. ..."</c> — <c>0</c> is the
+        /// RestSharp default <see cref="System.Net.HttpStatusCode"/> when no response arrived.
+        /// A 5xx or any message shape this cannot parse is treated the same conservative way (not
+        /// a confirmed rejection): a CA server error or an unrecognized failure does not confirm
+        /// the CSR was rejected, so the safer default is to track the order rather than assume.
+        /// Only a parsed 4xx status is treated as definitive.
+        /// </summary>
+        internal static bool IsTransportLevelCsrFailure(Exception ex)
+        {
+            if (ex == null) return true;
+            if (ex is OperationCanceledException) return true;
+            if (ex is System.Net.Http.HttpRequestException) return true;
+            if (ex is TimeoutException) return true;
+
+            var m = System.Text.RegularExpressions.Regex.Match(ex.Message ?? string.Empty, @"HTTP (\d+)\.");
+            if (!m.Success) return true;
+            int status = int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            return status < 400 || status >= 500;
         }
 
         /// <summary>

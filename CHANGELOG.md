@@ -1,3 +1,12 @@
+# 1.0.2
+
+## Bug Fixes
+- fix(revoke): V2 revoke denials (404/422) and the not-GENERATED/retry-failure paths now log an audit record (CARequestID, product family, HTTP status, EMS code); exception types/messages unchanged.
+- fix(enroll): a transport-level failure or timeout from V2 CSR submission no longer cancels an order the CA may have already accepted — the plugin now tracks the order first and only cancels if it's still pending-csr.
+
+## Chores
+- chore(tests): regression coverage for the 404/422/not-GENERATED/retry-outcome revoke logging and the CSR-transport-failure branches (rejection, still-pending, progressed, tracking-also-fails).
+
 # 1.0.1
 
 ## Features
