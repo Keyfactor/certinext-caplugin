@@ -140,12 +140,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Same revoke-if-issued / cancel-otherwise cleanup as V2FullLifecycleTests.
         /// CleanupOrderAsync — single attempt only, never retries a cancel, logs rather than
-        /// throws so a cleanup problem never masks the test's own assertion result.
+        /// throws so a cleanup problem never masks the test's own assertion result. Returns
+        /// whether cleanup completed without throwing (true = revoked or cancelled successfully,
+        /// or nothing to do), so a caller that wants to assert "nothing leaks" — e.g. the
+        /// wildcard fresh-subdomain test below — has something other than log text to check.
         /// </summary>
-        private async System.Threading.Tasks.Task CleanupOrderAsync(CERTInextCAPlugin plugin, string orderId)
+        private async System.Threading.Tasks.Task<bool> CleanupOrderAsync(CERTInextCAPlugin plugin, string orderId)
         {
             if (string.IsNullOrWhiteSpace(orderId))
-                return;
+                return true;
 
             try
             {
@@ -162,12 +165,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                         "V2 fresh-domain DCV test cleanup — order not issued, cancelling.");
                     _output.WriteLine($"Cleanup: cancelled non-issued order {orderId} (status={current?.Status}).");
                 }
+                return true;
             }
             catch (Exception ex)
             {
                 _output.WriteLine(
                     $"Cleanup FAILED for order {orderId}: {ex.GetType().Name}: {ex.Message}. " +
                     "Revoke/cancel it by hand in the CERTInext portal if it should not remain pending.");
+                return false;
             }
         }
 
@@ -236,6 +241,104 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             finally
             {
                 await CleanupOrderAsync(plugin, orderId);
+            }
+        }
+
+        // ---------------------------------------------------------------------------
+        // 8. Wildcard DV DCV against a fresh, never-before-verified subdomain
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Wildcard-only CSR shape (CN = SAN = the wildcard) on a freshly-generated,
+        /// never-before-seen subdomain — same freshness rationale as
+        /// <see cref="EnrollWithDcvOn_V2_FreshUnverifiedSubdomain_StagesAndCleansUpTxt"/> above,
+        /// but for <see cref="Constants.Products.DvSslWildcard"/>. What TXT hostname CERTInext's
+        /// DCV flow actually stages for a wildcard domain (does it strip the leading "*." before
+        /// handing the plugin a record name, or pass it through literally — which would be an
+        /// invalid DNS label?) is NOT confirmed live by any existing test in this repo, so this
+        /// test does not assert on that shape. It only records: (a) the FQDN
+        /// <see cref="RecordingDomainValidatorFactory.StagedCalls"/> shows the plugin actually
+        /// called <c>StageValidation</c> with, flagging whether it contains a literal '*', and
+        /// (b) what Track Order's <c>verifications.domain.domains[].domain</c> echoes back for
+        /// the same order. The only hard assertion is that cleanup (revoke-if-issued or cancel)
+        /// succeeds, so this probe never leaks a live order on the sandbox regardless of what the
+        /// TXT-hostname observation turns out to be.
+        /// Expected sandbox order count: 1.
+        /// </summary>
+        [SkippableFact]
+        public async System.Threading.Tasks.Task EnrollWithDcvOn_V2_WildcardFreshSubdomain_RecordsTxtHostnameAndCleansUp()
+        {
+            Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            Skip.If(!_dcvEnabled,
+                "CERTINEXT_CF_API_TOKEN and CERTINEXT_CF_ZONE_ID must be set so the plugin can publish a real TXT record.");
+            Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_FRESH_DCV") != "1",
+                "CERTINEXT_V2_LIFECYCLE_FRESH_DCV=1 not set — this places a real sandbox order and publishes a live DNS TXT record. Skipping.");
+
+            string freshSubdomain = $"dcv-fresh-{DateTime.UtcNow:yyyyMMddHHmmssfff}.{_v2Domain}";
+            string wildcard = $"*.{freshSubdomain}";
+
+            var config = BuildV2Config();
+            var recordingFactory = new RecordingDomainValidatorFactory(BuildV2DnsFactory());
+            var client = new CERTInextClient(config);
+            var plugin = new CERTInextCAPlugin(client, recordingFactory, config);
+
+            string orderId = null;
+            try
+            {
+                var result = await plugin.Enroll(
+                    csr:            GenerateCsrPem(wildcard),
+                    subject:        $"CN={wildcard}",
+                    san:            new Dictionary<string, string[]> { ["dns"] = new[] { wildcard } },
+                    productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.DvSslWildcard },
+                    requestFormat:  RequestFormat.PKCS10,
+                    enrollmentType: EnrollmentType.New);
+
+                result.Should().NotBeNull();
+                _output.WriteLine($"Wildcard fresh-subdomain order ({wildcard}): Status={result.Status}, Message={result.StatusMessage}");
+
+                if (!string.IsNullOrWhiteSpace(result.CARequestID))
+                    orderId = result.CARequestID;
+
+                var staged = recordingFactory.StagedCalls;
+                var cleaned = recordingFactory.CleanedUpFqdns;
+                _output.WriteLine($"DNS provider calls: staged={staged.Count}, cleaned={cleaned.Count}");
+                foreach (var call in staged)
+                    _output.WriteLine(
+                        $"OBSERVATION: staged TXT hostname Fqdn='{call.Fqdn}' " +
+                        $"(contains literal '*': {call.Fqdn?.Contains('*') == true} — UNVERIFIED territory, see this test's doc comment).");
+                foreach (var fqdn in cleaned)
+                    _output.WriteLine($"Cleaned-up TXT hostname: Fqdn='{fqdn}'.");
+
+                if (!string.IsNullOrWhiteSpace(orderId))
+                {
+                    try
+                    {
+                        var tracked = await client.ResolveAndTrackOrderV2Async(orderId);
+                        var domainEntries = tracked?.Verifications?.Domain?.Domains;
+                        if (domainEntries != null && domainEntries.Count > 0)
+                        {
+                            foreach (var entry in domainEntries)
+                                _output.WriteLine(
+                                    $"OBSERVATION: Track Order verifications.domain.domains[]: domain='{entry.Domain}', dcvStatus={entry.DcvStatus ?? "<none>"}.");
+                        }
+                        else
+                        {
+                            _output.WriteLine("Track Order returned no verifications.domain.domains[] entries for this order.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _output.WriteLine($"Track Order (for verifications detail) FAILED: {ex.GetType().Name}: {ex.Message}.");
+                    }
+                }
+            }
+            finally
+            {
+                bool cleanedUp = await CleanupOrderAsync(plugin, orderId);
+                cleanedUp.Should().BeTrue(
+                    "cleanup (revoke-if-issued or cancel) must succeed so this wildcard fresh-subdomain probe " +
+                    "never leaves a live order on the sandbox, regardless of what the TXT-hostname/Track-Order " +
+                    "observations above turn out to show — see the 'Cleanup FAILED' output above if this fails.");
             }
         }
     }

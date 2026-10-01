@@ -34,6 +34,7 @@ using Org.BouncyCastle.Pkcs;
 using Org.BouncyCastle.Security;
 using FluentAssertions;
 using Keyfactor.AnyGateway.Extensions;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.PKI.Enums.EJBCA;
 using Xunit;
@@ -92,13 +93,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         private static string Timestamp() => DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
 
-        private static string GenerateCsrPem(string commonName)
+        private static string GenerateCsrPem(string commonName) => GenerateCsrPem(commonName, ouTag: null);
+
+        /// <summary>
+        /// <paramref name="ouTag"/>, when supplied, is folded into the CSR subject as an OU —
+        /// e.g. <c>ov-<ts></c> for the OV/OV-UCC orphan-sweep probes below. The orders report
+        /// (<see cref="Constants.ApiV2.OrdersReportPath"/>) does not surface OU anywhere, so this
+        /// tag is NOT how an orphan is actually located (that's domain + creation-time window —
+        /// see <see cref="TryCancelOrphanByWindowAsync"/>); it exists only so a human reviewing
+        /// the order in the CERTInext portal or a raw CSR dump can see which test run placed it.
+        /// </summary>
+        private static string GenerateCsrPem(string commonName, string ouTag)
         {
             var keyGen = new RsaKeyPairGenerator();
             keyGen.Init(new KeyGenerationParameters(new SecureRandom(), 2048));
             var keyPair = keyGen.GenerateKeyPair();
 
-            var subject = new X509Name($"CN={commonName}");
+            string subjectDn = string.IsNullOrWhiteSpace(ouTag) ? $"CN={commonName}" : $"CN={commonName},OU={ouTag}";
+            var subject = new X509Name(subjectDn);
             var csr = new Pkcs10CertificationRequest("SHA256withRSA", subject, keyPair.Public, null, keyPair.Private);
 
             return "-----BEGIN CERTIFICATE REQUEST-----\n"
@@ -163,11 +175,112 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Distinguishes a client-side HTTP timeout (RestSharp/TaskCanceledException — the
         /// plugin's hard-coded 120s V2 RestClient timeout expiring before the CA responds) from a
         /// genuine CA-side rejection. See <see cref="OvEvCreateTimeoutTarget"/>'s doc comment.
+        ///
+        /// Also matches the shape actually observed on a live run: CERTInextClient's
+        /// <c>ThrowOnV2Failure</c> does not always surface a <see cref="TaskCanceledException"/>
+        /// for a RestSharp-level transport timeout — it can instead produce a plain
+        /// <see cref="Exception"/> reading "CERTInext V2 API error during '...'. HTTP 0.
+        /// CERTInext V2 returned no body for '...'." (StatusCode 0 = no HTTP response was ever
+        /// received). Both substrings ("HTTP 0" and "returned no body") must be present so this
+        /// never also matches a genuine HTTP-0-with-a-body CA-side condition.
         /// </summary>
         private static bool IsClientTimeout(Exception ex) =>
             ex is TaskCanceledException
             || ex is OperationCanceledException
-            || (ex.Message?.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0);
+            || (ex.Message?.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0)
+            || (ex.Message != null
+                && ex.Message.IndexOf("HTTP 0", StringComparison.OrdinalIgnoreCase) >= 0
+                && ex.Message.IndexOf("returned no body", StringComparison.OrdinalIgnoreCase) >= 0);
+
+        /// <summary>
+        /// Best-effort search for an order the CA may have created despite the plugin's own
+        /// client-side timeout (<see cref="IsClientTimeout"/>) — a timeout proves nothing about
+        /// what happened server-side. Scans the V2 orders report
+        /// (<see cref="Constants.ApiV2.OrdersReportPath"/> via <c>ListOrdersV2Async</c>) for the
+        /// "UTC today" window, matches on <c>domainName == domain</c> (the only field this report
+        /// row model exposes — no OU/SAN/tag field is echoed there) plus
+        /// <c>orderDate &gt;= windowStartUtc - 5min</c> to avoid grabbing an older, unrelated
+        /// order on the same long-reused <paramref name="domain"/>, picks the single most-recent
+        /// match if more than one row qualifies, and cancels it (one attempt, never retried) if
+        /// it is not already terminal. Never throws — every failure path is folded into the
+        /// returned description string so the caller's Skip.If message always has something
+        /// actionable. <paramref name="probeTag"/> is logged only (see <see cref="GenerateCsrPem(string,string)"/>).
+        /// </summary>
+        private async Task<string> TryCancelOrphanByWindowAsync(string domain, DateTime windowStartUtc, string probeTag)
+        {
+            try
+            {
+                using var client = new CERTInextClient(BuildV2Config());
+
+                string from = windowStartUtc.Date.ToString("yyyy-MM-dd");
+                string to = windowStartUtc.Date.AddDays(1).ToString("yyyy-MM-dd");
+
+                OrderReportEntryV2 best = null;
+                DateTime bestDate = DateTime.MinValue;
+                int scanned = 0;
+
+                await foreach (var row in client.ListOrdersV2Async(from, to, pageSize: 100))
+                {
+                    scanned++;
+                    if (!string.Equals(row.DomainName, domain, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    DateTime rowDate = DateTime.TryParse(
+                        row.OrderDate, null,
+                        System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+                        out var parsed)
+                        ? parsed
+                        : windowStartUtc; // unparseable date: don't exclude it from consideration on that basis alone
+
+                    if (rowDate < windowStartUtc.AddMinutes(-5))
+                        continue;
+
+                    if (best == null || rowDate >= bestDate)
+                    {
+                        best = row;
+                        bestDate = rowDate;
+                    }
+                }
+
+                _output.WriteLine(
+                    $"Orphan sweep (tag={probeTag}): scanned {scanned} report row(s) for domain '{domain}', " +
+                    $"window >= {windowStartUtc:O} (-5min grace).");
+
+                if (best == null)
+                    return "orphan sweep found no matching report row for this domain/window (nothing to cancel, " +
+                           "or the order has not appeared in the report yet — try again later by hand if needed)";
+
+                string orderId = best.OrderNumber;
+                if (string.IsNullOrWhiteSpace(orderId))
+                    return $"orphan sweep found a matching report row for domain '{domain}' with no orderNumber — cannot cancel it programmatically";
+
+                var (family, status) = await client.ResolveAndTrackOrderV2WithFamilyAsync(orderId);
+                bool terminal =
+                    string.Equals(status.Status, Constants.ApiV2.StatusCancelled, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(status.Status, Constants.ApiV2.StatusRevoked, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(status.Status, Constants.ApiV2.StatusRejected, StringComparison.OrdinalIgnoreCase);
+
+                if (terminal)
+                    return $"orphan sweep found order {orderId} already terminal (status={status.Status}) — nothing to cancel";
+
+                try
+                {
+                    var outcome = await client.CancelOrderV2Async(
+                        family, orderId,
+                        $"V2 full-lifecycle test orphan sweep — client-side timeout at submission (issue 0064), tag={probeTag}.");
+                    return $"orphan sweep found order {orderId} (status was {status.Status}) and cancelled it (outcome={outcome})";
+                }
+                catch (Exception cancelEx)
+                {
+                    return $"orphan sweep found order {orderId} but the cancel call itself FAILED " +
+                           $"({cancelEx.GetType().Name}: {cancelEx.Message}) — not retried; cancel it by hand in the CERTInext portal";
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"orphan sweep itself FAILED ({ex.GetType().Name}: {ex.Message}) — could not search for an orphaned order; check the CERTInext portal by hand";
+            }
+        }
 
         /// <summary>
         /// Cleans up a sandbox order this test created: revokes it via the plugin's real V2
@@ -304,6 +417,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var plugin = BuildV2Plugin(config);
 
             string domain = _v2Domain;
+            string probeTag = $"ov-{Timestamp()}";
+            DateTime windowStart = DateTime.UtcNow;
             string orderId = null;
             try
             {
@@ -311,8 +426,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 try
                 {
                     enrollResult = await plugin.Enroll(
-                        csr:            GenerateCsrPem(domain),
-                        subject:        $"CN={domain}",
+                        csr:            GenerateCsrPem(domain, probeTag),
+                        subject:        $"CN={domain},OU={probeTag}",
                         san:            new Dictionary<string, string[]> { ["dns"] = new[] { domain } },
                         productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.OvSsl },
                         requestFormat:  RequestFormat.PKCS10,
@@ -320,11 +435,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 catch (Exception ex) when (IsClientTimeout(ex))
                 {
+                    string sweepResult = await TryCancelOrphanByWindowAsync(domain, windowStart, probeTag);
                     Skip.If(true,
-                        $"OV order creation did not return within the plugin's hard-coded 120s V2 HTTP " +
-                        $"client timeout (CERTInextClient.cs has no CERTInextConfig override for this — " +
-                        $"a 300s test-level timeout target per issue 0064 cannot be honored without a " +
-                        $"production code change; flagged separately). Observed: {ex.GetType().Name}: {ex.Message}");
+                        "OV order creation did not return within the plugin's hard-coded 120s V2 HTTP client " +
+                        "timeout. Per issue 0064 (closed won't-fix) that timeout stays as-is, so this is an " +
+                        "expected skip rather than a production bug on its own — but a client timeout does not " +
+                        $"prove the CA never created the order; it likely did. {sweepResult}. " +
+                        $"Observed: {ex.GetType().Name}: {ex.Message}");
                     return;
                 }
 
@@ -380,6 +497,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var config = BuildV2Config(organizationNumber: organizationNumber);
             var plugin = BuildV2Plugin(config);
 
+            string probeTag = $"ovucc-{ts}";
+            DateTime windowStart = DateTime.UtcNow;
             string orderId = null;
             try
             {
@@ -387,8 +506,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 try
                 {
                     enrollResult = await plugin.Enroll(
-                        csr:            GenerateCsrPem(primary),
-                        subject:        $"CN={primary}",
+                        csr:            GenerateCsrPem(primary, probeTag),
+                        subject:        $"CN={primary},OU={probeTag}",
                         san:            new Dictionary<string, string[]> { ["dns"] = new[] { sanA, sanB } },
                         productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.OvSslUcc },
                         requestFormat:  RequestFormat.PKCS10,
@@ -396,10 +515,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 catch (Exception ex) when (IsClientTimeout(ex))
                 {
+                    string sweepResult = await TryCancelOrphanByWindowAsync(primary, windowStart, probeTag);
                     Skip.If(true,
-                        $"OV UCC order creation did not return within the plugin's hard-coded 120s V2 HTTP " +
-                        $"client timeout — same production gap as the plain OV test (issue 0064). " +
-                        $"Observed: {ex.GetType().Name}: {ex.Message}");
+                        "OV UCC order creation did not return within the plugin's hard-coded 120s V2 HTTP client " +
+                        "timeout — same accepted-stays-as-is condition as the plain OV test (issue 0064, closed " +
+                        "won't-fix). A client timeout does not prove the CA never created the order; it likely " +
+                        $"did. {sweepResult}. Observed: {ex.GetType().Name}: {ex.Message}");
                     return;
                 }
 
@@ -432,7 +553,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Places one V2 EV SSL order (<see cref="Constants.Products.EvSsl"/>) — same
         /// organization-block requirement as OV (issue 0028/0059's ProductVariantsV2 mapping
         /// resolves "ev" automatically), same pending-vetting observation, same client-timeout
-        /// caveat.
+        /// caveat. Uses <c>CERTINEXT_EV_ORG_NUMBER</c> — NOT <c>CERTINEXT_ORG_NUMBER</c>/
+        /// <see cref="IntegrationTestFixture.OrgNumber"/>, which is only pre-vetted for OV. EV
+        /// requires its own, separately-vetted organization number that this account does not
+        /// currently have; the test skips cleanly rather than guessing.
         /// Expected sandbox order count: 1.
         /// </summary>
         [SkippableFact]
@@ -442,9 +566,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_EV") != "1",
                 "CERTINEXT_V2_LIFECYCLE_EV=1 not set — this places a real EV sandbox order. Skipping.");
 
-            string organizationNumber = _fixture.IsConfigured ? _fixture.OrgNumber : null;
+            string organizationNumber = Environment.GetEnvironmentVariable("CERTINEXT_EV_ORG_NUMBER");
             Skip.If(string.IsNullOrWhiteSpace(organizationNumber),
-                "CERTINEXT_ORG_NUMBER not set in ~/.env_certinext — EV requires a pre-vetted organization number. Skipping.");
+                "CERTINEXT_EV_ORG_NUMBER not set — EV requires its own pre-vetted organization number " +
+                "(distinct from CERTINEXT_ORG_NUMBER, which is only vetted for OV). Skipping.");
 
             var config = BuildV2Config(organizationNumber: organizationNumber);
             var plugin = BuildV2Plugin(config);
@@ -635,9 +760,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// EnrollV2Async never branches on enrollmentType beyond logging it — every enrollment
         /// type is dispatched identically (CERTInextCAPlugin.cs: "V2 path: all enrollment types
         /// go through EnrollV2Async", and EnrollV2Async itself never reads PriorCertSN or
-        /// enrollmentType except in log statements). This test records that real observed
-        /// behavior: Renew/Reissue each place a brand-new order with a new CARequestID, and the
-        /// original order is never implicitly revoked as a side effect.
+        /// enrollmentType except in log statements). This test records the real observed
+        /// behavior (distinct CARequestIDs, original never implicitly revoked) but — unlike an
+        /// earlier version of this test — does NOT pass merely because the CA accepted each
+        /// submission; a FAILED order at the CA (e.g. the product-selection bug this plugin's own
+        /// catalog code resolves — now a separate, actively-fixed issue) must still fail this
+        /// test, since "records actual behavior" was never meant to license "observe FAILED
+        /// three times and call it a pass."
         /// Expected sandbox order count: up to 3 (original + renew + reissue).
         /// </summary>
         [SkippableFact]
@@ -665,7 +794,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 original.Should().NotBeNull();
                 original.CARequestID.Should().NotBeNullOrWhiteSpace();
                 originalOrderId = original.CARequestID;
-                _output.WriteLine($"Original order {originalOrderId}: Status={original.Status}");
+                _output.WriteLine($"Original order {originalOrderId}: Status={original.Status}, Message={original.StatusMessage}");
+                original.Status.Should().BeOneOf(
+                    new[] { (int)EndEntityStatus.GENERATED, (int)EndEntityStatus.EXTERNALVALIDATION },
+                    $"the original New enrollment must actually reach an in-flight or issued state for this to be a " +
+                    $"meaningful renew/reissue lifecycle test, not FAILED; message: {original.StatusMessage}");
 
                 string priorSn = ExtractHexSerialOrEmpty(original.Certificate);
                 var priorParams = new Dictionary<string, string> { ["PriorCertSN"] = priorSn };
@@ -683,9 +816,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 renewOrderId = renewResult.CARequestID;
                 renewOrderId.Should().NotBe(originalOrderId,
                     "V2 has no dedicated renew endpoint — EnrollV2Async dispatches every EnrollmentType " +
-                    "identically, so Renew is expected (and here confirmed) to place a brand-new order " +
-                    "with a new CARequestID rather than reusing or superseding the original's ID");
-                _output.WriteLine($"Renew order {renewOrderId}: Status={renewResult.Status} (new order, confirms V2 Renew == New under the hood).");
+                    "identically, so Renew places a brand-new order with a new CARequestID rather than " +
+                    "reusing or superseding the original's ID");
+                _output.WriteLine($"Renew order {renewOrderId}: Status={renewResult.Status}, Message={renewResult.StatusMessage} (new order, distinct CARequestID).");
+                renewResult.Status.Should().BeOneOf(
+                    new[] { (int)EndEntityStatus.GENERATED, (int)EndEntityStatus.EXTERNALVALIDATION },
+                    $"Renew must actually reach an in-flight or issued state, not FAILED; message: {renewResult.StatusMessage}");
 
                 var reissueResult = await plugin.Enroll(
                     csr:            GenerateCsrPem(domain),
@@ -700,7 +836,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 reissueOrderId = reissueResult.CARequestID;
                 reissueOrderId.Should().NotBe(originalOrderId);
                 reissueOrderId.Should().NotBe(renewOrderId);
-                _output.WriteLine($"Reissue order {reissueOrderId}: Status={reissueResult.Status} (new order, confirms V2 Reissue == New under the hood too).");
+                _output.WriteLine($"Reissue order {reissueOrderId}: Status={reissueResult.Status}, Message={reissueResult.StatusMessage} (new order, distinct CARequestID).");
+                reissueResult.Status.Should().BeOneOf(
+                    new[] { (int)EndEntityStatus.GENERATED, (int)EndEntityStatus.EXTERNALVALIDATION },
+                    $"Reissue must actually reach an in-flight or issued state, not FAILED; message: {reissueResult.StatusMessage}");
 
                 var originalAfter = await plugin.GetSingleRecord(originalOrderId);
                 originalAfter.Should().NotBeNull();
