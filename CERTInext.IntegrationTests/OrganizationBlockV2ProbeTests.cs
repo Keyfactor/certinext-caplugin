@@ -356,32 +356,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// POST /api/certinext/v2/ssl-certificates/{orderId}/cancel directly per the spec
         /// (docs/reference/specs/CERTInext API v2.postman_collection (1).json,
         /// "SSL/TLS Certificates/Cancel Order"). Not a product code path.
+        ///
+        /// Delegates to <see cref="V2RawProbeHelpers.CancelSslOrderRawAsync"/> (issue 0058) —
+        /// this file's own token-fetch-plus-cancel body used to be inlined here; extracted so
+        /// this file, <c>IdempotencyKeyV2ProbeTests</c>, and <c>V2GapProbeTests</c> share one
+        /// implementation instead of three near-duplicates. Behavior is unchanged: same
+        /// endpoint, same headers, same throw-on-failure semantics.
         /// </summary>
-        private async Task CancelSslOrderRawAsync(string orderId, string reason)
-        {
-            string tokenUrl = _v2ApiUrl.TrimEnd('/') + "/oauth/token";
-            using var tokenClient = new RestClient(tokenUrl);
-            var tokenReq = new RestRequest(string.Empty, Method.Post);
-            tokenReq.AddHeader("Content-Type", "application/x-www-form-urlencoded");
-            tokenReq.AddParameter("grant_type", "client_credentials");
-            tokenReq.AddParameter("client_id", _v2ClientId);
-            tokenReq.AddParameter("client_secret", _v2ClientSecret);
-            var tokenResp = await tokenClient.ExecuteAsync(tokenReq);
-            if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
-                throw new Exception($"Token request failed: {(int)tokenResp.StatusCode}");
-
-            using var tokenDoc = System.Text.Json.JsonDocument.Parse(tokenResp.Content);
-            string accessToken = tokenDoc.RootElement.GetProperty("access_token").GetString();
-
-            using var apiClient = new RestClient(_v2ApiUrl.TrimEnd('/'));
-            var cancelReq = new RestRequest($"/api/certinext/v2/ssl-certificates/{orderId}/cancel", Method.Post);
-            cancelReq.AddHeader("Authorization", $"Bearer {accessToken}");
-            cancelReq.AddJsonBody(new { reason });
-            var cancelResp = await apiClient.ExecuteAsync(cancelReq);
-            if (!cancelResp.IsSuccessful)
-                throw new Exception(
-                    $"Cancel request failed: {(int)cancelResp.StatusCode} {cancelResp.Content}");
-        }
+        private Task CancelSslOrderRawAsync(string orderId, string reason) =>
+            V2RawProbeHelpers.CancelSslOrderRawAsync(_v2ApiUrl, _v2ClientId, _v2ClientSecret, orderId, reason);
 
     }
 }

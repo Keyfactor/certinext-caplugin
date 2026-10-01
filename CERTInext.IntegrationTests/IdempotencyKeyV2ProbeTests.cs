@@ -284,44 +284,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         /// <summary>
-        /// Standalone OAuth2 client_credentials token fetch — same idiom as
-        /// <c>OrganizationBlockV2ProbeTests.CancelSslOrderRawAsync</c>'s inline token
-        /// request.
+        /// Standalone OAuth2 client_credentials token fetch. Delegates to
+        /// <see cref="V2RawProbeHelpers.GetV2AccessTokenAsync"/> (issue 0058) — this file used
+        /// to carry its own private copy, near-identical to
+        /// <c>OrganizationBlockV2ProbeTests.CancelSslOrderRawAsync</c>'s inline token request;
+        /// extracted so this file, <c>OrganizationBlockV2ProbeTests</c>, and
+        /// <c>V2GapProbeTests</c> share one implementation. Behavior is unchanged.
         /// </summary>
-        private async Task<string> GetV2AccessTokenAsync()
-        {
-            string tokenUrl = _v2ApiUrl.TrimEnd('/') + "/oauth/token";
-            using var tokenClient = new RestClient(tokenUrl);
-            var tokenReq = new RestRequest(string.Empty, Method.Post);
-            tokenReq.AddHeader("Content-Type", "application/x-www-form-urlencoded");
-            tokenReq.AddParameter("grant_type", "client_credentials");
-            tokenReq.AddParameter("client_id", _v2ClientId);
-            tokenReq.AddParameter("client_secret", _v2ClientSecret);
-            var tokenResp = await tokenClient.ExecuteAsync(tokenReq);
-            if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
-                throw new Exception($"Token request failed: {(int)tokenResp.StatusCode}");
-
-            using var tokenDoc = JsonDocument.Parse(tokenResp.Content);
-            return tokenDoc.RootElement.GetProperty("access_token").GetString();
-        }
+        private Task<string> GetV2AccessTokenAsync() =>
+            V2RawProbeHelpers.GetV2AccessTokenAsync(_v2ApiUrl, _v2ClientId, _v2ClientSecret);
 
         /// <summary>
-        /// Standalone cancel call for triage cleanup only — same idiom as
-        /// <c>OrganizationBlockV2ProbeTests.CancelSslOrderRawAsync</c>.
+        /// Standalone cancel call for triage cleanup only. Delegates to
+        /// <see cref="V2RawProbeHelpers.CancelSslOrderRawAsync"/> (issue 0058) — same idiom as
+        /// <see cref="GetV2AccessTokenAsync"/> above. Behavior is unchanged.
         /// </summary>
-        private async Task CancelSslOrderRawAsync(string orderId, string reason)
-        {
-            string accessToken = await GetV2AccessTokenAsync();
-
-            using var apiClient = new RestClient(_v2ApiUrl.TrimEnd('/'));
-            var cancelReq = new RestRequest($"{Constants.ApiV2.SslCertificatesPath}/{orderId}/cancel", Method.Post);
-            cancelReq.AddHeader("Authorization", $"Bearer {accessToken}");
-            cancelReq.AddJsonBody(new { reason });
-            var cancelResp = await apiClient.ExecuteAsync(cancelReq);
-            if (!cancelResp.IsSuccessful)
-                throw new Exception(
-                    $"Cancel request failed: {(int)cancelResp.StatusCode} {cancelResp.Content}");
-        }
+        private Task CancelSslOrderRawAsync(string orderId, string reason) =>
+            V2RawProbeHelpers.CancelSslOrderRawAsync(_v2ApiUrl, _v2ClientId, _v2ClientSecret, orderId, reason);
 
         /// <summary>
         /// Best-effort orderId extraction from a raw JSON response body. Returns null rather

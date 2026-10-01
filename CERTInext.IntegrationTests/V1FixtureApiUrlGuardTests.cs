@@ -26,7 +26,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     /// <list type="bullet">
     ///   <item>(D) the V1 fixture's <see cref="IntegrationTestFixture.EnsureV1ApiUrl"/> guard
     ///   rejects a V2 base URL with an actionable message that never echoes secrets;</item>
-    ///   <item>(B) <see cref="V2EnvHelper.PromotableKeys"/> never promotes a key the V1 side reads.</item>
+    ///   <item>(B) <see cref="V2EnvHelper.PromotableKeys"/> never promotes a key the V1 side reads,
+    ///   nor any of the fixture's opt-in-only flags (issue 0058).</item>
     /// </list>
     /// </summary>
     public class V1FixtureApiUrlGuardTests
@@ -136,6 +137,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             promoted.Should().BeEquivalentTo(
                 "CERTINEXT_CLIENT_ID", "CERTINEXT_CLIENT_SECRET", "CERTINEXT_REQUESTOR_MOBILE",
                 "CERTINEXT_SIGNER_IP", "CERTINEXT_USE_V2_API");
+        }
+
+        /// <summary>
+        /// Issue 0058: if a developer ever left one of the fixture's opt-in-only flags (e.g.
+        /// CERTINEXT_V2_GAP_PROBES, CERTINEXT_PRIVATE_PKI_LIVE) in ~/.env_certinext_v2, it must
+        /// NOT come back out of <see cref="V2EnvHelper.PromotableKeys"/> — otherwise the first
+        /// test class constructed in a run reads the flag as unset, then promotes it into real
+        /// process env, silently arming every later-constructed test class in the same run even
+        /// though nothing was ever exported in the shell. Covers every flag in
+        /// <see cref="IntegrationTestFixture._optInOnlyFlags"/>, not just the two named in the
+        /// issue, so a future addition to that set is covered automatically.
+        /// </summary>
+        [Fact]
+        public void PromotableKeys_ExcludesEveryOptInOnlyFlag()
+        {
+            var promoted = V2EnvHelper.PromotableKeys(IntegrationTestFixture._optInOnlyFlags);
+
+            promoted.Should().BeEmpty(
+                "every opt-in-only flag must be excluded from V2-file promotion, or a value left " +
+                "in ~/.env_certinext_v2 could silently arm a later test in the same run");
         }
 
         [Theory]

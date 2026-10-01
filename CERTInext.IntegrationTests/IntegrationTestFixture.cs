@@ -26,16 +26,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Env-var keys that must be set explicitly in the shell and must NOT be
-        /// auto-promoted from the env file.  These gate destructive or mutating tests
-        /// so a developer cannot accidentally arm them by leaving flags in ~/.env_certinext.
+        /// auto-promoted from either env file. These gate destructive or mutating tests
+        /// so a developer cannot accidentally arm them by leaving flags in ~/.env_certinext
+        /// OR ~/.env_certinext_v2. Exposed <c>internal</c> (rather than <c>private</c>) so
+        /// <see cref="V2EnvHelper.PromotableKeys"/> can exclude the same names from its own
+        /// promotion of ~/.env_certinext_v2 — without that, a flag left in the V2 file would
+        /// be read as unset by the first test class constructed in a run, then promoted into
+        /// process env, silently arming every later test in the same run (issue 0058).
         /// </summary>
-        private static readonly System.Collections.Generic.HashSet<string> _optInOnlyFlags =
+        internal static readonly System.Collections.Generic.HashSet<string> _optInOnlyFlags =
             new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "CERTINEXT_COMPLETE_PENDING",
                 "CERTINEXT_RUN_BULK_TEST",
                 "CERTINEXT_V2_RUN_BULK_TEST",
                 "CERTINEXT_PRIVATE_PKI_LIVE",
+                "CERTINEXT_V2_GAP_PROBES",
             };
 
         // ---------------------------------------------------------------------------

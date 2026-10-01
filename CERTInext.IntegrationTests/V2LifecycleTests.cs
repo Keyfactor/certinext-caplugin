@@ -713,14 +713,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// The V2-file keys <see cref="LoadAndPromote"/> may write into process env: every file
-        /// key except those the V1 side reads (<see cref="IntegrationTestFixture.V1EnvKeys"/>).
-        /// Exposed <c>internal</c> for direct unit-testing.
+        /// key except those the V1 side reads (<see cref="IntegrationTestFixture.V1EnvKeys"/>)
+        /// and the fixture's opt-in-only flags (<see cref="IntegrationTestFixture._optInOnlyFlags"/>
+        /// — issue 0058). Without the latter exclusion, a value left in ~/.env_certinext_v2 for
+        /// one of those flags (e.g. CERTINEXT_V2_GAP_PROBES, CERTINEXT_PRIVATE_PKI_LIVE) would be
+        /// read as unset by the first test class constructed in a run (before this method's
+        /// promotion step runs), then promoted into real process env, silently arming every
+        /// later-constructed test class in the same run even though no flag was ever exported in
+        /// the shell. Exposed <c>internal</c> for direct unit-testing.
         /// </summary>
         internal static List<string> PromotableKeys(IEnumerable<string> fileKeys)
         {
             var keys = new List<string>();
             foreach (string key in fileKeys)
-                if (!IntegrationTestFixture.V1EnvKeys.Contains(key))
+                if (!IntegrationTestFixture.V1EnvKeys.Contains(key)
+                    && !IntegrationTestFixture._optInOnlyFlags.Contains(key))
                     keys.Add(key);
             return keys;
         }
