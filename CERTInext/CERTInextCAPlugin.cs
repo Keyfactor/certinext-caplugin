@@ -3091,6 +3091,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             if (disposition != (int)EndEntityStatus.GENERATED)
             {
+                // Compliance finding: a revoke denial must leave an audit record (SOX/SOC2
+                // who/what/when/outcome) — mirrors the V1 "Revocation rejected" LogError above.
+                _logger.LogError(
+                    "V2 revocation rejected — certificate is not in a revocable state. " +
+                    "CARequestID={Id}, Family={Family}, CurrentStatus={Status}",
+                    caRequestID, resolvedFamily, currentStatus.Status);
                 throw new Exception(
                     $"V2 certificate '{caRequestID}' cannot be revoked: current status is '{currentStatus.Status}'. " +
                     "Only issued certificates may be revoked.");
@@ -3109,6 +3115,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             catch (KeyNotFoundException knf)
             {
+                // Compliance finding: audit the denial (CARequestID, family, HTTP status, EMS
+                // code) before converting/rethrowing — the client already logged the raw
+                // HTTP/body; this adds the plugin-level who/what/outcome context.
+                _logger.LogWarning(
+                    "V2 revocation denied — order not found or not in a revokable state. " +
+                    "CARequestID={Id}, Family={Family}, HttpStatus={HttpStatus}, EmsCode={EmsCode}",
+                    caRequestID, resolvedFamily, 404, ExtractEmsCode(knf.Message) ?? "(none)");
                 // We already confirmed the order lives in `resolvedFamily` via TrackOrder
                 // above, so a 404 here is the spec's other documented meaning — "not in a
                 // revokable state" — not a genuine family miss. Surface that plainly
@@ -3135,9 +3148,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // obligation, which would misrepresent a revoke that was never actually a
                 // key compromise.
                 _logger.LogWarning(
-                    "V2 revoke rejected reason 'unspecified' as invalid (CARequestID={Id}); " +
-                    "retrying once with 'cessation-of-operation' per issues/0026.",
-                    caRequestID);
+                    "V2 revoke rejected reason 'unspecified' as invalid (CARequestID={Id}, Family={Family}, " +
+                    "HttpStatus={HttpStatus}, EmsCode={EmsCode}); retrying once with 'cessation-of-operation' " +
+                    "per issues/0026.",
+                    caRequestID, resolvedFamily, 422, ExtractEmsCode(ioe.Message) ?? "(none)");
                 v2Reason = Constants.RevocationReasonV2.CessationOfOperation;
                 revokeReq = new V2RevokeRequest
                 {
@@ -3149,7 +3163,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Note = "Revoked via Command, reason unspecified, retried as cessation-of-operation (see issues/0026)."
                 };
                 retriedAsCessationOfOperation = true;
-                await _client.RevokeOrderV2Async(resolvedFamily, caRequestID, revokeReq);
+                try
+                {
+                    await _client.RevokeOrderV2Async(resolvedFamily, caRequestID, revokeReq);
+                }
+                catch (Exception retryEx)
+                {
+                    // Compliance finding: the retry attempt is itself a revoke call against the
+                    // CA and must leave an audit record on failure, not just succeed silently or
+                    // vanish into the caller's exception.
+                    _logger.LogError(retryEx,
+                        "V2 revocation retry (cessation-of-operation) failed. CARequestID={Id}, Family={Family}",
+                        caRequestID, resolvedFamily);
+                    throw;
+                }
+            }
+            catch (InvalidOperationException ioe)
+            {
+                // Any 422 not matched by the retry-eligible case above (e.g. a distinct EMS
+                // code/detail) — audit the denial and rethrow unchanged.
+                _logger.LogWarning(
+                    "V2 revocation denied. CARequestID={Id}, Family={Family}, HttpStatus={HttpStatus}, " +
+                    "EmsCode={EmsCode}, Detail={Detail}",
+                    caRequestID, resolvedFamily, 422, ExtractEmsCode(ioe.Message) ?? "(none)", ioe.Message);
+                throw;
             }
 
             _logger.LogInformation(
@@ -3163,6 +3200,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // ---------------------------------------------------------------------------
         // V2 private utility
         // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Pulls the first <c>EMS-NNN</c> code out of an exception message, for audit log
+        /// lines that want the CA's own error code as a discrete field rather than only the
+        /// free-text detail. Returns <c>null</c> when no code is present (e.g. a CERTInext
+        /// detail with no EMS code, such as "Certificate Request still being processed").
+        /// </summary>
+        private static string ExtractEmsCode(string message)
+        {
+            if (string.IsNullOrEmpty(message)) return null;
+            var m = System.Text.RegularExpressions.Regex.Match(message, @"\bEMS-\d+\b");
+            return m.Success ? m.Value : null;
+        }
 
         private static string ExtractCnFromSubject(string subject)
         {

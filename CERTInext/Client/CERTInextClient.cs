@@ -1480,6 +1480,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             var resp = await _httpV2.ExecuteAsync(req, ct);
             if (resp.StatusCode == HttpStatusCode.NotFound)
             {
+                // Compliance finding: a revoke denial must leave an audit trail (SOX/SOC2
+                // who/what/when/outcome) even though this branch returns before
+                // ThrowOnV2Failure/LogV2ApiFailure would otherwise run it. Log explicitly with
+                // the order/family identity plus the usual HTTP-status+redacted-body line.
+                Logger.LogWarning(
+                    "V2 revoke denied — order not found or not in a revokable state. " +
+                    "OrderId={OrderId}, ProductFamily={Family}, HttpStatus={HttpStatus}",
+                    orderId, productFamilySlug, (int)resp.StatusCode);
+                LogV2ApiFailure("V2 revoke order", resp, LogLevel.Warning);
                 Logger.MethodExit(LogLevel.Trace);
                 // Per the V2 spec ("Revoke Certificate", 404 response): "Order not found
                 // or not in a revokable state." This is deliberately ambiguous on the
@@ -1496,6 +1505,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 // distinct conditions (EMS-969 revoke reason ID missing, sandbox-timing
                 // "Certificate Request still being processed", etc. — see issues/0019).
                 string detail = ExtractV2ErrorMessage(resp.Content, "V2 revoke");
+                // Compliance finding: same audit-trail requirement as the 404 branch above —
+                // this also returns before ThrowOnV2Failure would otherwise log it.
+                Logger.LogWarning(
+                    "V2 revoke rejected. OrderId={OrderId}, ProductFamily={Family}, HttpStatus={HttpStatus}, " +
+                    "Detail={Detail}",
+                    orderId, productFamilySlug, (int)resp.StatusCode, detail);
+                LogV2ApiFailure("V2 revoke order", resp, LogLevel.Warning);
                 throw new InvalidOperationException($"V2 revoke rejected. {detail}");
             }
             ThrowOnV2Failure(resp, "V2 revoke order");
