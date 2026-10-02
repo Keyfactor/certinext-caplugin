@@ -34,7 +34,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// Enroll and renewal share <c>BuildSslOrderDetails</c> -> <c>BuildAgreementDetails</c>, so both
     /// paths are covered. All values are synthetic (RFC 5737 / RFC 3849 documentation addresses).
     /// </summary>
-    [Collection("CERTInextClientLogger-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class SignerIpWarningTests : IDisposable
     {
         private readonly WireMockServer _server;

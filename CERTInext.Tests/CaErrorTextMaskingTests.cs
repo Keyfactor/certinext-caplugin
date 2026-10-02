@@ -35,7 +35,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// Command stores; the rest of the text is preserved. With the flag on the text is verbatim.
     /// All data is synthetic.
     /// </summary>
-    [Collection("CERTInextClientLogger-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class CaErrorTextMaskingTests : IDisposable
     {
         private const string Email = "jane.doe@example.com";

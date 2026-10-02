@@ -41,7 +41,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// the capture while it is installed; every assertion is scoped to lines carrying this call's
     /// unique marker. All data is synthetic.
     /// </summary>
-    [Collection("CERTInextClientLogger-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class ClientPayloadLogRedactionTests : IDisposable
     {
         private const string RequestorName = "Jane Doe";

@@ -34,7 +34,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// <c>DeserializeOrThrow</c> call site through WireMock and captures what the client logged via
     /// <c>CERTInextClient.OverrideLoggerForTests</c>. All data is synthetic.
     /// </summary>
-    [Collection("CERTInextClientLogger-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class V1NonSuccessLogRedactionTests : IDisposable
     {
         private const string AuthKey = "SYNTHETIC-AUTHKEY-0073";

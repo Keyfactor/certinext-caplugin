@@ -17,7 +17,6 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Keyfactor.AnyGateway.Extensions;
@@ -35,7 +34,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// placeholders ("Keyfactor Gateway" / "Gateway") the client must log a Warning naming what to
     /// configure, without changing the values sent in <c>agreementDetails</c>.
     /// </summary>
-    [Collection("CERTInextClientLogger-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class SignerFallbackWarningTests : IDisposable
     {
         private readonly WireMockServer _server;
@@ -65,17 +64,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             public IDisposable BeginScope<TState>(TState state) => null;
             public bool IsEnabled(LogLevel logLevel) => true;
 
-            // The client logger is a process-wide static, so enrolls from unrelated test classes that
-            // run in parallel can log into it while it is overridden. Only record entries logged from
-            // this test's async flow (AsyncLocal flows down to callees, not across parallel tests).
-            private readonly AsyncLocal<bool> _active = new();
-            public void Activate() => _active.Value = true;
-
             public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception,
                 Func<TState, Exception, string> formatter)
-            {
-                if (_active.Value) Entries.Enqueue((logLevel, formatter(state, exception)));
-            }
+                => Entries.Enqueue((logLevel, formatter(state, exception)));
 
             public List<string> Warnings(string contains) => Entries
                 .Where(e => e.Level == LogLevel.Warning && e.Message.Contains(contains, StringComparison.Ordinal))
@@ -106,7 +97,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var plugin = new CERTInextCAPlugin(client, new CERTInextConfig { PickupRetries = 0 });
             var logger = new CapturingLogger();
-            logger.Activate();
             using (CERTInextClient.OverrideLoggerForTests(logger))
             {
                 await plugin.Enroll(

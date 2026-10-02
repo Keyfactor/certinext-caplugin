@@ -43,7 +43,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// no <c>technicalPointOfContact</c> key, and <c>agreementDetails.signerName</c> falls back to
     /// "Keyfactor Gateway".
     /// </summary>
-    [Collection("CERTInextClientLogger-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class BlankRequestorWireTests : IDisposable
     {
         private readonly WireMockServer _server;

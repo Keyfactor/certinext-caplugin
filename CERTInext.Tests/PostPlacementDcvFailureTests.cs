@@ -38,7 +38,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// result carrying the order number so the sync-DCV retry path finishes the order.
     /// Only compiled on the <c>-p:DcvSupport=true</c> build (see CERTInext.Tests.csproj).
     /// </summary>
-    [Collection("LogHandlerFactory-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class PostPlacementDcvFailureTests
     {
         private const string Order = MockCertificateData.DcvOrderId;

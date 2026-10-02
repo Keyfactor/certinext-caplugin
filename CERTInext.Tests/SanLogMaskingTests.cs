@@ -204,7 +204,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// <see cref="CERTInextCAPluginAuditLoggingTests"/>; only lines carrying this call's unique
     /// subject marker are considered.
     /// </summary>
-    [Collection("LogHandlerFactory-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class SanLogMaskingPluginTests
     {
         private const string EmailSan = "alice@example.com";

@@ -37,12 +37,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// <c>Client.CERTInextClient.Logger</c>, which is a <c>static readonly</c> field resolved once
     /// per process — not swappable after the fact). Swapping <see cref="LogHandler.Factory"/>
     /// before constructing a fresh plugin instance is therefore a genuine, narrow capture seam for
-    /// this one log line. All tests in this class run in the "LogHandlerFactory-NoParallel"
-    /// collection (sequential within the class by xUnit default; the named collection also blocks
-    /// any other class opting into it from interleaving) and restore the original factory in a
+    /// this one log line. All tests in this class run in the shared
+    /// <see cref="LoggingStateCollection"/> (non-parallel: no other test, in or out of the
+    /// collection, runs concurrently with them) and restore the original factory in a
     /// <c>finally</c> block so the global static mutation can't outlive a single test.
     /// </summary>
-    [Collection("LogHandlerFactory-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class CERTInextCAPluginAuditLoggingTests
     {
         private sealed class CapturingLoggerProvider : ILoggerProvider

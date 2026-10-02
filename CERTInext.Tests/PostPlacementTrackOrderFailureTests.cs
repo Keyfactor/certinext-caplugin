@@ -48,7 +48,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     ///
     /// Driven against WireMock with the real <see cref="CERTInextClient"/>. All data is synthetic.
     /// </summary>
-    [Collection("CERTInextClientLogger-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class PostPlacementTrackOrderFailureTests : IDisposable
     {
         private const string PriorOrder = MockCertificateData.OrderNumber1;
