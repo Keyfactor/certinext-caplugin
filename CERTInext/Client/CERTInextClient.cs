@@ -1719,6 +1719,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // because SignerIp is blank), but a missing value emits a Warning so an
             // auditor sees the misrepresentation as an actionable signal in the gateway log.
             string signerIp = FirstNonBlank(templateSignerIp, _config.SignerIp);
+            WarnIfSignerIpNotAnAddress(signerIp, source: string.IsNullOrWhiteSpace(templateSignerIp) ? "connector" : "template");
             if (signerIp == null)
             {
                 Logger.LogWarning(
@@ -1734,6 +1735,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 SignerPlace = FirstNonBlank(templateSignerPlace, _config.SignerPlace) ?? "Gateway",
                 SignerIp = signerIp
             };
+        }
+
+        /// <summary>
+        /// Warn-only check: the resolved SignerIp is sent as <c>agreementDetails.signerIP</c> (part of
+        /// the subscriber-agreement audit record), so a value that is not an IP literal (for example
+        /// a host name) is flagged. The value is still sent unchanged; enrollment never fails here.
+        /// </summary>
+        private static void WarnIfSignerIpNotAnAddress(string signerIp, string source)
+        {
+            if (string.IsNullOrWhiteSpace(signerIp) || IPAddress.TryParse(signerIp, out _))
+                return;
+
+            string shown = LogSanitizer.Strip(signerIp.Length > 64 ? signerIp.Substring(0, 64) + "..." : signerIp);
+            Logger.LogWarning(
+                "The SignerIp value from the {Source} ('{SignerIp}') is not a valid IPv4/IPv6 address but is " +
+                "being sent unchanged as agreementDetails.signerIP in the subscriber agreement audit record. " +
+                "Set SignerIp to the gateway host's actual IP address.",
+                source, shown);
         }
 
         private static string FirstNonBlank(string first, string second)
