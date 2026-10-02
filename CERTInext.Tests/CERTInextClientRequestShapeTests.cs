@@ -143,57 +143,100 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // -----------------------------------------------------------------------
-        // GroupNumber → delegationInformation block
+        // Legacy (wrong) field placements must never reappear. CERTInext reads
+        // groupNumber / autoSecureWWW from orderDetails and the technical contact as
+        // poc* fields; the shapes below were ignored by the API.
+        // -----------------------------------------------------------------------
+
+        private static void AssertNoLegacyFieldShapes(JsonElement orderDetails)
+        {
+            orderDetails.TryGetProperty("delegationInformation", out _).Should().BeFalse(
+                "delegationInformation{groupNumber} is not read by CERTInext — groupNumber belongs on orderDetails");
+            orderDetails.GetProperty("certificateInformation").TryGetProperty("autoSecureWWW", out _).Should().BeFalse(
+                "autoSecureWWW is read from orderDetails, not certificateInformation");
+            CollectPropertyNames(orderDetails)
+                .Where(n => n.StartsWith("tpc", StringComparison.Ordinal))
+                .Should().BeEmpty("the technical contact uses poc* field names, not tpc*");
+        }
+
+        private static System.Collections.Generic.IEnumerable<string> CollectPropertyNames(JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in element.EnumerateObject())
+                {
+                    yield return prop.Name;
+                    foreach (var nested in CollectPropertyNames(prop.Value))
+                        yield return nested;
+                }
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in element.EnumerateArray())
+                    foreach (var nested in CollectPropertyNames(item))
+                        yield return nested;
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // GroupNumber → orderDetails.groupNumber
         // -----------------------------------------------------------------------
 
         [Fact]
-        public async Task GroupNumber_Set_EmitsDelegationInformation()
+        public async Task GroupNumber_Set_EmitsOrderDetailsGroupNumber()
         {
             StubHappyEnroll();
             var cfg = MinimalConfig();
-            cfg.GroupNumber = "2171775848";
+            cfg.GroupNumber = "1000000001";
 
             await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
 
             var orderDetails = CapturedOrderBody();
-            orderDetails.TryGetProperty("delegationInformation", out var delegation).Should().BeTrue();
-            delegation.GetProperty("groupNumber").GetString().Should().Be("2171775848");
+            orderDetails.GetProperty("groupNumber").GetString().Should().Be("1000000001");
+            AssertNoLegacyFieldShapes(orderDetails);
         }
 
-        [Fact]
-        public async Task GroupNumber_Blank_OmitsDelegationInformation()
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task GroupNumber_Blank_OmitsGroupNumber(string blank)
         {
             StubHappyEnroll();
             var cfg = MinimalConfig();
-            cfg.GroupNumber = string.Empty;
+            cfg.GroupNumber = blank;
 
             await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
 
             var orderDetails = CapturedOrderBody();
-            orderDetails.TryGetProperty("delegationInformation", out _).Should().BeFalse();
+            orderDetails.TryGetProperty("groupNumber", out _).Should().BeFalse();
+            AssertNoLegacyFieldShapes(orderDetails);
         }
 
         // -----------------------------------------------------------------------
-        // technicalPointOfContact — overrides + requestor fallback
+        // technicalPointOfContact — poc* fields, name split, requestor fallback
         // -----------------------------------------------------------------------
 
         [Fact]
-        public async Task TechnicalContact_AllSet_EmitsExplicitValues()
+        public async Task TechnicalContact_AllSet_EmitsPocFields()
         {
             StubHappyEnroll();
             var cfg = MinimalConfig();
-            cfg.TechnicalContactName = "Jane Smith";
-            cfg.TechnicalContactEmail = "tpc@example.com";
+            cfg.TechnicalContactName = "Jane Q Smith";
+            cfg.TechnicalContactEmail = "poc@example.com";
             cfg.TechnicalContactIsdCode = "44";
             cfg.TechnicalContactMobileNumber = "5559999999";
 
             await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
 
-            var tpc = CapturedOrderBody().GetProperty("technicalPointOfContact");
-            tpc.GetProperty("tpcName").GetString().Should().Be("Jane Smith");
-            tpc.GetProperty("tpcEmail").GetString().Should().Be("tpc@example.com");
-            tpc.GetProperty("tpcIsdCode").GetString().Should().Be("44");
-            tpc.GetProperty("tpcMobileNumber").GetString().Should().Be("5559999999");
+            var od = CapturedOrderBody();
+            var poc = od.GetProperty("technicalPointOfContact");
+            poc.GetProperty("pocFirstName").GetString().Should().Be("Jane");
+            poc.GetProperty("pocLastName").GetString().Should().Be("Q Smith");
+            poc.GetProperty("pocEmail").GetString().Should().Be("poc@example.com");
+            poc.GetProperty("pocIsdCode").GetString().Should().Be("44");
+            poc.GetProperty("pocMobileNumber").GetString().Should().Be("5559999999");
+            AssertNoLegacyFieldShapes(od);
         }
 
         [Fact]
@@ -209,17 +252,70 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
 
-            var tpc = CapturedOrderBody().GetProperty("technicalPointOfContact");
-            tpc.GetProperty("tpcName").GetString().Should().Be(cfg.RequestorName);
-            tpc.GetProperty("tpcEmail").GetString().Should().Be(cfg.RequestorEmail);
-            tpc.GetProperty("tpcIsdCode").GetString().Should().Be(cfg.RequestorIsdCode);
-            tpc.GetProperty("tpcMobileNumber").GetString().Should().Be(cfg.RequestorMobileNumber);
+            var poc = CapturedOrderBody().GetProperty("technicalPointOfContact");
+            // MinimalConfig RequestorName = "Default Requestor"
+            poc.GetProperty("pocFirstName").GetString().Should().Be("Default");
+            poc.GetProperty("pocLastName").GetString().Should().Be("Requestor");
+            poc.GetProperty("pocEmail").GetString().Should().Be(cfg.RequestorEmail);
+            poc.GetProperty("pocIsdCode").GetString().Should().Be(cfg.RequestorIsdCode);
+            poc.GetProperty("pocMobileNumber").GetString().Should().Be(cfg.RequestorMobileNumber);
+        }
+
+        [Fact]
+        public async Task TechnicalContact_SingleTokenName_FillsFirstAndLast()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.TechnicalContactName = "  Operations  ";
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            var poc = CapturedOrderBody().GetProperty("technicalPointOfContact");
+            poc.GetProperty("pocFirstName").GetString().Should().Be("Operations");
+            poc.GetProperty("pocLastName").GetString().Should().Be("Operations");
+        }
+
+        [Fact]
+        public async Task TechnicalContact_PerFieldFallback_MixesOverridesAndRequestorValues()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.TechnicalContactName = string.Empty;           // → requestor name
+            cfg.TechnicalContactEmail = "poc@example.com";     // override
+            cfg.TechnicalContactIsdCode = string.Empty;        // → requestor ISD
+            cfg.TechnicalContactMobileNumber = "5551112222";   // override
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            var poc = CapturedOrderBody().GetProperty("technicalPointOfContact");
+            poc.GetProperty("pocFirstName").GetString().Should().Be("Default");
+            poc.GetProperty("pocLastName").GetString().Should().Be("Requestor");
+            poc.GetProperty("pocEmail").GetString().Should().Be("poc@example.com");
+            poc.GetProperty("pocIsdCode").GetString().Should().Be(cfg.RequestorIsdCode);
+            poc.GetProperty("pocMobileNumber").GetString().Should().Be("5551112222");
+        }
+
+        [Fact]
+        public async Task TechnicalContact_NoEmailResolved_OmitsBlock()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.RequestorEmail = string.Empty;
+            cfg.TechnicalContactEmail = "   ";
+            cfg.TechnicalContactName = "Jane Smith";
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            var od = CapturedOrderBody();
+            od.TryGetProperty("technicalPointOfContact", out _).Should().BeFalse(
+                "a POC with no email would now be validated by CERTInext — omit it rather than reject the order");
+            AssertNoLegacyFieldShapes(od);
         }
 
         // -----------------------------------------------------------------------
         // SSL order body defaults — AccountingModel / EmailNotifications /
         // SubscriptionAutoRenew / SubscriptionRenewCriteriaDays /
-        // SubscriptionValidityYears / AutoSecureWww
+        // SubscriptionValidityYears / AutoSecureWww (→ orderDetails.autoSecureWWW)
         // -----------------------------------------------------------------------
 
         [Fact]
@@ -245,7 +341,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             sub.GetProperty("autoRenew").GetString().Should().Be("1");
             sub.GetProperty("renewCriteria").GetString().Should().Be("60");
 
-            od.GetProperty("certificateInformation").GetProperty("autoSecureWWW").GetString().Should().Be("1");
+            od.GetProperty("autoSecureWWW").GetString().Should().Be("1");
+            AssertNoLegacyFieldShapes(od);
         }
 
         [Fact]
@@ -266,8 +363,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             sub.GetProperty("autoRenew").GetString().Should().Be("0");
             sub.GetProperty("renewCriteria").GetString().Should().Be("30");
 
-            od.GetProperty("certificateInformation").GetProperty("autoSecureWWW").GetString().Should().Be("0");
+            od.GetProperty("autoSecureWWW").GetString().Should().Be("0",
+                "the documented AutoSecureWww default of 0 must actually be sent, or CERTInext applies its own default of 1");
+            AssertNoLegacyFieldShapes(od);
         }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        public async Task AutoSecureWww_Blank_SendsZero(string blank)
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.AutoSecureWww = blank;
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            CapturedOrderBody().GetProperty("autoSecureWWW").GetString().Should().Be("0");
+        }
+
 
         // -----------------------------------------------------------------------
         // ValidityDays request-parameter still overrides the connector default
@@ -341,6 +455,196 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             CapturedOrderBody().GetProperty("productCode").GetString()
                 .Should().Be("connector-default-code",
                     "a blank ProfileId must fall back to the connector's DefaultProductCode, not an empty string");
+        }
+
+        // -----------------------------------------------------------------------
+        // RenewCertificateAsync — full order-details shape. Renewal shares the
+        // new-enrollment builder, so it must send every field a new order sends and
+        // follow the connector's validity / autoRenew / emailNotifications /
+        // accountingModel settings (previously hard-coded validity="1" and DTO
+        // defaults autoRenew="1" / emailNotifications="1", and omitted groupNumber,
+        // autoSecureWWW, technical contact, organizationDetails and remarks).
+        // -----------------------------------------------------------------------
+
+        private static CERTInextConfig FullyConfiguredConfig()
+        {
+            var cfg = MinimalConfig();
+            cfg.GroupNumber = "1000000001";
+            cfg.OrganizationNumber = "2000000002";
+            cfg.AccountingModel = "1";
+            cfg.EmailNotifications = "0";
+            cfg.SubscriptionValidityYears = "3";
+            cfg.SubscriptionAutoRenew = "0";
+            cfg.SubscriptionRenewCriteriaDays = "60";
+            cfg.AutoSecureWww = "0";
+            cfg.TechnicalContactName = "Pat Example";
+            cfg.TechnicalContactEmail = "poc@example.com";
+            cfg.TechnicalContactIsdCode = "44";
+            cfg.TechnicalContactMobileNumber = "5553334444";
+            return cfg;
+        }
+
+        [Fact]
+        public async Task RenewCertificateAsync_SendsFullOrderDetails_FromConnectorConfig()
+        {
+            StubHappyEnroll();
+            var cfg = FullyConfiguredConfig();
+
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                Subject = "CN=renew.example.com,O=Example",
+                ProfileId = "842",
+                Sans = new System.Collections.Generic.List<SanEntry>
+                {
+                    new SanEntry { Type = "dns", Value = "renew.example.com" },
+                    new SanEntry { Type = "dns", Value = "alt.example.com" }
+                },
+                ValidityYears = 2,
+                RequesterName = "Renew Requester",
+                RequesterEmail = "renew@example.com",
+                Comment = "Renewed via Keyfactor Command. Prior ID: ORD-AAA-111."
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            var od = CapturedOrderBody();
+            od.GetProperty("productCode").GetString().Should().Be("842");
+            od.GetProperty("accountingModel").GetString().Should().Be("1");
+            od.GetProperty("saveAndHold").GetString().Should().Be("0");
+            od.GetProperty("emailNotifications").GetString().Should().Be("0");
+            od.GetProperty("groupNumber").GetString().Should().Be("1000000001");
+            od.GetProperty("autoSecureWWW").GetString().Should().Be("0");
+
+            var org = od.GetProperty("organizationDetails");
+            org.GetProperty("preVetting").GetString().Should().Be("1");
+            org.GetProperty("organizationNumber").GetString().Should().Be("2000000002");
+
+            var requestor = od.GetProperty("requestorInformation");
+            requestor.GetProperty("requestorName").GetString().Should().Be("Renew Requester");
+            requestor.GetProperty("requestorEmail").GetString().Should().Be("renew@example.com");
+            requestor.GetProperty("requestorIsdCode").GetString().Should().Be(cfg.RequestorIsdCode);
+            requestor.GetProperty("requestorMobileNumber").GetString().Should().Be(cfg.RequestorMobileNumber);
+
+            var sub = od.GetProperty("subscriptionDetails");
+            sub.GetProperty("validity").GetString().Should().Be("2", "the plugin-supplied ValidityYears must win");
+            sub.GetProperty("autoRenew").GetString().Should().Be("0");
+            sub.GetProperty("renewCriteria").GetString().Should().Be("60");
+
+            var ci = od.GetProperty("certificateInformation");
+            ci.GetProperty("domainName").GetString().Should().Be("renew.example.com");
+            ci.GetProperty("additionalDomains").EnumerateArray().Select(e => e.GetString())
+                .Should().Equal("alt.example.com");
+
+            var poc = od.GetProperty("technicalPointOfContact");
+            poc.GetProperty("pocFirstName").GetString().Should().Be("Pat");
+            poc.GetProperty("pocLastName").GetString().Should().Be("Example");
+            poc.GetProperty("pocEmail").GetString().Should().Be("poc@example.com");
+            poc.GetProperty("pocIsdCode").GetString().Should().Be("44");
+            poc.GetProperty("pocMobileNumber").GetString().Should().Be("5553334444");
+
+            od.GetProperty("csr").GetString().Should().Be(MockCertificateData.FakeCsrPem);
+            od.GetProperty("agreementDetails").GetProperty("acceptAgreement").GetString().Should().Be("1");
+            od.GetProperty("additionalInformation").GetProperty("remarks").GetString()
+                .Should().Be("Renewed via Keyfactor Command. Prior ID: ORD-AAA-111.");
+
+            AssertNoLegacyFieldShapes(od);
+        }
+
+        [Fact]
+        public async Task RenewCertificateAsync_NoValidityOnRequest_UsesConnectorValidity()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.SubscriptionValidityYears = "3";
+
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                Subject = "CN=renew.example.com",
+                ProfileId = "842"
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            CapturedOrderBody().GetProperty("subscriptionDetails").GetProperty("validity").GetString()
+                .Should().Be("3", "renewal must no longer hard-code validity=1");
+        }
+
+        [Fact]
+        public async Task RenewCertificateAsync_ValidityDays_ConvertsToYears()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.SubscriptionValidityYears = "1";
+
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                Subject = "CN=renew.example.com",
+                ProfileId = "842",
+                ValidityDays = 730
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            CapturedOrderBody().GetProperty("subscriptionDetails").GetProperty("validity").GetString()
+                .Should().Be("2");
+        }
+
+        [Fact]
+        public async Task RenewCertificateAsync_ConfigUntouched_UsesConnectorDefaultsNotDtoDefaults()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                Subject = "CN=renew.example.com",
+                ProfileId = "842"
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            var od = CapturedOrderBody();
+            od.GetProperty("accountingModel").GetString().Should().Be("2");
+            od.GetProperty("emailNotifications").GetString().Should().Be("0",
+                "the connector default (0) must apply, not the DTO default (1)");
+            od.GetProperty("subscriptionDetails").GetProperty("autoRenew").GetString().Should().Be("0",
+                "the connector default (0) must apply, not the DTO default (1)");
+            od.GetProperty("subscriptionDetails").GetProperty("renewCriteria").GetString().Should().Be("30");
+            od.GetProperty("autoSecureWWW").GetString().Should().Be("0");
+            od.TryGetProperty("groupNumber", out _).Should().BeFalse();
+            od.TryGetProperty("organizationDetails", out _).Should().BeFalse();
+            od.GetProperty("technicalPointOfContact").GetProperty("pocEmail").GetString()
+                .Should().Be(cfg.RequestorEmail);
+            od.GetProperty("additionalInformation").GetProperty("remarks").GetString()
+                .Should().NotBeNullOrWhiteSpace();
+            AssertNoLegacyFieldShapes(od);
+        }
+
+        // -----------------------------------------------------------------------
+        // SplitContactName — TechnicalContactName → pocFirstName / pocLastName
+        // -----------------------------------------------------------------------
+
+        [Theory]
+        [InlineData("Jane Smith", "Jane", "Smith")]
+        [InlineData("Jane Q Smith", "Jane", "Q Smith")]
+        [InlineData("  Jane   Smith  ", "Jane", "Smith")]
+        [InlineData("Jane\tSmith", "Jane", "Smith")]
+        [InlineData("Jane  Q  Smith", "Jane", "Q  Smith")]
+        [InlineData("Operations", "Operations", "Operations")]
+        [InlineData("  Operations  ", "Operations", "Operations")]
+        [InlineData("", "", "")]
+        [InlineData("   ", "", "")]
+        [InlineData(null, "", "")]
+        public void SplitContactName_SplitsOnFirstWhitespaceRun(string input, string expectedFirst, string expectedLast)
+        {
+            var (first, last) = CERTInextClient.SplitContactName(input);
+
+            first.Should().Be(expectedFirst);
+            last.Should().Be(expectedLast);
         }
     }
 }
