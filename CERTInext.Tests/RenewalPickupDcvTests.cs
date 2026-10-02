@@ -40,7 +40,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// issue promptly keeps the pickup benefit. A failure of the DCV-state check must never fail the
     /// renewal (the order is already placed — issue 0077).
     /// </summary>
-    [Collection("LogHandlerFactory-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class RenewalPickupDcvTests
     {
         private const string PriorOrder = "ORD-PRIOR-001";
