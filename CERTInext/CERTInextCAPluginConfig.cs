@@ -29,8 +29,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "REQUIRED: CERTInext API base URL. " +
                                "Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ — " +
-                               "Production (US): https://us-api.certinext.io/ — " +
-                               "Production (Global/India): https://api.certinext.io/",
+                               "Production (US): https://us-api.certinext.io/emSignHub-API/ — " +
+                               "Production (Global/India): https://api.certinext.io/emSignHub-API/",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
