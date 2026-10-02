@@ -1981,13 +1981,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             //  but the field name is a common one and the cost of redacting it is zero).
             body = System.Text.RegularExpressions.Regex.Replace(
                 body,
-                @"(?i)""(authKey|client_secret|apiKey|accessKey|password)""\s*:\s*""[^""]*""",
+                @"(?i)""(authKey|client_secret|apiKey|accessKey|password)""\s*:\s*""[^""\\]*(?:\\.[^""\\]*)*""",
                 @"""$1"":""***REDACTED***""");
 
-            // Form-urlencoded: client_secret=... or authKey=... (before any & or end)
+            // The JSON value pattern above is escape-aware: a value such as "ab\"cd" is matched whole.
+            // Form-urlencoded: client_secret=... or authKey=... (before any & or end).
+            // A backslash-escaped char (e.g. \") is consumed as part of the value so a form value
+            // embedded in a JSON-escaped string cannot leak the text after the escape.
             body = System.Text.RegularExpressions.Regex.Replace(
                 body,
-                @"(?i)\b(authKey|client_secret|apiKey|accessKey|password)=([^&\s""]+)",
+                @"(?i)\b(authKey|client_secret|apiKey|accessKey|password)=(?:\\.|[^&\s""])+",
                 "$1=***REDACTED***");
 
             // Authorization header lines if a header dump ever ends up in body shape.
@@ -2072,13 +2075,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Replaces the value of every occurrence of a JSON string field named <paramref name="keyName"/>
         /// (case-insensitive, exact key match) with <paramref name="transform"/> applied to the
         /// original value. Leaves already-empty values untouched. Whitespace around the colon and
-        /// around the key's own quotes is tolerated.
+        /// around the key's own quotes is tolerated. The value match is escape-aware (<c>\"</c> and
+        /// <c>\\</c> do not end the string), so nothing after an escaped quote is left unredacted.
         /// </summary>
         private static string RedactJsonField(string body, string keyName, Func<string, string> transform)
         {
             return System.Text.RegularExpressions.Regex.Replace(
                 body,
-                $@"(?i)(""{System.Text.RegularExpressions.Regex.Escape(keyName)}""\s*:\s*"")([^""]*)("")",
+                $@"(?i)(""{System.Text.RegularExpressions.Regex.Escape(keyName)}""\s*:\s*"")([^""\\]*(?:\\.[^""\\]*)*)("")",
                 m => string.IsNullOrEmpty(m.Groups[2].Value)
                     ? m.Value
                     : m.Groups[1].Value + transform(m.Groups[2].Value) + m.Groups[3].Value);

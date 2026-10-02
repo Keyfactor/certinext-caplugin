@@ -15,6 +15,7 @@
 - **Renewals now send the full order details** (group, `AutoSecureWww`, technical contact, organization, remarks), the same as a new enrollment.
 - **Unexpected CERTInext error responses are now diagnosable from the logs.** Non-2xx responses with an unrecognised body now include the HTTP status in the error and log the redacted body (`authKey` always redacted, personal data per `LogSensitiveRequestData`).
 - **Gateway logs no longer contain the `authKey` or requestor personal data by default**; set `LogSensitiveRequestData` to log PII temporarily (credentials stay redacted).
+- **Log redaction no longer leaks the rest of a value after an escaped quote** (e.g. `"authKey":"ab\"cd"`, `"requestorName":"Jane \"JD\" Doe"`).
 - **Connector and template validation no longer leaks an HTTP client per check.**
 
 ## Chores
