@@ -40,15 +40,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     /// CERTINEXT_DCV_DOMAIN=&lt;subdomain to use, e.g. dcv-test.example.com&gt;
     /// </code>
     /// </summary>
-    public class DcvLifecycleTests : IClassFixture<IntegrationTestFixture>
+    public class DcvLifecycleTests : IClassFixture<IntegrationTestFixture>, IDisposable
     {
         private readonly IntegrationTestFixture _fixture;
         private readonly ITestOutputHelper _output;
+        private readonly List<IDisposable> _toDispose = new List<IDisposable>();
 
         public DcvLifecycleTests(IntegrationTestFixture fixture, ITestOutputHelper output)
         {
             _fixture = fixture;
             _output = output;
+        }
+
+        public void Dispose()
+        {
+            foreach (var d in _toDispose)
+                d.Dispose();
+            _toDispose.Clear();
         }
 
         // ---------------------------------------------------------------------------
@@ -69,11 +77,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 + "\n-----END CERTIFICATE REQUEST-----";
         }
 
-        private IDomainValidatorFactory BuildDnsFactory() =>
-            _fixture.IsCloudflareConfigured
-                ? (IDomainValidatorFactory)new CloudflareDomainValidatorFactory(
-                    _fixture.CloudflareApiToken, _fixture.CloudflareZoneId)
-                : new StubDomainValidatorFactory();
+        private IDomainValidatorFactory BuildDnsFactory()
+        {
+            if (_fixture.IsCloudflareConfigured)
+            {
+                var factory = new CloudflareDomainValidatorFactory(
+                    _fixture.CloudflareApiToken, _fixture.CloudflareZoneId);
+                _toDispose.Add(factory);
+                return factory;
+            }
+            return new StubDomainValidatorFactory();
+        }
 
         /// <summary>
         /// Runs <c>plugin.Synchronize</c> and returns every record that came out of the

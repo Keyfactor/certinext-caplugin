@@ -23,7 +23,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     /// Credentials are read from the <see cref="IntegrationTestFixture"/>:
     /// <c>CERTINEXT_CF_API_TOKEN</c> and <c>CERTINEXT_CF_ZONE_ID</c>.
     /// </summary>
-    internal sealed class CloudflareDomainValidator : IDomainValidator
+    internal sealed class CloudflareDomainValidator : IDomainValidator, IDisposable
     {
         private const string CfApiBase = "https://api.cloudflare.com/client/v4";
 
@@ -113,11 +113,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         public Task ValidateConfiguration(Dictionary<string, object> configuration) => Task.CompletedTask;
         public Dictionary<string, Keyfactor.AnyGateway.Extensions.PropertyConfigInfo> GetDomainValidatorAnnotations() => new();
         public string GetValidationType() => "dns-01";
+
+        public void Dispose() => _http.Dispose();
     }
 
-    internal sealed class CloudflareDomainValidatorFactory : IDomainValidatorFactory
+    internal sealed class CloudflareDomainValidatorFactory : IDomainValidatorFactory, IDisposable
     {
-        private readonly IDomainValidator _validator;
+        private readonly CloudflareDomainValidator _validator;
 
         public CloudflareDomainValidatorFactory(string apiToken, string zoneId)
         {
@@ -125,5 +127,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         public IDomainValidator ResolveDomainValidator(string domain, string validationType) => _validator;
+
+        public void Dispose() => _validator.Dispose();
     }
 }

@@ -36,7 +36,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
     /// </summary>
     public class CERTInextClient : ICERTInextClient, IDisposable
     {
-        private static readonly ILogger Logger = LogHandler.GetClassLogger<CERTInextClient>();
+        // Not readonly only so unit tests can capture the Trace payload dumps through
+        // OverrideLoggerForTests (issue 0040). Production code never reassigns it.
+        private static ILogger Logger = LogHandler.GetClassLogger<CERTInextClient>();
+
+        /// <summary>
+        /// Test seam (issue 0040): swaps the class-wide logger so a unit test can assert exactly
+        /// what the request/response payload dumps write. The logger is static and resolved once
+        /// per process, so swapping <c>LogHandler.Factory</c> cannot reach it. Dispose the
+        /// returned handle to restore the previous logger.
+        /// </summary>
+        internal static IDisposable OverrideLoggerForTests(ILogger logger)
+        {
+            var prior = Logger;
+            Logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            return new LoggerOverride(prior);
+        }
+
+        private sealed class LoggerOverride : IDisposable
+        {
+            private ILogger _prior;
+            public LoggerOverride(ILogger prior) => _prior = prior;
+            public void Dispose()
+            {
+                if (_prior == null) return;
+                Logger = _prior;
+                _prior = null;
+            }
+        }
 
         private readonly CERTInextConfig _config;
         private readonly RestClient _http;
@@ -167,7 +194,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     result.Meta.ErrorCode, result.Meta.ErrorMessage,
                     level: LogLevel.Error);
                 throw new Exception(
-                    $"CERTInext credential validation failed: {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}. " +
+                    $"CERTInext credential validation failed: {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}. " +
                     "See gateway logs for details.");
             }
 
@@ -186,9 +213,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (request.Meta == null)
                 request.Meta = await BuildMetaAsync(ct);
 
+            // The domain set is logged here, at the wire, not just where Command hands it to us.
+            // A UCC order that silently lost its SANs upstream of this point is otherwise
+            // indistinguishable in the gateway log from one the CA stripped — reconciling the
+            // enrollment-start "SANs=" line against this one localizes the loss immediately.
+            var certInfo = request.OrderDetails?.CertificateInformation;
             Logger.LogInformation(
-                "Submitting order to CERTInext. ProductCode={ProductCode}",
-                request.OrderDetails?.ProductCode);
+                "Submitting order to CERTInext. ProductCode={ProductCode}, DomainName={DomainName}, " +
+                "AdditionalDomainCount={AdditionalDomainCount}, AdditionalDomains={AdditionalDomains}",
+                request.OrderDetails?.ProductCode,
+                LogSanitizer.Strip(certInfo?.DomainName),
+                certInfo?.AdditionalDomains?.Count ?? 0,
+                // Untyped by now: an email SAN submitted here is masked unless
+                // LogSensitiveRequestData is on (issue 0040).
+                LogSanitizer.FormatUntypedSans(certInfo?.AdditionalDomains, _config.LogSensitiveRequestData));
 
             GenerateOrderResponse result = null;
             RestResponse resp = null;
@@ -213,10 +251,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     request.Meta = await BuildMetaAsync(ct);
 
                 var req = new RestRequest(Constants.Api.GenerateOrderSslPath, Method.Post);
-                req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
+                string jsonBody = JsonSerializer.Serialize(request, GetJsonOptions());
+                // Issue 0040: the body carries the replayable meta.authKey digest (always redacted)
+                // and requestor/contact PII (redacted unless LogSensitiveRequestData is on).
+                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}",
+                    ApplyLoggingRedaction(jsonBody, _config.LogSensitiveRequestData));
+                req.AddJsonBody(jsonBody);
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                resp = await ExecuteWithRetryAsync(req, ct);
+                // idempotent:false — order submission is non-idempotent. A network-level
+                // timeout may occur after CERTInext already created the order, so re-sending the
+                // same requestTxn would be rejected as EMS-947 and orphan the created order
+                // Rate-limit retries are still handled below (with a fresh txn).
+                resp = await ExecuteWithRetryAsync(req, ct, idempotent: false);
                 sw.Stop();
 
                 Logger.LogInformation(
@@ -230,6 +277,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         (int)resp.StatusCode, _config.AuthMode);
                     throw new Exception(
                         $"Authentication failure during certificate order. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+                }
+
+                // Transient/network failure (5xx or no HTTP status) on a non-idempotent submit:
+                // CERTInext may have already created the order (the response just didn't reach us).
+                // We deliberately did not retry (see idempotent:false above). Fail clearly instead
+                // of deserializing an empty body; if the order was created, the next sync imports it.
+                bool transientFailure = !resp.IsSuccessful
+                    && !((int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500);
+                if (transientFailure)
+                {
+                    Logger.LogWarning(
+                        "PlaceOrder received no usable response (DomainName={Domain}, HttpStatus={Status}, LatencyMs={Latency}). " +
+                        "Not retrying to avoid a duplicate order (EMS-947). If CERTInext created the order it " +
+                        "will be imported by the next synchronization.",
+                        LogSanitizer.Strip(request.OrderDetails?.CertificateInformation?.DomainName),
+                        (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                    throw new Exception(
+                        "CERTInext did not return a usable response to the order submission. If the order was " +
+                        "created it will be imported by the next synchronization — do not resubmit immediately. " +
+                        "See gateway logs for details.");
                 }
 
                 result = DeserializeOrThrow<GenerateOrderResponse>(resp, "place order");
@@ -247,7 +314,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         Logger.LogWarning(
                             "PlaceOrder hit rate-limit-shaped error \"{ErrorMessage}\" (attempt {Attempt}/{Max}). " +
                             "Backing off {WaitSeconds:F1}s before retrying. See Troubleshooting in README for context.",
-                            result.Meta.ErrorMessage, attempt, RateLimitMaxAttempts, waitSeconds);
+                            MaskCaText(result.Meta.ErrorMessage), attempt, RateLimitMaxAttempts, waitSeconds);
                         try
                         {
                             await Task.Delay(TimeSpan.FromSeconds(waitSeconds), ct);
@@ -259,8 +326,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         continue; // retry
                     }
 
+                    // EMS-947 "Duplicate requestTxn": CERTInext already received an order for this
+                    // transaction. With the non-idempotent-retry fix above this should no longer be
+                    // caused by our own retry, but if it still surfaces the order exists on the CA
+                    // side and will be imported by the next sync — say so, not a generic failure.
+                    bool isDuplicateTxn =
+                        string.Equals(result.Meta.ErrorCode, "EMS-947", StringComparison.OrdinalIgnoreCase)
+                        || (result.Meta.ErrorMessage?.IndexOf("Duplicate requestTxn", StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (isDuplicateTxn)
+                    {
+                        // Log the classification decision itself (parity with the transient-failure
+                        // branch above) so an auditor sees the plugin deliberately treated this as a
+                        // benign duplicate rather than a hard failure.
+                        Logger.LogWarning(
+                            "PlaceOrder classified {ErrorCode} as a duplicate transaction (not a hard failure). " +
+                            "DomainName={Domain}, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}. If an order exists " +
+                            "for this transaction it will be imported by the next synchronization.",
+                            result.Meta.ErrorCode,
+                            LogSanitizer.Strip(request.OrderDetails?.CertificateInformation?.DomainName),
+                            Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                        throw new Exception(
+                            "CERTInext reported a duplicate order transaction (EMS-947). If an order was created " +
+                            "for this transaction it will be imported by the next synchronization — do not resubmit " +
+                            "immediately. See gateway logs for details.");
+                    }
+
                     throw new Exception(
-                        $"CERTInext order failed: {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}. " +
+                        $"CERTInext order failed: {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}. " +
                         "See gateway logs for details.");
                 }
 
@@ -300,7 +392,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await ExecuteWithRetryAsync(req, ct);
+            // idempotent:false — submitting a CSR is non-idempotent; do not resend on a network
+            // timeout (the first attempt may have been received). See PlaceOrderAsync.
+            var resp = await ExecuteWithRetryAsync(req, ct, idempotent: false);
             sw.Stop();
 
             Logger.LogInformation(
@@ -310,6 +404,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (!resp.IsSuccessful)
             {
                 LogApiFailure(Constants.Api.SubmitCsrPath, resp);
+                // Parity with PlaceOrderAsync: a transient/network failure on this non-idempotent
+                // submit was NOT retried, so record that decision (the CSR may already have been
+                // received). 4xx client errors fall through to the generic failure below.
+                bool transientFailure = !((int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500);
+                if (transientFailure)
+                {
+                    Logger.LogWarning(
+                        "SubmitCSR received no usable response (OrderNumber={OrderNumber}, HttpStatus={Status}, " +
+                        "LatencyMs={Latency}); not retrying (non-idempotent). If CERTInext already received the CSR, " +
+                        "do not resubmit immediately.",
+                        request.OrderDetails?.OrderNumber, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                    // Parity with PlaceOrderAsync: carry the actionable guidance into the surfaced
+                    // exception, not only the log line.
+                    throw new Exception(
+                        "CERTInext did not return a usable response to the CSR submission. If the CSR was received " +
+                        "it will take effect — do not resubmit immediately. See gateway logs for details.");
+                }
                 throw new Exception($"CERTInext SubmitCSR failed. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
             }
 
@@ -354,6 +465,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
 
             var result = DeserializeOrThrow<TrackOrderResponse>(resp, $"track order {orderNumber}");
+            Logger.LogTrace("TrackOrderAsync response payload (Order={OrderNumber}): {Payload}",
+                orderNumber, ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
 
             // A meta status of "0" with errorCode EMS-913 or similar means the order was not found
             if (result.Meta != null && !result.Meta.IsSuccess)
@@ -363,10 +476,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 if (result.Meta.ErrorCode != null &&
                     (result.Meta.ErrorCode.StartsWith("EMS-9") || result.Meta.ErrorMessage?.Contains("not found", StringComparison.OrdinalIgnoreCase) == true))
                 {
-                    throw new KeyNotFoundException($"Order '{orderNumber}' was not found in CERTInext. Error: {result.Meta.ErrorMessage}");
+                    throw new KeyNotFoundException($"Order '{orderNumber}' was not found in CERTInext. Error: {MaskCaText(result.Meta.ErrorMessage)}");
                 }
                 throw new Exception(
-                    $"CERTInext TrackOrder failed for order '{orderNumber}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
+                    $"CERTInext TrackOrder failed for order '{orderNumber}': {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}.");
             }
 
             Logger.MethodExit(LogLevel.Trace);
@@ -415,7 +528,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 LogApiFailure($"{Constants.Api.GetCertificatePath} {orderNumber}", resp,
                     result.Meta.ErrorCode, result.Meta.ErrorMessage);
                 throw new Exception(
-                    $"CERTInext GetCertificate failed for order '{orderNumber}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
+                    $"CERTInext GetCertificate failed for order '{orderNumber}': {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}.");
             }
 
             Logger.MethodExit(LogLevel.Trace);
@@ -458,7 +571,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 }
 
                 string errMsg = ExtractErrorMessage(resp.Content,
-                    $"revoke order {request.RevocationDetails?.OrderNumber}");
+                    $"revoke order {request.RevocationDetails?.OrderNumber}",
+                    logSensitiveRequestData: _config.LogSensitiveRequestData);
                 Logger.LogError(
                     "RevokeOrder API call failed. OrderNumber={OrderNumber}, HttpStatus={Status}, Error={Error}",
                     request.RevocationDetails?.OrderNumber, (int)resp.StatusCode, errMsg);
@@ -478,7 +592,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             resp, revResp.Meta.ErrorCode, revResp.Meta.ErrorMessage);
                         throw new Exception(
                             $"CERTInext RevokeOrder returned failure for order " +
-                            $"'{request.RevocationDetails?.OrderNumber}': {revResp.Meta.ErrorMessage ?? revResp.Meta.ErrorCode}.");
+                            $"'{request.RevocationDetails?.OrderNumber}': {MaskCaText(revResp.Meta.ErrorMessage) ?? revResp.Meta.ErrorCode}.");
                     }
                 }
                 catch (JsonException)
@@ -647,9 +761,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // If the CSR was provided in the legacy request, submit it now if not already included in the order
             // (The real API accepts CSR inline in GenerateOrderSSL; the legacy flow may not have set it)
 
-            // Poll TrackOrder to get the current status
-            var trackResp = await TrackOrderAsync(orderNumber, ct);
-            string certStatusId = trackResp.OrderDetails?.CertificateStatusId ?? "1";
+            // Poll TrackOrder to get the current status. The order already exists at CERTInext
+            // (and is paid for), so a failure here must not fail the enrollment — see
+            // TryTrackOrderAfterPlacementAsync.
+            var trackResp = await TryTrackOrderAfterPlacementAsync(orderNumber, "enrollment", ct);
+            string certStatusId = trackResp?.OrderDetails?.CertificateStatusId ?? "1";
 
             // Try to download the certificate if the order is fulfilled
             string pemCert = null;
@@ -678,7 +794,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Certificate = pemCert,
                 SerialNumber = serialNumber,
                 ProfileId = request.ProfileId,
-                Message = trackResp.OrderDetails?.CertificateStatus
+                Message = trackResp?.OrderDetails?.CertificateStatus
             };
 
             Logger.LogInformation(
@@ -710,30 +826,57 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 throw new KeyNotFoundException($"Cannot renew: prior order '{certificateId}' was not found in CERTInext.");
             }
 
-            // We don't have the product code from TrackOrder — build an order using
-            // the config defaults and the CSR from the renewal request.
+            // Primary domain for the renewal order. Prefer the CN of the subject Command gave
+            // us; the prior order's requestorName is only a last resort and is not a domain —
+            // it is retained solely so an old caller that sets no Subject behaves as before.
+            // Hoisted: the same parse drives both the domain and the "did we get a CN?" warning,
+            // mirroring BuildOrderRequestFromLegacyEnrollRequest.
+            string subjectCn = ExtractCnFromSubject(request.Subject);
+
+            string renewalDomainName =
+                subjectCn
+                ?? priorTrack.OrderDetails?.RequestorInformation?.RequestorName
+                ?? "unknown";
+
+            if (subjectCn == null)
+            {
+                Logger.LogWarning(
+                    "Renewal of order {PriorId} has no usable CN in its subject; falling back to " +
+                    "DomainName='{DomainName}' from the prior order. Verify the renewed certificate's " +
+                    "primary domain.",
+                    certificateId, LogSanitizer.Strip(renewalDomainName));
+            }
+
+            // Prefer the template's own product code (threaded through via request.ProfileId);
+            // only fall back to the connector-level default when the caller didn't supply one.
+            // EnrollmentParams.ProductCode never returns null (it returns string.Empty when it
+            // can't resolve a code), so this must be a blank check, not a null-coalesce — a
+            // null-coalesce here would make the DefaultProductCode fallback unreachable, the
+            // same dead-fallback bug that made DefaultProductCode a no-op for new enrollments.
+            string renewalProductCode = string.IsNullOrWhiteSpace(request.ProfileId)
+                ? (_config.DefaultProductCode ?? string.Empty)
+                : request.ProfileId;
+
+            // Same order-details builder as new enrollment, so a renewal sends every field a new
+            // order does (groupNumber, autoSecureWWW, technicalPointOfContact, organizationDetails,
+            // remarks) and follows the connector's validity / autoRenew / emailNotifications /
+            // accountingModel settings plus the ValidityYears/Days/Comment the plugin passes.
             var orderReq = new GenerateOrderSslRequest
             {
                 Meta = await BuildMetaAsync(ct),
-                OrderDetails = new SslOrderDetails
-                {
-                    ProductCode = _config.DefaultProductCode ?? string.Empty,
-                    SaveAndHold = "0",
-                    RequestorInformation = new RequestorInformation
-                    {
-                        RequestorName = request.RequesterName ?? _config.RequestorName,
-                        RequestorEmail = request.RequesterEmail ?? _config.RequestorEmail,
-                        RequestorIsdCode = _config.RequestorIsdCode ?? "1",
-                        RequestorMobileNumber = _config.RequestorMobileNumber ?? string.Empty
-                    },
-                    SubscriptionDetails = new SubscriptionDetails { Validity = "1" },
-                    CertificateInformation = new CertificateInformation
-                    {
-                        DomainName = priorTrack.OrderDetails?.RequestorInformation?.RequestorName ?? "unknown"
-                    },
-                    Csr = request.Csr,
-                    AgreementDetails = BuildDefaultAgreementDetails()
-                }
+                OrderDetails = BuildSslOrderDetails(
+                    productCode: renewalProductCode,
+                    domainName: renewalDomainName,
+                    sans: request.Sans,
+                    csr: request.Csr,
+                    validityYears: request.ValidityYears,
+                    validityDays: request.ValidityDays,
+                    requesterName: request.RequesterName,
+                    requesterEmail: request.RequesterEmail,
+                    comment: request.Comment,
+                    signerName: request.SignerName,
+                    signerPlace: request.SignerPlace,
+                    signerIp: request.SignerIp)
             };
 
             var orderResp = await PlaceOrderAsync(orderReq, ct);
@@ -742,8 +885,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (string.IsNullOrWhiteSpace(newOrderNumber))
                 throw new Exception("CERTInext renewal order placement succeeded but returned no orderNumber.");
 
-            var trackResp = await TrackOrderAsync(newOrderNumber, ct);
-            string certStatusId = trackResp.OrderDetails?.CertificateStatusId ?? "1";
+            // Same post-placement rule as enrollment: the renewal order exists, so a TrackOrder
+            // failure degrades to a pending result instead of failing the renewal.
+            var trackResp = await TryTrackOrderAfterPlacementAsync(newOrderNumber, "renewal", ct);
+            string certStatusId = trackResp?.OrderDetails?.CertificateStatusId ?? "1";
 
             string pemCert = null;
             string serialNumber = null;
@@ -767,7 +912,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Status = MapCertStatusIdToLegacyString(certStatusId),
                 Certificate = pemCert,
                 SerialNumber = serialNumber,
-                Message = trackResp.OrderDetails?.CertificateStatus
+                Message = trackResp?.OrderDetails?.CertificateStatus
             };
 
             Logger.LogInformation(
@@ -775,6 +920,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 certificateId, newOrderNumber);
             Logger.MethodExit(LogLevel.Trace);
             return legacyResp;
+        }
+
+        /// <summary>
+        /// Looks up the status of an order that <c>GenerateOrderSSL</c> has just placed. The order
+        /// already exists at CERTInext (and is paid for), so a failure here — a transient 5xx, a
+        /// timeout, or an EMS-9xx "not found" during propagation lag surfacing as
+        /// <see cref="KeyNotFoundException"/> — must not fail the enrollment/renewal: that would hide
+        /// the order number from Command and let an operator retry place a duplicate paid order.
+        /// On failure this logs a Warning naming the order and returns <c>null</c>; the callers then
+        /// treat the status as unknown (pending), so sync and pickup finish the order later.
+        /// A genuine cancellation (<paramref name="ct"/> cancelled) still propagates; an
+        /// <see cref="OperationCanceledException"/> with a live token (an HTTP-timeout
+        /// <see cref="TaskCanceledException"/>) is treated like any other failure.
+        /// </summary>
+        private async Task<TrackOrderResponse> TryTrackOrderAfterPlacementAsync(
+            string orderNumber, string operation, CancellationToken ct)
+        {
+            try
+            {
+                return await TrackOrderAsync(orderNumber, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                Logger.LogWarning(
+                    "CERTInext {Operation} was cancelled after order {OrderNumber} was placed. The order exists at " +
+                    "CERTInext and will be imported by the next synchronization.",
+                    operation, orderNumber);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex,
+                    "TrackOrder failed after order {OrderNumber} was placed ({Operation}); the order exists at " +
+                    "CERTInext. Returning a pending result carrying the order number; the certificate will be " +
+                    "retrieved during next synchronization.",
+                    orderNumber, operation);
+                return null;
+            }
         }
 
         /// <inheritdoc/>
@@ -967,7 +1150,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     $"{Constants.Api.GetDcvPath} {orderNumber}/{domainName}",
                     resp, result.Meta.ErrorCode, result.Meta.ErrorMessage);
                 throw new Exception(
-                    $"CERTInext GetDcv failed for order '{orderNumber}' domain '{domainName}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
+                    $"CERTInext GetDcv failed for order '{orderNumber}' domain '{domainName}': {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}.");
             }
 
             // SOX CC7.3: log token presence (never value) so each DCV step is independently
@@ -1040,7 +1223,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             $"{Constants.Api.VerifyDcvPath} {orderNumber}/{domainName}",
                             resp, verifyResp.Meta.ErrorCode, verifyResp.Meta.ErrorMessage);
                         throw new Exception(
-                            $"CERTInext VerifyDcv returned failure for order '{orderNumber}' domain '{domainName}': {verifyResp.Meta.ErrorMessage ?? verifyResp.Meta.ErrorCode}.");
+                            $"CERTInext VerifyDcv returned failure for order '{orderNumber}' domain '{domainName}': {MaskCaText(verifyResp.Meta.ErrorMessage) ?? verifyResp.Meta.ErrorCode}.");
                     }
                 }
                 catch (JsonException) { /* non-JSON 200 body is acceptable */ }
@@ -1213,27 +1396,78 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// attempts, retrying on HTTP 5xx and network-level failures (no status code).
         /// 4xx responses are returned immediately — client errors will not be resolved
         /// by retrying.
+        ///
+        /// When <paramref name="idempotent"/> is <c>false</c> the request is sent exactly
+        /// once and transient failures are NOT retried. This is required for non-idempotent
+        /// order-submission calls: a network-level timeout can occur *after* CERTInext has
+        /// already received and created the order, so re-sending the same body (same
+        /// <c>requestTxn</c>) is rejected as "Duplicate requestTxn" (EMS-947) and orphans the
+        /// order the first attempt actually created.
         /// </summary>
         private async Task<RestResponse> ExecuteWithRetryAsync(
             RestRequest req,
             CancellationToken ct,
-            int maxAttempts = 3)
+            int maxAttempts = 3,
+            bool idempotent = true)
         {
+            int attempts = idempotent ? maxAttempts : 1;
             RestResponse resp = null;
-            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            for (int attempt = 1; attempt <= attempts; attempt++)
             {
                 resp = await _http.ExecuteAsync(req, ct);
 
-                // Success or 4xx client error — return immediately
+                // Success or 4xx client error — return immediately, checked BEFORE the
+                // cancellation check below. `_http.ExecuteAsync` already ran to completion by the
+                // time control reaches this line; whether `ct` has *since* flipped to cancelled is
+                // a separate, unsynchronized fact (a check-after-await race, not a fabricated one —
+                // a CancellationTokenSource(TimeSpan) callback and this awaited Task's completion
+                // are not mutually exclusive events). A deadline (the shared DcvTimeoutMinutes
+                // budget) firing at essentially the same instant a call genuinely succeeded must not
+                // discard that success: for VerifyDcv specifically, discarding it here would abort
+                // PerformDcvIfNeededAsync's loop before WaitForDcvVerificationAsync ever ran, and
+                // its finally block would delete the just-staged TXT record even though CERTInext
+                // had genuinely received the verify trigger — turning a real CA-side success into a
+                // self-inflicted DCV failure.
                 bool isClientError = (int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500;
                 if (resp.IsSuccessful || isClientError)
                     return resp;
 
-                if (attempt < maxAttempts)
+                // Only for a call that did NOT succeed: this client is built with
+                // ThrowOnAnyError=false (see the constructor), so a cancelled ct does not surface as
+                // OperationCanceledException from ExecuteAsync — RestSharp catches
+                // HttpClient.SendAsync's cancellation internally and returns a non-throwing,
+                // unsuccessful RestResponse instead. Left unchecked, that response reaches
+                // DeserializeOrThrow and becomes a plain Exception indistinguishable from a genuine
+                // API failure — which is exactly how a caller such as PerformDcvIfNeededAsync's
+                // shared DCV-timeout cancellation was still landing in a generic "GetDcv failed"
+                // per-domain catch instead of the cancellation-specific one, even after that method
+                // was hardened to re-throw a real OperationCanceledException past its per-domain
+                // catches. Surface the true cancellation here, at the one place in the client that
+                // actually holds `ct`, before any retry or error-wrapping logic sees the response.
+                //
+                // Throwing here means every caller's own per-call audit line (Method/Path/HttpStatus/
+                // LatencyMs, logged after ExecuteWithRetryAsync returns) never executes for the
+                // cancelled call — that specific attempt would otherwise vanish from the audit trail
+                // entirely, leaving only a coarser, order-level "unexpected failure" log with no
+                // domain/endpoint/status/latency. Log that record here instead, at the one place that
+                // reliably sees every cancellation regardless of which of ExecuteWithRetryAsync's ~10
+                // callers is in flight.
+                if (ct.IsCancellationRequested)
+                {
+                    Logger.LogWarning(
+                        "CERTInext API call cancelled: Method={Method}, Path={Path}, HttpStatus={Status}, " +
+                        "ResponseStatus={ResponseStatus}, LatencyMs={Latency}, Attempt={Attempt}/{Max}.",
+                        req.Method, req.Resource, (int)resp.StatusCode, resp.ResponseStatus,
+                        sw.ElapsedMilliseconds, attempt, attempts);
+                }
+                ct.ThrowIfCancellationRequested();
+
+                if (attempt < attempts)
                 {
                     Logger.LogWarning(
                         "CERTInext API returned {Status} on attempt {Attempt}/{Max} — retrying...",
-                        (int)resp.StatusCode, attempt, maxAttempts);
+                        (int)resp.StatusCode, attempt, attempts);
                 }
             }
 
@@ -1312,89 +1546,214 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private GenerateOrderSslRequest BuildOrderRequestFromLegacyEnrollRequest(EnrollCertificateRequest request)
         {
-            // Map ValidityDays → CERTInext's year-based validity. Default 1.
-            string validityYears = request.ValidityDays.HasValue
-                ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
-                : (string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears)
-                    ? "1"
-                    : _config.SubscriptionValidityYears);
-
-            string requestorName  = request.RequesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
-            string requestorEmail = request.RequesterEmail ?? _config.RequestorEmail ?? string.Empty;
-            string requestorIsd   = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
-            string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
+            // Hoisted: additionalDomains is de-duplicated against the primary domain, so both
+            // fields have to be built from the same value.
+            string domainName = ExtractCnFromSubject(request.Subject) ?? "unknown";
 
             return new GenerateOrderSslRequest
             {
                 // Meta will be set by PlaceOrderAsync
-                OrderDetails = new SslOrderDetails
-                {
-                    ProductCode = request.ProfileId ?? _config.DefaultProductCode ?? string.Empty,
-                    AccountingModel = string.IsNullOrWhiteSpace(_config.AccountingModel) ? "2" : _config.AccountingModel,
-                    SaveAndHold = "0",
-                    EmailNotifications = string.IsNullOrWhiteSpace(_config.EmailNotifications) ? "0" : _config.EmailNotifications,
+                OrderDetails = BuildSslOrderDetails(
+                    // Blank (not just null) ProfileId must fall back: the template ProductCode
+                    // resolves to "" when unset, so a null-coalesce would never fire.
+                    productCode: string.IsNullOrWhiteSpace(request.ProfileId)
+                        ? (_config.DefaultProductCode ?? string.Empty)
+                        : request.ProfileId,
+                    domainName: domainName,
+                    sans: request.Sans,
+                    csr: request.Csr,
+                    validityYears: request.ValidityYears,
+                    validityDays: request.ValidityDays,
+                    requesterName: request.RequesterName,
+                    requesterEmail: request.RequesterEmail,
+                    comment: request.Comment,
+                    signerName: request.SignerName,
+                    signerPlace: request.SignerPlace,
+                    signerIp: request.SignerIp)
+            };
+        }
 
-                    // delegationInformation — routes the order to the configured account group.
-                    // Omitted entirely when GroupNumber is blank (the model JsonIgnore-WhenNull
-                    // handles property absence further down).
-                    DelegationInformation = !string.IsNullOrWhiteSpace(_config.GroupNumber)
-                        ? new DelegationInformation { GroupNumber = _config.GroupNumber }
-                        : null,
+        /// <summary>
+        /// Builds the <c>orderDetails</c> block of a V1 <c>GenerateOrderSSL</c> body. Shared by new
+        /// enrollment and renewal so both send the same field set, in the locations CERTInext
+        /// reads them (<c>orderDetails.groupNumber</c>, <c>orderDetails.autoSecureWWW</c>,
+        /// <c>orderDetails.technicalPointOfContact.poc*</c>), and both honor the connector's
+        /// validity / autoRenew / emailNotifications / accountingModel settings.
+        /// Callers resolve the product code and primary domain themselves (renewal derives them
+        /// differently from new enrollment).
+        /// </summary>
+        private SslOrderDetails BuildSslOrderDetails(
+            string productCode,
+            string domainName,
+            List<SanEntry> sans,
+            string csr,
+            int? validityYears,
+            int? validityDays,
+            string requesterName,
+            string requesterEmail,
+            string comment,
+            string signerName,
+            string signerPlace,
+            string signerIp)
+        {
+            string requestorName  = requesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
+            string requestorEmail = requesterEmail ?? _config.RequestorEmail ?? string.Empty;
+            string requestorIsd   = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
+            string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
 
-                    // organizationDetails — declares pre-vetted org when configured. This is the
-                    // single biggest factor in how quickly CERTInext releases an order from
-                    // Pending System RA. When OrganizationNumber is blank we omit the whole
-                    // block (the model is JsonIgnore-WhenNull) so the order falls back to the
-                    // unvetted path — same behavior as the prior plugin builds.
-                    OrganizationDetails = !string.IsNullOrWhiteSpace(_config.OrganizationNumber)
-                        ? new OrganizationDetails
-                        {
-                            PreVetting = "1",
-                            OrganizationNumber = _config.OrganizationNumber
-                        }
-                        : null,
+            return new SslOrderDetails
+            {
+                ProductCode = productCode,
+                AccountingModel = string.IsNullOrWhiteSpace(_config.AccountingModel) ? "2" : _config.AccountingModel,
+                SaveAndHold = "0",
+                EmailNotifications = string.IsNullOrWhiteSpace(_config.EmailNotifications) ? "0" : _config.EmailNotifications,
 
-                    RequestorInformation = new RequestorInformation
-                    {
-                        RequestorName = requestorName,
-                        RequestorEmail = requestorEmail,
-                        RequestorIsdCode = requestorIsd,
-                        RequestorMobileNumber = requestorMobile
-                    },
-                    SubscriptionDetails = new SubscriptionDetails
-                    {
-                        Validity = validityYears,
-                        AutoRenew = string.IsNullOrWhiteSpace(_config.SubscriptionAutoRenew) ? "0" : _config.SubscriptionAutoRenew,
-                        RenewCriteria = string.IsNullOrWhiteSpace(_config.SubscriptionRenewCriteriaDays) ? "30" : _config.SubscriptionRenewCriteriaDays
-                    },
-                    CertificateInformation = new CertificateInformation
-                    {
-                        DomainName = ExtractCnFromSubject(request.Subject) ?? "unknown",
-                        AdditionalDomains = BuildAdditionalDomains(request.Sans),
-                        AutoSecureWww = string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0" : _config.AutoSecureWww
-                    },
+                // orderDetails.groupNumber — routes the order to the configured account group.
+                // Omitted (JsonIgnore-WhenNull) when GroupNumber is blank.
+                GroupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber,
 
-                    // technicalPointOfContact — each field falls back to the requestor default
-                    // when its TechnicalContact* counterpart is blank.
-                    TechnicalPointOfContact = new TechnicalPointOfContact
-                    {
-                        TpcName = string.IsNullOrWhiteSpace(_config.TechnicalContactName) ? requestorName : _config.TechnicalContactName,
-                        TpcEmail = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail) ? requestorEmail : _config.TechnicalContactEmail,
-                        TpcIsdCode = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode) ? requestorIsd : _config.TechnicalContactIsdCode,
-                        TpcMobileNumber = string.IsNullOrWhiteSpace(_config.TechnicalContactMobileNumber) ? requestorMobile : _config.TechnicalContactMobileNumber
-                    },
+                // orderDetails.autoSecureWWW — always sent so CERTInext's own default ("1", which
+                // adds www.<domain> and a second DCV) never applies silently.
+                AutoSecureWww = string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0" : _config.AutoSecureWww,
 
-                    Csr = request.Csr,
-                    AgreementDetails = BuildDefaultAgreementDetails(),
-                    AdditionalInformation = new AdditionalInformation
+                // organizationDetails — declares a pre-vetted organization when configured, which
+                // lets CERTInext reuse its pre-verified domains (no fresh DCV). Omitted when
+                // OrganizationNumber is blank (JsonIgnore-WhenNull), same as prior builds.
+                OrganizationDetails = !string.IsNullOrWhiteSpace(_config.OrganizationNumber)
+                    ? new OrganizationDetails
                     {
-                        Remarks = request.Comment ?? "Issued via Keyfactor Command AnyCA REST Gateway."
+                        PreVetting = "1",
+                        OrganizationNumber = _config.OrganizationNumber
                     }
+                    : null,
+
+                RequestorInformation = new RequestorInformation
+                {
+                    RequestorName = requestorName,
+                    RequestorEmail = requestorEmail,
+                    RequestorIsdCode = requestorIsd,
+                    RequestorMobileNumber = requestorMobile
+                },
+                SubscriptionDetails = new SubscriptionDetails
+                {
+                    Validity = ResolveValidityYears(validityYears, validityDays),
+                    AutoRenew = string.IsNullOrWhiteSpace(_config.SubscriptionAutoRenew) ? "0" : _config.SubscriptionAutoRenew,
+                    RenewCriteria = string.IsNullOrWhiteSpace(_config.SubscriptionRenewCriteriaDays) ? "30" : _config.SubscriptionRenewCriteriaDays
+                },
+                CertificateInformation = new CertificateInformation
+                {
+                    DomainName = domainName,
+                    AdditionalDomains = BuildAdditionalDomains(sans, domainName)
+                },
+
+                TechnicalPointOfContact = BuildTechnicalPointOfContact(
+                    requestorName, requestorEmail, requestorIsd, requestorMobile),
+
+                Csr = csr,
+                AgreementDetails = BuildAgreementDetails(signerName, signerPlace, signerIp),
+                AdditionalInformation = new AdditionalInformation
+                {
+                    Remarks = comment ?? "Issued via Keyfactor Command AnyCA REST Gateway."
                 }
             };
         }
 
-        private AgreementDetails BuildDefaultAgreementDetails()
+        /// <summary>
+        /// Resolves <c>subscriptionDetails.validity</c> (years). An explicit ValidityYears wins;
+        /// ValidityDays is rounded up to whole years as a fallback; otherwise the connector's
+        /// <c>SubscriptionValidityYears</c> (default "1") applies.
+        /// </summary>
+        private string ResolveValidityYears(int? validityYears, int? validityDays)
+        {
+            if (validityYears.HasValue)
+                return validityYears.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (validityDays.HasValue)
+                return Math.Ceiling(validityDays.Value / 365.0).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
+            return string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears) ? "1" : _config.SubscriptionValidityYears;
+        }
+
+        /// <summary>
+        /// Builds <c>technicalPointOfContact</c>. Each TechnicalContact* field falls back to the
+        /// matching resolved requestor value when blank; the name is split into
+        /// <c>pocFirstName</c>/<c>pocLastName</c> via <see cref="SplitContactName"/>.
+        /// Returns null (block omitted, Warning logged) when no email resolves or when the resolved
+        /// name yields a blank first name — CERTInext's spec marks the block optional but requires
+        /// the name and email inside it, and it validates them now that they reach it, so an empty
+        /// POC email or name must not start rejecting orders that previously went through.
+        /// </summary>
+        private TechnicalPointOfContact BuildTechnicalPointOfContact(
+            string requestorName, string requestorEmail, string requestorIsd, string requestorMobile)
+        {
+            string email = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail)
+                ? requestorEmail
+                : _config.TechnicalContactEmail;
+
+            if (string.IsNullOrWhiteSpace(email))
+            {
+                Logger.LogWarning(
+                    "Omitting technicalPointOfContact from the SSL order: neither TechnicalContactEmail " +
+                    "nor RequestorEmail resolved to a value. Set TechnicalContactEmail (or RequestorEmail) " +
+                    "in the connector configuration to send a technical point of contact.");
+                return null;
+            }
+
+            string name = string.IsNullOrWhiteSpace(_config.TechnicalContactName)
+                ? requestorName
+                : _config.TechnicalContactName;
+            var (first, last) = SplitContactName(name);
+
+            if (string.IsNullOrWhiteSpace(first))
+            {
+                Logger.LogWarning(
+                    "Omitting technicalPointOfContact from the SSL order: neither TechnicalContactName " +
+                    "nor RequestorName resolved to a value. Set TechnicalContactName (or RequestorName) " +
+                    "in the connector configuration to send a technical point of contact.");
+                return null;
+            }
+
+            return new TechnicalPointOfContact
+            {
+                PocFirstName = first,
+                PocLastName = last,
+                PocEmail = email,
+                PocIsdCode = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode) ? requestorIsd : _config.TechnicalContactIsdCode,
+                PocMobileNumber = string.IsNullOrWhiteSpace(_config.TechnicalContactMobileNumber) ? requestorMobile : _config.TechnicalContactMobileNumber
+            };
+        }
+
+        /// <summary>
+        /// Splits a single contact-name string into first/last name for
+        /// <c>pocFirstName</c>/<c>pocLastName</c>. The name is trimmed and split on the first run
+        /// of whitespace: the first token is the first name, the remainder (internal spacing
+        /// preserved) is the last name. A single-token name is placed in both fields (pending
+        /// CERTInext guidance on single-name contacts). Null/blank input yields two empty strings.
+        /// </summary>
+        internal static (string First, string Last) SplitContactName(string name)
+        {
+            string trimmed = name?.Trim();
+            if (string.IsNullOrEmpty(trimmed))
+                return (string.Empty, string.Empty);
+
+            int ws = -1;
+            for (int i = 0; i < trimmed.Length; i++)
+            {
+                if (char.IsWhiteSpace(trimmed[i])) { ws = i; break; }
+            }
+            if (ws < 0)
+                return (trimmed, trimmed);
+
+            string first = trimmed.Substring(0, ws);
+            string last = trimmed.Substring(ws).TrimStart();
+            return (first, last);
+        }
+
+        /// <summary>
+        /// Builds <c>agreementDetails</c>. Each signer value resolves template value, then
+        /// connector value, then built-in default, using blank (not just null) checks because
+        /// both the template parameters and the connector config default to "".
+        /// </summary>
+        private AgreementDetails BuildAgreementDetails(
+            string templateSignerName, string templateSignerPlace, string templateSignerIp)
         {
             // SOC1 accuracy-of-processing: the subscriber agreement is a legal artefact
             // and the SignerIp it carries is part of the audit record CERTInext stores.
@@ -1402,23 +1761,67 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // don't break existing deployments (and our enrollment never fails just
             // because SignerIp is blank), but a missing value emits a Warning so an
             // auditor sees the misrepresentation as an actionable signal in the gateway log.
-            string signerIp = _config.SignerIp;
-            if (string.IsNullOrWhiteSpace(signerIp))
+            string signerIp = FirstNonBlank(templateSignerIp, _config.SignerIp);
+            WarnIfSignerIpNotAnAddress(signerIp, source: string.IsNullOrWhiteSpace(templateSignerIp) ? "connector" : "template");
+            if (signerIp == null)
             {
                 Logger.LogWarning(
-                    "Connector config SignerIp is empty — falling back to 127.0.0.1 for the " +
-                    "subscriber agreement. Set the SignerIp config field to the gateway host's " +
-                    "actual public-routable IP so the audit record is accurate.");
+                    "Neither the template SignerIp parameter nor the connector SignerIp config is set — " +
+                    "falling back to 127.0.0.1 for the subscriber agreement. Set SignerIp to the " +
+                    "gateway host's actual public-routable IP so the audit record is accurate.");
                 signerIp = "127.0.0.1";
+            }
+            // Same SOC1 rationale as SignerIp: placeholder SignerName/SignerPlace values land in
+            // the legal agreement record, so a fallback is surfaced as a Warning (values unchanged).
+            string signerName = FirstNonBlank(templateSignerName, _config.RequestorName);
+            if (signerName == null)
+            {
+                Logger.LogWarning(
+                    "Neither the template SignerName parameter nor the connector RequestorName config is set — " +
+                    "falling back to \"Keyfactor Gateway\" for the subscriber agreement. Set SignerName on the " +
+                    "template or RequestorName on the connector to the actual signer so the audit record is accurate.");
+                signerName = "Keyfactor Gateway";
+            }
+            string signerPlace = FirstNonBlank(templateSignerPlace, _config.SignerPlace);
+            if (signerPlace == null)
+            {
+                Logger.LogWarning(
+                    "Neither the template SignerPlace parameter nor the connector SignerPlace config is set — " +
+                    "falling back to \"Gateway\" for the subscriber agreement. Set SignerPlace on the " +
+                    "template or connector to the signer's actual location so the audit record is accurate.");
+                signerPlace = "Gateway";
             }
             return new AgreementDetails
             {
                 AcceptAgreement = "1",
-                SignerName = _config.RequestorName ?? "Keyfactor Gateway",
-                SignerPlace = _config.SignerPlace ?? "Gateway",
+                SignerName = signerName,
+                SignerPlace = signerPlace,
                 SignerIp = signerIp
             };
         }
+
+        /// <summary>
+        /// Warn-only check: the resolved SignerIp is sent as <c>agreementDetails.signerIP</c> (part of
+        /// the subscriber-agreement audit record), so a value that is not an IP literal (for example
+        /// a host name) is flagged. The value is still sent unchanged; enrollment never fails here.
+        /// </summary>
+        private static void WarnIfSignerIpNotAnAddress(string signerIp, string source)
+        {
+            if (string.IsNullOrWhiteSpace(signerIp) || IPAddress.TryParse(signerIp, out _))
+                return;
+
+            string shown = LogSanitizer.Strip(signerIp.Length > 64 ? signerIp.Substring(0, 64) + "..." : signerIp);
+            Logger.LogWarning(
+                "The SignerIp value from the {Source} ('{SignerIp}') is not a valid IPv4/IPv6 address but is " +
+                "being sent unchanged as agreementDetails.signerIP in the subscriber agreement audit record. " +
+                "Set SignerIp to the gateway host's actual IP address.",
+                source, shown);
+        }
+
+        private static string FirstNonBlank(string first, string second)
+            => !string.IsNullOrWhiteSpace(first) ? first
+             : !string.IsNullOrWhiteSpace(second) ? second
+             : null;
 
         private static string ExtractCnFromSubject(string subject)
         {
@@ -1432,16 +1835,57 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return null;
         }
 
-        private static List<string> BuildAdditionalDomains(System.Collections.Generic.List<SanEntry> sans)
+        /// <summary>
+        /// Projects the resolved SAN list onto <c>certificateInformation.additionalDomains</c>.
+        ///
+        /// Every requested SAN is submitted regardless of type. Filtering to DNS-only (the
+        /// original behaviour) issued certificates quietly missing names the subscriber had
+        /// requested, which is the worse failure; the caller warns about the non-DNS entries
+        /// before we get here.
+        ///
+        /// <paramref name="domainName"/> is the value already going out as the order's primary
+        /// domain, and Command normally includes the CN in the SAN set as well. On the US
+        /// sandbox CERTInext was measured to collapse that repetition itself
+        /// (SanSubmissionProbeTests: CN submitted twice came back registered once), but that is
+        /// undocumented and unverified against production — which is exactly why we exclude it
+        /// here rather than relying on CA-side de-duplication. It also keeps the submitted body
+        /// matching what we log.
+        /// </summary>
+        private List<string> BuildAdditionalDomains(
+            System.Collections.Generic.List<SanEntry> sans,
+            string domainName)
         {
             if (sans == null || sans.Count == 0) return null;
+
             var domains = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            bool haveDomainName = !string.IsNullOrWhiteSpace(domainName);
+            if (haveDomainName)
+                seen.Add(domainName.Trim());
+
+            int duplicates = 0;
             foreach (var san in sans)
             {
-                if (string.Equals(san.Type, "dns", StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrWhiteSpace(san.Value))
-                    domains.Add(san.Value);
+                if (san == null || string.IsNullOrWhiteSpace(san.Value)) continue;
+
+                string value = san.Value.Trim();
+                if (!seen.Add(value))
+                {
+                    duplicates++;
+                    continue;
+                }
+                domains.Add(value);
             }
+
+            if (duplicates > 0)
+            {
+                Logger.LogDebug(
+                    "Collapsed {Count} duplicate SAN value(s) out of additionalDomains " +
+                    "(already submitted as domainName '{DomainName}', or repeated in the SAN set).",
+                    duplicates, LogSanitizer.Strip(domainName));
+            }
+
             return domains.Count > 0 ? domains : null;
         }
 
@@ -1449,14 +1893,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // Deserialization helpers
         // ---------------------------------------------------------------------------
 
-        private static T DeserializeOrThrow<T>(RestResponse resp, string operation) where T : class
+        // Instance (not static) — calls LogApiFailure, which needs _config.LogSensitiveRequestData.
+        private T DeserializeOrThrow<T>(RestResponse resp, string operation) where T : class
         {
             if (!resp.IsSuccessful)
             {
-                string errMsg = ExtractErrorMessage(resp.Content, operation);
-                Logger.LogError(
-                    "CERTInext API error during '{Operation}': HttpStatus={Status}, Error={Error}",
-                    operation, (int)resp.StatusCode, errMsg);
+                // Issue 0073 (port of 0044): V1 documents errors only as HTTP-200 meta envelopes, so a
+                // non-2xx body here is usually not from the V1 application at all (e.g. ApiUrl missing
+                // the /emSignHub-API/ segment). Log the redacted body and put the HTTP status in the
+                // message so "See gateway logs for details" has something to point at.
+                string errMsg = ExtractErrorMessage(
+                    resp.Content, operation, (int)resp.StatusCode, _config.LogSensitiveRequestData);
+                LogApiFailure(operation, resp, errorMessage: errMsg, level: LogLevel.Error);
                 throw new Exception(errMsg);
             }
 
@@ -1597,13 +2045,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             //  but the field name is a common one and the cost of redacting it is zero).
             body = System.Text.RegularExpressions.Regex.Replace(
                 body,
-                @"(?i)""(authKey|client_secret|apiKey|accessKey|password)""\s*:\s*""[^""]*""",
+                @"(?i)""(authKey|client_secret|apiKey|accessKey|password)""\s*:\s*""[^""\\]*(?:\\.[^""\\]*)*""",
                 @"""$1"":""***REDACTED***""");
 
-            // Form-urlencoded: client_secret=... or authKey=... (before any & or end)
+            // The JSON value pattern above is escape-aware: a value such as "ab\"cd" is matched whole.
+            // Form-urlencoded: client_secret=... or authKey=... (before any & or end).
+            // A backslash-escaped char (e.g. \") is consumed as part of the value so a form value
+            // embedded in a JSON-escaped string cannot leak the text after the escape.
             body = System.Text.RegularExpressions.Regex.Replace(
                 body,
-                @"(?i)\b(authKey|client_secret|apiKey|accessKey|password)=([^&\s""]+)",
+                @"(?i)\b(authKey|client_secret|apiKey|accessKey|password)=(?:\\.|[^&\s""])+",
                 "$1=***REDACTED***");
 
             // Authorization header lines if a header dump ever ends up in body shape.
@@ -1615,6 +2066,236 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 "Authorization: ***REDACTED***");
 
             return body;
+        }
+
+        // Exact JSON key names that carry a person's email address on the V1 wire shapes (see
+        // CERTInext/API/CertificateRequest.cs and CertificateResponse.cs). Every one of these is a
+        // full, exact key — never a substring of an unrelated key (e.g. "domainName"/
+        // "organizationName" do not end in a bare "email" key) — so matching the key by exact
+        // name cannot cross-contaminate unrelated fields. "pocEmail" is the technicalPointOfContact
+        // email on the current V1 order shape; the legacy "tpcEmail" and the bare "email" key are
+        // not emitted by any V1 model today and are kept as defence in depth for CA error/response
+        // bodies that may echo older field names.
+        private static readonly string[] PersonalEmailFieldNames =
+        {
+            "requestorEmail", "requesterEmail", "pocEmail", "tpcEmail", "requestorEmailId", "dcvEmail", "email"
+        };
+
+        // Exact JSON key names carrying other person/contact data (name, phone/ISD/mobile,
+        // designation, signer place/IP). The technicalPointOfContact keys are the poc* family
+        // (pocFirstName/pocLastName/pocIsdCode/pocMobileNumber); the legacy tpc* names and the
+        // bare "name"/"phone"/"designation" keys are not emitted by any V1 request this plugin
+        // logs raw; they are kept as defence in depth for CA response/error bodies, where
+        // over-redacting a log line costs nothing on the wire.
+        private static readonly string[] PersonalOtherFieldNames =
+        {
+            "requestorName", "requesterName", "signerName", "name",
+            "requestorIsdCode", "requestorMobileNumber", "requestorDesignation",
+            "pocFirstName", "pocLastName", "pocIsdCode", "pocMobileNumber",
+            "tpcName", "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signerip", "phone", "designation"
+        };
+
+        /// <summary>
+        /// Scrubs known person/contact-bearing keys out of a JSON-ish body before it goes into a
+        /// log line, when <c>LogSensitiveRequestData</c> is off (issue 0040). Covers the V1
+        /// <c>requestorInformation</c> / <c>technicalPointOfContact</c> / <c>agreementDetails</c>
+        /// shapes (<c>requestorName</c>, <c>requestorEmail</c>, <c>requestorIsdCode</c>,
+        /// <c>requestorMobileNumber</c>, <c>requestorDesignation</c>, <c>pocFirstName</c>,
+        /// <c>pocLastName</c>, <c>pocEmail</c>, <c>pocIsdCode</c>, <c>pocMobileNumber</c>, the
+        /// legacy <c>tpcName</c>/<c>tpcEmail</c>/<c>tpcIsdCode</c>/<c>tpcMobileNumber</c> (defence
+        /// in depth for CA bodies echoing the old names), <c>signerName</c>,
+        /// <c>signerPlace</c>, <c>signerIP</c>/<c>signerIp</c>, the legacy <c>requesterName</c>/
+        /// <c>requesterEmail</c> aliases, and the <c>requestorEmailId</c> search filter), plus bare
+        /// <c>name</c>/<c>email</c>/<c>phone</c>/<c>designation</c> keys as defence in depth.
+        ///
+        /// Email values are masked via <see cref="LogSanitizer.MaskEmail"/> so the domain stays
+        /// visible (e.g. <c>"j***@example.com"</c>) while the local part is hidden. Every other
+        /// matched field is replaced outright with <c>"***REDACTED***"</c>. Fields that are
+        /// already blank/empty on the wire are left untouched — there is nothing to redact.
+        ///
+        /// Conservative substring/regex pass, same style as <see cref="RedactCredentials"/> —
+        /// tolerant of whitespace around the JSON <c>key : value</c> separator (including
+        /// pretty-printed bodies), and anchored on the opening/closing quote of the key so it
+        /// cannot match a key name as a substring of a longer one. Email SANs inside the
+        /// <c>additionalDomains</c> array and <c>domainVerification</c> keys are masked afterwards
+        /// by <see cref="MaskEmailsInSanContainers"/>. Does NOT scrub credentials — that is
+        /// <see cref="RedactCredentials"/>'s job, applied unconditionally by
+        /// <see cref="ApplyLoggingRedaction"/>. Exposed <c>internal</c> for unit testing.
+        /// </summary>
+        internal static string RedactPersonalData(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+
+            foreach (var key in PersonalEmailFieldNames)
+                body = RedactJsonField(body, key, LogSanitizer.MaskEmail);
+
+            foreach (var key in PersonalOtherFieldNames)
+                body = RedactJsonField(body, key, _ => "***REDACTED***");
+
+            return MaskEmailsInSanContainers(body);
+        }
+
+        /// <summary>
+        /// Replaces the value of every occurrence of a JSON string field named <paramref name="keyName"/>
+        /// (case-insensitive, exact key match) with <paramref name="transform"/> applied to the
+        /// original value. Leaves already-empty values untouched. Whitespace around the colon and
+        /// around the key's own quotes is tolerated. The value match is escape-aware (<c>\"</c> and
+        /// <c>\\</c> do not end the string), so nothing after an escaped quote is left unredacted.
+        /// </summary>
+        private static string RedactJsonField(string body, string keyName, Func<string, string> transform)
+        {
+            return System.Text.RegularExpressions.Regex.Replace(
+                body,
+                $@"(?i)(""{System.Text.RegularExpressions.Regex.Escape(keyName)}""\s*:\s*"")([^""\\]*(?:\\.[^""\\]*)*)("")",
+                m => string.IsNullOrEmpty(m.Groups[2].Value)
+                    ? m.Value
+                    : m.Groups[1].Value + transform(m.Groups[2].Value) + m.Groups[3].Value);
+        }
+
+        // Exact JSON keys whose value is an array of SAN strings. V1 additionalDomains carries every
+        // requested SAN regardless of type, emails included (non-DNS SANs are submitted unless
+        // SubmitNonDnsSans=false). "additionalHosts" is not a V1 key; it is kept as defence in
+        // depth — a DNS name or IP literal never contains '@', so masking can only touch an email.
+        private static readonly string[] SanArrayFieldNames = { "additionalDomains", "additionalHosts" };
+
+        // Exact JSON keys whose value is an object keyed by SAN value. The V1 TrackOrder
+        // domainVerification block is { "<Domain Name>": { ... }, "status": "..." }, and an email
+        // submitted in additionalDomains comes back as one of those keys.
+        private static readonly string[] SanKeyedObjectFieldNames = { "domainVerification" };
+
+        /// <summary>
+        /// Masks email addresses (issue 0040) in the two SAN-bearing container shapes the
+        /// key/value regex in <see cref="RedactJsonField"/> cannot reach: string elements of a
+        /// <see cref="SanArrayFieldNames"/> array, and property names directly inside a
+        /// <see cref="SanKeyedObjectFieldNames"/> object. Only values containing <c>@</c> are masked,
+        /// with <see cref="LogSanitizer.MaskEmail"/>. DNS / IP values, every other key, and anything
+        /// nested deeper inside those containers are left alone. Keys match exactly and
+        /// case-insensitively, the same as <see cref="RedactJsonField"/>.
+        ///
+        /// Uses <see cref="Utf8JsonReader"/> to find the exact token spans, then splices masked
+        /// tokens into the original bytes. The rest of the body stays byte-for-byte as it was, with
+        /// its whitespace and escaping unchanged. A regex cannot follow nesting depth or escaped
+        /// quotes reliably, and a DOM re-serialize would reformat the whole logged body. Never
+        /// throws: a body that does not start with <c>{</c>/<c>[</c> is returned unchanged, and on
+        /// malformed or truncated JSON the masks found before the fault are still applied.
+        /// </summary>
+        internal static string MaskEmailsInSanContainers(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+            if (body.IndexOf('@') < 0 && body.IndexOf("\\u0040", StringComparison.OrdinalIgnoreCase) < 0)
+                return body;
+
+            int first = 0;
+            while (first < body.Length && char.IsWhiteSpace(body[first])) first++;
+            if (first == body.Length || (body[first] != '{' && body[first] != '[')) return body;
+
+            byte[] utf8 = Encoding.UTF8.GetBytes(body);
+            var edits = new List<(int Start, int Length, string Replacement)>();
+
+            try
+            {
+                var reader = new Utf8JsonReader(utf8, new JsonReaderOptions
+                {
+                    CommentHandling = JsonCommentHandling.Skip,
+                    AllowTrailingCommas = true
+                });
+
+                string pendingProperty = null;
+                int containerDepth = -1;   // CurrentDepth of tokens directly inside the targeted container
+                bool containerIsArray = false;
+
+                while (reader.Read())
+                {
+                    if (containerDepth >= 0)
+                    {
+                        if (reader.CurrentDepth < containerDepth)
+                        {
+                            containerDepth = -1;   // the container's own End token
+                            continue;
+                        }
+
+                        bool candidate = reader.CurrentDepth == containerDepth &&
+                            (containerIsArray
+                                ? reader.TokenType == JsonTokenType.String
+                                : reader.TokenType == JsonTokenType.PropertyName);
+                        if (candidate)
+                        {
+                            string value = reader.GetString();
+                            if (value != null && value.IndexOf('@') >= 0)
+                            {
+                                // TokenStartIndex is the opening quote; ValueSpan is the raw content.
+                                string masked = reader.ValueIsEscaped
+                                    ? JsonSerializer.Serialize(LogSanitizer.MaskEmail(value))
+                                    : "\"" + LogSanitizer.MaskEmail(Encoding.UTF8.GetString(reader.ValueSpan)) + "\"";
+                                edits.Add(((int)reader.TokenStartIndex, reader.ValueSpan.Length + 2, masked));
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (reader.TokenType == JsonTokenType.PropertyName)
+                    {
+                        pendingProperty = reader.GetString();
+                        continue;
+                    }
+
+                    if (pendingProperty != null)
+                    {
+                        if (reader.TokenType == JsonTokenType.StartArray && MatchesAny(SanArrayFieldNames, pendingProperty))
+                        {
+                            containerDepth = reader.CurrentDepth + 1;
+                            containerIsArray = true;
+                        }
+                        else if (reader.TokenType == JsonTokenType.StartObject && MatchesAny(SanKeyedObjectFieldNames, pendingProperty))
+                        {
+                            containerDepth = reader.CurrentDepth + 1;
+                            containerIsArray = false;
+                        }
+                    }
+                    pendingProperty = null;
+                }
+            }
+            catch (JsonException)
+            {
+                // Malformed or truncated body: keep the masks collected before the fault. Everything
+                // up to that point was well-formed, so those spans are correct.
+            }
+
+            if (edits.Count == 0) return body;
+
+            var output = new System.IO.MemoryStream(utf8.Length);
+            int cursor = 0;
+            foreach (var (start, length, replacement) in edits)
+            {
+                output.Write(utf8, cursor, start - cursor);
+                byte[] replacementBytes = Encoding.UTF8.GetBytes(replacement);
+                output.Write(replacementBytes, 0, replacementBytes.Length);
+                cursor = start + length;
+            }
+            output.Write(utf8, cursor, utf8.Length - cursor);
+            return Encoding.UTF8.GetString(output.GetBuffer(), 0, (int)output.Length);
+
+            static bool MatchesAny(string[] keys, string name)
+            {
+                foreach (var key in keys)
+                    if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Applies the standard logging redaction pipeline to a request/response body before it
+        /// is written to a log line: credentials (including the replayable <c>meta.authKey</c>
+        /// digest) are always scrubbed via <see cref="RedactCredentials"/>, and personal-data
+        /// fields are additionally scrubbed via <see cref="RedactPersonalData"/> unless
+        /// <paramref name="logSensitiveRequestData"/> is true (issue 0040). Used by the
+        /// <c>PlaceOrderAsync</c> request dump, the <c>TrackOrderAsync</c> response dump, and
+        /// <c>LogApiFailure</c>, so the on/off behavior has one place to unit-test.
+        /// </summary>
+        internal static string ApplyLoggingRedaction(string body, bool logSensitiveRequestData)
+        {
+            string redacted = RedactCredentials(body);
+            return logSensitiveRequestData ? redacted : RedactPersonalData(redacted);
         }
 
         /// <summary>
@@ -1644,14 +2325,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <see cref="LogLevel.Error"/> so SOX-loggable authentication events match
         /// the SIEM-alert level convention.
         /// </summary>
-        private static void LogApiFailure(
+        // Instance (not static) so it can read _config.LogSensitiveRequestData — see issue 0040.
+        // The errorMessage argument is CA-supplied text and is masked here (idempotently), so callers
+        // may pass it raw or already masked.
+        private void LogApiFailure(
             string operationContext,
             RestResponse resp,
             string errorCode = null,
             string errorMessage = null,
             LogLevel level = LogLevel.Warning)
         {
-            string sanitizedBody = RedactCredentials(resp?.Content) ?? "(empty)";
+            string sanitizedBody = ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)";
             Logger.Log(
                 level,
                 "CERTInext API non-success. Operation={Operation}, HttpStatus={HttpStatus}, " +
@@ -1659,14 +2343,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 operationContext,
                 (int?)resp?.StatusCode ?? 0,
                 errorCode ?? "(none)",
-                errorMessage ?? "(none)",
+                MaskCaText(errorMessage) ?? "(none)",
                 Truncate(sanitizedBody, LoggedResponseBodyCapBytes));
         }
 
-        private static string ExtractErrorMessage(string content, string operation)
+        /// <summary>
+        /// Masks email-shaped tokens in, and strips CR/LF from, CA-supplied error text unless
+        /// <c>LogSensitiveRequestData</c> is on. Use for every CA message that reaches a log line or
+        /// an exception message; feed <see cref="IsRateLimitSurface"/> the raw text instead.
+        /// </summary>
+        private string MaskCaText(string text) => LogSanitizer.SanitizeCaText(text, _config.LogSensitiveRequestData);
+
+        /// <summary>
+        /// Builds the exception/log message for a non-success CERTInext body. CA-supplied text
+        /// (<c>meta.errorMessage</c>, <c>meta.errorCode</c>, legacy <c>message</c>) goes through
+        /// <see cref="LogSanitizer.SanitizeCaText"/>; <paramref name="logSensitiveRequestData"/>
+        /// defaults to <c>false</c> so a caller that omits it fails closed.
+        /// </summary>
+        internal static string ExtractErrorMessage(
+            string content, string operation, int? httpStatus = null, bool logSensitiveRequestData = false)
         {
+            string status = httpStatus.HasValue ? $" (HTTP {httpStatus.Value})" : string.Empty;
+
             if (string.IsNullOrWhiteSpace(content))
-                return $"CERTInext returned no body for operation '{operation}'.";
+                return $"CERTInext returned no body{status} for operation '{operation}'.";
 
             if (content.Length > MaxErrorBodyBytes)
             {
@@ -1685,22 +2385,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 {
                     string errMsg = null;
                     string errCode = null;
-                    if (meta.TryGetProperty("errorMessage", out var em)) errMsg = em.GetString();
-                    if (meta.TryGetProperty("errorCode", out var ec)) errCode = ec.GetString();
+                    if (meta.TryGetProperty("errorMessage", out var em))
+                        errMsg = LogSanitizer.SanitizeCaText(em.GetString(), logSensitiveRequestData);
+                    if (meta.TryGetProperty("errorCode", out var ec))
+                        errCode = LogSanitizer.SanitizeCaText(ec.GetString(), logSensitiveRequestData);
                     if (!string.IsNullOrWhiteSpace(errMsg) || !string.IsNullOrWhiteSpace(errCode))
-                        return $"CERTInext error during '{operation}': {errMsg ?? errCode} [{errCode}]";
+                        return $"CERTInext error during '{operation}'{status}: {errMsg ?? errCode} [{errCode}]";
                 }
 
                 // Fall back to legacy ApiErrorResponse shape
                 if (doc.RootElement.TryGetProperty("message", out var legacyMsg))
-                    return $"CERTInext error during '{operation}': {legacyMsg.GetString()}";
+                    return $"CERTInext error during '{operation}'{status}: {LogSanitizer.SanitizeCaText(legacyMsg.GetString(), logSensitiveRequestData)}";
             }
             catch
             {
                 // Fall through to safe generic message
             }
 
-            return $"CERTInext returned an unrecognised error body for operation '{operation}'. " +
+            return $"CERTInext returned an unrecognised error body{status} for operation '{operation}'. " +
                    "See gateway logs for details.";
         }
 
