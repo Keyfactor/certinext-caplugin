@@ -1951,22 +1951,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // CERTInext/API/CertificateRequest.cs and CertificateResponse.cs). Every one of these is a
         // full, exact key — never a substring of an unrelated key (e.g. "domainName"/
         // "organizationName" do not end in a bare "email" key) — so matching the key by exact
-        // name cannot cross-contaminate unrelated fields. The bare "email" key is not used by any
-        // V1 model today; it is kept as defence in depth for CA error/response bodies.
+        // name cannot cross-contaminate unrelated fields. "pocEmail" is the technicalPointOfContact
+        // email on the current V1 order shape; the legacy "tpcEmail" and the bare "email" key are
+        // not emitted by any V1 model today and are kept as defence in depth for CA error/response
+        // bodies that may echo older field names.
         private static readonly string[] PersonalEmailFieldNames =
         {
-            "requestorEmail", "requesterEmail", "tpcEmail", "requestorEmailId", "dcvEmail", "email"
+            "requestorEmail", "requesterEmail", "pocEmail", "tpcEmail", "requestorEmailId", "dcvEmail", "email"
         };
 
         // Exact JSON key names carrying other person/contact data (name, phone/ISD/mobile,
-        // designation, signer place/IP). The bare "name"/"phone"/"designation" keys are not
-        // emitted by any V1 request this plugin logs raw; they are kept as defence in depth for
-        // CA response/error bodies, where over-redacting a log line costs nothing on the wire.
+        // designation, signer place/IP). The technicalPointOfContact keys are the poc* family
+        // (pocFirstName/pocLastName/pocIsdCode/pocMobileNumber); the legacy tpc* names and the
+        // bare "name"/"phone"/"designation" keys are not emitted by any V1 request this plugin
+        // logs raw; they are kept as defence in depth for CA response/error bodies, where
+        // over-redacting a log line costs nothing on the wire.
         private static readonly string[] PersonalOtherFieldNames =
         {
-            "requestorName", "requesterName", "tpcName", "signerName", "name",
+            "requestorName", "requesterName", "signerName", "name",
             "requestorIsdCode", "requestorMobileNumber", "requestorDesignation",
-            "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signerip", "phone", "designation"
+            "pocFirstName", "pocLastName", "pocIsdCode", "pocMobileNumber",
+            "tpcName", "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signerip", "phone", "designation"
         };
 
         /// <summary>
@@ -1974,8 +1979,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// log line, when <c>LogSensitiveRequestData</c> is off (issue 0040). Covers the V1
         /// <c>requestorInformation</c> / <c>technicalPointOfContact</c> / <c>agreementDetails</c>
         /// shapes (<c>requestorName</c>, <c>requestorEmail</c>, <c>requestorIsdCode</c>,
-        /// <c>requestorMobileNumber</c>, <c>requestorDesignation</c>, <c>tpcName</c>,
-        /// <c>tpcEmail</c>, <c>tpcIsdCode</c>, <c>tpcMobileNumber</c>, <c>signerName</c>,
+        /// <c>requestorMobileNumber</c>, <c>requestorDesignation</c>, <c>pocFirstName</c>,
+        /// <c>pocLastName</c>, <c>pocEmail</c>, <c>pocIsdCode</c>, <c>pocMobileNumber</c>, the
+        /// legacy <c>tpcName</c>/<c>tpcEmail</c>/<c>tpcIsdCode</c>/<c>tpcMobileNumber</c> (defence
+        /// in depth for CA bodies echoing the old names), <c>signerName</c>,
         /// <c>signerPlace</c>, <c>signerIP</c>/<c>signerIp</c>, the legacy <c>requesterName</c>/
         /// <c>requesterEmail</c> aliases, and the <c>requestorEmailId</c> search filter), plus bare
         /// <c>name</c>/<c>email</c>/<c>phone</c>/<c>designation</c> keys as defence in depth.
