@@ -11,6 +11,7 @@
 - **New enrollments now use the connector defaults when the template or connector value is blank.** A blank template product code now falls back to `DefaultProductCode`, and a blank `RequestorName`/`SignerPlace` now sends "Keyfactor Gateway"/"Gateway" as the agreement signer instead of an empty value.
 - **`GroupNumber`, `AutoSecureWww`, and the technical contact now reach CERTInext**; they were previously sent in fields CERTInext doesn't read.
 - **Renewals now send the full order details** (group, `AutoSecureWww`, technical contact, organization, remarks), the same as a new enrollment.
+- **Unexpected CERTInext error responses are now diagnosable from the logs.** Non-2xx responses with an unrecognised body now include the HTTP status in the error and log the redacted body (`authKey` always redacted, personal data per `LogSensitiveRequestData`).
 - **Gateway logs no longer contain the `authKey` or requestor personal data by default**; set `LogSensitiveRequestData` to log PII temporarily (credentials stay redacted).
 
 ## Chores
