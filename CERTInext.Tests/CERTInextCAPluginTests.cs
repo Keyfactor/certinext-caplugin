@@ -301,6 +301,37 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .WithMessage("*ProfileId*required*");
         }
 
+        [Fact]
+        public async Task ValidateProductInfo_ProfileIdMissing_ThrowsBeforeClientAllocation()
+        {
+            // Regression: the transient CERTInextClient was allocated before the ProfileId
+            // guard, so the early throw leaked a RestClient + SemaphoreSlim (it sat outside the
+            // try/finally that disposes it). A null ApiUrl makes the CERTInextClient constructor
+            // throw (NullReferenceException on ApiUrl.TrimEnd), so if the client is still built
+            // before the guard this test surfaces that exception instead of the validation error.
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = string.Empty,
+                ProductParameters = new Dictionary<string, string>()
+            };
+
+            var connInfo = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = null,
+                ["AuthMode"] = "ApiKey",
+                ["ApiKey"] = "key"
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().ThrowExactlyAsync<AnyCAValidationException>()
+                .WithMessage("*ProfileId*required*");
+            mock.VerifyNoOtherCalls();
+        }
+
         // ---------------------------------------------------------------------------
         // Enroll — New
         // ---------------------------------------------------------------------------
