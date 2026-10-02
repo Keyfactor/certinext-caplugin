@@ -21,6 +21,7 @@
 - **URI SANs in enrollment logs no longer leak personal data by default.** `mailto:` addresses are masked and `user:pw@` userinfo is replaced with `***` unless `LogSensitiveRequestData` is set.
 - **Enrollment and renewal no longer fail after the order is placed.** A failed status check or DCV step now returns pending with the order number, so sync finishes the order and a retry can't place a duplicate.
 - **Enrollment no longer waits for issuance on a DV order that cannot issue** (e.g. an IP or email SAN with no DNS provider). Valid domains are still validated; it returns pending and sync finishes the order.
+- **With DCV enabled, a renewal waiting on DNS-01 validation no longer holds a gateway worker for the pickup wait.** It returns pending at once and the next sync completes it; other renewals still wait for fast issuance.
 - **Connector and template validation no longer leaks an HTTP client per check.**
 
 ## Chores

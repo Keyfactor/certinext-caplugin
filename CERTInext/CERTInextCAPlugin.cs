@@ -1422,8 +1422,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     priorCaRequestId, renewResult.CARequestID, renewResult.Status);
 
                 // Synchronous certificate pickup (Sectigo-parity), same as the new-enrollment path.
-                // The renew path never runs an in-call DCV issuance wait, so pickup always applies.
-                renewResult = await PickUpEnrolledCertificateAsync(renewResult, renewResp.Id, dcvIssuanceWaitRan: false);
+                // The renew path never runs an in-call DCV, so on a DCV-enabled deployment a renewal
+                // that is still waiting on DNS-01 validation cannot issue inside the pickup window:
+                // polling it only holds a gateway worker for a guaranteed miss. Skip pickup for that
+                // case and return the pending result; the sync-driven DCV retry completes the order.
+                // Every other renewal (validation reused, no DCV pending, DCV disabled) keeps pickup.
+                bool awaitsDnsDcv = false;
+#if SUPPORTS_DCV
+                if (renewResult.Status == (int)EndEntityStatus.EXTERNALVALIDATION)
+                    awaitsDnsDcv = await RenewalAwaitsDnsDcvAsync(renewResp.Id);
+#endif
+                if (!awaitsDnsDcv)
+                    renewResult = await PickUpEnrolledCertificateAsync(renewResult, renewResp.Id, dcvIssuanceWaitRan: false);
 
                 return renewResult;
             }
@@ -1439,6 +1449,76 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // ---------------------------------------------------------------------------
         // DCV helpers
         // ---------------------------------------------------------------------------
+
+#if SUPPORTS_DCV
+        /// <summary>
+        /// True when a domain entry is pending validation (<c>dcvStatus="0"</c>) and is either not yet
+        /// assigned a method or assigned to DNS TXT — the only domains this plugin's DCV can complete.
+        /// Domains assigned to HTTP or e-mail validation are excluded.
+        /// </summary>
+        private static bool IsPendingDnsDcvEntry(DomainVerificationDetail detail)
+        {
+            if (!string.Equals(detail?.DcvStatus, Constants.Dcv.StatusPending, StringComparison.Ordinal))
+                return false;
+            string method = detail?.DcvMethod ?? string.Empty;
+            return string.IsNullOrEmpty(method)
+                || string.Equals(method, Constants.Dcv.MethodDnsTxt, StringComparison.Ordinal)
+                || string.Equals(method, Constants.Dcv.MethodDnsTxtLabel, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Whether a just-placed renewal order is waiting on DNS-01 validation that this call will
+        /// never perform (the renew path does not run in-call DCV), so the synchronous pickup poll
+        /// cannot succeed. True only when DCV is enabled with a validator factory and a non-terminal
+        /// order has at least one pending DNS-01 domain. One TrackOrder call; any failure (including
+        /// cancellation — Enroll has no caller token) logs a Warning and returns false so the caller
+        /// falls back to the existing pickup behavior. Never throws: the order already exists at
+        /// CERTInext, so this check must not fail the renewal (issue 0077).
+        /// </summary>
+        private async Task<bool> RenewalAwaitsDnsDcvAsync(string orderNumber)
+        {
+            if (_domainValidatorFactory == null || !_config.DcvEnabled || string.IsNullOrWhiteSpace(orderNumber))
+                return false;
+
+            try
+            {
+                var track = await _client.TrackOrderAsync(orderNumber);
+                var details = track?.OrderDetails;
+                if (details == null)
+                    return false;
+
+                // Terminal orders (issued/revoked, cancelled/rejected) can keep a stale pending
+                // domain entry; pickup resolves those immediately, so never skip it for them.
+                if (int.TryParse(details.CertificateStatusId, out int certStatusId))
+                {
+                    int disposition = StatusMapper.CertificateStatusIdToRequestDisposition(certStatusId);
+                    if (disposition == (int)EndEntityStatus.GENERATED || disposition == (int)EndEntityStatus.REVOKED)
+                        return false;
+                }
+                if (details.OrderStatusId is "4" or "5")
+                    return false;
+
+                int pending = details.DomainVerification?.GetDomainEntries()
+                    .Count(kvp => IsPendingDnsDcvEntry(kvp.Value)) ?? 0;
+                if (pending == 0)
+                    return false;
+
+                _logger.LogInformation(
+                    "Renewal order {OrderNumber} has {Count} domain(s) pending DNS-01 validation, which the renew " +
+                    "path does not perform in-call; synchronous pickup skipped. Returning the pending result; " +
+                    "the next synchronization completes DCV and imports the certificate.",
+                    orderNumber, pending);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not check DCV state for renewal order {OrderNumber}; falling back to the normal " +
+                    "synchronous pickup.", orderNumber);
+                return false;
+            }
+        }
+#endif
 
         /// <summary>
         /// True when a <c>GetDcv</c> failure is the CERTInext-side "DCV slot is exposed in
@@ -1696,15 +1776,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // or are already assigned to DNS TXT (numeric "1" from API or label from TrackOrder).
             // Domains assigned to HTTP or email DCV are excluded — we must not override them.
             var pendingDomains = domainVerification.GetDomainEntries()
-                .Where(kvp =>
-                {
-                    if (!string.Equals(kvp.Value?.DcvStatus, Constants.Dcv.StatusPending, StringComparison.Ordinal))
-                        return false;
-                    string method = kvp.Value?.DcvMethod ?? string.Empty;
-                    return string.IsNullOrEmpty(method)
-                        || string.Equals(method, Constants.Dcv.MethodDnsTxt, StringComparison.Ordinal)
-                        || string.Equals(method, Constants.Dcv.MethodDnsTxtLabel, StringComparison.OrdinalIgnoreCase);
-                })
+                .Where(kvp => IsPendingDnsDcvEntry(kvp.Value))
                 .ToList();
 
             // SOX CC6.1: validate domain names before passing them to the DNS provider plugin
