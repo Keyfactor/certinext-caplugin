@@ -510,6 +510,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public async Task Pickup_StopsPolling_WhenGetCertificateThrowsOperationCanceled()
+        {
+            // Regression: the per-attempt catch swallowed OperationCanceledException as a
+            // transient poll error and kept polling. It must escape the poll loop; the outer
+            // pickup guard still degrades it to the pending result for a later sync.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new OperationCanceledException());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 3);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Once, "cancellation must not be consumed as a retryable poll error");
+        }
+
+        [Fact]
         public async Task Enroll_New_Throws_WhenProfileIdNotSet()
         {
             var mock = NewMock();
