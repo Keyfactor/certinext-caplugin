@@ -453,7 +453,7 @@ get-field-details:
 FILTER ?=
 
 show-postman-bodies:
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/extract_postman_bodies.py \
+	@python3 $(CURDIR)/scripts/extract_postman_bodies.py \
 	  --filter "$(FILTER)"
 
 # ---------------------------------------------------------------------------
@@ -465,7 +465,7 @@ show-postman-bodies:
 # ---------------------------------------------------------------------------
 
 show-postman-variables:
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/extract_postman_variables.py
+	@python3 $(CURDIR)/scripts/extract_postman_variables.py
 
 # ---------------------------------------------------------------------------
 # probe-private-pki-payloads — Try three payload variants for
@@ -479,7 +479,7 @@ show-postman-variables:
 # ---------------------------------------------------------------------------
 
 probe-private-pki-payloads: generate-test-csr
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/order_private_pki_minimal.py \
+	@python3 $(CURDIR)/scripts/order_private_pki_minimal.py \
 	  --csr /tmp/certinext-test.csr \
 	  --domain "$(IGTF_DOMAIN)" \
 	  --product "$(PRIVATE_PKI_CODE)" \
