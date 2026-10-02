@@ -178,5 +178,41 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             line.Should().Contain("Jane Doe", "the requester name is logged in full when the flag is on");
             line.Should().Contain("jane.doe@example.com", "the requester email is logged in full when the flag is on");
         }
+
+        [Fact]
+        public async Task Enroll_LogSensitiveRequestDataTrue_CrLfInRequesterValuesIsStripped()
+        {
+            // Regression: RequesterName/RequesterEmail were logged raw (log injection via CR/LF),
+            // unlike subject and SANs which already went through LogSanitizer.Strip.
+            var (messages, marker) = await CaptureEnrollLogMessagesAsync(
+                logSensitiveRequestData: true,
+                requesterName: "Jane\r\nFAKE-LOG-ENTRY name",
+                requesterEmail: "jane@example.com\r\nFAKE-LOG-ENTRY email");
+
+            string line = FindEnrollmentAttemptLine(messages, marker);
+            line.Should().NotBeNull("the enrollment-attempt audit line must always be logged");
+            line.Should().NotContain("\r").And.NotContain("\n",
+                "CR/LF in requester values must not be able to forge a new log line");
+            line.Should().Contain("Jane\\r\\nFAKE-LOG-ENTRY name");
+            line.Should().Contain("jane@example.com\\r\\nFAKE-LOG-ENTRY email");
+        }
+
+        [Fact]
+        public async Task Enroll_LogSensitiveRequestDataFalse_CrLfInRequesterValuesIsStripped()
+        {
+            // Flag off: name is dropped, email is MaskEmail(Strip(email)). The domain part survives
+            // masking, so CR/LF placed there must still be escaped.
+            var (messages, marker) = await CaptureEnrollLogMessagesAsync(
+                logSensitiveRequestData: false,
+                requesterName: "Jane\r\nFAKE-LOG-ENTRY name",
+                requesterEmail: "jane@example.com\r\nFAKE-LOG-ENTRY email");
+
+            string line = FindEnrollmentAttemptLine(messages, marker);
+            line.Should().NotBeNull("the enrollment-attempt audit line must always be logged");
+            line.Should().NotContain("\r").And.NotContain("\n",
+                "CR/LF in requester values must not be able to forge a new log line");
+            line.Should().NotContain("Jane").And.NotContain("FAKE-LOG-ENTRY name");
+            line.Should().Contain("j***@example.com\\r\\nFAKE-LOG-ENTRY email");
+        }
     }
 }
