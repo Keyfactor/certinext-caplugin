@@ -1344,5 +1344,112 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             validator.CleanedUpKeys.Should().NotContain(badHostname,
                 "the bad domain was never staged, so there is nothing to clean up for it");
         }
+
+        // ---------------------------------------------------------------------------
+        // Partial skip vs. all-staged: the post-DCV issuance wait
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Regression: when some pending domains are skipped (here an IP-literal SAN with no DNS
+        /// provider) the order cannot issue, so Enroll must not hold the worker in the post-DCV
+        /// issuance wait. The staged domain must still be verified and its TXT record cleaned up;
+        /// sync DCV completes the order later.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_PartialSkip_VerifiesAndCleansUpStagedDomains_ButSkipsIssuanceWait()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            const string good  = MockCertificateData.DcvDomain;
+            const string ip    = "192.0.2.10";
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+            mock.SetupSequence(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, good, ip))
+                .ReturnsAsync(MockCertificateData.DcvVerifiedTrackResponse(order, good));
+            mock.Setup(c => c.GetDcvAsync(order, It.IsAny<string>(), Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.DcvTokenResponse(MockCertificateData.DcvToken));
+            mock.Setup(c => c.VerifyDcvAsync(order, good, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            // Configured so that a (wrong) issuance wait would succeed and be observable.
+            mock.Setup(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(order));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(
+                mock.Object,
+                new FakeDomainValidatorFactory(validator, resolvableDomain: good),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            string goodHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, good);
+            validator.StagedRecords.Should().ContainSingle().Which.key.Should().Be(goodHostname);
+            mock.Verify(c => c.VerifyDcvAsync(order, good, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()), Times.Once);
+            validator.CleanedUpKeys.Should().ContainSingle().Which.Should().Be(goodHostname);
+
+            mock.Verify(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()), Times.Never,
+                "the order cannot issue while a domain is skipped, so the post-DCV issuance wait must not run");
+            result.CARequestID.Should().Be(order);
+            result.Status.Should().NotBe((int)EndEntityStatus.GENERATED);
+        }
+
+        /// <summary>
+        /// Counterpart: every pending domain staged and verified -> the issuance wait still runs and
+        /// the issued certificate is returned from Enroll.
+        /// </summary>
+        [Fact]
+        public async Task Dcv_AllDomainsStaged_StillRunsIssuanceWait()
+        {
+            const string order = MockCertificateData.DcvOrderId;
+            const string a     = "a.example.com";
+            const string b     = "b.example.com";
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new EnrollCertificateResponse { Id = order, Status = "pending_dcv" });
+
+            var verifiedDetail = DcvDetail(Constants.Dcv.StatusValidated);
+            var verifiedRaw = new Dictionary<string, System.Text.Json.JsonElement> { [a] = verifiedDetail, [b] = verifiedDetail };
+            mock.SetupSequence(c => c.TrackOrderAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DcvPendingTrackResponseMultiDomain(order, a, b))
+                .ReturnsAsync(new TrackOrderResponse
+                {
+                    OrderDetails = new TrackOrderResponseDetails
+                    {
+                        OrderStatusId       = "1",
+                        CertificateStatusId = "1",
+                        DomainVerification  = new TrackOrderDomainVerification
+                        {
+                            Status           = Constants.Dcv.StatusValidated,
+                            RawDomainEntries = verifiedRaw
+                        }
+                    }
+                });
+            foreach (string d in new[] { a, b })
+            {
+                mock.Setup(c => c.GetDcvAsync(order, d, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                    .ReturnsAsync(MockCertificateData.DcvTokenResponse($"token-{d}"));
+                mock.Setup(c => c.VerifyDcvAsync(order, d, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
+                    .Returns(Task.CompletedTask);
+            }
+            mock.Setup(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord(order));
+
+            var validator = new FakeDomainValidator();
+            var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
+                DcvConfig(dcvWaitForIssuanceSeconds: 10));
+
+            var result = await Enroll(plugin);
+
+            validator.StagedRecords.Should().HaveCount(2);
+            validator.CleanedUpKeys.Should().HaveCount(2);
+            mock.Verify(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()), Times.Once,
+                "every domain was staged, so the post-DCV issuance wait must still run");
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+        }
     }
 }
