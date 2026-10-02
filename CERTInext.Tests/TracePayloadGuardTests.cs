@@ -38,7 +38,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// line must never reach it when Trace is off, and must be byte-identical to
     /// <c>ApplyLoggingRedaction</c> output when Trace is on. All data is synthetic.
     /// </summary>
-    [Collection("CERTInextClientLogger-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class TracePayloadGuardTests : IDisposable
     {
         private const string RequestorName = "Jane Doe";
