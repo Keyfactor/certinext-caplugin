@@ -1622,9 +1622,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Builds <c>technicalPointOfContact</c>. Each TechnicalContact* field falls back to the
         /// matching resolved requestor value when blank; the name is split into
         /// <c>pocFirstName</c>/<c>pocLastName</c> via <see cref="SplitContactName"/>.
-        /// Returns null (block omitted) when no email resolves — CERTInext validates these fields
-        /// now that they reach it, and an empty POC email must not start rejecting orders that
-        /// previously went through.
+        /// Returns null (block omitted, Warning logged) when no email resolves or when the resolved
+        /// name yields a blank first name — CERTInext's spec marks the block optional but requires
+        /// the name and email inside it, and it validates them now that they reach it, so an empty
+        /// POC email or name must not start rejecting orders that previously went through.
         /// </summary>
         private TechnicalPointOfContact BuildTechnicalPointOfContact(
             string requestorName, string requestorEmail, string requestorIsd, string requestorMobile)
@@ -1646,6 +1647,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 ? requestorName
                 : _config.TechnicalContactName;
             var (first, last) = SplitContactName(name);
+
+            if (string.IsNullOrWhiteSpace(first))
+            {
+                Logger.LogWarning(
+                    "Omitting technicalPointOfContact from the SSL order: neither TechnicalContactName " +
+                    "nor RequestorName resolved to a value. Set TechnicalContactName (or RequestorName) " +
+                    "in the connector configuration to send a technical point of contact.");
+                return null;
+            }
 
             return new TechnicalPointOfContact
             {
