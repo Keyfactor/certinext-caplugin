@@ -39,7 +39,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SignerPlace = "SignerPlace";
             public const string SignerIp = "SignerIp";
 
-            // Technical point-of-contact defaults (TpcName/Email default to Requestor* when blank)
+            // Technical point-of-contact (each poc* field defaults to its Requestor* value when blank)
             public const string TechnicalContactName = "TechnicalContactName";
             public const string TechnicalContactEmail = "TechnicalContactEmail";
             public const string TechnicalContactIsdCode = "TechnicalContactIsdCode";

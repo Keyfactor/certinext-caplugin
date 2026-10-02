@@ -121,6 +121,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("emailNotifications")]
         public string EmailNotifications { get; set; } = "1";
 
+        /// <summary>
+        /// CERTInext account group (delegation) number the order is placed under. Sent at
+        /// <c>orderDetails.groupNumber</c>, which is where CERTInext reads it. Omitted when null,
+        /// in which case CERTInext places the order against the account's default group.
+        /// </summary>
+        [JsonPropertyName("groupNumber")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string GroupNumber { get; set; }
+
+        /// <summary>
+        /// "1" = CERTInext also secures the <c>www.</c> variant of the primary domain (which then
+        /// needs its own DCV); "0" = only the supplied domain names. Sent at
+        /// <c>orderDetails.autoSecureWWW</c>, which is where CERTInext reads it. When omitted,
+        /// CERTInext applies its own default of "1".
+        /// </summary>
+        [JsonPropertyName("autoSecureWWW")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string AutoSecureWww { get; set; }
+
         [JsonPropertyName("requestorInformation")]
         public RequestorInformation RequestorInformation { get; set; }
 
@@ -141,10 +160,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("organizationDetails")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public OrganizationDetails OrganizationDetails { get; set; }
-
-        [JsonPropertyName("delegationInformation")]
-        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public DelegationInformation DelegationInformation { get; set; }
 
         [JsonPropertyName("technicalPointOfContact")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -200,10 +215,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public List<string> AdditionalDomains { get; set; }
 
-        /// <summary>"1" = also secure www variant (default); "0" = disable.</summary>
-        [JsonPropertyName("autoSecureWWW")]
-        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public string AutoSecureWww { get; set; }
+        // autoSecureWWW is NOT a certificateInformation field — CERTInext reads it from
+        // orderDetails. See SslOrderDetails.AutoSecureWww.
     }
 
     public class AgreementDetails
@@ -233,36 +246,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
     }
 
     /// <summary>
-    /// Routes the order to a specific account group within CERTInext.  Required by many
-    /// accounts even though the V1 docs list it as optional — without it, orders may be
-    /// placed against the default group and queued for additional review.
-    /// </summary>
-    public class DelegationInformation
-    {
-        [JsonPropertyName("groupNumber")]
-        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public string GroupNumber { get; set; }
-    }
-
-    /// <summary>
-    /// Technical point of contact metadata sent with SSL orders.  CERTInext uses these
-    /// fields as the secondary contact for issuance-related notifications.  When omitted,
-    /// some product configurations queue the order in <c>Pending System RA</c> waiting
-    /// for the field to be populated manually.
+    /// Technical point of contact sent at <c>orderDetails.technicalPointOfContact</c> on SSL
+    /// orders. Field names follow the shape CERTInext reads
+    /// (<c>pocFirstName/pocLastName/pocEmail/pocIsdCode/pocMobileNumber</c>). No defaults are
+    /// applied here — the order builder resolves every value from connector config.
     /// </summary>
     public class TechnicalPointOfContact
     {
-        [JsonPropertyName("tpcName")]
-        public string TpcName { get; set; }
+        [JsonPropertyName("pocFirstName")]
+        public string PocFirstName { get; set; }
 
-        [JsonPropertyName("tpcEmail")]
-        public string TpcEmail { get; set; }
+        [JsonPropertyName("pocLastName")]
+        public string PocLastName { get; set; }
 
-        [JsonPropertyName("tpcIsdCode")]
-        public string TpcIsdCode { get; set; } = "1";
+        [JsonPropertyName("pocEmail")]
+        public string PocEmail { get; set; }
 
-        [JsonPropertyName("tpcMobileNumber")]
-        public string TpcMobileNumber { get; set; }
+        [JsonPropertyName("pocIsdCode")]
+        public string PocIsdCode { get; set; }
+
+        [JsonPropertyName("pocMobileNumber")]
+        public string PocMobileNumber { get; set; }
     }
 
     public class AdditionalInformation
