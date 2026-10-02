@@ -11,6 +11,7 @@
 - **New enrollments now use the connector defaults when the template or connector value is blank.** A blank template product code now falls back to `DefaultProductCode`, and a blank `RequestorName`/`SignerPlace` now sends "Keyfactor Gateway"/"Gateway" as the agreement signer instead of an empty value.
 - **The `SignerName`, `SignerPlace`, and `SignerIp` template parameters now take effect.** They were accepted but ignored; they now override the connector values for the subscriber agreement on both new orders and renewals.
 - **A `SignerIp` that isn't an IP address now logs a Warning** naming whether it came from the template or the connector; the value is still sent unchanged and enrollment is never blocked.
+- **A Warning is now logged when `SignerName` or `SignerPlace` fall back to the "Keyfactor Gateway"/"Gateway" placeholders**, naming the template parameter or connector field to set; the values sent are unchanged.
 - **`GroupNumber`, `AutoSecureWww`, and the technical contact now reach CERTInext**; they were previously sent in fields CERTInext doesn't read.
 - **Renewals now send the full order details** (group, `AutoSecureWww`, technical contact, organization, remarks), the same as a new enrollment.
 - **Unexpected CERTInext error responses are now diagnosable from the logs.** Non-2xx responses with an unrecognised body now include the HTTP status in the error and log the redacted body (`authKey` always redacted, personal data per `LogSensitiveRequestData`).
