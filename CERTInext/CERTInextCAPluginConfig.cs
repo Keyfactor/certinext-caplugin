@@ -49,6 +49,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                "When set, it is included in GetProductDetails requests AND in the " +
                                "`orderDetails.groupNumber` field of every SSL order (new and renewal) so the " +
                                "order is routed to the configured account group. " +
+                               "When blank, CERTInext uses the account's default group. " +
                                "Available in the CERTInext portal under Delegation → Groups.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -567,9 +568,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Optional CERTInext group (delegation) number.  When set, it is passed in
         /// the <c>productDetails.groupNumber</c> field of <c>GetProductDetails</c>
-        /// requests AND in the <c>delegationInformation.groupNumber</c> field of every
-        /// SSL order body so the order is routed to the correct account group.  Some
-        /// accounts queue orders for extra review when this field is omitted.
+        /// requests AND in the <c>orderDetails.groupNumber</c> field of every SSL order
+        /// (new and renewal). When blank, CERTInext uses the account's default group.
         /// </summary>
         [JsonPropertyName("GroupNumber")]
         public string GroupNumber { get; set; } = string.Empty;
