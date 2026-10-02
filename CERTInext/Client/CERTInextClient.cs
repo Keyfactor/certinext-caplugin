@@ -1508,7 +1508,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 // Meta will be set by PlaceOrderAsync
                 OrderDetails = BuildSslOrderDetails(
-                    productCode: request.ProfileId ?? _config.DefaultProductCode ?? string.Empty,
+                    // Blank (not just null) ProfileId must fall back: the template ProductCode
+                    // resolves to "" when unset, so a null-coalesce would never fire.
+                    productCode: string.IsNullOrWhiteSpace(request.ProfileId)
+                        ? (_config.DefaultProductCode ?? string.Empty)
+                        : request.ProfileId,
                     domainName: domainName,
                     sans: request.Sans,
                     csr: request.Csr,
@@ -1711,8 +1715,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return new AgreementDetails
             {
                 AcceptAgreement = "1",
-                SignerName = _config.RequestorName ?? "Keyfactor Gateway",
-                SignerPlace = _config.SignerPlace ?? "Gateway",
+                // Config strings default to "", so these need blank checks, not null-coalesce.
+                SignerName = string.IsNullOrWhiteSpace(_config.RequestorName) ? "Keyfactor Gateway" : _config.RequestorName,
+                SignerPlace = string.IsNullOrWhiteSpace(_config.SignerPlace) ? "Gateway" : _config.SignerPlace,
                 SignerIp = signerIp
             };
         }
