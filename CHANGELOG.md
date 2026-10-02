@@ -14,6 +14,7 @@
 - **Renewals now send the full order details** (group, `AutoSecureWww`, technical contact, organization, remarks), the same as a new enrollment.
 - **Unexpected CERTInext error responses are now diagnosable from the logs.** Non-2xx responses with an unrecognised body now include the HTTP status in the error and log the redacted body (`authKey` always redacted, personal data per `LogSensitiveRequestData`).
 - **Gateway logs no longer contain the `authKey` or requestor personal data by default**; set `LogSensitiveRequestData` to log PII temporarily (credentials stay redacted).
+- **Connector and template validation no longer leaks an HTTP client per check.**
 
 ## Chores
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
@@ -25,6 +26,8 @@
 - **`www.` is no longer added to orders by default**, because `AutoSecureWww` (default `0`) is now honored; set it to `1` to keep the old behavior.
 - **Orders now route to the configured `GroupNumber`**, which previously was not applied to orders.
 - **Renewals follow the connector's `SubscriptionAutoRenew`, `EmailNotifications`, and validity settings** instead of fixed 1-year validity with auto-renew and notifications on.
+- **The technical contact is omitted, with a Warning, when no contact name or email resolves**, since CERTInext requires both once the block is sent.
+- **The V1 API error log line now reads `CERTInext API non-success. Operation=...`** instead of `CERTInext API error during ...`; update any log alerts keyed on the old text.
 
 # 1.0.0
 
