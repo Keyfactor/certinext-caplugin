@@ -47,9 +47,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "OPTIONAL: CERTInext group (delegation) number. " +
                                "When set, it is included in GetProductDetails requests AND in the " +
-                               "`delegationInformation.groupNumber` field of every SSL order so the order " +
-                               "is routed to the correct account group. Some accounts will queue orders for " +
-                               "additional review when this field is omitted. " +
+                               "`orderDetails.groupNumber` field of every SSL order (new and renewal) so the " +
+                               "order is routed to the configured account group. " +
                                "Available in the CERTInext portal under Delegation → Groups.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -73,17 +72,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.TechnicalContactName] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every " +
-                               "SSL order. Defaults to the configured RequestorName when blank. " +
-                               "Some product configurations require a TPoC to be present; omitting it can " +
-                               "cause CERTInext to park orders awaiting manual completion of the field.",
+                    Comments = "OPTIONAL: Technical point of contact name, sent as " +
+                               "`technicalPointOfContact.pocFirstName` / `pocLastName` on every SSL order " +
+                               "(new and renewal). The name is split on the first whitespace: the first word " +
+                               "is the first name and the rest is the last name; a single-word name is sent " +
+                               "in both. Defaults to the configured RequestorName when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.TechnicalContactEmail] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every " +
+                    Comments = "OPTIONAL: Email sent in the `technicalPointOfContact.pocEmail` field of every " +
                                "SSL order. Defaults to the configured RequestorEmail when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -91,7 +91,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.TechnicalContactIsdCode] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: International dialing code for the TPoC phone number. " +
+                    Comments = "OPTIONAL: International dialing code for the technical contact phone number, " +
+                               "sent as `technicalPointOfContact.pocIsdCode`. " +
                                "Defaults to the configured RequestorIsdCode when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -99,7 +100,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.TechnicalContactMobileNumber] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Mobile number for the TPoC (digits only). " +
+                    Comments = "OPTIONAL: Mobile number for the technical contact (digits only), sent as " +
+                               "`technicalPointOfContact.pocMobileNumber`. " +
                                "Defaults to the configured RequestorMobileNumber when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -242,9 +244,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.AutoSecureWww] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the " +
-                               "primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied " +
-                               "with the CSR. Default: \"0\".",
+                    Comments = "OPTIONAL: Sent as `orderDetails.autoSecureWWW` on every SSL order (new and " +
+                               "renewal). If \"1\", CERTInext automatically adds the `www.` variant of the " +
+                               "primary domain as an additional SAN, which must also pass domain validation. " +
+                               "\"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\".",
                     Hidden = false,
                     DefaultValue = "0",
                     Type = "String"

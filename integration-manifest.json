@@ -35,7 +35,7 @@
                 },
                 {
                     "name": "GroupNumber",
-                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts will queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation \u2192 Groups."
+                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `orderDetails.groupNumber` field of every SSL order (new and renewal) so the order is routed to the configured account group. Available in the CERTInext portal under Delegation \u2192 Groups."
                 },
                 {
                     "name": "OrganizationNumber",
@@ -43,19 +43,19 @@
                 },
                 {
                     "name": "TechnicalContactName",
-                    "description": "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to the configured RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field."
+                    "description": "OPTIONAL: Technical point of contact name, sent as `technicalPointOfContact.pocFirstName` / `pocLastName` on every SSL order (new and renewal). The name is split on the first whitespace: the first word is the first name and the rest is the last name; a single-word name is sent in both. Defaults to the configured RequestorName when blank."
                 },
                 {
                     "name": "TechnicalContactEmail",
-                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank."
+                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.pocEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank."
                 },
                 {
                     "name": "TechnicalContactIsdCode",
-                    "description": "OPTIONAL: International dialing code for the TPoC phone number. Defaults to the configured RequestorIsdCode when blank."
+                    "description": "OPTIONAL: International dialing code for the technical contact phone number, sent as `technicalPointOfContact.pocIsdCode`. Defaults to the configured RequestorIsdCode when blank."
                 },
                 {
                     "name": "TechnicalContactMobileNumber",
-                    "description": "OPTIONAL: Mobile number for the TPoC (digits only). Defaults to the configured RequestorMobileNumber when blank."
+                    "description": "OPTIONAL: Mobile number for the technical contact (digits only), sent as `technicalPointOfContact.pocMobileNumber`. Defaults to the configured RequestorMobileNumber when blank."
                 },
                 {
                     "name": "AuthMode",
@@ -127,7 +127,7 @@
                 },
                 {
                     "name": "AutoSecureWww",
-                    "description": "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\"."
+                    "description": "OPTIONAL: Sent as `orderDetails.autoSecureWWW` on every SSL order (new and renewal). If \"1\", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN, which must also pass domain validation. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\"."
                 },
                 {
                     "name": "IgnoreExpired",
