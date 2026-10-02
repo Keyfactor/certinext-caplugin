@@ -1146,6 +1146,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                 RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
                 KeyType = string.IsNullOrWhiteSpace(ep.KeyType) ? null : ep.KeyType,
+                SignerName = string.IsNullOrWhiteSpace(ep.SignerName) ? null : ep.SignerName,
+                SignerPlace = string.IsNullOrWhiteSpace(ep.SignerPlace) ? null : ep.SignerPlace,
+                SignerIp = string.IsNullOrWhiteSpace(ep.SignerIp) ? null : ep.SignerIp,
                 Comment = "Issued via Keyfactor Command AnyCA REST Gateway."
             };
 
@@ -1369,6 +1372,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                     RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                     RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
+                    SignerName = string.IsNullOrWhiteSpace(ep.SignerName) ? null : ep.SignerName,
+                    SignerPlace = string.IsNullOrWhiteSpace(ep.SignerPlace) ? null : ep.SignerPlace,
+                    SignerIp = string.IsNullOrWhiteSpace(ep.SignerIp) ? null : ep.SignerIp,
                     Comment = $"Renewed via Keyfactor Command. Prior ID: {priorCaRequestId}."
                 };
 

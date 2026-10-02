@@ -870,7 +870,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     validityDays: request.ValidityDays,
                     requesterName: request.RequesterName,
                     requesterEmail: request.RequesterEmail,
-                    comment: request.Comment)
+                    comment: request.Comment,
+                    signerName: request.SignerName,
+                    signerPlace: request.SignerPlace,
+                    signerIp: request.SignerIp)
             };
 
             var orderResp = await PlaceOrderAsync(orderReq, ct);
@@ -1520,7 +1523,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     validityDays: request.ValidityDays,
                     requesterName: request.RequesterName,
                     requesterEmail: request.RequesterEmail,
-                    comment: request.Comment)
+                    comment: request.Comment,
+                    signerName: request.SignerName,
+                    signerPlace: request.SignerPlace,
+                    signerIp: request.SignerIp)
             };
         }
 
@@ -1542,7 +1548,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             int? validityDays,
             string requesterName,
             string requesterEmail,
-            string comment)
+            string comment,
+            string signerName,
+            string signerPlace,
+            string signerIp)
         {
             string requestorName  = requesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
             string requestorEmail = requesterEmail ?? _config.RequestorEmail ?? string.Empty;
@@ -1598,7 +1607,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     requestorName, requestorEmail, requestorIsd, requestorMobile),
 
                 Csr = csr,
-                AgreementDetails = BuildDefaultAgreementDetails(),
+                AgreementDetails = BuildAgreementDetails(signerName, signerPlace, signerIp),
                 AdditionalInformation = new AdditionalInformation
                 {
                     Remarks = comment ?? "Issued via Keyfactor Command AnyCA REST Gateway."
@@ -1695,7 +1704,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return (first, last);
         }
 
-        private AgreementDetails BuildDefaultAgreementDetails()
+        /// <summary>
+        /// Builds <c>agreementDetails</c>. Each signer value resolves template value, then
+        /// connector value, then built-in default, using blank (not just null) checks because
+        /// both the template parameters and the connector config default to "".
+        /// </summary>
+        private AgreementDetails BuildAgreementDetails(
+            string templateSignerName, string templateSignerPlace, string templateSignerIp)
         {
             // SOC1 accuracy-of-processing: the subscriber agreement is a legal artefact
             // and the SignerIp it carries is part of the audit record CERTInext stores.
@@ -1703,24 +1718,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // don't break existing deployments (and our enrollment never fails just
             // because SignerIp is blank), but a missing value emits a Warning so an
             // auditor sees the misrepresentation as an actionable signal in the gateway log.
-            string signerIp = _config.SignerIp;
-            if (string.IsNullOrWhiteSpace(signerIp))
+            string signerIp = FirstNonBlank(templateSignerIp, _config.SignerIp);
+            if (signerIp == null)
             {
                 Logger.LogWarning(
-                    "Connector config SignerIp is empty — falling back to 127.0.0.1 for the " +
-                    "subscriber agreement. Set the SignerIp config field to the gateway host's " +
-                    "actual public-routable IP so the audit record is accurate.");
+                    "Neither the template SignerIp parameter nor the connector SignerIp config is set — " +
+                    "falling back to 127.0.0.1 for the subscriber agreement. Set SignerIp to the " +
+                    "gateway host's actual public-routable IP so the audit record is accurate.");
                 signerIp = "127.0.0.1";
             }
             return new AgreementDetails
             {
                 AcceptAgreement = "1",
-                // Config strings default to "", so these need blank checks, not null-coalesce.
-                SignerName = string.IsNullOrWhiteSpace(_config.RequestorName) ? "Keyfactor Gateway" : _config.RequestorName,
-                SignerPlace = string.IsNullOrWhiteSpace(_config.SignerPlace) ? "Gateway" : _config.SignerPlace,
+                SignerName = FirstNonBlank(templateSignerName, _config.RequestorName) ?? "Keyfactor Gateway",
+                SignerPlace = FirstNonBlank(templateSignerPlace, _config.SignerPlace) ?? "Gateway",
                 SignerIp = signerIp
             };
         }
+
+        private static string FirstNonBlank(string first, string second)
+            => !string.IsNullOrWhiteSpace(first) ? first
+             : !string.IsNullOrWhiteSpace(second) ? second
+             : null;
 
         private static string ExtractCnFromSubject(string subject)
         {
