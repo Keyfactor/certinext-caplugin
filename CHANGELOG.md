@@ -1,3 +1,38 @@
+# 1.0.1
+
+## Features
+- **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly and returns the certificate in the same request when it issues fast, instead of always waiting for the next sync. Configurable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s). Orders that don't issue in time (e.g. OV/EV) return pending and are picked up by the next sync, as before.
+
+## Bug Fixes
+- **UCC certificates no longer come back with only the common name.** The gateway sends SANs under the key `dnsname`, which the plugin didn't recognize, so orders went out with an empty domain list. SANs are now read from every key the gateway sends, plus from the CSR itself.
+- **Renewals no longer lose their SANs.** Renewals were submitted with no additional domains and the wrong primary domain; both now come from the certificate being renewed.
+- **Enrollment no longer fails on an order CERTInext auto-approves before it finishes issuing.** The plugin used to report these as issued with no certificate attached, which the gateway rejected. It now returns pending and picks up the certificate once CERTInext finishes issuing it.
+- **Renewals now use the certificate template's product code.** Renewals previously always used the connector's `DefaultProductCode`, which could send an empty product code if that setting was never configured. Renewals now use the template's code, falling back to `DefaultProductCode` only when the template doesn't have one.
+- **New enrollments now use the connector defaults when the template or connector value is blank.** A blank template product code now falls back to `DefaultProductCode`, and a blank `RequestorName`/`SignerPlace` now sends "Keyfactor Gateway"/"Gateway" as the agreement signer instead of an empty value.
+- **The `SignerName`, `SignerPlace`, and `SignerIp` template parameters now take effect.** They were accepted but ignored; they now override the connector values for the subscriber agreement on both new orders and renewals.
+- **A `SignerIp` that isn't an IP address now logs a Warning** naming whether it came from the template or the connector; the value is still sent unchanged and enrollment is never blocked.
+- **A Warning is now logged when `SignerName` or `SignerPlace` fall back to the "Keyfactor Gateway"/"Gateway" placeholders**, naming the template parameter or connector field to set; the values sent are unchanged.
+- **`GroupNumber`, `AutoSecureWww`, and the technical contact now reach CERTInext**; they were previously sent in fields CERTInext doesn't read.
+- **Renewals now send the full order details** (group, `AutoSecureWww`, technical contact, organization, remarks), the same as a new enrollment.
+- **Unexpected CERTInext error responses are now diagnosable from the logs.** Non-2xx responses with an unrecognised body now include the HTTP status in the error and log the redacted body (`authKey` always redacted, personal data per `LogSensitiveRequestData`).
+- **Gateway logs no longer contain the `authKey` or requestor personal data by default**; set `LogSensitiveRequestData` to log PII temporarily (credentials stay redacted).
+- **Log redaction no longer leaks the rest of a value after an escaped quote** (e.g. `"authKey":"ab\"cd"`, `"requestorName":"Jane \"JD\" Doe"`).
+- **CERTInext error text in logs and error messages now has email addresses masked** unless `LogSensitiveRequestData` is set.
+- **Connector and template validation no longer leaks an HTTP client per check.**
+
+## Chores
+- **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
+- **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
+
+## Upgrade Notes
+- **Non-DNS SANs (IP, email, URI) are now submitted instead of silently dropped.** CERTInext can't validate them, so such an order won't issue until the SAN is removed. Set `SubmitNonDnsSans` to `false` to restore the old drop-silently behavior.
+- **No more duplicate or orphaned orders after a network timeout.** Order/CSR submissions no longer auto-retry after a timeout, since the CA may have already created the order. If it was created, the next sync imports it.
+- **`www.` is no longer added to orders by default**, because `AutoSecureWww` (default `0`) is now honored; set it to `1` to keep the old behavior.
+- **Orders now route to the configured `GroupNumber`**, which previously was not applied to orders.
+- **Renewals follow the connector's `SubscriptionAutoRenew`, `EmailNotifications`, and validity settings** instead of fixed 1-year validity with auto-renew and notifications on.
+- **The technical contact is omitted, with a Warning, when no contact name or email resolves**, since CERTInext requires both once the block is sent.
+- **The V1 API error log line now reads `CERTInext API non-success. Operation=...`** instead of `CERTInext API error during ...`; update any log alerts keyed on the old text.
+
 # 1.0.0
 
 Initial release of the CERTInext (emSign Hub) AnyCA REST Gateway plugin.
