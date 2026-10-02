@@ -559,6 +559,56 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public async Task Enroll_New_ThreadsTemplateSignerParamsOntoRequest()
+        {
+            var mock = NewMock();
+            EnrollCertificateRequest captured = null;
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<EnrollCertificateRequest, CancellationToken>((r, _) => captured = r)
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse());
+
+            var plugin = BuildPlugin(mock.Object);
+            await plugin.Enroll(
+                MockCertificateData.FakeCsrPem, "CN=test.example.com", null,
+                MakeProductInfo(extras: new Dictionary<string, string>
+                {
+                    ["SignerName"] = "Template Signer",
+                    ["SignerPlace"] = "Template Place",
+                    ["SignerIp"] = "203.0.113.77"
+                }),
+                RequestFormat.PKCS10, EnrollmentType.New);
+
+            captured.Should().NotBeNull();
+            captured!.SignerName.Should().Be("Template Signer");
+            captured.SignerPlace.Should().Be("Template Place");
+            captured.SignerIp.Should().Be("203.0.113.77");
+        }
+
+        [Fact]
+        public async Task Enroll_New_BlankTemplateSignerParams_LeaveRequestSignerValuesNull()
+        {
+            var mock = NewMock();
+            EnrollCertificateRequest captured = null;
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<EnrollCertificateRequest, CancellationToken>((r, _) => captured = r)
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse());
+
+            var plugin = BuildPlugin(mock.Object);
+            await plugin.Enroll(
+                MockCertificateData.FakeCsrPem, "CN=test.example.com", null,
+                MakeProductInfo(), RequestFormat.PKCS10, EnrollmentType.New);
+
+            captured.Should().NotBeNull();
+            captured!.SignerName.Should().BeNull();
+            captured.SignerPlace.Should().BeNull();
+            captured.SignerIp.Should().BeNull();
+        }
+
+        [Fact]
         public async Task Enroll_Reissue_AlsoCallsEnrollAsync()
         {
             var mock = NewMock();
@@ -1153,6 +1203,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 MockCertificateData.CertId1, It.IsAny<RenewCertificateRequest>(),
                 It.IsAny<CancellationToken>()), Times.Once,
                 "cert expiring in 30 days should use the renewal API (within 90-day window)");
+        }
+
+        [Fact]
+        public async Task RenewOrReissue_Renewal_ThreadsTemplateSignerParamsOntoRequest()
+        {
+            var clientMock = new Mock<ICERTInextClient>(MockBehavior.Strict);
+            var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
+
+            readerMock.Setup(r => r.GetRequestIDBySerialNumber(It.IsAny<string>()))
+                .ReturnsAsync(MockCertificateData.CertId1);
+            readerMock.Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.CertId1))
+                .Returns(DateTime.UtcNow.AddDays(30));
+
+            RenewCertificateRequest captured = null;
+            clientMock.Setup(c => c.RenewCertificateAsync(
+                    MockCertificateData.CertId1,
+                    It.IsAny<RenewCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<string, RenewCertificateRequest, CancellationToken>((_, r, _) => captured = r)
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse("renewed-01"));
+
+            var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object);
+            await plugin.Enroll(
+                MockCertificateData.FakeCsrPem, "CN=test.example.com", null,
+                MakeProductInfo(extras: new Dictionary<string, string>
+                {
+                    ["PriorCertSN"] = "AABB",
+                    ["RenewalWindowDays"] = "90",
+                    ["SignerName"] = "Template Signer",
+                    ["SignerPlace"] = "Template Place",
+                    ["SignerIp"] = "203.0.113.77"
+                }),
+                RequestFormat.PKCS10, EnrollmentType.RenewOrReissue);
+
+            captured.Should().NotBeNull();
+            captured!.SignerName.Should().Be("Template Signer");
+            captured.SignerPlace.Should().Be("Template Place");
+            captured.SignerIp.Should().Be("203.0.113.77");
         }
 
         [Fact]
