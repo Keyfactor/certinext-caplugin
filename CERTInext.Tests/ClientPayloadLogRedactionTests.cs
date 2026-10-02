@@ -48,7 +48,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private const string RequestorEmail = "jane.doe@example.com";
         private const string MaskedRequestorEmail = "j***@example.com";
         private const string RequestorMobile = "5551234567";
-        private const string TpcEmail = "tech.contact@example.com";
+        private const string PocEmail = "tech.contact@example.com";
+        private const string MaskedPocEmail = "t***@example.com";
+        private const string PocFirstName = "Terry";
+        private const string PocLastName = "Techcontact";
+        private const string PocMobile = "5559876543";
         private const string SignerName = "John Signer";
         private const string EmailSan = "alice@example.com";
         private const string MaskedEmailSan = "a***@example.com";
@@ -100,7 +104,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     AdditionalDomains = new List<string> { "www." + primaryDomain, EmailSan }
                 },
                 AgreementDetails = new AgreementDetails { SignerName = SignerName, SignerPlace = "Austin", SignerIp = "203.0.113.10" },
-                TechnicalPointOfContact = new TechnicalPointOfContact { TpcName = "Tech Contact", TpcEmail = TpcEmail, TpcMobileNumber = "5559876543" }
+                TechnicalPointOfContact = new TechnicalPointOfContact
+                {
+                    PocFirstName = PocFirstName, PocLastName = PocLastName, PocEmail = PocEmail,
+                    PocIsdCode = "44", PocMobileNumber = PocMobile
+                }
             }
         };
 
@@ -152,7 +160,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             payload.Should().NotContain(authKey, "the replayable authKey digest must never be logged");
             payload.Should().Contain("\"authKey\":\"***REDACTED***\"");
             payload.Should().NotContain(RequestorName).And.NotContain(RequestorEmail).And.NotContain(RequestorMobile)
-                .And.NotContain(TpcEmail).And.NotContain(SignerName).And.NotContain(EmailSan);
+                .And.NotContain(PocEmail).And.NotContain(SignerName).And.NotContain(EmailSan)
+                .And.NotContain(PocFirstName).And.NotContain(PocLastName).And.NotContain(PocMobile)
+                .And.NotContain("\"pocIsdCode\":\"44\"");
+            payload.Should().Contain(MaskedPocEmail).And.Contain("\"pocFirstName\":\"***REDACTED***\"")
+                .And.Contain("\"pocLastName\":\"***REDACTED***\"").And.Contain("\"pocIsdCode\":\"***REDACTED***\"")
+                .And.Contain("\"pocMobileNumber\":\"***REDACTED***\"");
             payload.Should().Contain(MaskedRequestorEmail).And.Contain(MaskedEmailSan).And.Contain("www." + domain);
 
             lines.Should().NotContain(l => l.Message.Contains(authKey) || l.Message.Contains(EmailSan) || l.Message.Contains(RequestorEmail),
@@ -174,7 +187,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             payload.Should().NotContain(authKey, "credentials are redacted regardless of LogSensitiveRequestData");
             payload.Should().Contain("\"authKey\":\"***REDACTED***\"");
             payload.Should().Contain(RequestorName).And.Contain(RequestorEmail).And.Contain(RequestorMobile)
-                .And.Contain(TpcEmail).And.Contain(SignerName).And.Contain(EmailSan);
+                .And.Contain(PocEmail).And.Contain(SignerName).And.Contain(EmailSan)
+                .And.Contain(PocFirstName).And.Contain(PocLastName).And.Contain(PocMobile)
+                .And.Contain("\"pocIsdCode\":\"44\"");
 
             lines.Should().NotContain(l => l.Message.Contains(authKey));
         }
