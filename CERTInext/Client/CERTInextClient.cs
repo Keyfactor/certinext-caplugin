@@ -254,8 +254,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 string jsonBody = JsonSerializer.Serialize(request, GetJsonOptions());
                 // Issue 0040: the body carries the replayable meta.authKey digest (always redacted)
                 // and requestor/contact PII (redacted unless LogSensitiveRequestData is on).
-                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}",
-                    ApplyLoggingRedaction(jsonBody, _config.LogSensitiveRequestData));
+                // Guarded: redaction is a regex + JSON-reader pass that must not run when Trace is off.
+                if (Logger.IsEnabled(LogLevel.Trace))
+                    Logger.LogTrace("PlaceOrderAsync request payload: {Payload}",
+                        ApplyLoggingRedaction(jsonBody, _config.LogSensitiveRequestData));
                 req.AddJsonBody(jsonBody);
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -465,8 +467,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
 
             var result = DeserializeOrThrow<TrackOrderResponse>(resp, $"track order {orderNumber}");
-            Logger.LogTrace("TrackOrderAsync response payload (Order={OrderNumber}): {Payload}",
-                orderNumber, ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
+            // Guarded: full syncs call TrackOrder thousands of times; skip redaction when Trace is off.
+            if (Logger.IsEnabled(LogLevel.Trace))
+                Logger.LogTrace("TrackOrderAsync response payload (Order={OrderNumber}): {Payload}",
+                    orderNumber, ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
 
             // A meta status of "0" with errorCode EMS-913 or similar means the order was not found
             if (result.Meta != null && !result.Meta.IsSuccess)
@@ -2335,6 +2339,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string errorMessage = null,
             LogLevel level = LogLevel.Warning)
         {
+            // Skip the redaction passes entirely when this level is disabled.
+            if (!Logger.IsEnabled(level)) return;
             string sanitizedBody = ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)";
             Logger.Log(
                 level,
