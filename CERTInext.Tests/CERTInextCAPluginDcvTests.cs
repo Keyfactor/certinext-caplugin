@@ -1007,7 +1007,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             mock.Verify(c => c.GetDcvAsync(order, bad, It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.Never, "a non-FQDN domain must never be sent to GetDcv");
-            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            // A domain was skipped, so the order cannot issue: the post-DCV issuance wait must not run.
+            mock.Verify(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()), Times.Never);
+            result.Status.Should().NotBe((int)EndEntityStatus.GENERATED);
         }
 
         /// <summary>
@@ -1061,7 +1063,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             mock.Verify(c => c.GetDcvAsync(order, bad, It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.Never, "a domain with a trailing newline must never be sent to GetDcv");
-            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            // A domain was skipped, so the order cannot issue: the post-DCV issuance wait must not run.
+            mock.Verify(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()), Times.Never);
+            result.Status.Should().NotBe((int)EndEntityStatus.GENERATED);
         }
 
         /// <summary>
@@ -1140,7 +1144,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             validator.StagedRecords.Should().ContainSingle(
                 "only the domain with a resolvable provider should be staged, and it must still be staged")
                 .Which.Should().Be((expectedHostname, MockCertificateData.DcvToken));
-            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            // A domain was skipped, so the order cannot issue: the post-DCV issuance wait must not run.
+            mock.Verify(c => c.GetCertificateAsync(order, It.IsAny<CancellationToken>()), Times.Never);
+            result.Status.Should().NotBe((int)EndEntityStatus.GENERATED);
         }
 
         /// <summary>
