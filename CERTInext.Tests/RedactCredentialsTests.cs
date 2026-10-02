@@ -54,6 +54,52 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             CERTInextClient.RedactCredentials(input).Should().Be(expected);
         }
 
+        // JSON string values can contain escaped quotes and backslashes. A scrubber that stops at the
+        // first '"' it sees leaks everything after the escape into the log. Values below are synthetic.
+        [Theory]
+        [InlineData(
+            "{\"authKey\":\"ab\\\"cd\"}",
+            "{\"authKey\":\"***REDACTED***\"}")]
+        [InlineData(
+            "{\"meta\":{\"authKey\":\"ab\\\"cd\\\"ef\",\"ts\":\"2026\"}}",
+            "{\"meta\":{\"authKey\":\"***REDACTED***\",\"ts\":\"2026\"}}")]
+        [InlineData(
+            "{\"password\":\"p\\\\q\",\"other\":\"keep\"}",
+            "{\"password\":\"***REDACTED***\",\"other\":\"keep\"}")]
+        [InlineData(
+            "{\"client_secret\":\"ends-with-backslash\\\\\",\"other\":\"keep\"}",
+            "{\"client_secret\":\"***REDACTED***\",\"other\":\"keep\"}")]
+        [InlineData(
+            "{\"apiKey\":\"a\\\"b\",\"accessKey\":\"c\\\\d\\\"e\"}",
+            "{\"apiKey\":\"***REDACTED***\",\"accessKey\":\"***REDACTED***\"}")]
+        public void RedactCredentials_ScrubsJsonValuesContainingEscapes(string input, string expected)
+        {
+            CERTInextClient.RedactCredentials(input).Should().Be(expected);
+        }
+
+        [Fact]
+        public void RedactCredentials_EscapedQuoteInJsonValue_DoesNotLeakTail()
+        {
+            string actual = CERTInextClient.RedactCredentials("{\"authKey\":\"head\\\"TAILSECRET\"}");
+            actual.Should().NotContain("TAILSECRET").And.NotContain("head");
+        }
+
+        [Fact]
+        public void RedactCredentials_EmptyJsonValue_IsStillRedactedAsBefore()
+        {
+            // Pre-existing behavior (unlike PII fields, credential fields are not skipped when empty).
+            CERTInextClient.RedactCredentials("{\"authKey\":\"\"}")
+                .Should().Be("{\"authKey\":\"***REDACTED***\"}");
+        }
+
+        [Theory]
+        [InlineData("authKey=ab\\\"TAILSECRET", "authKey=***REDACTED***")]
+        [InlineData("x=1&password=a\\\\b\\\"TAILSECRET&y=2", "x=1&password=***REDACTED***&y=2")]
+        public void RedactCredentials_FormValueWithEscapedQuote_DoesNotLeakTail(string input, string expected)
+        {
+            CERTInextClient.RedactCredentials(input).Should().Be(expected);
+        }
+
         [Fact]
         public void RedactCredentials_ScrubsAuthorizationHeaderLines()
         {

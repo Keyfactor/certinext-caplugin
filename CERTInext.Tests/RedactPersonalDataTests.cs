@@ -526,6 +526,59 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             act2.Should().NotThrow();
         }
 
+        // JSON string values can contain escaped quotes and backslashes. A scrubber that stops at the
+        // first '"' it sees leaks everything after the escape into the log. Values below are synthetic.
+        [Theory]
+        [InlineData(
+            "{\"requestorName\":\"Jane \\\"JD\\\" Doe\"}",
+            "{\"requestorName\":\"***REDACTED***\"}")]
+        [InlineData(
+            "{\"requestorName\":\"Jane \\\"JD\\\" Doe\",\"requestorDesignation\":\"Eng\"}",
+            "{\"requestorName\":\"***REDACTED***\",\"requestorDesignation\":\"***REDACTED***\"}")]
+        [InlineData(
+            "{\"signerPlace\":\"C:\\\\Users\\\\jdoe\",\"other\":\"keep\"}",
+            "{\"signerPlace\":\"***REDACTED***\",\"other\":\"keep\"}")]
+        [InlineData(
+            "{\"pocLastName\":\"Doe\\\\\",\"other\":\"keep\"}",
+            "{\"pocLastName\":\"***REDACTED***\",\"other\":\"keep\"}")]
+        [InlineData(
+            "{\"pocFirstName\":\"\\\"\",\"other\":\"keep\"}",
+            "{\"pocFirstName\":\"***REDACTED***\",\"other\":\"keep\"}")]
+        public void RedactPersonalData_RedactsOtherFieldValuesContainingEscapes(string input, string expected)
+        {
+            CERTInextClient.RedactPersonalData(input).Should().Be(expected);
+        }
+
+        [Fact]
+        public void RedactPersonalData_EmailValueContainingEscapedQuote_IsMaskedWithoutLeakingTail()
+        {
+            string actual = CERTInextClient.RedactPersonalData(
+                "{\"requestorEmail\":\"jane\\\"TAILSECRET\\\"@example.com\",\"other\":\"keep\"}");
+            actual.Should().NotContain("TAILSECRET");
+            actual.Should().Contain("\"other\":\"keep\"");
+        }
+
+        [Fact]
+        public void RedactPersonalData_EmptyValues_AreLeftUntouchedByEscapeAwareMatching()
+        {
+            string input = "{\"requestorName\":\"\",\"requestorEmail\":\"\"}";
+            CERTInextClient.RedactPersonalData(input).Should().Be(input);
+        }
+
+        [Fact]
+        public void ApplyLoggingRedaction_EscapedQuotesInCredentialAndPii_NeitherLeaks()
+        {
+            string input = "{\"authKey\":\"ab\\\"AUTHTAIL\",\"requestorName\":\"Jane \\\"JD\\\" PIITAIL\"}";
+
+            CERTInextClient.ApplyLoggingRedaction(input, logSensitiveRequestData: false)
+                .Should().Be("{\"authKey\":\"***REDACTED***\",\"requestorName\":\"***REDACTED***\"}");
+
+            // Credentials are scrubbed even when PII logging is opted in; the PII is left as sent.
+            string credsOnly = CERTInextClient.ApplyLoggingRedaction(input, logSensitiveRequestData: true);
+            credsOnly.Should().NotContain("AUTHTAIL");
+            credsOnly.Should().Contain("PIITAIL");
+        }
+
         [Fact]
         public void RedactPersonalData_TruncatedBody_MasksElementsSeenBeforeTheFault()
         {
