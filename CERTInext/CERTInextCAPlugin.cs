@@ -254,7 +254,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "GroupNumberPresent={GroupNumberPresent}, " +
                 "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, SubmitNonDnsSans={SubmitNonDnsSans}, " +
                 "DcvEnabled={DcvEnabled}, DcvTxtRecordTemplate={DcvTxtRecordTemplate}, " +
-                "DomainValidatorFactoryInjected={FactoryInjected}",
+                "DomainValidatorFactoryInjected={FactoryInjected}, LogSensitiveRequestData={LogSensitiveRequestData}",
                 _config.ApiUrl, _config.AuthMode, _config.Enabled,
                 hasApiKey, hasUsername,
                 hasPassword, hasClientId,
@@ -263,7 +263,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 hasGroupNumber,
                 _config.PageSize, _config.IgnoreExpired, _config.SubmitNonDnsSans,
                 _config.DcvEnabled, _config.DcvTxtRecordTemplate,
-                _domainValidatorFactory != null);
+                _domainValidatorFactory != null, _config.LogSensitiveRequestData);
 
             // SOC2 CC7.1: surface silent functional downgrades. If DCV is enabled in
             // config but no factory was injected (e.g. v3.2 gateway host), DCV will be
@@ -277,6 +277,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "(see GitHub issue #7). Install a DNS provider plugin and upgrade to a " +
                     "gateway image that supplies the factory, or set DcvEnabled=false to clear " +
                     "this warning.");
+            }
+
+            // Issue 0040 audit trail: this is the one place that records sensitive-data logging
+            // was switched on, so a reviewer scanning gateway logs can see exactly when it started
+            // (and, from the absence of a corresponding line on a later restart, when it stopped).
+            if (_config.LogSensitiveRequestData)
+            {
+                _logger.LogWarning(
+                    "LogSensitiveRequestData=true — this CERTInext connector will write requestor " +
+                    "personal data (name, email, phone, and other organization contact details) and " +
+                    "full CA request/response payloads to the gateway logs. This is intended for " +
+                    "temporary use while verifying a new deployment; turn it back off once " +
+                    "verification is complete.");
             }
             _logger.MethodExit(LogLevel.Debug);
         }
@@ -573,19 +586,37 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // SOX / SOC2 CC7.3: log the enrollment attempt with full identifying context
             // so the event is independently auditable before any API call is made.
-            string sanSummary = san != null && san.Count > 0
-                ? string.Join("; ", san.SelectMany(kvp => (kvp.Value ?? Array.Empty<string>())
-                    .Select(v => $"{kvp.Key}:{v}")))
-                : "(none)";
+            // Issue 0040: email-type SAN values are personal data, masked unless
+            // LogSensitiveRequestData is on; DNS/IP/URI values stay verbatim as audit fields.
+            // FormatSans also applies LogSanitizer.Strip to the whole summary.
+            string sanSummary = LogSanitizer.FormatSans(san, _config.LogSensitiveRequestData);
 
-            _logger.LogInformation(
-                "Enrollment attempt started. " +
-                "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
-                "ProfileId={ProfileId}, SANs={SANs}, " +
-                "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
-                enrollmentType, requestFormat, LogSanitizer.Strip(subject),
-                ep.ProfileId, LogSanitizer.Strip(sanSummary),
-                ep.RequesterName, ep.RequesterEmail);
+            // Issue 0040: RequesterName/RequesterEmail are personal data belonging to whoever
+            // placed the order. Off by default (LogSensitiveRequestData=false) — the name is
+            // dropped from the line entirely and the email is masked to keep only its domain.
+            // On, both fields are logged in full, for deployment verification.
+            if (_config.LogSensitiveRequestData)
+            {
+                _logger.LogInformation(
+                    "Enrollment attempt started. " +
+                    "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
+                    "ProfileId={ProfileId}, SANs={SANs}, " +
+                    "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
+                    enrollmentType, requestFormat, LogSanitizer.Strip(subject),
+                    ep.ProfileId, sanSummary,
+                    ep.RequesterName, ep.RequesterEmail);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Enrollment attempt started. " +
+                    "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
+                    "ProfileId={ProfileId}, SANs={SANs}, " +
+                    "RequesterEmail={RequesterEmail}",
+                    enrollmentType, requestFormat, LogSanitizer.Strip(subject),
+                    ep.ProfileId, sanSummary,
+                    LogSanitizer.MaskEmail(ep.RequesterEmail));
+            }
 
             if (string.IsNullOrWhiteSpace(ep.ProfileId))
             {
@@ -1668,7 +1699,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "[{Domains}]. They are skipped so the remaining {ValidCount} domain(s) can still be validated. " +
                     "This order cannot be issued by CERTInext until these are removed — they usually come from a " +
                     "non-DNS SAN (IP address, email, URI) that was requested on the enrollment.",
-                    invalidDomains.Count, orderNumber, LogSanitizer.Strip(string.Join(", ", invalidDomains)),
+                    // An email SAN submitted to V1 comes back verbatim as an order domain; mask it
+                    // unless LogSensitiveRequestData is on (issue 0040).
+                    invalidDomains.Count, orderNumber,
+                    LogSanitizer.FormatUntypedSans(invalidDomains, _config.LogSensitiveRequestData, ", "),
                     validPendingDomains.Count);
             }
 
@@ -2484,8 +2518,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 if (fromCsr) fromCsrKeys.Add(key);
             }
 
+            // Issue 0040: email SAN values masked unless LogSensitiveRequestData is on.
             string FormatSans(IEnumerable<SanEntry> sans) =>
-                LogSanitizer.Strip(string.Join("; ", sans.Select(s => $"{s.Type}:{s.Value}")));
+                LogSanitizer.FormatSans(sans, _config.LogSensitiveRequestData);
 
             // AnyCA passes SANs keyed by type name — the real gateway uses "dnsname",
             // "rfc822name", "ipaddress"; MapSanType normalizes the spelling variants.

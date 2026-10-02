@@ -10,6 +10,7 @@
 - **Renewals now use the certificate template's product code.** Renewals previously always used the connector's `DefaultProductCode`, which could send an empty product code if that setting was never configured. Renewals now use the template's code, falling back to `DefaultProductCode` only when the template doesn't have one.
 - **`GroupNumber`, `AutoSecureWww`, and the technical contact now reach CERTInext**; they were previously sent in fields CERTInext doesn't read.
 - **Renewals now send the full order details** (group, `AutoSecureWww`, technical contact, organization, remarks), the same as a new enrollment.
+- **Gateway logs no longer contain the `authKey` or requestor personal data by default**; set `LogSensitiveRequestData` to log PII temporarily (credentials stay redacted).
 
 ## Chores
 - **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.

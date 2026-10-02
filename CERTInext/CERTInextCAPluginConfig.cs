@@ -288,6 +288,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = true,
                     Type = "Boolean"
                 },
+                [Constants.Config.LogSensitiveRequestData] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL diagnostic escape hatch. When true, requestor personal data (name, email, " +
+                               "phone, and other organization contact details) and full CA request/response payloads " +
+                               "are written to the gateway logs: the Trace-level order request/response bodies and the " +
+                               "API-failure response bodies are left unredacted (beyond the credential scrubbing that " +
+                               "always applies), and the Information-level enrollment-attempt log line includes the " +
+                               "requestor's name and email in full. This is meant for temporary use while verifying a " +
+                               "new deployment — confirming exactly what was sent to the CA and that the order " +
+                               "succeeded — and should be turned back off once verification is complete. When false " +
+                               "(default), personal data fields are redacted to '***REDACTED***' (email is masked but " +
+                               "keeps its domain, e.g. 'j***@example.com'), email SAN values in log lines are masked " +
+                               "the same way, and the enrollment log line omits the requester name entirely. " +
+                               "Credentials (access keys, authKey digests, OAuth secrets, tokens) are always redacted " +
+                               "regardless of this setting. Default: false.",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
+                },
                 [Constants.Config.PickupRetries] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Number of times Enroll() will poll CERTInext to download the certificate after a " +
@@ -729,6 +748,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         [JsonPropertyName("Enabled")]
         public bool Enabled { get; set; } = true;
+
+        /// <summary>
+        /// OPTIONAL diagnostic escape hatch. When true, full CA request/response payloads are
+        /// logged at Trace (beyond the credential scrubbing that always applies), and the
+        /// enrollment-attempt Information log line includes the requestor's name and email in
+        /// full. This writes personal data belonging to whoever placed the order — name, email,
+        /// phone, and other organization contact fields — into the gateway's log files. Intended
+        /// only for temporary use while verifying a new deployment; turn it back off once
+        /// verification is complete. When false (default), personal-data fields are replaced with
+        /// "***REDACTED***" (email values are masked but keep their domain, e.g.
+        /// "j***@example.com"), email SAN values in log lines are masked the same way, and the
+        /// enrollment log line omits the requester name entirely. Credentials (access keys,
+        /// authKey digests, OAuth secrets, tokens) are always redacted regardless of this setting.
+        /// Default: false.
+        /// </summary>
+        [JsonPropertyName("LogSensitiveRequestData")]
+        public bool LogSensitiveRequestData { get; set; } = false;
 
         // -----------------------------------------------------------------------
         // DCV — domain control validation via DNS provider plugins

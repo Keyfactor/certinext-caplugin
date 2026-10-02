@@ -142,6 +142,10 @@
                     "description": "Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true."
                 },
                 {
+                    "name": "LogSensitiveRequestData",
+                    "description": "OPTIONAL diagnostic escape hatch. When true, enabling it writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. Meant for temporary use while verifying a new deployment — confirming exactly what was sent to the CA and that the order succeeded — and should be turned back off once verification is complete. When false (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. 'j***@example.com') and the enrollment log line omits the requester name entirely. Email SAN values (rfc822Name) in log lines are masked the same way; DNS, IP and URI SANs are always logged in full. Credentials (access keys, authKey digests, OAuth secrets, tokens) are always redacted regardless of this setting. Default: false."
+                },
+                {
                     "name": "DcvEnabled",
                     "description": "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false."
                 },

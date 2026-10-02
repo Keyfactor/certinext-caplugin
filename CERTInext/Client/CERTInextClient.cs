@@ -36,7 +36,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
     /// </summary>
     public class CERTInextClient : ICERTInextClient, IDisposable
     {
-        private static readonly ILogger Logger = LogHandler.GetClassLogger<CERTInextClient>();
+        // Not readonly only so unit tests can capture the Trace payload dumps through
+        // OverrideLoggerForTests (issue 0040). Production code never reassigns it.
+        private static ILogger Logger = LogHandler.GetClassLogger<CERTInextClient>();
+
+        /// <summary>
+        /// Test seam (issue 0040): swaps the class-wide logger so a unit test can assert exactly
+        /// what the request/response payload dumps write. The logger is static and resolved once
+        /// per process, so swapping <c>LogHandler.Factory</c> cannot reach it. Dispose the
+        /// returned handle to restore the previous logger.
+        /// </summary>
+        internal static IDisposable OverrideLoggerForTests(ILogger logger)
+        {
+            var prior = Logger;
+            Logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            return new LoggerOverride(prior);
+        }
+
+        private sealed class LoggerOverride : IDisposable
+        {
+            private ILogger _prior;
+            public LoggerOverride(ILogger prior) => _prior = prior;
+            public void Dispose()
+            {
+                if (_prior == null) return;
+                Logger = _prior;
+                _prior = null;
+            }
+        }
 
         private readonly CERTInextConfig _config;
         private readonly RestClient _http;
@@ -197,9 +224,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 request.OrderDetails?.ProductCode,
                 LogSanitizer.Strip(certInfo?.DomainName),
                 certInfo?.AdditionalDomains?.Count ?? 0,
-                certInfo?.AdditionalDomains != null && certInfo.AdditionalDomains.Count > 0
-                    ? LogSanitizer.Strip(string.Join("; ", certInfo.AdditionalDomains))
-                    : "(none)");
+                // Untyped by now: an email SAN submitted here is masked unless
+                // LogSensitiveRequestData is on (issue 0040).
+                LogSanitizer.FormatUntypedSans(certInfo?.AdditionalDomains, _config.LogSensitiveRequestData));
 
             GenerateOrderResponse result = null;
             RestResponse resp = null;
@@ -225,7 +252,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
                 var req = new RestRequest(Constants.Api.GenerateOrderSslPath, Method.Post);
                 string jsonBody = JsonSerializer.Serialize(request, GetJsonOptions());
-                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}", jsonBody);
+                // Issue 0040: the body carries the replayable meta.authKey digest (always redacted)
+                // and requestor/contact PII (redacted unless LogSensitiveRequestData is on).
+                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}",
+                    ApplyLoggingRedaction(jsonBody, _config.LogSensitiveRequestData));
                 req.AddJsonBody(jsonBody);
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -436,7 +466,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             var result = DeserializeOrThrow<TrackOrderResponse>(resp, $"track order {orderNumber}");
             Logger.LogTrace("TrackOrderAsync response payload (Order={OrderNumber}): {Payload}",
-                orderNumber, resp.Content);
+                orderNumber, ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
 
             // A meta status of "0" with errorCode EMS-913 or similar means the order was not found
             if (result.Meta != null && !result.Meta.IsSuccess)
@@ -1917,6 +1947,228 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return body;
         }
 
+        // Exact JSON key names that carry a person's email address on the V1 wire shapes (see
+        // CERTInext/API/CertificateRequest.cs and CertificateResponse.cs). Every one of these is a
+        // full, exact key — never a substring of an unrelated key (e.g. "domainName"/
+        // "organizationName" do not end in a bare "email" key) — so matching the key by exact
+        // name cannot cross-contaminate unrelated fields. The bare "email" key is not used by any
+        // V1 model today; it is kept as defence in depth for CA error/response bodies.
+        private static readonly string[] PersonalEmailFieldNames =
+        {
+            "requestorEmail", "requesterEmail", "tpcEmail", "requestorEmailId", "dcvEmail", "email"
+        };
+
+        // Exact JSON key names carrying other person/contact data (name, phone/ISD/mobile,
+        // designation, signer place/IP). The bare "name"/"phone"/"designation" keys are not
+        // emitted by any V1 request this plugin logs raw; they are kept as defence in depth for
+        // CA response/error bodies, where over-redacting a log line costs nothing on the wire.
+        private static readonly string[] PersonalOtherFieldNames =
+        {
+            "requestorName", "requesterName", "tpcName", "signerName", "name",
+            "requestorIsdCode", "requestorMobileNumber", "requestorDesignation",
+            "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signerip", "phone", "designation"
+        };
+
+        /// <summary>
+        /// Scrubs known person/contact-bearing keys out of a JSON-ish body before it goes into a
+        /// log line, when <c>LogSensitiveRequestData</c> is off (issue 0040). Covers the V1
+        /// <c>requestorInformation</c> / <c>technicalPointOfContact</c> / <c>agreementDetails</c>
+        /// shapes (<c>requestorName</c>, <c>requestorEmail</c>, <c>requestorIsdCode</c>,
+        /// <c>requestorMobileNumber</c>, <c>requestorDesignation</c>, <c>tpcName</c>,
+        /// <c>tpcEmail</c>, <c>tpcIsdCode</c>, <c>tpcMobileNumber</c>, <c>signerName</c>,
+        /// <c>signerPlace</c>, <c>signerIP</c>/<c>signerIp</c>, the legacy <c>requesterName</c>/
+        /// <c>requesterEmail</c> aliases, and the <c>requestorEmailId</c> search filter), plus bare
+        /// <c>name</c>/<c>email</c>/<c>phone</c>/<c>designation</c> keys as defence in depth.
+        ///
+        /// Email values are masked via <see cref="LogSanitizer.MaskEmail"/> so the domain stays
+        /// visible (e.g. <c>"j***@example.com"</c>) while the local part is hidden. Every other
+        /// matched field is replaced outright with <c>"***REDACTED***"</c>. Fields that are
+        /// already blank/empty on the wire are left untouched — there is nothing to redact.
+        ///
+        /// Conservative substring/regex pass, same style as <see cref="RedactCredentials"/> —
+        /// tolerant of whitespace around the JSON <c>key : value</c> separator (including
+        /// pretty-printed bodies), and anchored on the opening/closing quote of the key so it
+        /// cannot match a key name as a substring of a longer one. Email SANs inside the
+        /// <c>additionalDomains</c> array and <c>domainVerification</c> keys are masked afterwards
+        /// by <see cref="MaskEmailsInSanContainers"/>. Does NOT scrub credentials — that is
+        /// <see cref="RedactCredentials"/>'s job, applied unconditionally by
+        /// <see cref="ApplyLoggingRedaction"/>. Exposed <c>internal</c> for unit testing.
+        /// </summary>
+        internal static string RedactPersonalData(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+
+            foreach (var key in PersonalEmailFieldNames)
+                body = RedactJsonField(body, key, LogSanitizer.MaskEmail);
+
+            foreach (var key in PersonalOtherFieldNames)
+                body = RedactJsonField(body, key, _ => "***REDACTED***");
+
+            return MaskEmailsInSanContainers(body);
+        }
+
+        /// <summary>
+        /// Replaces the value of every occurrence of a JSON string field named <paramref name="keyName"/>
+        /// (case-insensitive, exact key match) with <paramref name="transform"/> applied to the
+        /// original value. Leaves already-empty values untouched. Whitespace around the colon and
+        /// around the key's own quotes is tolerated.
+        /// </summary>
+        private static string RedactJsonField(string body, string keyName, Func<string, string> transform)
+        {
+            return System.Text.RegularExpressions.Regex.Replace(
+                body,
+                $@"(?i)(""{System.Text.RegularExpressions.Regex.Escape(keyName)}""\s*:\s*"")([^""]*)("")",
+                m => string.IsNullOrEmpty(m.Groups[2].Value)
+                    ? m.Value
+                    : m.Groups[1].Value + transform(m.Groups[2].Value) + m.Groups[3].Value);
+        }
+
+        // Exact JSON keys whose value is an array of SAN strings. V1 additionalDomains carries every
+        // requested SAN regardless of type, emails included (non-DNS SANs are submitted unless
+        // SubmitNonDnsSans=false). "additionalHosts" is not a V1 key; it is kept as defence in
+        // depth — a DNS name or IP literal never contains '@', so masking can only touch an email.
+        private static readonly string[] SanArrayFieldNames = { "additionalDomains", "additionalHosts" };
+
+        // Exact JSON keys whose value is an object keyed by SAN value. The V1 TrackOrder
+        // domainVerification block is { "<Domain Name>": { ... }, "status": "..." }, and an email
+        // submitted in additionalDomains comes back as one of those keys.
+        private static readonly string[] SanKeyedObjectFieldNames = { "domainVerification" };
+
+        /// <summary>
+        /// Masks email addresses (issue 0040) in the two SAN-bearing container shapes the
+        /// key/value regex in <see cref="RedactJsonField"/> cannot reach: string elements of a
+        /// <see cref="SanArrayFieldNames"/> array, and property names directly inside a
+        /// <see cref="SanKeyedObjectFieldNames"/> object. Only values containing <c>@</c> are masked,
+        /// with <see cref="LogSanitizer.MaskEmail"/>. DNS / IP values, every other key, and anything
+        /// nested deeper inside those containers are left alone. Keys match exactly and
+        /// case-insensitively, the same as <see cref="RedactJsonField"/>.
+        ///
+        /// Uses <see cref="Utf8JsonReader"/> to find the exact token spans, then splices masked
+        /// tokens into the original bytes. The rest of the body stays byte-for-byte as it was, with
+        /// its whitespace and escaping unchanged. A regex cannot follow nesting depth or escaped
+        /// quotes reliably, and a DOM re-serialize would reformat the whole logged body. Never
+        /// throws: a body that does not start with <c>{</c>/<c>[</c> is returned unchanged, and on
+        /// malformed or truncated JSON the masks found before the fault are still applied.
+        /// </summary>
+        internal static string MaskEmailsInSanContainers(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+            if (body.IndexOf('@') < 0 && body.IndexOf("\\u0040", StringComparison.OrdinalIgnoreCase) < 0)
+                return body;
+
+            int first = 0;
+            while (first < body.Length && char.IsWhiteSpace(body[first])) first++;
+            if (first == body.Length || (body[first] != '{' && body[first] != '[')) return body;
+
+            byte[] utf8 = Encoding.UTF8.GetBytes(body);
+            var edits = new List<(int Start, int Length, string Replacement)>();
+
+            try
+            {
+                var reader = new Utf8JsonReader(utf8, new JsonReaderOptions
+                {
+                    CommentHandling = JsonCommentHandling.Skip,
+                    AllowTrailingCommas = true
+                });
+
+                string pendingProperty = null;
+                int containerDepth = -1;   // CurrentDepth of tokens directly inside the targeted container
+                bool containerIsArray = false;
+
+                while (reader.Read())
+                {
+                    if (containerDepth >= 0)
+                    {
+                        if (reader.CurrentDepth < containerDepth)
+                        {
+                            containerDepth = -1;   // the container's own End token
+                            continue;
+                        }
+
+                        bool candidate = reader.CurrentDepth == containerDepth &&
+                            (containerIsArray
+                                ? reader.TokenType == JsonTokenType.String
+                                : reader.TokenType == JsonTokenType.PropertyName);
+                        if (candidate)
+                        {
+                            string value = reader.GetString();
+                            if (value != null && value.IndexOf('@') >= 0)
+                            {
+                                // TokenStartIndex is the opening quote; ValueSpan is the raw content.
+                                string masked = reader.ValueIsEscaped
+                                    ? JsonSerializer.Serialize(LogSanitizer.MaskEmail(value))
+                                    : "\"" + LogSanitizer.MaskEmail(Encoding.UTF8.GetString(reader.ValueSpan)) + "\"";
+                                edits.Add(((int)reader.TokenStartIndex, reader.ValueSpan.Length + 2, masked));
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (reader.TokenType == JsonTokenType.PropertyName)
+                    {
+                        pendingProperty = reader.GetString();
+                        continue;
+                    }
+
+                    if (pendingProperty != null)
+                    {
+                        if (reader.TokenType == JsonTokenType.StartArray && MatchesAny(SanArrayFieldNames, pendingProperty))
+                        {
+                            containerDepth = reader.CurrentDepth + 1;
+                            containerIsArray = true;
+                        }
+                        else if (reader.TokenType == JsonTokenType.StartObject && MatchesAny(SanKeyedObjectFieldNames, pendingProperty))
+                        {
+                            containerDepth = reader.CurrentDepth + 1;
+                            containerIsArray = false;
+                        }
+                    }
+                    pendingProperty = null;
+                }
+            }
+            catch (JsonException)
+            {
+                // Malformed or truncated body: keep the masks collected before the fault. Everything
+                // up to that point was well-formed, so those spans are correct.
+            }
+
+            if (edits.Count == 0) return body;
+
+            var output = new System.IO.MemoryStream(utf8.Length);
+            int cursor = 0;
+            foreach (var (start, length, replacement) in edits)
+            {
+                output.Write(utf8, cursor, start - cursor);
+                byte[] replacementBytes = Encoding.UTF8.GetBytes(replacement);
+                output.Write(replacementBytes, 0, replacementBytes.Length);
+                cursor = start + length;
+            }
+            output.Write(utf8, cursor, utf8.Length - cursor);
+            return Encoding.UTF8.GetString(output.GetBuffer(), 0, (int)output.Length);
+
+            static bool MatchesAny(string[] keys, string name)
+            {
+                foreach (var key in keys)
+                    if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Applies the standard logging redaction pipeline to a request/response body before it
+        /// is written to a log line: credentials (including the replayable <c>meta.authKey</c>
+        /// digest) are always scrubbed via <see cref="RedactCredentials"/>, and personal-data
+        /// fields are additionally scrubbed via <see cref="RedactPersonalData"/> unless
+        /// <paramref name="logSensitiveRequestData"/> is true (issue 0040). Used by the
+        /// <c>PlaceOrderAsync</c> request dump, the <c>TrackOrderAsync</c> response dump, and
+        /// <c>LogApiFailure</c>, so the on/off behavior has one place to unit-test.
+        /// </summary>
+        internal static string ApplyLoggingRedaction(string body, bool logSensitiveRequestData)
+        {
+            string redacted = RedactCredentials(body);
+            return logSensitiveRequestData ? redacted : RedactPersonalData(redacted);
+        }
+
         /// <summary>
         /// Writes a structured log capturing every diagnostic field available for a
         /// non-success CERTInext API response — HTTP status, the CERTInext-side error
@@ -1944,14 +2196,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <see cref="LogLevel.Error"/> so SOX-loggable authentication events match
         /// the SIEM-alert level convention.
         /// </summary>
-        private static void LogApiFailure(
+        // Instance (not static) so it can read _config.LogSensitiveRequestData — see issue 0040.
+        private void LogApiFailure(
             string operationContext,
             RestResponse resp,
             string errorCode = null,
             string errorMessage = null,
             LogLevel level = LogLevel.Warning)
         {
-            string sanitizedBody = RedactCredentials(resp?.Content) ?? "(empty)";
+            string sanitizedBody = ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)";
             Logger.Log(
                 level,
                 "CERTInext API non-success. Operation={Operation}, HttpStatus={HttpStatus}, " +
