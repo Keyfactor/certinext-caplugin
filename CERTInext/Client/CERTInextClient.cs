@@ -761,9 +761,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // If the CSR was provided in the legacy request, submit it now if not already included in the order
             // (The real API accepts CSR inline in GenerateOrderSSL; the legacy flow may not have set it)
 
-            // Poll TrackOrder to get the current status
-            var trackResp = await TrackOrderAsync(orderNumber, ct);
-            string certStatusId = trackResp.OrderDetails?.CertificateStatusId ?? "1";
+            // Poll TrackOrder to get the current status. The order already exists at CERTInext
+            // (and is paid for), so a failure here must not fail the enrollment — see
+            // TryTrackOrderAfterPlacementAsync.
+            var trackResp = await TryTrackOrderAfterPlacementAsync(orderNumber, "enrollment", ct);
+            string certStatusId = trackResp?.OrderDetails?.CertificateStatusId ?? "1";
 
             // Try to download the certificate if the order is fulfilled
             string pemCert = null;
@@ -792,7 +794,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Certificate = pemCert,
                 SerialNumber = serialNumber,
                 ProfileId = request.ProfileId,
-                Message = trackResp.OrderDetails?.CertificateStatus
+                Message = trackResp?.OrderDetails?.CertificateStatus
             };
 
             Logger.LogInformation(
@@ -883,8 +885,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (string.IsNullOrWhiteSpace(newOrderNumber))
                 throw new Exception("CERTInext renewal order placement succeeded but returned no orderNumber.");
 
-            var trackResp = await TrackOrderAsync(newOrderNumber, ct);
-            string certStatusId = trackResp.OrderDetails?.CertificateStatusId ?? "1";
+            // Same post-placement rule as enrollment: the renewal order exists, so a TrackOrder
+            // failure degrades to a pending result instead of failing the renewal.
+            var trackResp = await TryTrackOrderAfterPlacementAsync(newOrderNumber, "renewal", ct);
+            string certStatusId = trackResp?.OrderDetails?.CertificateStatusId ?? "1";
 
             string pemCert = null;
             string serialNumber = null;
@@ -908,7 +912,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Status = MapCertStatusIdToLegacyString(certStatusId),
                 Certificate = pemCert,
                 SerialNumber = serialNumber,
-                Message = trackResp.OrderDetails?.CertificateStatus
+                Message = trackResp?.OrderDetails?.CertificateStatus
             };
 
             Logger.LogInformation(
@@ -916,6 +920,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 certificateId, newOrderNumber);
             Logger.MethodExit(LogLevel.Trace);
             return legacyResp;
+        }
+
+        /// <summary>
+        /// Looks up the status of an order that <c>GenerateOrderSSL</c> has just placed. The order
+        /// already exists at CERTInext (and is paid for), so a failure here — a transient 5xx, a
+        /// timeout, or an EMS-9xx "not found" during propagation lag surfacing as
+        /// <see cref="KeyNotFoundException"/> — must not fail the enrollment/renewal: that would hide
+        /// the order number from Command and let an operator retry place a duplicate paid order.
+        /// On failure this logs a Warning naming the order and returns <c>null</c>; the callers then
+        /// treat the status as unknown (pending), so sync and pickup finish the order later.
+        /// A genuine cancellation (<paramref name="ct"/> cancelled) still propagates; an
+        /// <see cref="OperationCanceledException"/> with a live token (an HTTP-timeout
+        /// <see cref="TaskCanceledException"/>) is treated like any other failure.
+        /// </summary>
+        private async Task<TrackOrderResponse> TryTrackOrderAfterPlacementAsync(
+            string orderNumber, string operation, CancellationToken ct)
+        {
+            try
+            {
+                return await TrackOrderAsync(orderNumber, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                Logger.LogWarning(
+                    "CERTInext {Operation} was cancelled after order {OrderNumber} was placed. The order exists at " +
+                    "CERTInext and will be imported by the next synchronization.",
+                    operation, orderNumber);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex,
+                    "TrackOrder failed after order {OrderNumber} was placed ({Operation}); the order exists at " +
+                    "CERTInext. Returning a pending result carrying the order number; the certificate will be " +
+                    "retrieved during next synchronization.",
+                    orderNumber, operation);
+                return null;
+            }
         }
 
         /// <inheritdoc/>

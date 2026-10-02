@@ -18,6 +18,7 @@
 - **Gateway logs no longer contain the `authKey` or requestor personal data by default**; set `LogSensitiveRequestData` to log PII temporarily (credentials stay redacted).
 - **Log redaction no longer leaks the rest of a value after an escaped quote** (e.g. `"authKey":"ab\"cd"`, `"requestorName":"Jane \"JD\" Doe"`).
 - **CERTInext error text in logs and error messages now has email addresses masked** unless `LogSensitiveRequestData` is set.
+- **Enrollment and renewal no longer fail after the order is placed.** A failed status check or DCV step now returns pending with the order number, so sync finishes the order and a retry can't place a duplicate.
 - **Connector and template validation no longer leaks an HTTP client per check.**
 
 ## Chores

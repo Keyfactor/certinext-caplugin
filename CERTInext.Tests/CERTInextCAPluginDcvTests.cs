@@ -596,9 +596,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var validator = new FakeDomainValidator();
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
 
-            Func<Task> act = () => Enroll(plugin);
-
-            await act.Should().ThrowAsync<Exception>().WithMessage("*DNS record not found*");
+            // The order is already placed, so the VerifyDcv failure no longer fails Enroll (issue
+            // 0077): it is logged and the pending result carrying the order number is returned.
+            var result = await Enroll(plugin);
+            result.CARequestID.Should().Be(MockCertificateData.DcvOrderId);
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
 
             // Cleanup must run even when VerifyDcv throws
             string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, MockCertificateData.DcvDomain);
@@ -1086,11 +1088,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var validator = new FakeDomainValidator();
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
 
-            Func<Task> act = () => Enroll(plugin);
+            // The cancellation still reaches the outer catch inside PerformDcvIfNeededAsync (not the
+            // per-domain "GetDcv failed" skip) — pinned by the no-VerifyDcv assertion below — but
+            // since the order is already placed, EnrollNewAsync now absorbs it and returns the
+            // pending result carrying the order number instead of failing Enroll (issue 0077).
+            var result = await Enroll(plugin);
 
-            // Must propagate as a cancellation, not be swallowed and reported as "GetDcv failed" in
-            // the skipped-domains summary while Enroll completes normally.
-            await act.Should().ThrowAsync<OperationCanceledException>();
+            result.CARequestID.Should().Be(MockCertificateData.DcvOrderId);
+            mock.Verify(c => c.VerifyDcvAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         }
 
         /// <summary>
@@ -1177,8 +1182,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var validator = new FakeDomainValidator();
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator));
 
-            Func<Task> act = () => Enroll(plugin);
-            await act.Should().ThrowAsync<OperationCanceledException>();
+            // The mid-loop cancellation no longer fails Enroll (issue 0077: the order is already
+            // placed); the cleanup behavior asserted below is unchanged.
+            var result = await Enroll(plugin);
+            result.CARequestID.Should().Be(order);
 
             validator.StagedRecords.Should().ContainSingle(
                 "'good' must have staged before 'bad' threw, for this test to exercise cleanup at all");
