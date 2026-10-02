@@ -57,14 +57,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.OrganizationNumber] = new PropertyConfigInfo
                 {
-                    Comments = "STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric " +
-                               "CERTInext organization number for a pre-vetted organization (e.g. " +
-                               "your company's pre-vetted entry). When set, every SSL order is submitted " +
-                               "with `organizationDetails.preVetting=\"1\"` and the configured " +
-                               "`organizationNumber`, telling CERTInext to skip the manual " +
-                               "organization-vetting queue. Without this value, orders are placed without " +
-                               "any organizationDetails block and CERTInext may park them in " +
-                               "`Pending System RA` for extended manual review (observed: tens of hours). " +
+                    Comments = "OPTIONAL, strongly recommended for OV/EV: numeric CERTInext organization " +
+                               "number for a pre-vetted organization. When set, every SSL order is submitted " +
+                               "with `organizationDetails.preVetting=\"1\"` and this `organizationNumber`, so " +
+                               "CERTInext can reuse that organization's pre-verified domains without fresh DCV. " +
+                               "Leave blank to omit `organizationDetails`. " +
                                "Available in the CERTInext portal under Organizations → " +
                                "Pre-vetted Organizations.",
                     Hidden = false,
@@ -575,15 +572,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public string GroupNumber { get; set; } = string.Empty;
 
         /// <summary>
-        /// CERTInext organization number for a pre-vetted organization (e.g. the customer's
-        /// company).  When set, every SSL order is submitted with
-        /// <c>organizationDetails.preVetting="1"</c> and the configured
-        /// <c>organizationNumber</c>, telling CERTInext to skip the manual organization
-        /// vetting queue.  Strongly recommended for OV/EV products; significantly speeds
-        /// up DV issuance because CERTInext otherwise parks orders in <c>Pending System RA</c>
-        /// for extended manual review (observed tens of hours on the sandbox).
-        /// Empty by default — the plugin omits the <c>organizationDetails</c> block when
-        /// this is unset, preserving prior behavior.
+        /// CERTInext organization number for a pre-vetted organization. When set, every SSL
+        /// order is submitted with <c>organizationDetails.preVetting="1"</c> and this
+        /// <c>organizationNumber</c>. Per CERTInext's spec, this lets the order reuse the
+        /// organization's pre-verified domains without fresh DCV. Empty by default; the
+        /// <c>organizationDetails</c> block is omitted when unset, preserving prior behavior.
         /// </summary>
         [JsonPropertyName("OrganizationNumber")]
         public string OrganizationNumber { get; set; } = string.Empty;

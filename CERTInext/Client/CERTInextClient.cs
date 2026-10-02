@@ -1560,11 +1560,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 // adds www.<domain> and a second DCV) never applies silently.
                 AutoSecureWww = string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0" : _config.AutoSecureWww,
 
-                // organizationDetails — declares pre-vetted org when configured. This is the
-                // single biggest factor in how quickly CERTInext releases an order from
-                // Pending System RA. When OrganizationNumber is blank we omit the whole
-                // block (the model is JsonIgnore-WhenNull) so the order falls back to the
-                // unvetted path — same behavior as the prior plugin builds.
+                // organizationDetails — declares a pre-vetted organization when configured, which
+                // lets CERTInext reuse its pre-verified domains (no fresh DCV). Omitted when
+                // OrganizationNumber is blank (JsonIgnore-WhenNull), same as prior builds.
                 OrganizationDetails = !string.IsNullOrWhiteSpace(_config.OrganizationNumber)
                     ? new OrganizationDetails
                     {
