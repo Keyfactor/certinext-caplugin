@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Optional env var: SAVE_AND_HOLD (default 1)
+# groupNumber is sent directly under orderDetails (CERTInext's GenerateOrderSSL
+# placement; the old delegationInformation.groupNumber is not read). Placement for
+# GenerateOrderPrivatePKI is assumed to match and has not been confirmed live.
 set -euo pipefail
 . ~/.env_certinext
 . "$(dirname "$0")/lib/certinext-auth.sh"
@@ -36,7 +39,7 @@ result=$(jq -n \
         accountingModel:"2",
         saveAndHold:$sah,
         emailNotifications:"0",
-        delegationInformation:{groupNumber:$grp},
+        groupNumber:$grp,
         requestorInformation:{requestorName:$name,
           requestorIsdCode:"1",requestorMobileNumber:$mobile,
           requestorEmail:$email},

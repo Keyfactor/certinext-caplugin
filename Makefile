@@ -471,7 +471,7 @@ show-postman-variables:
 # probe-private-pki-payloads — Try three payload variants for
 # GenerateOrderPrivatePKI with product 149.
 #
-# Tests Postman-minimal, +agreementDetails, and +delegationInformation
+# Tests Postman-minimal, +agreementDetails, and +orderDetails.groupNumber
 # to isolate which payload structure the server accepts without EMS-939.
 #
 # Optional: DOMAIN=...  PRODUCT_CODE=149  SAVE_AND_HOLD=0
