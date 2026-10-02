@@ -181,14 +181,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 + "\n-----END CERTIFICATE REQUEST-----";
         }
 
-        /// <summary>Masks anything that looks like an email address, then truncates to 500 chars.</summary>
-        private static string Scrub(string s)
-        {
-            if (s == null) return null;
-            s = Regex.Replace(s, @"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", "<email>");
-            return s.Length > 500 ? s.Substring(0, 500) : s;
-        }
-
         [SkippableFact]
         public async Task DvOrder_WithBlankRequestorNameAndTechnicalContactName_RecordsCertinextResponse()
         {
@@ -229,19 +221,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
                     created.Add(result.CARequestID);
                     _output.WriteLine($"RESULT: ACCEPTED order={result.CARequestID} status={result.Status} " +
-                                      $"statusMessage={Scrub(result.StatusMessage)}");
+                                      $"statusMessage={TestOutputScrub.Scrub(result.StatusMessage)}");
 
                     var track = await client.TrackOrderAsync(result.CARequestID);
                     string storedName = track.OrderDetails?.RequestorInformation?.RequestorName;
-                    _output.WriteLine($"TRACK: orderStatusId={track.OrderDetails?.OrderStatusId} ({track.OrderDetails?.OrderStatus}), " +
-                                      $"certificateStatusId={track.OrderDetails?.CertificateStatusId} ({track.OrderDetails?.CertificateStatus}), " +
+                    _output.WriteLine($"TRACK: orderStatusId={track.OrderDetails?.OrderStatusId} ({TestOutputScrub.Scrub(track.OrderDetails?.OrderStatus)}), " +
+                                      $"certificateStatusId={track.OrderDetails?.CertificateStatusId} ({TestOutputScrub.Scrub(track.OrderDetails?.CertificateStatus)}), " +
                                       $"stored requestorName blank={string.IsNullOrWhiteSpace(storedName)}");
                 }
                 catch (Exception ex)
                 {
-                    _output.WriteLine($"RESULT: REJECTED/FAILED {ex.GetType().Name}: {Scrub(ex.Message)}");
+                    _output.WriteLine($"RESULT: REJECTED/FAILED {ex.GetType().Name}: {TestOutputScrub.Scrub(ex.Message)}");
                     if (ex.InnerException != null)
-                        _output.WriteLine($"  inner {ex.InnerException.GetType().Name}: {Scrub(ex.InnerException.Message)}");
+                        _output.WriteLine($"  inner {ex.InnerException.GetType().Name}: {TestOutputScrub.Scrub(ex.InnerException.Message)}");
                 }
             }
             finally
@@ -313,7 +305,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 {
                     var before = await client.TrackOrderAsync(id);
                     int.TryParse(before.OrderDetails?.CertificateStatusId, out int st);
-                    _output.WriteLine($"cleanup {id}: before certificateStatusId={st} ({before.OrderDetails?.CertificateStatus})");
+                    _output.WriteLine($"cleanup {id}: before certificateStatusId={st} ({TestOutputScrub.Scrub(before.OrderDetails?.CertificateStatus)})");
                     if (st == Constants.CertificateStatusId.CertificateRevoked)
                         continue;
 
@@ -336,7 +328,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 catch (Exception ex)
                 {
-                    _output.WriteLine($"cleanup {id}: REVOKE/CANCEL FAILED -> {ex.GetType().Name}: {Scrub(ex.Message)}");
+                    _output.WriteLine($"cleanup {id}: REVOKE/CANCEL FAILED -> {ex.GetType().Name}: {TestOutputScrub.Scrub(ex.Message)}");
                 }
             }
 
@@ -346,12 +338,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 try
                 {
                     var after = await client.TrackOrderAsync(id);
-                    _output.WriteLine($"verify {id}: orderStatusId={after.OrderDetails?.OrderStatusId} ({after.OrderDetails?.OrderStatus}), " +
-                                      $"certificateStatusId={after.OrderDetails?.CertificateStatusId} ({after.OrderDetails?.CertificateStatus})");
+                    _output.WriteLine($"verify {id}: orderStatusId={after.OrderDetails?.OrderStatusId} ({TestOutputScrub.Scrub(after.OrderDetails?.OrderStatus)}), " +
+                                      $"certificateStatusId={after.OrderDetails?.CertificateStatusId} ({TestOutputScrub.Scrub(after.OrderDetails?.CertificateStatus)})");
                 }
                 catch (Exception ex)
                 {
-                    _output.WriteLine($"verify {id}: TrackOrder failed -> {ex.GetType().Name}: {Scrub(ex.Message)}");
+                    _output.WriteLine($"verify {id}: TrackOrder failed -> {ex.GetType().Name}: {TestOutputScrub.Scrub(ex.Message)}");
                 }
             }
         }

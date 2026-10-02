@@ -181,8 +181,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             bool groupMatches = string.Equals(entry!.GroupNumber, _fixture.Config.GroupNumber, StringComparison.Ordinal);
             _output.WriteLine($"  [{label}] {orderNumber}: ListOrders groupNumber matches configured group = {groupMatches} " +
                               $"(report groupNumber blank = {string.IsNullOrWhiteSpace(entry.GroupNumber)})");
-            _output.WriteLine($"  [{label}] {orderNumber}: TrackOrder domains = [{string.Join(", ", domains)}]; " +
-                              $"report domainName = {entry.DomainName}");
+            _output.WriteLine($"  [{label}] {orderNumber}: TrackOrder domains = [{TestOutputScrub.Scrub(string.Join(", ", domains))}]; " +
+                              $"report domainName = {TestOutputScrub.Scrub(entry.DomainName)}");
 
             groupMatches.Should().BeTrue($"{label} order must land in the configured CERTInext group");
             domains.Should().Contain(d => string.Equals(d, cn, StringComparison.OrdinalIgnoreCase),
@@ -203,7 +203,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 {
                     var before = await _fixture.Client.TrackOrderAsync(id);
                     int.TryParse(before.OrderDetails?.CertificateStatusId, out int st);
-                    _output.WriteLine($"  cleanup {id}: before certificateStatusId={st} ({before.OrderDetails?.CertificateStatus})");
+                    _output.WriteLine($"  cleanup {id}: before certificateStatusId={st} ({TestOutputScrub.Scrub(before.OrderDetails?.CertificateStatus)})");
                     if (st == Constants.CertificateStatusId.CertificateRevoked)
                         continue;
 
@@ -227,7 +227,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 catch (Exception ex)
                 {
-                    _output.WriteLine($"  cleanup {id}: REVOKE/CANCEL FAILED -> {ex.GetType().Name}: {Truncate(ex.Message)}");
+                    _output.WriteLine($"  cleanup {id}: REVOKE/CANCEL FAILED -> {TestOutputScrub.Describe(ex)}");
                 }
             }
 
@@ -237,17 +237,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 try
                 {
                     var after = await _fixture.Client.TrackOrderAsync(id);
-                    _output.WriteLine($"  verify {id}: orderStatusId={after.OrderDetails?.OrderStatusId} ({after.OrderDetails?.OrderStatus}), " +
-                                      $"certificateStatusId={after.OrderDetails?.CertificateStatusId} ({after.OrderDetails?.CertificateStatus})");
+                    _output.WriteLine($"  verify {id}: orderStatusId={after.OrderDetails?.OrderStatusId} ({TestOutputScrub.Scrub(after.OrderDetails?.OrderStatus)}), " +
+                                      $"certificateStatusId={after.OrderDetails?.CertificateStatusId} ({TestOutputScrub.Scrub(after.OrderDetails?.CertificateStatus)})");
                 }
                 catch (Exception ex)
                 {
-                    _output.WriteLine($"  verify {id}: TrackOrder failed -> {ex.GetType().Name}: {Truncate(ex.Message)}");
+                    _output.WriteLine($"  verify {id}: TrackOrder failed -> {TestOutputScrub.Describe(ex)}");
                 }
             }
         }
 
-        private static string Truncate(string s) => s != null && s.Length > 500 ? s.Substring(0, 500) : s;
 
         // ---------------------------------------------------------------------------
         // Test A: new enrollment (compiles on both DcvSupport variants)
@@ -395,7 +394,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 catch (Exception ex)
                 {
-                    _output.WriteLine($"RENEWAL REFUSED/FAILED: {ex.GetType().Name}: {Truncate(ex.Message)}");
+                    _output.WriteLine($"RENEWAL REFUSED/FAILED: {TestOutputScrub.Describe(ex)}");
                     throw;
                 }
 
