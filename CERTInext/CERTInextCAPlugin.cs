@@ -609,7 +609,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
                     enrollmentType, requestFormat, LogSanitizer.Strip(subject),
                     ep.ProfileId, sanSummary,
-                    ep.RequesterName, ep.RequesterEmail);
+                    LogSanitizer.Strip(ep.RequesterName), LogSanitizer.Strip(ep.RequesterEmail));
             }
             else
             {
@@ -620,7 +620,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "RequesterEmail={RequesterEmail}",
                     enrollmentType, requestFormat, LogSanitizer.Strip(subject),
                     ep.ProfileId, sanSummary,
-                    LogSanitizer.MaskEmail(ep.RequesterEmail));
+                    LogSanitizer.MaskEmail(LogSanitizer.Strip(ep.RequesterEmail)));
             }
 
             if (string.IsNullOrWhiteSpace(ep.ProfileId))
