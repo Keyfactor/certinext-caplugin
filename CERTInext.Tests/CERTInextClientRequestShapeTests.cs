@@ -312,6 +312,77 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             AssertNoLegacyFieldShapes(od);
         }
 
+        [Theory]
+        [InlineData("", "")]
+        [InlineData("   ", "")]
+        [InlineData("", "   ")]
+        public async Task TechnicalContact_NoNameResolved_OmitsBlock_OnEnroll(string technicalName, string requestorName)
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.TechnicalContactName = technicalName;
+            cfg.RequestorName = requestorName;
+            // Email resolves fine — only the name is missing.
+            cfg.TechnicalContactEmail = "poc@example.com";
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            var od = CapturedOrderBody();
+            od.TryGetProperty("technicalPointOfContact", out _).Should().BeFalse(
+                "CERTInext requires the POC name inside the block — omit it rather than send empty first/last names");
+            AssertNoLegacyFieldShapes(od);
+        }
+
+        [Fact]
+        public async Task TechnicalContact_NoNameResolved_OmitsBlock_OnRenewal()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.TechnicalContactName = string.Empty;
+            cfg.RequestorName = string.Empty;
+            cfg.TechnicalContactEmail = "poc@example.com";
+
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                ProfileId = "842",
+                ValidityDays = 365,
+                Comment = "Renewal test"
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            var od = CapturedOrderBody();
+            od.TryGetProperty("technicalPointOfContact", out _).Should().BeFalse(
+                "renewal shares the enroll builder and must also omit a POC block with no name");
+            AssertNoLegacyFieldShapes(od);
+        }
+
+        [Fact]
+        public async Task TechnicalContact_RenewalWithRequesterName_EmitsBlockFromRequesterName()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.TechnicalContactName = string.Empty;
+            cfg.RequestorName = string.Empty;   // config blank, but the renewal request supplies a name
+            cfg.TechnicalContactEmail = "poc@example.com";
+
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                ProfileId = "842",
+                ValidityDays = 365,
+                RequesterName = "Renew Requester",
+                Comment = "Renewal test"
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            var poc = CapturedOrderBody().GetProperty("technicalPointOfContact");
+            poc.GetProperty("pocFirstName").GetString().Should().Be("Renew");
+            poc.GetProperty("pocLastName").GetString().Should().Be("Requester");
+        }
+
         // -----------------------------------------------------------------------
         // SSL order body defaults — AccountingModel / EmailNotifications /
         // SubscriptionAutoRenew / SubscriptionRenewCriteriaDays /
