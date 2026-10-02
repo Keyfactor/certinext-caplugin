@@ -779,10 +779,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public string DcvTxtRecordTemplate { get; set; } = Constants.Dcv.DefaultTxtRecordTemplate;
 
         /// <summary>
-        /// Seconds to wait after publishing the DNS TXT record before calling VerifyDcv.
-        /// Default: 30.
-        /// </summary>
-        /// <summary>
         /// Number of GetCertificate poll attempts inside <c>Enroll()</c> after an order is
         /// submitted, before falling back to a pending result (picked up by the next sync).
         /// Mirrors the legacy Sectigo connector's <c>PickupRetries</c>. Set to 0 to disable.
@@ -799,6 +795,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("PickupDelay")]
         public int PickupDelayInSeconds { get; set; } = Constants.Pickup.DefaultDelaySeconds;
 
+        /// <summary>
+        /// Seconds to wait after publishing the DNS TXT record before calling VerifyDcv.
+        /// Default: 30.
+        /// </summary>
         [JsonPropertyName("DcvPropagationDelaySeconds")]
         public int DcvPropagationDelaySeconds { get; set; } = 30;
 
