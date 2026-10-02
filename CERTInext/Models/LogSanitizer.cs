@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 {
@@ -59,6 +60,37 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
             if (at <= 0) return "***REDACTED***";
             string domain = value.Substring(at + 1);
             return value.Substring(0, 1) + "***@" + domain;
+        }
+
+        // Email-shaped token inside free text. The lookbehind restricts match starts to token
+        // boundaries so scanning stays linear on long runs of local-part characters (error bodies
+        // can be up to 64 KB). Already-masked output ("j***@example.com") does not re-match, so
+        // masking is idempotent. A trailing '.' is left out of the domain ("a@b.com." -> "a@b.com").
+        private static readonly Regex EmailInText = new Regex(
+            @"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(1));
+
+        /// <summary>
+        /// Prepares CA-supplied error text (<c>meta.errorMessage</c>, legacy <c>message</c>) for a
+        /// log line or an exception message. With <paramref name="logSensitiveRequestData"/> on the
+        /// text is returned unchanged. Off, email-shaped tokens are masked via <see cref="MaskEmail"/>
+        /// (CERTInext may echo a submitted request value in its error text) and CR/LF/tab are
+        /// neutralized via <see cref="Strip"/>; everything else (codes, field names, reasons) is kept
+        /// word for word. Names and phone numbers in free text are not detected. Null passes through.
+        /// Rate-limit detection must be given the raw text, not this output.
+        /// </summary>
+        internal static string SanitizeCaText(string text, bool logSensitiveRequestData)
+        {
+            if (logSensitiveRequestData || string.IsNullOrEmpty(text)) return text;
+            try
+            {
+                return Strip(EmailInText.Replace(text, m => MaskEmail(m.Value)));
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                return "(CA error text withheld: could not be safely masked)";
+            }
         }
 
         // SAN type spellings (case-insensitive) whose values are email addresses: the gateway's
