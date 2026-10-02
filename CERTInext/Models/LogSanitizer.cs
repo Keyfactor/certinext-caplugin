@@ -98,22 +98,56 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         private static readonly HashSet<string> EmailSanTypes =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "email", "rfc822", "rfc822name" };
 
-        // SAN types logged verbatim even with LogSensitiveRequestData off: host names, IP
-        // literals and URIs are audit fields, not personal data (issue 0040 follow-up).
+        // SAN types logged verbatim even with LogSensitiveRequestData off: host names and IP
+        // literals are audit fields, not personal data (issue 0040 follow-up).
         private static readonly HashSet<string> VerbatimSanTypes =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "dns", "dnsname", "dnsnames",
-                "ip", "ipaddress", "ipaddresses",
-                "uri", "uniformresourceidentifier"
+                "ip", "ipaddress", "ipaddresses"
             };
+
+        // URI SAN type spellings. Logged verbatim unless the value carries an '@' (see MaskUri).
+        private static readonly HashSet<string> UriSanTypes =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "uri", "uniformresourceidentifier" };
+
+        /// <summary>
+        /// Masks the personal part of a URI SAN for logging. A URI without <c>@</c> is returned
+        /// unchanged. For a hierarchical URI (<c>scheme://</c>) the userinfo before the last
+        /// <c>@</c> of the authority is replaced with <c>***</c> (<c>https://user:pw@host/</c> becomes
+        /// <c>https://***@host/</c>); an <c>@</c> after the authority (path, query, fragment) is left
+        /// alone. For an opaque URI (<c>mailto:</c>, <c>sip:</c>, ...) the part after the scheme is
+        /// masked with <see cref="MaskEmail"/> (<c>mailto:jane@example.com</c> becomes
+        /// <c>mailto:j***@example.com</c>). Anything unparseable falls back to <see cref="MaskEmail"/>.
+        /// </summary>
+        internal static string MaskUri(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.IndexOf('@') < 0) return value;
+
+            int schemeEnd = value.IndexOf(':');
+            if (schemeEnd <= 0) return MaskEmail(value);
+
+            int authStart = schemeEnd + 1;
+            if (string.CompareOrdinal(value, authStart, "//", 0, 2) == 0)
+            {
+                authStart += 2;
+                int authEnd = value.IndexOfAny(new[] { '/', '?', '#' }, authStart);
+                if (authEnd < 0) authEnd = value.Length;
+                string authority = value.Substring(authStart, authEnd - authStart);
+                int at = authority.LastIndexOf('@');
+                return at < 0 ? value : value.Substring(0, authStart) + "***" + value.Substring(authStart + at);
+            }
+
+            return value.Substring(0, authStart) + MaskEmail(value.Substring(authStart));
+        }
 
         /// <summary>
         /// Returns a single SAN value as it should appear in a log line (issue 0040 follow-up).
         /// With <paramref name="logSensitiveRequestData"/> on, the value is returned as-is. Off,
         /// an email-type SAN (<c>rfc822name</c> and its spelling variants) is masked with
         /// <see cref="MaskEmail"/>, and so is any value containing <c>@</c> whose type is unknown
-        /// or <c>null</c> (untyped host lists). DNS, IP and URI values are always returned as-is.
+        /// or <c>null</c> (untyped host lists). URI values go through <see cref="MaskUri"/>, so userinfo
+        /// and <c>mailto:</c> addresses are masked. DNS and IP values are always returned as-is.
         /// Does not <see cref="Strip"/>; callers strip the formatted line.
         /// </summary>
         internal static string FormatSanValue(string sanType, string value, bool logSensitiveRequestData)
@@ -121,6 +155,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
             if (logSensitiveRequestData || string.IsNullOrEmpty(value)) return value;
             if (sanType != null && EmailSanTypes.Contains(sanType)) return MaskEmail(value);
             if (sanType != null && VerbatimSanTypes.Contains(sanType)) return value;
+            if (sanType != null && UriSanTypes.Contains(sanType)) return MaskUri(value);
             return value.IndexOf('@') >= 0 ? MaskEmail(value) : value;
         }
 
