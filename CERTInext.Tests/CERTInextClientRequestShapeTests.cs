@@ -475,6 +475,72 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // -----------------------------------------------------------------------
+        // New enrollment — blank-value fallbacks (local issues/0071). Config/template
+        // strings default to "", so null-coalesce fallbacks never fired.
+        // -----------------------------------------------------------------------
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task Enroll_ProfileIdBlank_FallsBackToConnectorDefaultProductCode(string blankProfileId)
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.DefaultProductCode = "connector-default-code";
+            var req = BasicEnrollRequest();
+            req.ProfileId = blankProfileId;
+
+            await BuildClient(cfg).EnrollCertificateAsync(req);
+
+            CapturedOrderBody().GetProperty("productCode").GetString().Should().Be("connector-default-code",
+                "a blank template ProductCode must fall back to the connector's DefaultProductCode");
+        }
+
+        [Fact]
+        public async Task Enroll_ProfileIdSet_UsesTemplateProductCodeOverConnectorDefault()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.DefaultProductCode = "connector-default-code";
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            CapturedOrderBody().GetProperty("productCode").GetString().Should().Be("842");
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task Enroll_SignerNameAndPlaceBlank_FallBackToDefaults(string blank)
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.RequestorName = blank;
+            cfg.SignerPlace = blank;
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Keyfactor Gateway");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Gateway");
+        }
+
+        [Fact]
+        public async Task Enroll_SignerNameAndPlaceConfigured_AreSentVerbatim()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig(); // RequestorName "Default Requestor", SignerPlace "Austin"
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Default Requestor");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Austin");
+        }
+
+        // -----------------------------------------------------------------------
         // RenewCertificateAsync — productCode resolution (issue #26 / local issues/0012)
         // Renewals go out as a fresh GenerateOrderSSL order; the product code must
         // come from the template (RenewCertificateRequest.ProfileId) when supplied,
