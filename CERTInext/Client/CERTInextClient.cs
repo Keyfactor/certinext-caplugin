@@ -1728,11 +1728,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     "gateway host's actual public-routable IP so the audit record is accurate.");
                 signerIp = "127.0.0.1";
             }
+            // Same SOC1 rationale as SignerIp: placeholder SignerName/SignerPlace values land in
+            // the legal agreement record, so a fallback is surfaced as a Warning (values unchanged).
+            string signerName = FirstNonBlank(templateSignerName, _config.RequestorName);
+            if (signerName == null)
+            {
+                Logger.LogWarning(
+                    "Neither the template SignerName parameter nor the connector RequestorName config is set — " +
+                    "falling back to \"Keyfactor Gateway\" for the subscriber agreement. Set SignerName on the " +
+                    "template or RequestorName on the connector to the actual signer so the audit record is accurate.");
+                signerName = "Keyfactor Gateway";
+            }
+            string signerPlace = FirstNonBlank(templateSignerPlace, _config.SignerPlace);
+            if (signerPlace == null)
+            {
+                Logger.LogWarning(
+                    "Neither the template SignerPlace parameter nor the connector SignerPlace config is set — " +
+                    "falling back to \"Gateway\" for the subscriber agreement. Set SignerPlace on the " +
+                    "template or connector to the signer's actual location so the audit record is accurate.");
+                signerPlace = "Gateway";
+            }
             return new AgreementDetails
             {
                 AcceptAgreement = "1",
-                SignerName = FirstNonBlank(templateSignerName, _config.RequestorName) ?? "Keyfactor Gateway",
-                SignerPlace = FirstNonBlank(templateSignerPlace, _config.SignerPlace) ?? "Gateway",
+                SignerName = signerName,
+                SignerPlace = signerPlace,
                 SignerIp = signerIp
             };
         }
