@@ -484,6 +484,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.OAuthClientSecret = string.Empty;
                     tempConfig.Password = string.Empty;
                 }
+                tempClient?.Dispose();
             }
 
             _logger.LogInformation(
@@ -499,14 +500,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             string rawConfig = JsonSerializer.Serialize(connectionInfo);
             var tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig);
-            var tempClient = new CERTInextClient(tempConfig);
 
             var params_ = new EnrollmentParams(productInfo);
             string profileId = params_.ProfileId;
-
-            _logger.LogInformation(
-                "Product/profile validation attempt started. ProfileId={ProfileId}, ProductID={ProductID}",
-                profileId, productInfo?.ProductID);
 
             if (string.IsNullOrWhiteSpace(profileId))
             {
@@ -516,6 +512,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 throw new AnyCAValidationException(
                     $"Template parameter '{Constants.EnrollmentParam.ProfileId}' is required but was not set.");
             }
+
+            _logger.LogInformation(
+                "Product/profile validation attempt started. ProfileId={ProfileId}, ProductID={ProductID}",
+                profileId, productInfo?.ProductID);
+
+            // Allocated only after the ProfileId guard so the early-throw path above never
+            // leaks a RestClient + SemaphoreSlim; disposed in the finally below.
+            var tempClient = new CERTInextClient(tempConfig);
 
             try
             {
@@ -561,6 +565,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.OAuthClientSecret = string.Empty;
                     tempConfig.Password = string.Empty;
                 }
+                tempClient?.Dispose();
             }
 
             _logger.LogInformation("Product/profile validation succeeded. ProfileId={ProfileId}", profileId);
