@@ -181,13 +181,26 @@ blocks depending on connector configuration.
 |------|-----------|
 | `OrganizationNumber_Set_EmitsPreVettedOrganizationDetails` | Body includes `organizationDetails.preVetting="1"` and the configured `organizationNumber` |
 | `OrganizationNumber_Blank_OmitsOrganizationDetailsBlock` | Body omits `organizationDetails` entirely |
-| `GroupNumber_Set_EmitsDelegationInformation` | Body includes `delegationInformation.groupNumber` |
-| `GroupNumber_Blank_OmitsDelegationInformation` | Body omits `delegationInformation` |
-| `TechnicalContact_AllSet_EmitsExplicitValues` | Body includes `technicalPointOfContact` with the configured values |
-| `TechnicalContact_AllBlank_FallsBackToRequestorDefaults` | Body includes `technicalPointOfContact` fields derived from `RequestorName`/`RequestorEmail` |
-| `SslBodyDefaults_AreEmitted_FromCustomConnectorValues` | Custom connector-level defaults appear in the order body |
-| `SslBodyDefaults_AreSafeFallbacks_WhenConfigUntouched` | Default values are emitted without throwing when optional config fields are omitted |
+| `GroupNumber_Set_EmitsOrderDetailsGroupNumber` | Body includes `orderDetails.groupNumber`; no `delegationInformation` |
+| `GroupNumber_Blank_OmitsGroupNumber` | Body omits `orderDetails.groupNumber` (null/empty/whitespace) |
+| `TechnicalContact_AllSet_EmitsPocFields` | `technicalPointOfContact` carries `pocFirstName`/`pocLastName` (split from `TechnicalContactName`), `pocEmail`, `pocIsdCode`, `pocMobileNumber`; no `tpc*` fields |
+| `TechnicalContact_AllBlank_FallsBackToRequestorDefaults` | Each `poc*` field falls back to the matching `Requestor*` value |
+| `TechnicalContact_SingleTokenName_FillsFirstAndLast` | A single-token name goes into both `pocFirstName` and `pocLastName` |
+| `TechnicalContact_PerFieldFallback_MixesOverridesAndRequestorValues` | Fallback is per field, not all-or-nothing |
+| `TechnicalContact_NoEmailResolved_OmitsBlock` | `technicalPointOfContact` is omitted (with a Warning) when no email resolves |
+| `SslBodyDefaults_AreEmitted_FromCustomConnectorValues` | Custom connector-level defaults appear in the order body, incl. `orderDetails.autoSecureWWW` |
+| `SslBodyDefaults_AreSafeFallbacks_WhenConfigUntouched` | Default values are emitted when optional config fields are untouched; `orderDetails.autoSecureWWW="0"` is sent |
+| `AutoSecureWww_Blank_SendsZero` | Blank `AutoSecureWww` still sends `orderDetails.autoSecureWWW="0"` |
 | `ValidityDays_OnRequest_OverridesConnectorDefault` | `ValidityDays` template parameter overrides the connector `SubscriptionValidityYears` |
+| `RenewCertificateAsync_ProfileIdSet_UsesTemplateProductCode` | Renewal uses the template product code over the connector default |
+| `RenewCertificateAsync_ProfileIdBlank_FallsBackToConnectorDefault` | Blank renewal `ProfileId` falls back to `DefaultProductCode` |
+| `RenewCertificateAsync_SendsFullOrderDetails_FromConnectorConfig` | Renewal body carries every field a new order does (groupNumber, autoSecureWWW, organizationDetails, requestor, subscription, SANs, `poc*`, CSR, agreement, remarks) |
+| `RenewCertificateAsync_NoValidityOnRequest_UsesConnectorValidity` | Renewal validity comes from `SubscriptionValidityYears`, not a hard-coded `1` |
+| `RenewCertificateAsync_ValidityDays_ConvertsToYears` | Renewal `ValidityDays` is rounded up to whole years |
+| `RenewCertificateAsync_ConfigUntouched_UsesConnectorDefaultsNotDtoDefaults` | Renewal uses connector defaults (`autoRenew="0"`, `emailNotifications="0"`), not DTO defaults |
+| `SplitContactName_SplitsOnFirstWhitespaceRun` | Name split: trim, first whitespace run separates first/last; single token fills both; blank → empty |
+
+Every enroll and renewal shape test also asserts the legacy (ignored-by-CERTInext) placements are absent: no `delegationInformation`, no `certificateInformation.autoSecureWWW`, no `tpc*` property anywhere in `orderDetails`.
 
 ---
 
