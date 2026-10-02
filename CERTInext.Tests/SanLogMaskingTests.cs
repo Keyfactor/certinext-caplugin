@@ -59,11 +59,60 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData("ipaddress", "192.0.2.10")]
         [InlineData("ip", "2001:db8::1")]
         [InlineData("uri", "https://example.com/path")]
-        [InlineData("uniformresourceidentifier", "https://user@example.com/")]
+        [InlineData("uri", "https://host.example.com:8443/a/b?q=1#frag")]
+        [InlineData("uniformresourceidentifier", "urn:example:thing")]
+        [InlineData("uri", "https://example.com/path/@handle")]
+        [InlineData("uri", "https://example.com/?contact=a@b.example")]
         public void FormatSanValue_DnsIpUri_VerbatimEitherWay(string type, string value)
         {
             LogSanitizer.FormatSanValue(type, value, false).Should().Be(value);
             LogSanitizer.FormatSanValue(type, value, true).Should().Be(value);
+        }
+
+        [Theory]
+        [InlineData("uri", "mailto:jane.doe@example.com", "mailto:j***@example.com")]
+        [InlineData("URI", "MAILTO:jane.doe@example.com", "MAILTO:j***@example.com")]
+        [InlineData("uniformresourceidentifier", "sip:jane.doe@example.com", "sip:j***@example.com")]
+        [InlineData("uri", "https://user:pw@host.example.com/", "https://***@host.example.com/")]
+        [InlineData("uri", "https://user@host.example.com/", "https://***@host.example.com/")]
+        [InlineData("uri", "ldaps://cn=a:p@ss@host.example.com:636/dc=x?q", "ldaps://***@host.example.com:636/dc=x?q")]
+        [InlineData("uri", "https://user:pw@host.example.com", "https://***@host.example.com")]
+        public void FormatSanValue_FlagOff_UriWithAt_IsMasked(string type, string value, string expected)
+        {
+            string masked = LogSanitizer.FormatSanValue(type, value, false);
+            masked.Should().Be(expected);
+            masked.Should().NotContain("jane.doe").And.NotContain("pw@").And.NotContain("user");
+        }
+
+        [Theory]
+        [InlineData("uri", "mailto:jane.doe@example.com")]
+        [InlineData("uri", "https://user:pw@host.example.com/")]
+        [InlineData("uniformresourceidentifier", "https://user@host.example.com/")]
+        public void FormatSanValue_FlagOn_UriIsVerbatim(string type, string value)
+            => LogSanitizer.FormatSanValue(type, value, true).Should().Be(value);
+
+        [Fact]
+        public void FormatSans_Dictionary_FlagOff_MasksUriUserinfoAndMailto()
+        {
+            var san = new Dictionary<string, string[]>
+            {
+                ["uri"] = new[] { "mailto:jane.doe@example.com", "https://user:pw@host.example.com/", "https://example.com" }
+            };
+
+            string off = LogSanitizer.FormatSans(san, false);
+            off.Should().Be("uri:mailto:j***@example.com; uri:https://***@host.example.com/; uri:https://example.com");
+            off.Should().NotContain("jane.doe").And.NotContain("pw");
+            LogSanitizer.FormatSans(san, true).Should().Contain("uri:mailto:jane.doe@example.com")
+                .And.Contain("uri:https://user:pw@host.example.com/");
+        }
+
+        [Fact]
+        public void FormatUntypedSans_FlagOff_UriWithAt_LeaksNoLocalPartOrUserinfo()
+        {
+            string line = LogSanitizer.FormatUntypedSans(
+                new[] { "mailto:jane.doe@example.com", "https://user:pw@host.example.com/", "https://example.com/x" }, false);
+            line.Should().NotContain("jane.doe").And.NotContain("user").And.NotContain("pw@")
+                .And.Contain("https://example.com/x");
         }
 
         [Theory]
