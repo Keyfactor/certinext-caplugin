@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -232,6 +232,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public static string GetProductDetailsEmptyJson() =>
             $@"{{""meta"":{SuccessMetaJson()},""productDetails"":[]}}";
 
+        // GET /api/certinext/v2/catalog/products — nested category envelope, the shape
+        // confirmed live against the sandbox account 2026-09-24 (issue 0025 step 0 / issue
+        // 0016). Same structure as the V1 GetProductDetails category envelope, just under a
+        // top-level "products" key instead of "productDetails".
+        public static string GetCatalogProductsV2NestedJson() =>
+            $@"{{
+  ""products"":[
+    {{
+      ""currencyType"":""USD"",
+      ""categoryName"":""SSL/TLS Certificates"",
+      ""categoryID"":""3"",
+      ""products"":[
+        {{""productCode"":""{ProfileIdTls}"",""productName"":""TLS Server"",""productTypeID"":""13""}},
+        {{""productCode"":""{ProfileIdClient}"",""productName"":""Client Authentication"",""productTypeID"":""14""}}
+      ]
+    }}
+  ]
+}}";
+
+        // Flat shape documented in the Postman "List Products" saved 200 example — kept as a
+        // fallback branch in the parser even though the live account returns the nested shape.
+        public static string GetCatalogProductsV2FlatJson() =>
+            $@"{{
+  ""products"":[
+    {{""productId"":""{ProfileIdTls}"",""productName"":""TLS Server"",""masterProductName"":""TLS Server""}},
+    {{""productId"":""{ProfileIdClient}"",""productName"":""Client Authentication"",""masterProductName"":""Client Authentication""}}
+  ]
+}}";
+
+        // Bare-array shape (no wrapper object) — legacy branch already handled by
+        // ParseProductDetailsV2Response.
+        public static string GetCatalogProductsV2BareArrayJson() =>
+            $@"[
+    {{""productCode"":""{ProfileIdTls}"",""productName"":""TLS Server"",""productType"":""SSL/TLS Certificates"",""active"":true}}
+]";
+
+        public static string GetCatalogProductsV2EmptyJson() =>
+            $@"{{""products"":[]}}";
+
         // Generic API failure body (meta.status = "0")
         public static string ApiFailureJson(string errorCode = "EMS-100", string errorMessage = "An error occurred") =>
             $@"{{""meta"":{FailureMetaJson(errorCode, errorMessage)}}}";
@@ -292,6 +331,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Certificate = null,
                 ProfileId = ProfileIdTls,
                 Message = "Awaiting approval."
+            };
+
+        // Reproduces the CERTInext "auto-approved" race: TrackOrder reports a
+        // certificateStatusId the client legacy-maps to "issued", but the immediate
+        // GetCertificate download failed (cert bytes not generated yet), so no PEM
+        // ever arrived. See issue 0009.
+        public static EnrollCertificateResponse AutoApprovedNoBodyEnrollResponse(string id = null) =>
+            new EnrollCertificateResponse
+            {
+                Id = id ?? CertId1,
+                Status = "issued",
+                Certificate = null,
+                ProfileId = ProfileIdTls,
+                Message = "Order auto-approved."
             };
 
         // -----------------------------------------------------------------------
@@ -477,6 +530,104 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         public static string UnauthorizedJson() =>
             @"{""error"":""UNAUTHORIZED"",""message"":""Invalid API key."",""statusCode"":401}";
+
+        // -----------------------------------------------------------------------
+        // V2 API JSON factories
+        // -----------------------------------------------------------------------
+
+        // V2 well-known order IDs
+        public const string V2OrderId1 = "ord_abc001";
+        public const string V2OrderId2 = "ord_abc002";
+
+        /// <summary>Standard OAuth2 client_credentials token response.</summary>
+        public static string V2TokenResponseJson(int expiresIn = 3600) =>
+            $@"{{""access_token"":""eyJhbGciOiJSUzI1NiJ9.test-token"",""token_type"":""Bearer"",""expires_in"":{expiresIn},""refresh_token"":""refresh-opaque-token""}}";
+
+        /// <summary>V2 create order response (status = pending-dcv).</summary>
+        public static string V2CreateOrderPendingJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""pending-dcv"",""_links"":{{""self"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}""}}}}}}";
+
+        /// <summary>V2 create order response (status = issued — unlikely on fresh order but usable for testing).</summary>
+        public static string V2CreateOrderIssuedJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""issued"",""_links"":{{""self"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}""}}}}}}";
+
+        /// <summary>V2 track order response — pending DCV.</summary>
+        public static string V2TrackOrderPendingJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""pending-dcv"",""productVariant"":""dv"",""domain"":""example.com"",""_links"":{{""self"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}""}}}}}}";
+
+        /// <summary>V2 track order response — issued.</summary>
+        public static string V2TrackOrderIssuedJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""issued"",""productVariant"":""dv"",""domain"":""example.com"",""_links"":{{""certificate"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}/certificate""}}}}}}";
+
+        /// <summary>
+        /// V2 track order response — revoked. Nested <c>revocation</c> object shape confirmed
+        /// live against a real revoked order (issues/0034, 2026-09-25) — NOT the flat
+        /// <c>revocationReason</c>/<c>revocationDate</c> shape this fixture previously encoded.
+        /// </summary>
+        public static string V2TrackOrderRevokedJson(
+            string orderId = "ord_abc001",
+            string reason = "cessation-of-operation",
+            string processedAt = "2026-09-24T20:44:41Z") =>
+            $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""revoked"",""productVariant"":""dv"",""domain"":""example.com"",""revocation"":{{""status"":""Certificate Revoked"",""reason"":""{reason}"",""processedAt"":""{processedAt}""}},""_links"":{{}}}}";
+
+        /// <summary>V2 certificate download response (leaf PEM only).</summary>
+        public static string V2CertificateDownloadJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""serialNumber"":""0A1B2C3D4E5F"",""subject"":""CN=example.com"",""issuer"":""CN=CERTInext TLS Intermediate"",""notBefore"":""2026-01-01T00:00:00Z"",""notAfter"":""2027-01-01T00:00:00Z"",""certificatePem"":""{EscapeForJson(FakePemCertificate)}""}}";
+
+        /// <summary>V2 auth/me response.</summary>
+        public static string V2AuthMeJson(string accountNumber = "99887766") =>
+            $@"{{""accountNumber"":""{accountNumber}"",""authType"":""oauth2""}}";
+
+        /// <summary>RFC 7807 problem+json error response.</summary>
+        public static string V2ProblemDetailsJson(int status = 403, string title = "Forbidden", string detail = "OAuth2 not enabled", string type = "EMS-2022") =>
+            $@"{{""type"":""{type}"",""title"":""{title}"",""status"":{status},""detail"":""{detail}"",""instance"":null}}";
+
+        /// <summary>
+        /// V2 DCV challenge response. Matches the confirmed live shape (issues/0037, live
+        /// probe 2026-09-25): exactly <c>token</c> and <c>tokenExpiryDate</c> — no
+        /// <c>orderNumber</c>/<c>domainName</c>/<c>dcvMethod</c>/<c>fileNameContent</c>.
+        /// </summary>
+        public static string V2DcvChallengeJson(string token = "emudhra-dcv-abc123", string tokenExpiryDate = "2026-12-31 23:59:59") =>
+            $@"{{""tokenExpiryDate"":""{tokenExpiryDate}"",""token"":""{token}""}}";
+
+        /// <summary>V2 DCV verify response (success).</summary>
+        public static string V2DcvVerifySuccessJson(string domain = "example.com") =>
+            $@"{{""overallStatus"":""VERIFIED"",""method"":""dns-txt"",""verifiedAt"":""2026-09-21T10:00:00Z""}}";
+
+        /// <summary>V2 DCV verify response (failure).</summary>
+        public static string V2DcvVerifyFailedJson() =>
+            $@"{{""overallStatus"":""FAILED"",""method"":""dns-txt"",""verifiedAt"":null}}";
+
+        /// <summary>V2 certificate download response with chain PEM.</summary>
+        public static string V2CertificateDownloadWithChainJson(string orderId = "ord_abc001") =>
+            $@"{{""orderId"":""{orderId}"",""serialNumber"":""0A1B2C3D4E5F"",""subject"":""CN=example.com"",""issuer"":""CN=CERTInext TLS Intermediate"",""notBefore"":""2026-01-01T00:00:00Z"",""notAfter"":""2027-01-01T00:00:00Z"",""certificatePem"":""{EscapeForJson(FakePemCertificate)}"",""chainPem"":[""{EscapeForJson(FakeIntermediatePemCertificate)}""]}}";
+
+        public static readonly string FakeIntermediatePemCertificate =
+            "-----BEGIN CERTIFICATE-----\nMIIBfakeBASE64INTERMEDIATE==\n-----END CERTIFICATE-----";
+
+        /// <summary>
+        /// V2 <c>/reports/orders</c> page envelope (issues/0022). Rows default to a
+        /// pending-DCV-shaped display-string pair ("Order Accepted" / "Pending for Approver") —
+        /// override <paramref name="orderStatus"/>/<paramref name="certificateStatus"/> for other
+        /// scenarios. Field names match the live field table confirmed in issues/0022 Phase 0.
+        /// </summary>
+        public static string V2OrdersReportJson(
+            int page, int totalPages, string[] orderNumbers,
+            int size = 50, long? totalElements = null,
+            string orderStatus = "Order Accepted", string certificateStatus = "Pending for Approver")
+        {
+            var rows = new List<string>();
+            foreach (string id in orderNumbers)
+            {
+                rows.Add(
+                    $@"{{""orderNumber"":""{id}"",""requestNumber"":""{id}-req"",""orderStatus"":""{orderStatus}""," +
+                    $@"""certificateStatus"":""{certificateStatus}"",""domainName"":""example.com""," +
+                    $@"""productCode"":""842"",""orderDate"":""2026-01-01T00:00:00Z""}}");
+            }
+            long total = totalElements ?? orderNumbers.Length;
+            return $@"{{""content"":[{string.Join(",", rows)}],""page"":{page},""size"":{size}," +
+                   $@"""totalElements"":{total},""totalPages"":{totalPages}}}";
+        }
 
         // -----------------------------------------------------------------------
         // Helpers

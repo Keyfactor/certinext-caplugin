@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# V2 private-pki-certificates/{orderId}/revoke — permanently revoke an issued Private PKI certificate.
+# V2 private-pki-certificates/{orderId}/revoke — permanently REVOKE an issued Private PKI
+# certificate. MUTATING and irreversible. Refuses to run and prints the planned request
+# unless --yes-mutate is passed.
 # Required env var: ORDER_ID
 # Optional env var: REASON (default superseded)
 #
@@ -8,24 +10,24 @@
 #
 # 204 No Content = revocation recorded on the customer CA.
 # 422 = order not yet issued, or already revoked.
+# Credentials: see scripts/v2/README.md.
 set -euo pipefail
-. ~/.env_certinext
+# shellcheck source=scripts/lib/certinext-v2-auth.sh
 . "$(dirname "$0")/../lib/certinext-v2-auth.sh"
+v2_usage() { echo "Usage: ORDER_ID=<orderId> [REASON=superseded] scripts/v2/revoke-private-pki.sh [--yes-mutate]" >&2; }
+v2_parse_mutating_args "$@"
 
 ORDER_ID="${ORDER_ID:-}"
 REASON="${REASON:-superseded}"
+v2_require_id ORDER_ID
 
-if [ -z "$ORDER_ID" ]; then
-    echo "Usage: ORDER_ID=<orderId> [REASON=superseded] scripts/v2/revoke-private-pki.sh" >&2
-    exit 1
-fi
+path="/api/certinext/v2/private-pki-certificates/$ORDER_ID/revoke"
+body=$(jq -n --arg reason "$REASON" '{reason:$reason,note:"Revoked via scripts/v2 dev helper."}')
+v2_mutation_gate POST "$path" "$body"
 
-idempotency_key=$(python3 -c "import uuid; print(uuid.uuid4())")
-
-echo "V2 POST /api/certinext/v2/private-pki-certificates/$ORDER_ID/revoke  reason=$REASON  idempotencyKey=$idempotency_key"
-curl -s -X POST "$CERTINEXT_V2_API_URL/api/certinext/v2/private-pki-certificates/$ORDER_ID/revoke" \
-     -H "Authorization: Bearer $CERTINEXT_V2_TOKEN" \
-     -H "Content-Type: application/json" \
-     -H "Idempotency-Key: $idempotency_key" \
-     -d "$(jq -n --arg reason "$REASON" '{reason:$reason,note:"Revoked via Makefile smoke test."}')" \
-| jq .
+idempotency_key=$(v2_uuid)
+echo "V2 POST $path  reason=$REASON  idempotencyKey=$idempotency_key" >&2
+v2_request POST "$path" \
+    -H "Content-Type: application/json" \
+    -H "Idempotency-Key: $idempotency_key" \
+    --data-binary "$body"

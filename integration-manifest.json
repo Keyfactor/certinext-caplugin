@@ -7,7 +7,7 @@
     "link_github": true,
     "update_catalog": true,
     "description": "AnyCA REST Gateway plugin for CERTInext (eMudhra) certificate lifecycle management platform",
-    "gateway_framework": "25.5.0",
+    "gateway_framework": "26.2.0",
     "release_dir": "CERTInext/bin/Release",
     "release_project": "CERTInext/CERTInext.csproj",
     "about": {
@@ -27,7 +27,7 @@
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
-                    "description": "REQUIRED: CERTInext API base URL. Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ \u2014 Production (US): https://us-api.certinext.io/emSignHub-API/ \u2014 Production (Global/India): https://api.certinext.io/emSignHub-API/"
+                    "description": "REQUIRED: CERTInext API base URL. Its meaning follows UseV2Api. V1 (default): Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ \u2014 Production (US): https://us-api.certinext.io/emSignHub-API/ \u2014 Production (Global/India): https://api.certinext.io/emSignHub-API/. V2 (UseV2Api=true): the bare V2 host, e.g. https://sandbox-us-api.certinext.io, no trailing slash or path suffix \u2014 V1 and V2 are hosted differently, so this value changes when UseV2Api is toggled."
                 },
                 {
                     "name": "AccountNumber",
@@ -71,11 +71,11 @@
                 },
                 {
                     "name": "OAuthClientId",
-                    "description": "OAuth client ID. Required when AuthMode is 'OAuth'."
+                    "description": "OAuth client ID. Required when AuthMode is 'OAuth' (V1). Also required, and reused, when UseV2Api is true — V2 authenticates with these same OAuthClientId/OAuthClientSecret fields via client_credentials against {ApiUrl}/oauth/token, rather than separate V2-only credentials."
                 },
                 {
                     "name": "OAuthClientSecret",
-                    "description": "OAuth client secret. Required when AuthMode is 'OAuth'."
+                    "description": "OAuth client secret. Required when AuthMode is 'OAuth' (V1). Also required, and reused, when UseV2Api is true (see OAuthClientId)."
                 },
                 {
                     "name": "RequestorName",
@@ -94,8 +94,12 @@
                     "description": "Requestor mobile number (digits only, no country code)."
                 },
                 {
+                    "name": "RequestorDesignation",
+                    "description": "OPTIONAL: Job title / role of the requestor (e.g. 'IT Administrator'). Sent in V2 orders' `requestor.designation` field. Free text with no CA-side enum. Left blank by default, in which case the field is omitted entirely from the order rather than sent with a default value."
+                },
+                {
                     "name": "SignerPlace",
-                    "description": "City or location of the subscriber agreement signer. Required by CERTInext for all orders."
+                    "description": "City or location of the subscriber agreement signer (e.g. 'San Francisco, CA'). REQUIRED when UseV2Api is on: the V2 Subscriber Agreement sent with every SSL order requires it, so the connector cannot be saved with it blank. A per-template SignerPlace enrollment parameter overrides it."
                 },
                 {
                     "name": "SignerIp",
@@ -111,7 +115,7 @@
                 },
                 {
                     "name": "EmailNotifications",
-                    "description": "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. \"1\" = enabled, \"0\" = silent (recommended for gateway-driven orders so end users aren't surprised by CA emails). Default: \"0\"."
+                    "description": "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. \"1\" = full notification set (V1 sends it as-is; V2 maps it to \"all\"). \"0\" = silent on both V1 and V2 (V2 confirmed live 2026-09-28). Blank/unset stays silent on V1 (sent as \"0\") but is omitted on V2, so the CA's own default (\"all\", not silent) applies instead. Any other value fails V2 enrollment before any CA call. Default: \"0\" — V2 orders are now silent by default, matching V1 (previously V2 always sent \"all\")."
                 },
                 {
                     "name": "SubscriptionValidityYears",
@@ -140,6 +144,10 @@
                 {
                     "name": "Enabled",
                     "description": "Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true."
+                },
+                {
+                    "name": "LogSensitiveRequestData",
+                    "description": "OPTIONAL diagnostic escape hatch. When true, enabling it writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. Meant for temporary use while verifying a new deployment — confirming exactly what was sent to the CA and that the order succeeded — and should be turned back off once verification is complete. When false (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. 'j***@example.com') and the enrollment log line omits the requester name entirely. Email SAN values (rfc822Name) in log lines are masked the same way; DNS, IP and URI SANs are always logged in full. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: false."
                 },
                 {
                     "name": "DcvEnabled",
@@ -172,6 +180,14 @@
                 {
                     "name": "DcvSyncMaxPerPass",
                     "description": "OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; remaining pending orders are reported as-is and picked up on a later pass (the per-minute incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: 50."
+                },
+                {
+                    "name": "UseV2Api",
+                    "description": "OPTIONAL: When true, the plugin routes Enroll / GetSingleRecord / Revoke / Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 /reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode) plus OAuthClientId and OAuthClientSecret. V1 credentials (ApiKey/AccountNumber/AuthMode) are not required when this is true. Default: false (V1 API)."
+                },
+                {
+                    "name": "V2SyncLookbackHours",
+                    "description": "OPTIONAL (V2 mode only): during an incremental Synchronize, the plugin queries V2 /reports/orders with a 'from' date of (lastSync minus this many hours) rather than exactly lastSync, since live probing could not confirm whether the API's from/to filter brackets order-placement date or issuance date. A lookback window ensures an order created before lastSync but issued afterward (e.g. a slow DCV order) still surfaces on the next incremental pass. Ignored when UseV2Api is false. Default: 72."
                 }
             ],
             "enrollment_config": [
@@ -213,7 +229,7 @@
                 },
                 {
                     "name": "DomainName",
-                    "description": "OPTIONAL: Primary domain for SSL/TLS orders. Derived from the CSR CN if omitted."
+                    "description": "OPTIONAL: Primary domain for SSL/TLS orders (for V2 private-pki orders, the primary hostname). Derived from the CSR CN if omitted."
                 },
                 {
                     "name": "SignerName",

@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Keyfactor.AnyGateway.Extensions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.Logging;
@@ -132,13 +133,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Internal test-injection constructor — pass a mock <see cref="ICERTInextClient"/>
         /// and a specific <see cref="CERTInextConfig"/> for tests that need to override
-        /// configuration fields such as <c>IgnoreExpired</c>.
+        /// configuration fields such as <c>IgnoreExpired</c>. <paramref name="certDataReader"/>
+        /// is optional (defaults to <c>null</c>) and lets V2 tests exercise the issue-0049
+        /// bodyless-REVOKED guard, which consults <see cref="ICertificateDataReader"/>.
         /// </summary>
-        internal CERTInextCAPlugin(ICERTInextClient client, CERTInextConfig config)
+        internal CERTInextCAPlugin(ICERTInextClient client, CERTInextConfig config, ICertificateDataReader certDataReader = null)
         {
             _client = client;
             _clientWasInjected = true;
             _config = config ?? new CERTInextConfig();
+            _certificateDataReader = certDataReader;
         }
 
         /// <summary>
@@ -229,6 +233,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _config = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig)
                 ?? throw new InvalidOperationException("Failed to deserialize CERTInext plugin configuration.");
 
+            // Compliance gap fix: ValidateCAConnectionInfo enforces https-or-loopback on ApiUrl
+            // (and, in V1 OAuth mode, OAuthTokenUrl) at connection-test time, but a connector
+            // saved before that enforcement existed would otherwise sail straight through here
+            // on every gateway restart and keep sending its API key / OAuth client secret in
+            // cleartext. Re-check the config itself (not just the client we're about to build)
+            // before any client is built or used — this applies even when a test has already
+            // injected a mock client via `_client ??=` below, because the gap is in the saved
+            // config, not in which ICERTInextClient instance ends up talking to it.
+            void EnsureValidUrl(string fieldName, string url, string requiredSuffix)
+            {
+                string error = string.IsNullOrWhiteSpace(url)
+                    ? $"'{fieldName}' is required{requiredSuffix}."
+                    : ValidateHttpsOrLoopbackUrl(fieldName, url);
+                if (error == null)
+                    return;
+
+                _logger.LogError(
+                    "CERTInext plugin initialization failed — invalid configuration. {Error}", error);
+                throw new InvalidOperationException(error);
+            }
+
+            EnsureValidUrl(Constants.Config.ApiUrl, _config.ApiUrl, string.Empty);
+
+            string authModeUpper = (_config.AuthMode ?? string.Empty).Trim().ToUpperInvariant();
+            bool isV1OAuth = !_config.UseV2Api && (authModeUpper == "OAUTH" || authModeUpper == "OAUTH2");
+            if (isV1OAuth)
+                EnsureValidUrl(Constants.Config.OAuth2TokenUrl, _config.OAuth2TokenUrl, " when AuthMode is 'OAuth'");
+
             // Only create a real client if one wasn't injected (test scenario)
             _client ??= new CERTInextClient(_config);
 
@@ -240,6 +272,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             bool hasClientId    = !string.IsNullOrWhiteSpace(_config.OAuth2ClientId);
             bool hasClientSecret= !string.IsNullOrWhiteSpace(_config.OAuth2ClientSecret);
             bool hasTokenUrl    = !string.IsNullOrWhiteSpace(_config.OAuth2TokenUrl);
+            bool hasOrganizationNumber = !string.IsNullOrWhiteSpace(_config.OrganizationNumber);
+            bool hasDefaultProductCode = !string.IsNullOrWhiteSpace(_config.DefaultProductCode);
+            bool hasGroupNumber        = !string.IsNullOrWhiteSpace(_config.GroupNumber);
+
+            int effectivePickupRetries = _config.GetEffectivePickupRetries();
+            int effectivePickupDelay  = _config.GetEffectivePickupDelaySeconds();
+            string preVettingMode = hasOrganizationNumber ? "1 (use pre-vetted org)" : "omitted (no org configured)";
 
             _logger.LogInformation(
                 "CERTInext plugin initialized. " +
@@ -247,16 +286,36 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "ApiKeyPresent={ApiKeyPresent}, UsernamePresent={UsernamePresent}, " +
                 "PasswordPresent={PasswordPresent}, OAuth2ClientIdPresent={OAuth2ClientIdPresent}, " +
                 "OAuth2ClientSecretPresent={OAuth2ClientSecretPresent}, OAuth2TokenUrlPresent={OAuth2TokenUrlPresent}, " +
-                "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, " +
+                "OrganizationNumber={OrganizationNumber}, PreVetting={PreVetting}, " +
+                "DefaultProductCode={DefaultProductCode}, GroupNumber={GroupNumber}, " +
+                "AccountingModel={AccountingModel}, EmailNotifications={EmailNotifications}, " +
+                "AutoSecureWww={AutoSecureWww}, ValidityYears={ValidityYears}, " +
+                "AutoRenew={AutoRenew}, RenewCriteriaDays={RenewCriteriaDays}, " +
+                "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, SubmitNonDnsSans={SubmitNonDnsSans}, " +
+                "PickupRetries={PickupRetries}, PickupDelay={PickupDelay}, " +
                 "DcvEnabled={DcvEnabled}, DcvTxtRecordTemplate={DcvTxtRecordTemplate}, " +
-                "DomainValidatorFactoryInjected={FactoryInjected}",
+                "DcvPropagationDelaySeconds={DcvPropagationDelay}, DcvTimeoutMinutes={DcvTimeout}, " +
+                "DcvWaitForChallengeSeconds={DcvWaitChallenge}, DcvWaitForIssuanceSeconds={DcvWaitIssuance}, " +
+                "DomainValidatorFactoryInjected={FactoryInjected}, LogSensitiveRequestData={LogSensitiveRequestData}",
                 _config.ApiUrl, _config.AuthMode, _config.Enabled,
                 hasApiKey, hasUsername,
                 hasPassword, hasClientId,
                 hasClientSecret, hasTokenUrl,
-                _config.PageSize, _config.IgnoreExpired,
+                hasOrganizationNumber ? _config.OrganizationNumber : "(not configured)", preVettingMode,
+                hasDefaultProductCode ? _config.DefaultProductCode : "(not configured)",
+                hasGroupNumber ? _config.GroupNumber : "(not configured)",
+                string.IsNullOrWhiteSpace(_config.AccountingModel) ? "2 (default)" : _config.AccountingModel,
+                string.IsNullOrWhiteSpace(_config.EmailNotifications) ? "0 (default)" : _config.EmailNotifications,
+                string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0 (default)" : _config.AutoSecureWww,
+                string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears) ? "1 (default)" : _config.SubscriptionValidityYears,
+                string.IsNullOrWhiteSpace(_config.SubscriptionAutoRenew) ? "0 (default)" : _config.SubscriptionAutoRenew,
+                string.IsNullOrWhiteSpace(_config.SubscriptionRenewCriteriaDays) ? "30 (default)" : _config.SubscriptionRenewCriteriaDays,
+                _config.PageSize, _config.IgnoreExpired, _config.SubmitNonDnsSans,
+                effectivePickupRetries, effectivePickupDelay,
                 _config.DcvEnabled, _config.DcvTxtRecordTemplate,
-                _domainValidatorFactory != null);
+                _config.DcvPropagationDelaySeconds, _config.DcvTimeoutMinutes,
+                _config.DcvWaitForChallengeSeconds, _config.DcvWaitForIssuanceSeconds,
+                _domainValidatorFactory != null, _config.LogSensitiveRequestData);
 
             // SOC2 CC7.1: surface silent functional downgrades. If DCV is enabled in
             // config but no factory was injected (e.g. v3.2 gateway host), DCV will be
@@ -270,6 +329,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "(see GitHub issue #7). Install a DNS provider plugin and upgrade to a " +
                     "gateway image that supplies the factory, or set DcvEnabled=false to clear " +
                     "this warning.");
+            }
+
+            // Issue 0040 audit trail: this is the one place that records sensitive-data logging
+            // was switched on, so a reviewer scanning gateway logs can see exactly when it started
+            // (and, from the absence of a corresponding line on a later restart, when it stopped).
+            if (_config.LogSensitiveRequestData)
+            {
+                _logger.LogWarning(
+                    "LogSensitiveRequestData=true — this CERTInext connector will write requestor " +
+                    "personal data (name, email, phone, and other organization contact details) and " +
+                    "full CA request/response payloads to the gateway logs. This is intended for " +
+                    "temporary use while verifying a new deployment; turn it back off once " +
+                    "verification is complete.");
             }
             _logger.MethodExit(LogLevel.Debug);
         }
@@ -330,15 +402,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             try
             {
-                await _client.PingAsync();
-                // SOC2 CC9.2: connectivity confirmation is a security-relevant event; must be
-                // at Information so it survives production log filters.
-                _logger.LogInformation("CERTInext ping successful. ApiUrl={ApiUrl}", _config.ApiUrl);
+                if (_config.UseV2Api)
+                {
+                    await _client.PingV2Async();
+                    _logger.LogInformation("CERTInext V2 ping successful. ApiUrl={ApiUrl}", _config.ApiUrl);
+                }
+                else
+                {
+                    await _client.PingAsync();
+                    // SOC2 CC9.2: connectivity confirmation is a security-relevant event; must be
+                    // at Information so it survives production log filters.
+                    _logger.LogInformation("CERTInext ping successful. ApiUrl={ApiUrl}", _config.ApiUrl);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "CERTInext ping failed. ApiUrl={ApiUrl}", _config.ApiUrl);
-                throw new Exception($"Unable to reach CERTInext at {_config.ApiUrl}: {ex.Message}", ex);
+                string url = _config.ApiUrl;
+                _logger.LogError(ex, "CERTInext ping failed. Url={Url}, UseV2Api={UseV2Api}", url, _config.UseV2Api);
+                throw new Exception($"Unable to reach CERTInext at {url}: {ex.Message}", ex);
             }
             finally
             {
@@ -373,44 +454,96 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var errors = new List<string>();
 
-            // ApiUrl and AccountNumber are always required
+            // ApiUrl is always required in both modes — its meaning follows UseV2Api (V1 base
+            // URL incl. /emSignHub-API vs the bare V2 host). See issues/0022 config consolidation.
             string apiUrl = GetStringValue(connectionInfo, Constants.Config.ApiUrl);
             if (string.IsNullOrWhiteSpace(apiUrl))
                 errors.Add($"'{Constants.Config.ApiUrl}' is required.");
-            else if (!Uri.TryCreate(apiUrl, UriKind.Absolute, out _))
-                errors.Add($"'{Constants.Config.ApiUrl}' is not a valid absolute URI.");
-
-            string accountNumber = GetStringValue(connectionInfo, Constants.Config.AccountNumber);
-            if (string.IsNullOrWhiteSpace(accountNumber))
-                errors.Add($"'{Constants.Config.AccountNumber}' is required.");
-
-            // Auth mode — validate the required credentials for the chosen mode
-            string authMode = GetStringValue(connectionInfo, Constants.Config.AuthMode, Constants.Config.AuthModeAccessKey);
-            switch (authMode.ToUpperInvariant())
+            else
             {
-                case "ACCESSKEY":
-                case "APIKEY":  // legacy alias
-                    string apiKey = GetStringValue(connectionInfo, Constants.Config.ApiKey);
-                    if (string.IsNullOrWhiteSpace(apiKey))
-                        errors.Add($"'{Constants.Config.ApiKey}' is required when AuthMode is 'AccessKey'.");
-                    break;
+                // The OAuth client secret (V2) / API key (V1) is sent to this URL on every
+                // request; http would transmit it in cleartext. http is allowed only for
+                // loopback hosts (localhost/127.0.0.1/::1) so local mock-server tests keep
+                // working without a real TLS endpoint. Shared with the OAuthTokenUrl check
+                // below and with Initialize's config-time enforcement of the same rule.
+                string apiUrlError = ValidateHttpsOrLoopbackUrl(Constants.Config.ApiUrl, apiUrl);
+                if (apiUrlError != null)
+                    errors.Add(apiUrlError);
+            }
 
-                case "OAUTH":
-                case "OAUTH2":
-                    string tokenUrl = GetStringValue(connectionInfo, Constants.Config.OAuth2TokenUrl);
-                    string clientId = GetStringValue(connectionInfo, Constants.Config.OAuth2ClientId);
-                    string clientSecret = GetStringValue(connectionInfo, Constants.Config.OAuth2ClientSecret);
-                    if (string.IsNullOrWhiteSpace(tokenUrl))
-                        errors.Add($"'{Constants.Config.OAuth2TokenUrl}' is required when AuthMode is 'OAuth'.");
-                    if (string.IsNullOrWhiteSpace(clientId))
-                        errors.Add($"'{Constants.Config.OAuth2ClientId}' is required when AuthMode is 'OAuth'.");
-                    if (string.IsNullOrWhiteSpace(clientSecret))
-                        errors.Add($"'{Constants.Config.OAuth2ClientSecret}' is required when AuthMode is 'OAuth'.");
-                    break;
+            bool useV2 = connectionInfo.TryGetValue(Constants.ConfigV2.UseV2Api, out object v2Obj)
+                         && v2Obj is bool v2Bool && v2Bool;
 
-                default:
-                    errors.Add($"'{Constants.Config.AuthMode}' must be one of: AccessKey, OAuth. Got: '{authMode}'.");
-                    break;
+            if (useV2)
+            {
+                // V2 mode: OAuth2 client_credentials against {ApiUrl}/oauth/token, reusing the
+                // same OAuthClientId/OAuthClientSecret fields V1's AuthMode=OAuth uses. V1-only
+                // credentials (AccountNumber, AuthMode, ApiKey, ...) are NOT required here — the
+                // V1 AuthMode switch below is skipped entirely (issues/0022).
+                string oauthClientId = GetStringValue(connectionInfo, Constants.Config.OAuthClientId);
+                string oauthClientSecret = GetStringValue(connectionInfo, Constants.Config.OAuthClientSecret);
+
+                if (string.IsNullOrWhiteSpace(oauthClientId))
+                    errors.Add($"'{Constants.Config.OAuthClientId}' is required when UseV2Api is true.");
+
+                if (string.IsNullOrWhiteSpace(oauthClientSecret))
+                    errors.Add($"'{Constants.Config.OAuthClientSecret}' is required when UseV2Api is true.");
+
+                // Issue 0039: every V2 SSL create order sends an `agreement` block, and the V2 spec
+                // marks agreement.signerPlace "Conditional - required if `agreement` sent". Required
+                // at the connector level (user decision) even though a per-template SignerPlace
+                // enrollment parameter can override it — EnrollV2Async also fails fast if the
+                // resolved value is blank.
+                string signerPlace = GetStringValue(connectionInfo, Constants.Config.SignerPlace);
+                if (string.IsNullOrWhiteSpace(signerPlace))
+                    errors.Add($"'{Constants.Config.SignerPlace}' is required when UseV2Api is true — the CERTInext " +
+                               "V2 Subscriber Agreement sent with every SSL order requires the signing place " +
+                               "(city/location, e.g. 'San Francisco, CA').");
+            }
+            else
+            {
+                // V1 mode: AccountNumber is always required, plus whatever the selected AuthMode needs.
+                string accountNumber = GetStringValue(connectionInfo, Constants.Config.AccountNumber);
+                if (string.IsNullOrWhiteSpace(accountNumber))
+                    errors.Add($"'{Constants.Config.AccountNumber}' is required.");
+
+                string authMode = GetStringValue(connectionInfo, Constants.Config.AuthMode, Constants.Config.AuthModeAccessKey);
+                switch (authMode.ToUpperInvariant())
+                {
+                    case "ACCESSKEY":
+                    case "APIKEY":  // legacy alias
+                        string apiKey = GetStringValue(connectionInfo, Constants.Config.ApiKey);
+                        if (string.IsNullOrWhiteSpace(apiKey))
+                            errors.Add($"'{Constants.Config.ApiKey}' is required when AuthMode is 'AccessKey'.");
+                        break;
+
+                    case "OAUTH":
+                    case "OAUTH2":
+                        string tokenUrl = GetStringValue(connectionInfo, Constants.Config.OAuth2TokenUrl);
+                        string clientId = GetStringValue(connectionInfo, Constants.Config.OAuth2ClientId);
+                        string clientSecret = GetStringValue(connectionInfo, Constants.Config.OAuth2ClientSecret);
+                        if (string.IsNullOrWhiteSpace(tokenUrl))
+                            errors.Add($"'{Constants.Config.OAuth2TokenUrl}' is required when AuthMode is 'OAuth'.");
+                        else
+                        {
+                            // The OAuth client secret is POSTed to this URL on every token
+                            // refresh (CERTInextClient.GetOrRefreshTokenAsync) — same cleartext-
+                            // credential exposure as ApiUrl, so it gets the same https-or-loopback
+                            // rule.
+                            string tokenUrlError = ValidateHttpsOrLoopbackUrl(Constants.Config.OAuth2TokenUrl, tokenUrl);
+                            if (tokenUrlError != null)
+                                errors.Add(tokenUrlError);
+                        }
+                        if (string.IsNullOrWhiteSpace(clientId))
+                            errors.Add($"'{Constants.Config.OAuth2ClientId}' is required when AuthMode is 'OAuth'.");
+                        if (string.IsNullOrWhiteSpace(clientSecret))
+                            errors.Add($"'{Constants.Config.OAuth2ClientSecret}' is required when AuthMode is 'OAuth'.");
+                        break;
+
+                    default:
+                        errors.Add($"'{Constants.Config.AuthMode}' must be one of: AccessKey, OAuth. Got: '{authMode}'.");
+                        break;
+                }
             }
 
             if (errors.Any())
@@ -430,9 +563,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // Build a transient config from the supplied connectionInfo so we don't
                 // rely on the already-initialized _client (which may hold stale creds)
                 string rawConfig = JsonSerializer.Serialize(connectionInfo);
-                tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig);
+                tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig)
+                    ?? throw new InvalidOperationException("Failed to deserialize connection info.");
                 tempClient = new CERTInextClient(tempConfig);
-                await tempClient.PingAsync();
+
+                if (tempConfig.UseV2Api)
+                    await tempClient.PingV2Async();
+                else
+                    await tempClient.PingAsync();
             }
             catch (Exception ex)
             {
@@ -441,8 +579,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogError(
                     ex,
                     "CA connection validation failed — live connectivity test unsuccessful. " +
-                    "ApiUrl={ApiUrl}, AuthMode={AuthMode}",
-                    attemptedApiUrl, attemptedAuthMode);
+                    "ApiUrl={ApiUrl}, UseV2Api={UseV2Api}, AuthMode={AuthMode}",
+                    attemptedApiUrl, tempConfig?.UseV2Api ?? false, attemptedAuthMode);
 
                 // The inner exception message is NOT forwarded to the AnyCAValidationException
                 // because it may contain HTTP response bodies or header fragments from the
@@ -464,6 +602,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.OAuthClientSecret = string.Empty;
                     tempConfig.Password = string.Empty;
                 }
+                tempClient?.Dispose();
             }
 
             _logger.LogInformation(
@@ -478,15 +617,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.MethodEntry(LogLevel.Debug);
 
             string rawConfig = JsonSerializer.Serialize(connectionInfo);
-            var tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig);
-            var tempClient = new CERTInextClient(tempConfig);
+            var tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig)
+                ?? throw new InvalidOperationException("Failed to deserialize connection info.");
+            bool useV2 = tempConfig.UseV2Api;
 
             var params_ = new EnrollmentParams(productInfo);
             string profileId = params_.ProfileId;
-
-            _logger.LogInformation(
-                "Product/profile validation attempt started. ProfileId={ProfileId}, ProductID={ProductID}",
-                profileId, productInfo?.ProductID);
 
             if (string.IsNullOrWhiteSpace(profileId))
             {
@@ -497,20 +633,228 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     $"Template parameter '{Constants.EnrollmentParam.ProfileId}' is required but was not set.");
             }
 
+            _logger.LogInformation(
+                "Product/profile validation attempt started. ProfileId={ProfileId}, ProductID={ProductID}, UseV2Api={UseV2Api}",
+                profileId, productInfo?.ProductID, useV2);
+
+            bool isPrivatePki = useV2
+                && string.Equals(params_.ProductFamilySlug, Constants.ApiV2.FamilyPrivatePki, StringComparison.Ordinal);
+            // Issue 0059: gate the SSL-only ProductVariant cross-check below on the SSL family
+            // specifically (not just "!isPrivatePki") so a signature (Document Signer) template —
+            // which has no productVariant concept — is left unaffected, same as before this fix.
+            bool isSsl = useV2
+                && string.Equals(params_.ProductFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.Ordinal);
+
+            var tempClient = new CERTInextClient(tempConfig);
+
             try
             {
-                var profiles = await tempClient.GetProfilesAsync();
-                bool found = profiles.Any(p =>
-                    string.Equals(p.Id, profileId, StringComparison.OrdinalIgnoreCase));
+                // Issue 0033: a V2 private-pki template needs a Private PKI ProductVariant and an
+                // explicit ProductCode — checked before any catalog call, with the same rules
+                // EnrollV2Async enforces, so a template that can never enroll is rejected at save
+                // time. Inside the try so the finally block's credential scrubbing still runs.
+                if (isPrivatePki)
+                {
+                    string pkiConfigError = ValidatePrivatePkiEnrollmentParams(params_, out _);
+                    if (pkiConfigError != null)
+                    {
+                        _logger.LogWarning(
+                            "Product/profile validation failed — {Reason} ProductID={ProductID}",
+                            pkiConfigError, params_.ProductId);
+                        throw new AnyCAValidationException(pkiConfigError);
+                    }
+                }
+
+                // Issue 0059: an SSL template's explicit ProductVariant must agree with the
+                // product it's paired with — checked before any catalog call, same fail-fast
+                // placement as the private-pki check above, so a template that would silently
+                // send a DV-shaped body for an OV/EV product (or vice versa) is rejected at save
+                // time instead of at enroll.
+                if (isSsl)
+                {
+                    string variantError = ResolveSslProductVariant(params_, out _);
+                    if (variantError != null)
+                    {
+                        _logger.LogWarning(
+                            "Product/profile validation failed — {Reason} ProductID={ProductID}",
+                            variantError, params_.ProductId);
+                        throw new AnyCAValidationException(variantError);
+                    }
+                }
+
+                // V2 catalog validation mirrors ValidateCAConnectionInfo's UseV2Api branch
+                // (issues/0025): GetProfilesAsync/GetProductDetailsAsync are V1-only and 404
+                // against a V2-shaped ApiUrl. There is no soft-accept difference between modes
+                // — an empty/unusable catalog is treated as "not found", same as V1.
+                List<string> availableIds;
+                bool found;
+
+                if (useV2)
+                {
+                    var products = await tempClient.GetProductDetailsV2Async();
+                    availableIds = products.Select(p => p.ProductCode).ToList();
+
+                    if (isPrivatePki)
+                    {
+                        // Issue 0033: the SSL ProductId -> productTypeID cross-check below would
+                        // always reject a Private PKI code (GetProductIds only advertises SSL/TLS
+                        // product names). Check the code against the spec's Private PKI
+                        // productTypeID instead ("39" | Private PKI | Private PKI (8)).
+                        var matchedProduct = products.FirstOrDefault(p =>
+                            string.Equals(p.ProductCode, profileId, StringComparison.OrdinalIgnoreCase));
+
+                        if (matchedProduct == null)
+                        {
+                            var available = string.Join(", ", availableIds);
+                            _logger.LogWarning(
+                                "Product/profile validation failed — configured private-pki ProductCode '{ProfileId}' " +
+                                "was not found in the CERTInext V2 catalog. AvailableCount={AvailableCount}",
+                                profileId, availableIds.Count);
+                            throw new AnyCAValidationException(
+                                $"ProductCode '{profileId}' was not found in the CERTInext V2 catalog. " +
+                                $"Available codes: {available}");
+                        }
+
+                        if (!string.Equals(matchedProduct.ProductTypeId, Constants.ApiV2.PrivatePkiProductTypeId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogWarning(
+                                "Product/profile validation failed — configured ProductCode '{ProfileId}' exists in the " +
+                                "CERTInext V2 catalog, but its productTypeID ('{ActualTypeId}') is not the Private PKI " +
+                                "productTypeID ('{ExpectedTypeId}') while ProductFamily is 'private-pki'.",
+                                profileId, matchedProduct.ProductTypeId, Constants.ApiV2.PrivatePkiProductTypeId);
+                            throw new AnyCAValidationException(
+                                $"ProductCode '{profileId}' exists in the CERTInext catalog, but it is not a Private PKI " +
+                                "product, and the template's ProductFamily is 'private-pki'. Set ProductCode to a Private " +
+                                "PKI product code from your account's catalog, or correct ProductFamily.");
+                        }
+
+                        found = true;
+                    }
+                    else if (params_.HasExplicitProductCode)
+                    {
+                        // Explicit override: the code must exist in the catalog AND the matched
+                        // catalog entry's productTypeID must actually correspond to the selected
+                        // ProductId — not just "does this code exist as *some* product" (issue
+                        // 0036: a code can exist and still mean a different, wrong-assurance-level
+                        // product than the one the administrator selected).
+                        var matchedProduct = products.FirstOrDefault(p =>
+                            string.Equals(p.ProductCode, profileId, StringComparison.OrdinalIgnoreCase));
+
+                        if (matchedProduct == null)
+                        {
+                            var available = string.Join(", ", availableIds);
+                            _logger.LogWarning(
+                                "Product/profile validation failed — configured ProductCode '{ProfileId}' was not " +
+                                "found in the CERTInext V2 catalog. ProductID={ProductID}, AvailableCount={AvailableCount}",
+                                profileId, params_.ProductId, availableIds.Count);
+                            throw new AnyCAValidationException(
+                                $"ProductCode '{profileId}' was not found in the CERTInext V2 catalog. " +
+                                $"Available codes: {available}");
+                        }
+
+                        if (Constants.Products.ProductTypeIdsV2.TryGetValue(params_.ProductId ?? string.Empty, out string expectedTypeId)
+                            && !string.Equals(matchedProduct.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogWarning(
+                                "Product/profile validation failed — configured ProductCode '{ProfileId}' exists in " +
+                                "the CERTInext V2 catalog, but its catalog productTypeID ('{ActualTypeId}') does not " +
+                                "match the selected ProductID '{ProductID}' (expected productTypeID '{ExpectedTypeId}'). " +
+                                "This template would order a different product than the one selected.",
+                                profileId, matchedProduct.ProductTypeId, params_.ProductId, expectedTypeId);
+                            throw new AnyCAValidationException(
+                                $"ProductCode '{profileId}' exists in the CERTInext catalog, but it does not " +
+                                $"correspond to the selected product '{params_.ProductId}'. Verify the ProductCode " +
+                                "override is correct for this product, or remove the override to let the plugin " +
+                                "resolve it automatically from the catalog.");
+                        }
+
+                        found = true;
+                    }
+                    else
+                    {
+                        // No explicit override: resolve/validate by matching the live catalog's
+                        // productTypeID for the selected ProductId — do NOT fall back to
+                        // Constants.Products.DefaultProductCodes (V1-era numbering that does not
+                        // match the live V2 catalog, issue 0036).
+                        if (!Constants.Products.ProductTypeIdsV2.TryGetValue(params_.ProductId ?? string.Empty, out string expectedTypeId))
+                        {
+                            _logger.LogWarning(
+                                "Product/profile validation failed — no productTypeID mapping is defined for " +
+                                "ProductID '{ProductID}'.", params_.ProductId);
+                            throw new AnyCAValidationException(
+                                $"No V2 productTypeID mapping is defined for ProductID '{params_.ProductId}'. " +
+                                "Set the ProductCode template parameter explicitly, or contact support to add a " +
+                                "mapping for this product.");
+                        }
+
+                        // Mirrors EnrollV2Async's own ambiguity handling (so a template is
+                        // rejected/flagged at save time, not only discovered at enroll time):
+                        // the live catalog can carry MORE THAN ONE entry with this productTypeID
+                        // (sandbox-confirmed for type 13/DV SSL). Resolve automatically only when
+                        // exactly one match exists, or when the connector's DefaultProductCode
+                        // names one of several matches; otherwise reject with the candidates
+                        // listed.
+                        var matchingProducts = products
+                            .Where(p => string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
+                            .ToList();
+
+                        if (matchingProducts.Count == 0)
+                        {
+                            _logger.LogWarning(
+                                "Product/profile validation failed — no CERTInext V2 catalog entry has " +
+                                "productTypeID '{ExpectedTypeId}' for ProductID '{ProductID}'. AvailableCount={AvailableCount}",
+                                expectedTypeId, params_.ProductId, availableIds.Count);
+                            throw new AnyCAValidationException(
+                                $"Could not find a CERTInext V2 catalog entry for product '{params_.ProductId}' " +
+                                $"(expected productTypeID '{expectedTypeId}'). Verify the account is entitled to " +
+                                "this product.");
+                        }
+
+                        if (matchingProducts.Count > 1)
+                        {
+                            bool resolvedByDefault = matchingProducts.Any(p =>
+                                !string.IsNullOrWhiteSpace(tempConfig.DefaultProductCode) &&
+                                string.Equals(p.ProductCode, tempConfig.DefaultProductCode, StringComparison.OrdinalIgnoreCase));
+
+                            if (!resolvedByDefault)
+                            {
+                                string candidates = string.Join(", ",
+                                    matchingProducts.Select(p => $"{p.ProductCode} ('{p.ProductName}')"));
+                                _logger.LogWarning(
+                                    "Product/profile validation failed — multiple CERTInext V2 catalog entries " +
+                                    "share productTypeID '{ExpectedTypeId}' for ProductID '{ProductID}', and none " +
+                                    "match the configured DefaultProductCode ('{DefaultProductCode}'). " +
+                                    "Candidates=[{Candidates}]",
+                                    expectedTypeId, params_.ProductId,
+                                    string.IsNullOrWhiteSpace(tempConfig.DefaultProductCode) ? "(not set)" : tempConfig.DefaultProductCode,
+                                    candidates);
+                                throw new AnyCAValidationException(
+                                    $"Multiple CERTInext catalog products match ProductID '{params_.ProductId}' " +
+                                    $"(productTypeID '{expectedTypeId}'): {candidates}. Set the ProductCode " +
+                                    "template parameter explicitly, or set the CA connector's DefaultProductCode " +
+                                    "to one of these codes, to disambiguate.");
+                            }
+                        }
+
+                        found = true;
+                    }
+                }
+                else
+                {
+                    var profiles = await tempClient.GetProfilesAsync();
+                    availableIds = profiles.Select(p => p.Id).ToList();
+                    found = profiles.Any(p =>
+                        string.Equals(p.Id, profileId, StringComparison.OrdinalIgnoreCase));
+                }
 
                 if (!found)
                 {
-                    var available = string.Join(", ", profiles.Select(p => p.Id));
+                    var available = string.Join(", ", availableIds);
                     // SOC2 CC7.2: log profile probe misses at Warning to support anomaly detection.
                     _logger.LogWarning(
                         "Product/profile validation failed — ProfileId not found in CERTInext. " +
-                        "ProfileId={ProfileId}, AvailableCount={AvailableCount}",
-                        profileId, profiles.Count);
+                        "ProfileId={ProfileId}, AvailableCount={AvailableCount}, UseV2Api={UseV2Api}",
+                        profileId, availableIds.Count, useV2);
                     throw new AnyCAValidationException(
                         $"Profile '{profileId}' was not found in CERTInext. " +
                         $"Available profiles: {available}");
@@ -541,9 +885,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     tempConfig.OAuthClientSecret = string.Empty;
                     tempConfig.Password = string.Empty;
                 }
+                tempClient?.Dispose();
             }
 
-            _logger.LogInformation("Product/profile validation succeeded. ProfileId={ProfileId}", profileId);
+            _logger.LogInformation(
+                "Product/profile validation succeeded. ProfileId={ProfileId}, UseV2Api={UseV2Api}",
+                profileId, useV2);
             _logger.MethodExit(LogLevel.Debug);
         }
 
@@ -566,47 +913,73 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // SOX / SOC2 CC7.3: log the enrollment attempt with full identifying context
             // so the event is independently auditable before any API call is made.
-            string sanSummary = san != null && san.Count > 0
-                ? string.Join("; ", san.SelectMany(kvp => (kvp.Value ?? Array.Empty<string>())
-                    .Select(v => $"{kvp.Key}:{v}")))
-                : "(none)";
+            // Issue 0040 follow-up: email-type SAN values are personal data, masked unless
+            // LogSensitiveRequestData is on; DNS/IP/URI values stay verbatim as audit fields.
+            string sanSummary = LogSanitizer.FormatSans(san, _config.LogSensitiveRequestData);
 
-            _logger.LogInformation(
-                "Enrollment attempt started. " +
-                "EnrollmentType={EnrollmentType}, Subject={Subject}, " +
-                "ProfileId={ProfileId}, SANs={SANs}, " +
-                "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
-                enrollmentType, subject,
-                ep.ProfileId, sanSummary,
-                ep.RequesterName, ep.RequesterEmail);
+            // Issue 0040: RequesterName/RequesterEmail are personal data belonging to whoever
+            // placed the order. Off by default (LogSensitiveRequestData=false) — the name is
+            // dropped from the line entirely and the email is masked to keep only its domain.
+            // On, this is the pre-0040 behaviour: both fields logged in full, for deployment
+            // verification.
+            if (_config.LogSensitiveRequestData)
+            {
+                _logger.LogInformation(
+                    "Enrollment attempt started. " +
+                    "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
+                    "ProfileId={ProfileId}, SANs={SANs}, " +
+                    "RequesterName={RequesterName}, RequesterEmail={RequesterEmail}",
+                    enrollmentType, requestFormat, LogSanitizer.Strip(subject),
+                    ep.ProfileId, sanSummary,
+                    LogSanitizer.Strip(ep.RequesterName), LogSanitizer.Strip(ep.RequesterEmail));
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Enrollment attempt started. " +
+                    "EnrollmentType={EnrollmentType}, RequestFormat={RequestFormat}, Subject={Subject}, " +
+                    "ProfileId={ProfileId}, SANs={SANs}, " +
+                    "RequesterEmail={RequesterEmail}",
+                    enrollmentType, requestFormat, LogSanitizer.Strip(subject),
+                    ep.ProfileId, sanSummary,
+                    LogSanitizer.MaskEmail(LogSanitizer.Strip(ep.RequesterEmail)));
+            }
 
             if (string.IsNullOrWhiteSpace(ep.ProfileId))
             {
                 _logger.LogError(
                     "Enrollment rejected — ProfileId parameter is missing. Subject={Subject}, EnrollmentType={EnrollmentType}",
-                    subject, enrollmentType);
+                    LogSanitizer.Strip(subject), enrollmentType);
                 throw new Exception($"Template parameter '{Constants.EnrollmentParam.ProfileId}' is required.");
             }
 
             EnrollmentResult result;
 
-            switch (enrollmentType)
+            if (_config.UseV2Api)
             {
-                case EnrollmentType.New:
-                case EnrollmentType.Reissue:
-                    result = await EnrollNewAsync(csr, subject, san, ep);
-                    break;
+                // V2 path: all enrollment types go through EnrollV2Async
+                result = await EnrollV2Async(csr, subject, san, ep, enrollmentType);
+            }
+            else
+            {
+                switch (enrollmentType)
+                {
+                    case EnrollmentType.New:
+                    case EnrollmentType.Reissue:
+                        result = await EnrollNewAsync(csr, subject, san, ep);
+                        break;
 
-                case EnrollmentType.Renew:
-                case EnrollmentType.RenewOrReissue:
-                    result = await RenewOrReissueAsync(csr, subject, san, productInfo, ep);
-                    break;
+                    case EnrollmentType.Renew:
+                    case EnrollmentType.RenewOrReissue:
+                        result = await RenewOrReissueAsync(csr, subject, san, productInfo, ep);
+                        break;
 
-                default:
-                    _logger.LogError(
-                        "Enrollment rejected — unsupported enrollment type. EnrollmentType={EnrollmentType}, Subject={Subject}",
-                        enrollmentType, subject);
-                    throw new NotSupportedException($"Enrollment type '{enrollmentType}' is not supported.");
+                    default:
+                        _logger.LogError(
+                            "Enrollment rejected — unsupported enrollment type. EnrollmentType={EnrollmentType}, Subject={Subject}",
+                            enrollmentType, LogSanitizer.Strip(subject));
+                        throw new NotSupportedException($"Enrollment type '{enrollmentType}' is not supported.");
+                }
             }
 
             // SOX: the completion log must include the CA-assigned identifier, serial number,
@@ -617,7 +990,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "SerialNumber={SerialNumber}, Subject={Subject}, ProfileId={ProfileId}",
                 enrollmentType, result.CARequestID, result.Status,
                 result.Certificate != null ? ExtractSerialFromPem(result.Certificate) : "(pending)",
-                subject, ep.ProfileId);
+                LogSanitizer.Strip(subject), ep.ProfileId);
             _logger.MethodExit(LogLevel.Debug);
             return result;
         }
@@ -630,7 +1003,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public async Task<AnyCAPluginCertificate> GetSingleRecord(string caRequestID)
         {
             _logger.MethodEntry(LogLevel.Debug);
-            _logger.LogInformation("GetSingleRecord started. CARequestID={Id}", caRequestID);
+            _logger.LogInformation("GetSingleRecord started. CARequestID={Id}, UseV2Api={UseV2Api}", caRequestID, _config.UseV2Api);
+
+            if (_config.UseV2Api)
+                return await GetSingleRecordV2Async(caRequestID);
 
             try
             {
@@ -690,6 +1066,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             _logger.MethodEntry(LogLevel.Debug);
 
+            if (_config.UseV2Api)
+                return await RevokeV2Async(caRequestID, hexSerialNumber, revocationReason);
+
             string reasonString = StatusMapper.ToRevocationReason(revocationReason);
 
             // SOX: log the revocation attempt before any state change so the intent is
@@ -727,7 +1106,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogWarning(
                     "Revocation skipped — certificate is already revoked. " +
                     "CARequestID={Id}, HexSerialNumber={Serial}, Subject={Subject}",
-                    caRequestID, hexSerialNumber, current.Subject);
+                    caRequestID, hexSerialNumber, LogSanitizer.Strip(current.Subject));
                 return (int)EndEntityStatus.REVOKED;
             }
 
@@ -756,7 +1135,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "Revocation complete. " +
                 "CARequestID={Id}, HexSerialNumber={Serial}, Subject={Subject}, " +
                 "ReasonCode={ReasonCode}, ReasonString={ReasonString}",
-                caRequestID, hexSerialNumber, current.Subject,
+                caRequestID, hexSerialNumber, LogSanitizer.Strip(current.Subject),
                 revocationReason, reasonString);
             _logger.MethodExit(LogLevel.Debug);
             return (int)EndEntityStatus.REVOKED;
@@ -775,11 +1154,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             _logger.MethodEntry(LogLevel.Debug);
 
+            if (_config.UseV2Api)
+            {
+                // V2 mode routes Synchronize through V2 /reports/orders (issues/0022) — the V1
+                // GetOrderReport path below is never used, and V1 credentials are optional.
+                await SynchronizeV2Async(blockingBuffer, lastSync, fullSync, cancelToken);
+                _logger.MethodExit(LogLevel.Debug);
+                return;
+            }
+
             DateTime? issuedAfter = fullSync ? (DateTime?)null : lastSync;
 
             _logger.LogInformation(
-                "Starting CERTInext synchronization. FullSync={FullSync}, IssuedAfter={IssuedAfter}",
-                fullSync, issuedAfter?.ToString("O") ?? "none");
+                "Starting CERTInext synchronization. FullSync={FullSync}, IssuedAfter={IssuedAfter}, UseV2Api={UseV2Api}",
+                fullSync, issuedAfter?.ToString("O") ?? "none", _config.UseV2Api);
 
             int synced = 0;
             int skipped = 0;
@@ -937,7 +1325,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 status = StatusMapper.ToRequestDisposition(current.Status);
                                 _logger.LogDebug(
                                     "Sync: refetched order Id={Id} — status={Status}, certBytes={Bytes}, subject={Subject}.",
-                                    current.Id, status, current.Certificate?.Length ?? 0, current.Subject);
+                                    current.Id, status, current.Certificate?.Length ?? 0,
+                                    LogSanitizer.Strip(current.Subject));
                             }
                             catch (Exception fetchEx)
                             {
@@ -970,7 +1359,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         }
                         _logger.LogDebug(
                             "Sync emit: CARequestID={Id}, Status={Status}, CertBytes={CertBytes}, Subject={Subject}",
-                            record.CARequestID, record.Status, record.Certificate?.Length ?? 0, current.Subject);
+                            record.CARequestID, record.Status, record.Certificate?.Length ?? 0,
+                            LogSanitizer.Strip(current.Subject));
 
                         blockingBuffer.Add(record, cancelToken);
                         synced++;
@@ -1079,6 +1469,2055 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             return DcvSyncDecision.Attempt;
         }
 
+        // ---------------------------------------------------------------------------
+        // V2 API private helpers — only called when _config.UseV2Api is true
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Composes a single E.164-style phone value from separate ISD-code + mobile-number
+        /// config fields, for V2 request shapes that carry one <c>phone</c> field (e.g.
+        /// <see cref="V2TechnicalPointOfContact"/>) rather than V1's separate
+        /// <c>IsdCode</c>/<c>MobileNumber</c> pair. Returns an empty string when
+        /// <paramref name="mobileNumber"/> is blank (nothing to compose); returns the bare
+        /// mobile number when <paramref name="isdCode"/> is blank (never invents a code).
+        /// Internal + static for direct unit testing (no live precedent existed for this exact
+        /// composition to mirror — see issues/0030-v2-technical-contact-not-sent.md).
+        /// </summary>
+        internal static string ComposeV2Phone(string isdCode, string mobileNumber)
+        {
+            if (string.IsNullOrWhiteSpace(mobileNumber))
+                return string.Empty;
+            if (string.IsNullOrWhiteSpace(isdCode))
+                return mobileNumber.Trim();
+
+            return "+" + isdCode.Trim().TrimStart('+') + mobileNumber.Trim();
+        }
+
+        /// <summary>
+        /// Issue 0033: validates the template parameters a V2 <c>private-pki</c> order needs
+        /// beyond the SSL ones, before any CA call. Shared by <see cref="EnrollV2Async"/> (fail
+        /// fast with a FAILED result) and <see cref="ValidateProductInfo"/> (reject at template
+        /// save time). Returns <c>null</c> when valid, else an actionable message naming the field.
+        ///
+        /// - <c>ProductVariant</c> must be one of the spec's create-body <c>variant</c> values
+        ///   (<see cref="Constants.ApiV2.PrivatePkiVariants"/>). Its SSL-only "dv" default is
+        ///   rejected rather than silently mapped to a Private PKI variant.
+        /// - <c>ProductCode</c> must be set explicitly. <see cref="GetProductIds"/> only advertises
+        ///   SSL/TLS product names, so <see cref="Constants.Products.ProductTypeIdsV2"/> would
+        ///   resolve an SSL product code for a private-pki template; and per the spec's Product
+        ///   Codes reference, "Private PKI codes vary per customer catalog".
+        /// </summary>
+        internal static string ValidatePrivatePkiEnrollmentParams(EnrollmentParams ep, out string normalizedVariant)
+        {
+            normalizedVariant = null;
+
+            string variant = ep.ProductVariant?.Trim();
+            if (string.IsNullOrEmpty(variant) || !Constants.ApiV2.PrivatePkiVariants.Contains(variant))
+            {
+                string configured = ep.HasExplicitProductVariant ? $"'{variant}'" : "not set (defaults to the SSL-only 'dv')";
+                return $"ProductFamily 'private-pki' requires the '{Constants.EnrollmentParam.ProductVariant}' " +
+                       $"template parameter to be one of: {Constants.ApiV2.PrivatePkiVariantIntranetSsl}, " +
+                       $"{Constants.ApiV2.PrivatePkiVariantIgtfHost}. Current value: {configured}.";
+            }
+
+            if (!ep.HasExplicitProductCode)
+            {
+                return $"ProductFamily 'private-pki' requires the '{Constants.EnrollmentParam.ProductCode}' " +
+                       "template parameter to be set explicitly to your account's Private PKI catalog product " +
+                       "code (Private PKI codes vary per customer catalog and cannot be resolved from the " +
+                       "selected SSL/TLS product name).";
+            }
+
+            normalizedVariant = variant.ToLowerInvariant();
+            return null;
+        }
+
+        /// <summary>
+        /// Issue 0059: resolves the SSL family's <c>productVariant</c> value to send, and
+        /// validates an explicit template override against the product it's paired with.
+        /// Previously, <see cref="EnrollmentParams.ProductVariant"/> defaulted to "dv" independent
+        /// of <see cref="EnrollmentParams.ProductId"/>, so an OV/EV product with no explicit
+        /// ProductVariant sent <c>productVariant:"dv"</c> — which skips the mandatory OV/EV
+        /// <c>organization</c> block (see <c>isOvOrEv</c> in <see cref="EnrollV2Async"/> and issue
+        /// 0028) — silently ordering a DV-shaped body for an OV/EV product.
+        ///
+        /// Derivation source: <see cref="Constants.Products.ProductVariantsV2"/>, keyed by
+        /// ProductId (the same productTypeID assurance-level grouping
+        /// <see cref="Constants.Products.ProductTypeIdsV2"/> documents). SSL-only — callers must
+        /// not invoke this for private-pki (see <see cref="ValidatePrivatePkiEnrollmentParams"/>)
+        /// or signature (not yet supported for enrollment) families.
+        ///
+        /// Returns <c>null</c> and sets <paramref name="resolvedVariant"/> when valid: either the
+        /// template's explicit value (when it agrees with the derived variant, or no mapping
+        /// exists for this ProductId — current pre-0059 behavior is kept rather than guessing), or
+        /// the value derived from ProductId when no explicit override is configured. Returns an
+        /// actionable error message (<paramref name="resolvedVariant"/> = <c>null</c>) when an
+        /// explicit override contradicts the product's derived variant.
+        /// </summary>
+        internal static string ResolveSslProductVariant(EnrollmentParams ep, out string resolvedVariant)
+        {
+            bool hasMapping = Constants.Products.ProductVariantsV2.TryGetValue(
+                ep.ProductId ?? string.Empty, out string derivedVariant);
+
+            if (!ep.HasExplicitProductVariant)
+            {
+                // No override configured — derive from the product when we have an authoritative
+                // mapping; otherwise fall back to the current (pre-0059) default rather than
+                // inventing a mapping for a product this table doesn't cover.
+                resolvedVariant = hasMapping ? derivedVariant : ep.ProductVariant;
+                return null;
+            }
+
+            string explicitVariant = ep.ProductVariant.Trim();
+            if (hasMapping && !string.Equals(explicitVariant, derivedVariant, StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedVariant = null;
+                return $"Template parameter '{Constants.EnrollmentParam.ProductVariant}' is set to " +
+                       $"'{explicitVariant}', but the selected product '{ep.ProductId}' is " +
+                       $"'{derivedVariant}'. Set '{Constants.EnrollmentParam.ProductVariant}' to " +
+                       $"'{derivedVariant}' (or remove the override to let the plugin derive it " +
+                       $"automatically from the product), or select a product whose assurance " +
+                       $"level matches '{explicitVariant}'.";
+            }
+
+            resolvedVariant = explicitVariant.ToLowerInvariant();
+            return null;
+        }
+
+        /// <summary>
+        /// Dispatches all enrollment types through the V2 REST API.
+        /// </summary>
+        private async Task<EnrollmentResult> EnrollV2Async(
+            string csr,
+            string subject,
+            Dictionary<string, string[]> san,
+            EnrollmentParams ep,
+            EnrollmentType enrollmentType)
+        {
+            _logger.MethodEntry(LogLevel.Debug);
+            _logger.LogInformation(
+                "EnrollV2Async started. EnrollmentType={EnrollmentType}, ProductFamily={Family}, ProductVariant={Variant}, " +
+                "ProductId={ProductId}, HasExplicitProductCode={HasExplicit}, ConfiguredProductCode={Code}",
+                enrollmentType, ep.ProductFamilySlug, ep.ProductVariant, ep.ProductId, ep.HasExplicitProductCode,
+                ep.HasExplicitProductCode ? ep.ProductCode : "(resolved from catalog)");
+
+            // Issue 0033: the create-order body is family-specific. Previously every family got
+            // the SSL body (productVariant/certificate/agreement...), which is not the Private PKI
+            // or Document Signer shape at all. ssl (and any unrecognized ProductFamily, which
+            // ProductFamilySlug already maps to ssl) keeps the exact pre-0033 flow below.
+            bool isPrivatePki = string.Equals(ep.ProductFamilySlug, Constants.ApiV2.FamilyPrivatePki, StringComparison.Ordinal);
+
+            // Document Signer (signature): the body DTO exists (V2CreateSignatureOrderRequest),
+            // but its mandatory subjectType / subject.email and the per-subject-type subject
+            // name/organization fields have no settled source in the Command enrollment inputs
+            // yet — an open design decision on issue 0033. Fail fast with a clear message, before
+            // any CA call, rather than guessing those values or sending the wrong-family SSL body
+            // (which the CA rejects anyway: subjectType and subject.email are "400 if missing").
+            if (string.Equals(ep.ProductFamilySlug, Constants.ApiV2.FamilySignature, StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "EnrollV2Async rejected a ProductFamily=signature (Document Signer) order — V2 Document " +
+                    "Signer enrollment is not yet supported by this plugin version. EnrollmentType={EnrollmentType}, " +
+                    "ProductId={ProductId}",
+                    enrollmentType, ep.ProductId);
+                _logger.MethodExit(LogLevel.Debug);
+                return new EnrollmentResult
+                {
+                    CARequestID   = string.Empty,
+                    Certificate   = null,
+                    Status        = (int)EndEntityStatus.FAILED,
+                    StatusMessage = "V2 enrollment rejected: ProductFamily 'signature' (Document Signer) is not yet " +
+                                    "supported for enrollment by this plugin version. A Document Signer order needs " +
+                                    "signer-subject details (subjectType, subject email, and per-subject-type name or " +
+                                    "organization fields) that the plugin does not yet take from the enrollment request. " +
+                                    "No order was placed."
+                };
+            }
+
+            string privatePkiVariant = null;
+            if (isPrivatePki)
+            {
+                string pkiConfigError = ValidatePrivatePkiEnrollmentParams(ep, out privatePkiVariant);
+                if (pkiConfigError != null)
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async rejected a private-pki order before any CA call: {Reason}", pkiConfigError);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = "V2 enrollment rejected: " + pkiConfigError
+                    };
+                }
+            }
+
+            // Issue 0059: the SSL family's productVariant must reflect the actual product ordered
+            // — not the template's independent (and possibly wrong/stale) ProductVariant value.
+            // Resolve/validate before any CA call, same fail-fast placement as the private-pki
+            // check above. Private PKI (checked above) doesn't use this — its variant enum is
+            // unrelated (intranet-ssl/igtf-host).
+            string sslProductVariant = ep.ProductVariant;
+            if (!isPrivatePki)
+            {
+                string variantError = ResolveSslProductVariant(ep, out sslProductVariant);
+                if (variantError != null)
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async rejected an SSL order before any CA call: {Reason}", variantError);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = "V2 enrollment rejected: " + variantError
+                    };
+                }
+            }
+
+            // Issue 0039: the SSL create body always carries an `agreement` block, and the V2 spec
+            // marks agreement.signerPlace "Conditional - required if `agreement` sent". Resolved
+            // per-template SignerPlace -> connector SignerPlace (which ValidateCAConnectionInfo
+            // already requires); fail fast here too, before any CA call, in case the connector was
+            // saved before that check existed. Private PKI sends no agreement, so it is exempt.
+            string signerPlace = string.IsNullOrWhiteSpace(ep.SignerPlace) ? _config.SignerPlace : ep.SignerPlace;
+            if (!isPrivatePki && string.IsNullOrWhiteSpace(signerPlace))
+            {
+                _logger.LogWarning(
+                    "EnrollV2Async rejected an SSL order before any CA call — no SignerPlace is configured " +
+                    "(neither the template's SignerPlace enrollment parameter nor the CA connector's SignerPlace), " +
+                    "but the V2 Subscriber Agreement requires it. EnrollmentType={EnrollmentType}, ProductId={ProductId}",
+                    enrollmentType, ep.ProductId);
+                _logger.MethodExit(LogLevel.Debug);
+                return new EnrollmentResult
+                {
+                    CARequestID   = string.Empty,
+                    Certificate   = null,
+                    Status        = (int)EndEntityStatus.FAILED,
+                    StatusMessage = "V2 enrollment rejected: the CERTInext V2 Subscriber Agreement requires a signer " +
+                                    "place, but SignerPlace is blank on both the CA connector and the template. Set " +
+                                    "SignerPlace on the CA connector (or the template's SignerPlace enrollment " +
+                                    "parameter) and retry. No order was placed."
+                };
+            }
+
+            // Derive the primary domain from subject CN (for private-pki this is the order's
+            // `hostname` — spec: "hostname - primary CN" — sourced the same way).
+            string domain = ep.DomainName;
+            if (string.IsNullOrWhiteSpace(domain))
+                domain = ExtractCnFromSubject(subject);
+            if (string.IsNullOrWhiteSpace(domain))
+                throw new Exception(isPrivatePki
+                    ? "Cannot determine the primary hostname for V2 private-pki order — set the DomainName enrollment parameter or ensure the CSR subject has a CN."
+                    : "Cannot determine primary domain for V2 order — set the DomainName enrollment parameter or ensure the CSR subject has a CN.");
+
+            // organization is "Conditional — Mandatory for OV / EV" per the V2 spec's SSL field
+            // table; every OV/EV create example in the spec sends it, and it is omitted entirely
+            // for DV. CERTInext hard-rejects an OV/EV order with no organization block (HTTP 422
+            // EMS-1180 "Organization Name cannot be empty" — confirmed live), so fail fast with a
+            // clear message here — before any catalog/order-placement call — rather than
+            // sending an incomplete block and letting the CA surface that opaque error. See
+            // issues/0028-v2-organizationnumber-not-sent.md.
+            // SSL-only: Private PKI "has no DCV, no organization block, and no Subscriber
+            // Agreement" per the spec (issue 0033), and its ProductVariant is intranet-ssl/igtf-host.
+            bool isOvOrEv = !isPrivatePki
+                         && (string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantOv, StringComparison.OrdinalIgnoreCase)
+                          || string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase));
+
+            V2OrganizationParams organization = null;
+            if (isOvOrEv)
+            {
+                if (string.IsNullOrWhiteSpace(_config.OrganizationNumber))
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async rejected a '{Variant}' order for domain '{Domain}' — the CA " +
+                        "connector's OrganizationNumber is not configured, but an organization block is " +
+                        "mandatory for OV/EV orders under the V2 API.",
+                        sslProductVariant, LogSanitizer.Strip(domain));
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: product variant '{sslProductVariant}' requires " +
+                                        "a pre-vetted organization, but the CA connector's OrganizationNumber " +
+                                        "setting is empty. Set OrganizationNumber on the CA connector before " +
+                                        "enrolling OV/EV certificates via the V2 API."
+                    };
+                }
+
+                organization = new V2OrganizationParams
+                {
+                    OrganizationNumber = _config.OrganizationNumber,
+                    PreVetted          = true
+                };
+            }
+
+            // SubscriptionAutoRenew / SubscriptionRenewCriteriaDays — CA connector config that
+            // feeds the Subscription block below. AutoRenew uses the same bare "1"-means-true
+            // comparison AutoSecureWww already uses elsewhere in this method. RenewBeforeDays is
+            // validated up front — before any CA call — so a bad value fails the enrollment with
+            // a clear message rather than surfacing as an opaque CA-side error later, matching the
+            // fail-fast convention the OrganizationNumber check above already established. Blank/
+            // unset stays null (omitted on the wire; the client's global WhenWritingNull option
+            // means the CA falls back to its documented default of 30). See issue 0027 item 2a/2b.
+            bool subscriptionAutoRenew = _config.SubscriptionAutoRenew == "1";
+            int? subscriptionRenewBeforeDays = null;
+            if (!string.IsNullOrWhiteSpace(_config.SubscriptionRenewCriteriaDays))
+            {
+                if (!int.TryParse(_config.SubscriptionRenewCriteriaDays, out int parsedRenewDays) || parsedRenewDays < 0)
+                {
+                    _logger.LogError(
+                        "EnrollV2Async rejected an order — the CA connector's SubscriptionRenewCriteriaDays " +
+                        "value ('{Value}') is not a valid non-negative integer.",
+                        _config.SubscriptionRenewCriteriaDays);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: the CA connector's SubscriptionRenewCriteriaDays " +
+                                        $"setting ('{_config.SubscriptionRenewCriteriaDays}') must be a non-negative " +
+                                        "integer (or blank to use the CA's default of 30). Fix the CA connector " +
+                                        "configuration and retry."
+                    };
+                }
+
+                subscriptionRenewBeforeDays = parsedRenewDays;
+            }
+
+            // EmailNotifications — issue 0027 item 1a: previously hardcoded "all" on every V2
+            // order, ignoring the connector's EmailNotifications config entirely. The connector
+            // field uses V1's "0"/"1" vocabulary and defaults to "0". A real-inbox probe
+            // (2026-09-28, see issue 0027) confirmed V2 honors "0" by suppressing the
+            // order-creation emails — it does not silently coerce back to "all" — so the mapping
+            // below is user-decided, not a guess: "1" -> "all" (full notification set), "0" ->
+            // "0" (silent, matching V1's own wire vocabulary), blank/unset -> null (omitted; the
+            // client's global WhenWritingNull option drops the key and the CA falls back to its
+            // documented default of "all", NOT silent — this is the one place V1 and V2 defaults
+            // diverge for a blank config value, since V1's own fallback always sends "0"). Any
+            // other value fails fast, before any CA call, mirroring the
+            // SubscriptionRenewCriteriaDays check above.
+            string emailNotifications;
+            string configEmailNotifications = _config.EmailNotifications?.Trim();
+            if (string.IsNullOrEmpty(configEmailNotifications))
+            {
+                emailNotifications = null;
+            }
+            else if (configEmailNotifications == "1")
+            {
+                emailNotifications = "all";
+            }
+            else if (configEmailNotifications == "0")
+            {
+                emailNotifications = "0";
+            }
+            else
+            {
+                _logger.LogError(
+                    "EnrollV2Async rejected an order — the CA connector's EmailNotifications value " +
+                    "('{Value}') is not one of the supported values.",
+                    _config.EmailNotifications);
+                _logger.MethodExit(LogLevel.Debug);
+                return new EnrollmentResult
+                {
+                    CARequestID   = string.Empty,
+                    Certificate   = null,
+                    Status        = (int)EndEntityStatus.FAILED,
+                    StatusMessage = $"V2 enrollment rejected: the CA connector's EmailNotifications " +
+                                    $"setting ('{_config.EmailNotifications}') must be \"0\", \"1\", or " +
+                                    "blank. Fix the CA connector configuration and retry."
+                };
+            }
+
+            // Resolve the real V2 product code (and UCC-ness) from the live Catalog response.
+            // Fetched once here and reused for both purposes — no second catalog call.
+            //
+            // Explicit override (ProductCode/ProfileId set on the template): trust the
+            // administrator's value as-is; the catalog is only consulted for UCC detection, and a
+            // catalog lookup failure there must not block enrollment — fall back to non-UCC
+            // (single-domain) behavior, the strictly-safer failure mode: the CSR-SAN-count guard
+            // below still runs against that non-UCC assumption, so a surplus-SAN CSR is rejected
+            // rather than silently accepted. See issues/f3-v2-multi-san-limitation.md and
+            // issues/0047-v2-multi-san-guard-blocks-ucc-orders.md.
+            //
+            // No explicit override: the code must NOT fall back to
+            // Constants.Products.DefaultProductCodes (V1-era numbering that does not match the
+            // live V2 catalog — issue 0036, e.g. its "842" is OV SSL but the live V2 catalog's
+            // "842" is DV SSL). Instead resolve the live product code by matching the catalog
+            // entry whose productTypeID equals the stable numeric type ID for ep.ProductId
+            // (Constants.Products.ProductTypeIdsV2) — productTypeID is a small CERTInext-documented
+            // enum, unlike productCode (wrong table) or productName (spelling varies by
+            // account/catalog version — see issue 0036 triage). Here, a catalog failure or an
+            // unresolvable mapping MUST fail the enrollment loudly: there is no safe fallback code
+            // to send on the wire.
+            //
+            // Private PKI (issue 0033): the explicit ProductCode is required (validated above) and
+            // trusted as-is, exactly like the SSL explicit-override case; the catalog is not
+            // fetched at all because its only use on that path — SSL UCC detection — does not
+            // apply (ValidateProductInfo checks the code's productTypeID at template save time).
+            string productCode;
+            bool isUccProduct = false;
+            bool isWildcardProduct = false;
+            List<ProductDetail> catalog = null;
+            if (!isPrivatePki)
+            {
+                try
+                {
+                    catalog = await _client.GetProductDetailsV2Async();
+                }
+                catch (Exception catalogEx)
+                {
+                    _logger.LogWarning(catalogEx,
+                        "EnrollV2Async: could not fetch the live V2 product catalog. ProductId={ProductId}, " +
+                        "HasExplicitProductCode={HasExplicit}", ep.ProductId, ep.HasExplicitProductCode);
+                }
+            }
+
+            if (isPrivatePki)
+            {
+                productCode = ep.ProductCode;
+            }
+            else if (ep.HasExplicitProductCode)
+            {
+                productCode = ep.ProductCode;
+
+                var matchedProduct = catalog?.FirstOrDefault(p =>
+                    string.Equals(p.ProductCode, productCode, StringComparison.OrdinalIgnoreCase));
+                isUccProduct = matchedProduct != null
+                    && !string.IsNullOrWhiteSpace(matchedProduct.ProductTypeId)
+                    && Constants.ApiV2.UccProductTypeIds.Contains(matchedProduct.ProductTypeId);
+                isWildcardProduct = matchedProduct != null
+                    && !string.IsNullOrWhiteSpace(matchedProduct.ProductTypeId)
+                    && Constants.ApiV2.WildcardProductTypeIds.Contains(matchedProduct.ProductTypeId);
+            }
+            else
+            {
+                if (!Constants.Products.ProductTypeIdsV2.TryGetValue(ep.ProductId ?? string.Empty, out string expectedTypeId))
+                {
+                    _logger.LogError(
+                        "EnrollV2Async rejected an order for ProductId={ProductId} — no productTypeID mapping " +
+                        "is defined for this product name, and no explicit ProductCode override is configured.",
+                        ep.ProductId);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: no productTypeID mapping is defined for " +
+                                        $"ProductID '{ep.ProductId}'. Set the ProductCode template parameter " +
+                                        "explicitly, or contact support to add a mapping for this product."
+                    };
+                }
+
+                // Sandbox-confirmed: the live catalog can carry MORE THAN ONE entry with the
+                // same productTypeID (e.g. two type-13 DV SSL entries, "917 SSL DV 1 month"
+                // and "842 DV SSL Certificate") — picking the catalog's first-listed match
+                // (the old behavior) is not safe: on sandbox it silently ordered "917", which
+                // PUT /csr then rejected 422 "PFX based certificate orders are not allowed",
+                // failing every ProductId-only DV SSL enrollment. When more than one catalog
+                // entry shares the expected productTypeID, only resolve automatically if the
+                // connector's DefaultProductCode names one of them; otherwise reject with a
+                // clear message listing the candidates rather than guessing.
+                var matchingProducts = (catalog ?? new List<ProductDetail>())
+                    .Where(p => string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                ProductDetail matchedProduct = null;
+                if (matchingProducts.Count == 1)
+                {
+                    matchedProduct = matchingProducts[0];
+                }
+                else if (matchingProducts.Count > 1)
+                {
+                    matchedProduct = matchingProducts.FirstOrDefault(p =>
+                        !string.IsNullOrWhiteSpace(_config.DefaultProductCode) &&
+                        string.Equals(p.ProductCode, _config.DefaultProductCode, StringComparison.OrdinalIgnoreCase));
+
+                    if (matchedProduct == null)
+                    {
+                        string candidates = string.Join(", ",
+                            matchingProducts.Select(p => $"{p.ProductCode} ('{p.ProductName}')"));
+                        _logger.LogWarning(
+                            "EnrollV2Async rejected an order — multiple CERTInext V2 catalog entries share " +
+                            "productTypeID '{ExpectedTypeId}' for ProductId={ProductId}, and none match the " +
+                            "configured DefaultProductCode ('{DefaultProductCode}'). Candidates=[{Candidates}]",
+                            expectedTypeId, ep.ProductId,
+                            string.IsNullOrWhiteSpace(_config.DefaultProductCode) ? "(not set)" : _config.DefaultProductCode,
+                            candidates);
+                        _logger.MethodExit(LogLevel.Debug);
+                        return new EnrollmentResult
+                        {
+                            CARequestID   = string.Empty,
+                            Certificate   = null,
+                            Status        = (int)EndEntityStatus.FAILED,
+                            StatusMessage = $"V2 enrollment rejected: multiple CERTInext catalog products match " +
+                                            $"ProductID '{ep.ProductId}' (productTypeID '{expectedTypeId}'): " +
+                                            $"{candidates}. Set the ProductCode template parameter explicitly, " +
+                                            "or set the CA connector's DefaultProductCode to one of these codes, " +
+                                            "to disambiguate."
+                        };
+                    }
+                }
+
+                if (matchedProduct == null || string.IsNullOrWhiteSpace(matchedProduct.ProductCode))
+                {
+                    _logger.LogError(
+                        "EnrollV2Async: could not resolve a live V2 product code for ProductId={ProductId} " +
+                        "(expected catalog productTypeID='{ExpectedTypeId}'). CatalogFetchSucceeded={CatalogOk}",
+                        ep.ProductId, expectedTypeId, catalog != null);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: could not resolve a live product code for " +
+                                        $"ProductID '{ep.ProductId}' from the CERTInext catalog (expected " +
+                                        $"productTypeID '{expectedTypeId}'). Verify the account is entitled to " +
+                                        "this product, or set the ProductCode template parameter explicitly."
+                    };
+                }
+
+                productCode = matchedProduct.ProductCode;
+                isUccProduct = Constants.ApiV2.UccProductTypeIds.Contains(expectedTypeId);
+                isWildcardProduct = Constants.ApiV2.WildcardProductTypeIds.Contains(expectedTypeId);
+
+                _logger.LogInformation(
+                    "EnrollV2Async: resolved V2 product code from live catalog. ProductId={ProductId}, " +
+                    "ProductTypeId={ProductTypeId}, ResolvedProductCode={ProductCode}",
+                    ep.ProductId, expectedTypeId, productCode);
+            }
+
+            // Non-UCC V2 products support only a single domain plus autoSecureWww's www.<domain>
+            // variant; any other DNS SAN — from the CSR OR Command's SAN dictionary — would be
+            // silently dropped (issue 0061) or cause a CA-side rejection, so fail fast with a
+            // clear message rather than letting the CA return an opaque error, or the extra
+            // names vanish with no order-side signal at all. UCC (multi-domain) products are
+            // exempt — their extra SANs are the expected input and are carried into
+            // additionalDomains below instead. This check necessarily runs after UCC detection
+            // above (which needs the live catalog lookup to know isUccProduct), not before it,
+            // but it still runs before PlaceOrderV2Async, so a rejected non-UCC request never
+            // places a CA order. See issues/f3-v2-multi-san-limitation.md,
+            // issues/0047-v2-multi-san-guard-blocks-ucc-orders.md and
+            // issues/0061-v2-san-dictionary-extras-silently-dropped.md.
+            //
+            // Issue 0061: looking at the CSR alone missed the case where Command's SAN
+            // dictionary carries the extras and the CSR itself carries only the primary domain —
+            // a non-UCC order never sends additionalDomains at all, so those dictionary-only
+            // extras had nowhere to go and were dropped with no warning.
+            //
+            // This guard deliberately takes the UNION of the CSR's own SANs and the SAN
+            // dictionary — NOT CollectRequestedSanEntries'/BuildSanList's "fallback, not union"
+            // rule (dictionary wins when non-null; CSR consulted only when the dictionary is
+            // null). That rule exists to decide what additionalDomains/additionalHosts actually
+            // send to the CA, where the CSR's own subjectAltName extension is otherwise ignored.
+            // Here it is wrong: SubmitCsrV2Async submits the CSR to CERTInext verbatim regardless
+            // of what the SAN dictionary contains, so a CSR-embedded extra domain still reaches
+            // the CA even when Command also supplied a (single-domain) SAN dictionary. Deferring
+            // to the dictionary alone whenever it is non-null would let that CSR-embedded extra
+            // slip past this guard unrejected — a regression of the pre-0061 CSR-extras reject
+            // (issues/f3-v2-multi-san-limitation.md, issues/0047-v2-multi-san-guard-blocks-ucc-orders.md)
+            // for any enrollment that also happens to pass a SAN dictionary.
+            //
+            // SSL-only (issue 0033): a private-pki order carries its SANs in additionalHosts,
+            // which the spec defines as a multi-entry "SAN list (DNS names or IPv4 / IPv6)" for
+            // every Private PKI variant, so the single-domain restriction does not apply.
+            //
+            // Wildcard apex exemption: a non-UCC wildcard product's `domain` is the literal
+            // wildcard value (e.g. "*.example.com"), and a wildcard CSR/SAN dictionary
+            // routinely also carries the bare apex ("example.com") alongside it — rejecting
+            // that apex as an "extra SAN" would make every ordinary wildcard CSR unenrollable
+            // via this guard. Exempt exactly the apex (the wildcard domain with its leading
+            // "*." stripped) for wildcard products (productTypeID 14/17,
+            // Constants.ApiV2.WildcardProductTypeIds) — any other extra SAN is still rejected.
+            // NOTE (unverified): this only widens what the guard *accepts*; it does not change
+            // what is sent to the CA for the apex — additionalDomains is still not populated
+            // for non-UCC products below, exactly as before this fix. Whether CERTInext's V2
+            // order create needs the apex added to additionalDomains (or handles it
+            // automatically for a wildcard product) has not been confirmed live and is left
+            // to the principal to verify.
+            if (!isPrivatePki && !isUccProduct)
+            {
+                string wildcardApexDomain = isWildcardProduct && domain != null
+                    && domain.StartsWith("*.", StringComparison.Ordinal)
+                    ? StripWildcardPrefix(domain)
+                    : null;
+
+                var csrSanEntries = ExtractSanEntriesFromCsr(csr, out _);
+                // CollectRequestedSanEntries(san, csr: null, ...) yields exactly the SAN
+                // dictionary's own (MapSanType-normalized) entries: when san is non-null the
+                // CSR-fallback branch never runs, and when san is null there is nothing to
+                // collect (csr: null makes the fallback branch's own CSR read a no-op) — the
+                // real CSR is already covered by csrSanEntries above, so no double-count.
+                var dictSanEntries = CollectRequestedSanEntries(san, csr: null, out _, out _);
+                var extraSans = csrSanEntries
+                    .Concat(dictSanEntries)
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .Select(s => s.Value?.ToLowerInvariant())
+                    .Where(v => !string.IsNullOrWhiteSpace(v))
+                    .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
+                    .Where(v => !string.Equals(v, "www." + domain, StringComparison.OrdinalIgnoreCase))
+                    .Where(v => wildcardApexDomain == null || !string.Equals(v, wildcardApexDomain, StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (extraSans.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async rejected multi-SAN order on domain '{Domain}'. " +
+                        "This product does not support additional domains via the V2 API " +
+                        "(autoSecureWww covers www.); only UCC (multi-domain) products may carry " +
+                        "extra SANs, whether requested via the CSR or Command's SAN dictionary. " +
+                        "ExtraSans=[{ExtraSans}]",
+                        LogSanitizer.Strip(domain),
+                        LogSanitizer.Strip(string.Join(", ", extraSans)));
+                    _logger.MethodExit(LogLevel.Debug);
+                    // Wildcard products get their own wording: unlike a plain single-domain
+                    // product, a wildcard product cannot be made to accept extra SANs by
+                    // switching to a UCC product on this same domain, so the rejection must not
+                    // suggest that.
+                    string statusMessage = isWildcardProduct
+                        ? $"V2 enrollment rejected: {extraSans.Count} SAN(s) beyond the primary wildcard " +
+                          $"domain ('{domain}') and its www. variant were requested (via the CSR and/or " +
+                          "Command's SAN dictionary). Only the primary wildcard domain and its bare apex " +
+                          "are supported via the V2 API for this product. Resubmit with a CSR/SAN set " +
+                          "carrying only those, and no other SANs."
+                        : $"V2 enrollment rejected: {extraSans.Count} SAN(s) beyond the primary domain " +
+                          $"('{domain}') and its www. variant were requested (via the CSR and/or Command's " +
+                          "SAN dictionary). This product only supports a single domain via the V2 API " +
+                          "(UCC/multi-domain products are the exception). Resubmit with a single-domain " +
+                          "CSR and no additional SANs, or enroll against a UCC product if additional " +
+                          "domains are required.";
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = statusMessage
+                    };
+                }
+            }
+
+            // For UCC products, additionalDomains is populated from the same SAN source the V1
+            // path uses for BuildAdditionalDomains (CERTInextClient.cs) — the gateway-supplied SAN
+            // dictionary, falling back to CSR SANs only when Command supplied no SAN dictionary at
+            // all (BuildSanList's own fallback rule). additionalDomains is a domain-name-only field
+            // per the V2 spec, so non-DNS SAN types are excluded (and logged) rather than submitted.
+            // BuildSanList runs in DNS-only mode here (issue 0046): V1's SubmitNonDnsSans switch
+            // and its "submitted rather than dropped" wording do not apply to this field, so the
+            // exclusion is logged below instead — SAN types only, since a value (e.g. an email
+            // address) may be personal data.
+            List<string> additionalDomains = null;
+            if (isUccProduct)
+            {
+                var resolvedSans = BuildSanList(san, csr, subject, dnsOnly: true, out var nonDnsSans);
+                if (nonDnsSans.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "EnrollV2Async: {Count} non-DNS SAN(s) excluded from V2 additionalDomains " +
+                        "(FQDNs only) — they will NOT appear on the issued certificate. " +
+                        "Types=[{Types}], Subject={Subject}",
+                        nonDnsSans.Count,
+                        string.Join(", ", nonDnsSans.Select(s => s.Type).Distinct(StringComparer.OrdinalIgnoreCase)),
+                        LogSanitizer.Strip(subject));
+                }
+
+                additionalDomains = resolvedSans?
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .Select(s => s.Value?.Trim())
+                    .Where(v => !string.IsNullOrWhiteSpace(v))
+                    .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (additionalDomains != null && additionalDomains.Count == 0)
+                    additionalDomains = null;
+
+                _logger.LogInformation(
+                    "EnrollV2Async: resolved UCC product. ProductCode={ProductCode}, AdditionalDomainCount={Count}",
+                    productCode, additionalDomains?.Count ?? 0);
+            }
+
+            // Private PKI additionalHosts (issue 0033): same SAN source rule as the UCC path
+            // above, but DNS names AND IP addresses are both native here (spec: "SAN list (DNS
+            // names or IPv4 / IPv6)"; the Intranet SSL example sends "10.0.0.50").
+            List<string> additionalHosts = null;
+            if (isPrivatePki)
+            {
+                additionalHosts = BuildPrivatePkiAdditionalHosts(san, csr, subject, domain);
+                _logger.LogInformation(
+                    "EnrollV2Async: private-pki order. Variant={Variant}, ProductCode={ProductCode}, " +
+                    "Hostname={Hostname}, AdditionalHostCount={Count}",
+                    privatePkiVariant, productCode, LogSanitizer.Strip(domain), additionalHosts?.Count ?? 0);
+            }
+
+            string requestorName  = string.IsNullOrWhiteSpace(ep.RequesterName)  ? _config.RequestorName  : ep.RequesterName;
+            string requestorEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? _config.RequestorEmail : ep.RequesterEmail;
+            string signerName     = string.IsNullOrWhiteSpace(ep.SignerName)     ? requestorName          : ep.SignerName;
+            string signerIp       = string.IsNullOrWhiteSpace(ep.SignerIp)       ? _config.SignerIp       : ep.SignerIp;
+            // signerPlace is resolved (and required for SSL) near the top of this method.
+            int validityYears    = ep.ValidityYears > 0 ? ep.ValidityYears
+                                  : (int.TryParse(_config.SubscriptionValidityYears, out int cfgYears) && cfgYears > 0 ? cfgYears : 1);
+
+            // requestorIsd/requestorMobile are the same Requestor* defaults V1 falls back to for
+            // its own TechnicalPointOfContact (CERTInextClient.cs BuildOrderRequestFromLegacyEnrollRequest).
+            // Also used directly for this order's own Requestor.Phone (below) via ComposeV2Phone —
+            // issue 0027 item 5b: Requestor.Phone previously sent the raw mobile number only, with
+            // RequestorIsdCode never combined in. Fixed to reuse the same ComposeV2Phone helper
+            // TechnicalPointOfContact.Phone already uses (issue 0030).
+            string requestorIsd    = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
+            string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
+
+            // Requestor.Designation — issue 0027 item 5e: previously hardcoded "IT Administrator"
+            // (the V2 spec's own example value for this Optional free-text field). Now sourced from
+            // the RequestorDesignation config field; blank/unset leaves this null so the property is
+            // omitted from the wire JSON entirely (relies on the client's global
+            // DefaultIgnoreCondition = WhenWritingNull, CERTInextClient.GetJsonOptions()), rather than
+            // sending any default designation value.
+            string requestorDesignation = string.IsNullOrWhiteSpace(_config.RequestorDesignation)
+                ? null
+                : _config.RequestorDesignation.Trim();
+
+            // technicalPointOfContact — each field falls back to the requestor default when its
+            // TechnicalContact* counterpart is blank, mirroring V1's BuildOrderRequestFromLegacyEnrollRequest
+            // (CERTInextClient.cs:2335-2341). See issues/0030-v2-technical-contact-not-sent.md.
+            string technicalContactName   = string.IsNullOrWhiteSpace(_config.TechnicalContactName)         ? requestorName   : _config.TechnicalContactName;
+            string technicalContactEmail  = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail)        ? requestorEmail  : _config.TechnicalContactEmail;
+            string technicalContactIsd    = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode)      ? requestorIsd    : _config.TechnicalContactIsdCode;
+            string technicalContactMobile = string.IsNullOrWhiteSpace(_config.TechnicalContactMobileNumber) ? requestorMobile : _config.TechnicalContactMobileNumber;
+
+            // Blocks shared verbatim by every family's create body — the spec's requestor,
+            // subscription and technicalPointOfContact field tables are identical for the SSL/TLS
+            // and Private PKI folders (issue 0033).
+            var requestor = new V2Requestor
+            {
+                Name        = requestorName,
+                Email       = requestorEmail,
+                Phone       = ComposeV2Phone(requestorIsd, requestorMobile),
+                Designation = requestorDesignation
+            };
+            var subscription = new V2SubscriptionParams
+            {
+                ValidityYears   = validityYears,
+                AutoRenew       = subscriptionAutoRenew,
+                RenewBeforeDays = subscriptionRenewBeforeDays
+            };
+            // Always populated (never omitted), even though the spec marks every subfield
+            // Optional — mirrors V1's fallback-to-Requestor* TechnicalPointOfContact
+            // defaulting rather than leaving the block blank. See issue 0030.
+            var technicalPointOfContact = new V2TechnicalPointOfContact
+            {
+                Name        = technicalContactName,
+                Email       = technicalContactEmail,
+                Phone       = ComposeV2Phone(technicalContactIsd, technicalContactMobile),
+                Designation = Constants.ApiV2.DefaultTechnicalContactDesignation
+            };
+            const string remarks = "Issued via Keyfactor Command AnyCA REST Gateway.";
+            // Mirrors V1's DelegationInformation.GroupNumber — omit when unconfigured so the
+            // order falls back to the account's default billing group (issue 0029).
+            string groupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber;
+
+            V2CreateOrderResponse createResp;
+            if (isPrivatePki)
+            {
+                // Spec "Private PKI Certificates" body: no productVariant / organization /
+                // certificate / agreement blocks — "Private PKI has no DCV, no organization
+                // block, and no Subscriber Agreement".
+                var privatePkiReq = new V2CreatePrivatePkiOrderRequest
+                {
+                    Variant                 = privatePkiVariant,
+                    EmailNotifications      = emailNotifications,
+                    GroupNumber             = groupNumber,
+                    Requestor               = requestor,
+                    Hostname                = domain,
+                    AdditionalHosts         = additionalHosts,
+                    Subscription            = subscription,
+                    Remarks                 = remarks,
+                    TechnicalPointOfContact = technicalPointOfContact
+                };
+                createResp = await _client.PlaceOrderV2Async(productCode, privatePkiReq);
+            }
+            else
+            {
+                var orderReq = new V2CreateSslOrderRequest
+                {
+                    ProductVariant     = sslProductVariant,
+                    EmailNotifications = emailNotifications,
+                    Requestor          = requestor,
+                    Organization       = organization,
+                    Certificate = new V2CertificateParams
+                    {
+                        Domain            = domain,
+                        AutoSecureWww     = _config.AutoSecureWww == "1",
+                        AdditionalDomains = additionalDomains
+                    },
+                    Subscription = subscription,
+                    Agreement = new V2AgreementParams
+                    {
+                        SignerName  = signerName,
+                        SignerIp    = string.IsNullOrWhiteSpace(signerIp)    ? null : signerIp,
+                        SignerPlace = string.IsNullOrWhiteSpace(signerPlace)  ? null : signerPlace,
+                        Accepted    = true
+                    },
+                    TechnicalPointOfContact = technicalPointOfContact,
+                    Remarks                 = remarks,
+                    GroupNumber             = groupNumber
+                };
+                createResp = await _client.PlaceOrderV2Async(ep.ProductFamilySlug, productCode, orderReq);
+            }
+            string orderId = createResp.OrderId;
+
+            _logger.LogInformation(
+                "V2 order placed. OrderId={OrderId}, Status={Status}, EnrollmentType={EnrollmentType}",
+                orderId, createResp.Status, enrollmentType);
+
+            // The V2 API creates the order in 'pending-csr' and requires a separate PUT to submit
+            // the CSR before the order can progress to validation or issuance.
+            // Issue 0039 / review finding (B): if Submit CSR throws, the order already exists at
+            // pending-csr and Command would otherwise never learn its ID. A *definitive* CA
+            // rejection (a real HTTP 4xx response body) keeps the original single-best-effort-
+            // cancel-and-FAILED behavior. But a transport-level failure or timeout tells us
+            // nothing about whether CERTInext actually received and recorded the CSR — cancelling
+            // unconditionally on any exception here can orphan a CSR the CA genuinely accepted.
+            // For that ambiguous case, track the order first and only cancel if it is still
+            // pending-csr; if tracking itself fails, don't cancel — return pending so sync resolves
+            // it later.
+            V2OrderStatusResponse postCsrStatus = null;
+            int disposition = 0;
+            // Raw CA status string behind the current `disposition` value — kept in step with it
+            // (reassigned everywhere `disposition` is recomputed from a fresh TrackOrderV2Async
+            // call) purely so a terminal REVOKED result can be logged/reported with the CA's own
+            // status text (issue 0052), not just Command's mapped disposition.
+            string lastKnownCaStatus = null;
+            bool csrStatusResolvedAfterFailure = false;
+            try
+            {
+                await _client.SubmitCsrV2Async(ep.ProductFamilySlug, orderId, csr);
+            }
+            catch (Exception csrEx)
+            {
+                if (!IsTransportLevelCsrFailure(csrEx))
+                {
+                    // Definitive CA rejection (a real 4xx response) — unchanged behavior.
+                    var orphanResult = await CancelOrphanedV2OrderAfterCsrFailureAsync(
+                        ep.ProductFamilySlug, orderId, csrEx);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return orphanResult;
+                }
+
+                _logger.LogWarning(csrEx,
+                    "V2 SubmitCsrV2Async failed with a transport-level or timeout error for order " +
+                    "{OrderId}; tracking the order before deciding whether to cancel it (CERTInext " +
+                    "may have already accepted the CSR).", orderId);
+
+                V2OrderStatusResponse trackedAfterCsrFailure;
+                try
+                {
+                    trackedAfterCsrFailure = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+                }
+                catch (Exception trackEx)
+                {
+                    // Tracking itself failed — we still don't know whether the CSR landed. Do not
+                    // cancel (that risks orphaning an order CERTInext may have already advanced);
+                    // return pending with the known orderId so the next sync resolves it.
+                    _logger.LogWarning(trackEx,
+                        "V2 TrackOrderV2Async also failed while resolving an ambiguous CSR-submit " +
+                        "failure for order {OrderId}; returning pending without cancelling.", orderId);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = orderId,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.EXTERNALVALIDATION,
+                        StatusMessage = $"V2 order {orderId} placed; CSR submission result is unknown " +
+                                        "after a transport error and the follow-up status check also " +
+                                        "failed — sync will resolve."
+                    };
+                }
+
+                if (string.Equals(trackedAfterCsrFailure.Status, Constants.ApiV2.StatusPendingCsr,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    // Confirmed: the CSR never landed. Cancel exactly as before.
+                    var orphanResult = await CancelOrphanedV2OrderAfterCsrFailureAsync(
+                        ep.ProductFamilySlug, orderId, csrEx);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return orphanResult;
+                }
+
+                // The order progressed past pending-csr — CERTInext did receive the CSR despite the
+                // transport error on our side. Continue the normal post-CSR flow below instead of
+                // cancelling a valid order.
+                _logger.LogInformation(
+                    "V2 CSR submission actually succeeded despite a transport-level error — order " +
+                    "{OrderId} progressed to status {Status}. Continuing normal post-CSR flow.",
+                    orderId, trackedAfterCsrFailure.Status);
+                postCsrStatus = trackedAfterCsrFailure;
+                disposition = StatusMapper.V2StatusToRequestDisposition(trackedAfterCsrFailure.Status);
+                lastKnownCaStatus = trackedAfterCsrFailure.Status;
+                csrStatusResolvedAfterFailure = true;
+            }
+
+            if (!csrStatusResolvedAfterFailure)
+            {
+                _logger.LogInformation("V2 CSR submitted. OrderId={OrderId}", orderId);
+
+                // Re-read status after CSR submission — the order advances past pending-csr.
+                // Guard: if TrackOrderV2Async fails transiently here the order is already
+                // placed and the CSR submitted; return pending with the known orderId so Command
+                // has a CARequestID and the next sync can resolve the status.
+                try
+                {
+                    postCsrStatus = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+                    disposition = StatusMapper.V2StatusToRequestDisposition(postCsrStatus.Status);
+                    lastKnownCaStatus = postCsrStatus.Status;
+                }
+                catch (Exception trackEx)
+                {
+                    _logger.LogWarning(trackEx,
+                        "V2 TrackOrderV2Async failed after CSR submission for order {OrderId}; " +
+                        "returning pending so sync can pick it up.", orderId);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = orderId,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.EXTERNALVALIDATION,
+                        StatusMessage = "V2 order placed and CSR submitted; status check failed transiently — sync will resolve."
+                    };
+                }
+            }
+
+            // Whether the inline DCV block below took ownership of the in-call issuance wait for
+            // this order (issue 0051). Declared outside the #if so both build flavors compile the
+            // pickup-gate call below the same way (it simply stays false on the no-DCV build).
+            // Mirrors dcvIssuanceWaitRan in EnrollNewAsync, but the condition is derived
+            // differently: V2's outer gate here is only "order landed in pending-dcv" — whether
+            // DCV is actually configured/enabled is checked *inside* PerformDcvV2IfNeededAsync, not
+            // at this call site — so we can't pre-set the flag before calling it (that would also
+            // catch the DCV-disabled case and wrongly skip pickup for every V2 order). Instead this
+            // is set from PerformDcvV2IfNeededAsync's own return contract ("true when DCV steps were
+            // executed, false when cleanly skipped"), which is the one source of truth for whether
+            // an in-call wait was actually spent.
+            bool dcvV2Ran = false;
+
+#if SUPPORTS_DCV
+            // Attempt DCV inline when the order lands in pending-dcv and DCV is configured
+            if (disposition == (int)EndEntityStatus.EXTERNALVALIDATION)
+            {
+                int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+                using var dcvCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+                dcvCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
+                try
+                {
+                    bool dcvDone = await PerformDcvV2IfNeededAsync(
+                        orderId, domain, ep.ProductFamilySlug, dcvCts.Token,
+                        postCsrStatus?.Verifications?.Domain?.Domains);
+                    dcvV2Ran = dcvDone;
+                    if (dcvDone)
+                    {
+                        // Re-check status after DCV completes
+                        var tracked = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+                        disposition = StatusMapper.V2StatusToRequestDisposition(tracked.Status);
+                        lastKnownCaStatus = tracked.Status;
+                        _logger.LogInformation(
+                            "V2 DCV completed inline for order {OrderId}. Post-DCV status={Status}",
+                            orderId, tracked.Status);
+                    }
+                }
+                catch (Exception dcvEx)
+                {
+                    // Every early-exit path inside PerformDcvV2IfNeededAsync (not configured, no
+                    // domain, in-flight elsewhere, GetDcv/staging/verify failure) is caught
+                    // internally and returns false rather than throwing — the only way an
+                    // exception reaches here is VerifyDcvV2Async failing *after* the TXT record
+                    // was already staged and the propagation delay already spent. Real in-call
+                    // wait time was consumed, so still treat this as "DCV ran" and defer to the
+                    // next sync rather than stacking a pickup poll on top.
+                    dcvV2Ran = true;
+                    _logger.LogWarning(dcvEx,
+                        "V2 inline DCV attempt failed for order {OrderId}; order will remain pending for sync.",
+                        orderId);
+                }
+            }
+#endif
+
+            // If the order issued immediately, download the certificate
+            if (disposition == (int)EndEntityStatus.GENERATED)
+            {
+                try
+                {
+                    var certResp = await _client.DownloadCertificateV2Async(ep.ProductFamilySlug, orderId);
+                    string fullChain = AssembleV2CertChain(certResp);
+                    _logger.LogInformation(
+                        "V2 certificate downloaded immediately. OrderId={OrderId}, SerialNumber={Serial}, ChainPemCount={ChainCount}",
+                        orderId, certResp.SerialNumber, certResp.ChainPem?.Count ?? 0);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = orderId,
+                        Certificate   = fullChain,
+                        Status        = (int)EndEntityStatus.GENERATED,
+                        StatusMessage = "Certificate issued via V2 API."
+                    };
+                }
+                catch (Exception dlEx)
+                {
+                    _logger.LogWarning(dlEx,
+                        "V2 order is 'issued' but certificate download failed — returning pending. OrderId={OrderId}",
+                        orderId);
+                }
+            }
+
+            // Synchronous certificate pickup (V2 parity with the V1/Sectigo pickup poll, issue
+            // 0051): poll for the issued certificate so a fast-issuing DV order returns GENERATED
+            // + PEM in this same call instead of waiting for the next synchronization. No-op when
+            // the inline DCV block above already ran an in-call wait for this order (dcvV2Ran).
+            var pendingResult = new EnrollmentResult
+            {
+                CARequestID   = orderId,
+                Certificate   = null,
+                Status        = disposition == (int)EndEntityStatus.GENERATED
+                                    ? (int)EndEntityStatus.EXTERNALVALIDATION
+                                    : disposition,
+                StatusMessage = $"V2 order placed. Status={createResp.Status}"
+            };
+            var (pickedUpResult, observedCaStatus) = await PickUpEnrolledCertificateV2Async(
+                pendingResult, orderId, ep.ProductFamilySlug, dcvV2Ran, lastKnownCaStatus);
+
+            // Issue 0052: normalize a body-less REVOKED disposition to FAILED once here, right
+            // before returning — every path above that can surface REVOKED (the post-CSR-submit
+            // status check, the post-DCV status re-check, and PickUpEnrolledCertificateV2Async's
+            // own poll) funnels through pickedUpResult, so a single check here covers all of them
+            // rather than patching each branch individually. See NormalizeV2RevokedEnrollResult.
+            var finalResult = NormalizeV2RevokedEnrollResult(pickedUpResult, orderId, observedCaStatus);
+
+            _logger.MethodExit(LogLevel.Debug);
+            return finalResult;
+        }
+
+        /// <summary>
+        /// Review finding (B): true when <paramref name="ex"/> (thrown by <c>SubmitCsrV2Async</c>)
+        /// represents a transport-level failure, timeout, or cancellation — i.e. whether CERTInext
+        /// actually received and recorded the CSR is unknown — rather than a definitive CA-side
+        /// rejection (a real HTTP 4xx response CERTInext returned after processing the request).
+        /// <c>CERTInextClient</c> is built with <c>ThrowOnAnyError=false</c>, so a connection
+        /// failure/timeout never received a response and instead renders through
+        /// <c>ThrowOnV2Failure</c>'s generic fallback as <c>"... HTTP 0. ..."</c> — <c>0</c> is the
+        /// RestSharp default <see cref="System.Net.HttpStatusCode"/> when no response arrived.
+        /// A 5xx or any message shape this cannot parse is treated the same conservative way (not
+        /// a confirmed rejection): a CA server error or an unrecognized failure does not confirm
+        /// the CSR was rejected, so the safer default is to track the order rather than assume.
+        /// Only a parsed 4xx status is treated as definitive.
+        /// </summary>
+        internal static bool IsTransportLevelCsrFailure(Exception ex)
+        {
+            if (ex == null) return true;
+            if (ex is OperationCanceledException) return true;
+            if (ex is System.Net.Http.HttpRequestException) return true;
+            if (ex is TimeoutException) return true;
+
+            var m = System.Text.RegularExpressions.Regex.Match(ex.Message ?? string.Empty, @"HTTP (\d+)\.");
+            if (!m.Success) return true;
+            int status = int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            return status < 400 || status >= 500;
+        }
+
+        /// <summary>
+        /// Cancel reason sent to CERTInext when Submit CSR fails after the order was created
+        /// (issue 0039). Deliberately fixed text: the CSR exception may carry CA response detail,
+        /// and the reason is persisted in the CA's audit log.
+        /// </summary>
+        internal const string OrphanedOrderCancelReason =
+            "Keyfactor gateway: CSR submission failed; cancelling orphaned order.";
+
+        /// <summary>
+        /// Issue 0039: <see cref="EnrollV2Async"/> calls this when <c>SubmitCsrV2Async</c> throws
+        /// after the order was placed. Makes exactly one best-effort <c>CancelOrderV2Async</c>
+        /// call (never retried, never rethrown) and returns a FAILED result that carries the
+        /// orderId and says whether the orphaned order was cancelled.
+        /// </summary>
+        private async Task<EnrollmentResult> CancelOrphanedV2OrderAfterCsrFailureAsync(
+            string familySlug, string orderId, Exception csrEx)
+        {
+            _logger.MethodEntry(LogLevel.Trace);
+            // The CSR exception message can carry CA response detail (problem+json "detail"),
+            // so it is redacted like any other CA body and capped at 500 characters.
+            string csrFailure = RedactAndCapForLog(csrEx.Message);
+
+            string cancelOutcome;
+            string cancelMessage;
+            try
+            {
+                var outcome = await _client.CancelOrderV2Async(familySlug, orderId, OrphanedOrderCancelReason);
+                if (outcome == V2CancelOrderOutcome.Cancelled)
+                {
+                    cancelOutcome = "cancelled";
+                    cancelMessage = "The orphaned order was cancelled.";
+                }
+                else
+                {
+                    cancelOutcome = "not cancelled (HTTP 422: order already in a terminal state)";
+                    cancelMessage = "The orphaned order was NOT cancelled: the CA reported it is already in a " +
+                                    "terminal state (HTTP 422). Check the order in the CERTInext portal.";
+                }
+            }
+            catch (Exception cancelEx)
+            {
+                cancelOutcome = $"not cancelled (cancel failed: {cancelEx.GetType().Name}: " +
+                                $"{RedactAndCapForLog(cancelEx.Message)})";
+                cancelMessage = "The orphaned order was NOT cancelled: the cancel request failed. " +
+                                "Cancel it manually in the CERTInext portal. See gateway logs for details.";
+            }
+
+            _logger.LogWarning(
+                "V2 CSR submission failed after the order was placed. OrderId={OrderId}, Family={Family}, " +
+                "CsrFailure={CsrFailure}, CancelOutcome={CancelOutcome}",
+                orderId, familySlug, csrFailure, cancelOutcome);
+
+            _logger.MethodExit(LogLevel.Trace);
+            return new EnrollmentResult
+            {
+                CARequestID   = orderId,
+                Certificate   = null,
+                Status        = (int)EndEntityStatus.FAILED,
+                StatusMessage = $"V2 CSR submission failed for order {orderId}: {csrFailure} {cancelMessage}"
+            };
+        }
+
+        private string RedactAndCapForLog(string message)
+        {
+            string redacted = CERTInextClient.ApplyLoggingRedaction(message ?? string.Empty, _config?.LogSensitiveRequestData ?? false);
+            return redacted.Length <= 500 ? redacted : redacted.Substring(0, 500) + "…";
+        }
+
+        /// <summary>
+        /// Issue 0052: at enroll time the gateway never holds a stored certificate body for a
+        /// brand-new order — unlike the Synchronize/GetSingleRecord 0049 guard (<see
+        /// cref="DecideBodylessRevokedRecord"/>), there is no "gateway already holds a body" case
+        /// for <see cref="EnrollV2Async"/> to fall back to. A REVOKED disposition surfaced from V2
+        /// enrollment — whether observed on the post-CSR-submit status check, the post-DCV status
+        /// re-check, or <see cref="PickUpEnrolledCertificateV2Async"/>'s own poll — is therefore
+        /// always body-less. Persisting that as a REVOKED row with <c>Certificate = null</c> is
+        /// exactly what poisons the gateway per issue 0049 (RevocationDate never clears, and every
+        /// later revoked-certificate search calls FromDER(null) and 500s). Mapped to FAILED here,
+        /// once, on the final result <see cref="EnrollV2Async"/> is about to return, rather than in
+        /// each branch that can produce a REVOKED disposition.
+        /// </summary>
+        private EnrollmentResult NormalizeV2RevokedEnrollResult(EnrollmentResult result, string orderId, string observedCaStatus)
+        {
+            if (result == null || result.Status != (int)EndEntityStatus.REVOKED)
+                return result;
+
+            // SOC2 audit trail: the log must show the CA reported revoked and the plugin reported
+            // FAILED, with enough context (order id + raw CA status) to reconstruct why.
+            _logger.LogWarning(
+                "V2 enroll observed order '{OrderId}' as revoked at the CA (raw status='{CaStatus}') " +
+                "before a certificate was ever delivered. Mapping the enrollment result to FAILED " +
+                "instead of a body-less REVOKED record — Enroll has no stored certificate body to " +
+                "fall back on, unlike the Synchronize/GetSingleRecord 0049 guard.",
+                orderId, string.IsNullOrWhiteSpace(observedCaStatus) ? "(unknown)" : observedCaStatus);
+
+            string statusSuffix = string.IsNullOrWhiteSpace(observedCaStatus)
+                ? string.Empty
+                : $" (CA status '{observedCaStatus}')";
+
+            return new EnrollmentResult
+            {
+                CARequestID   = result.CARequestID,
+                Certificate   = null,
+                Status        = (int)EndEntityStatus.FAILED,
+                StatusMessage = $"Order '{orderId}' was revoked at the CA{statusSuffix} before a " +
+                                 "certificate could be delivered; reporting enrollment failure rather " +
+                                 "than a certificate revocation with no certificate body."
+            };
+        }
+
+        /// <summary>
+        /// Outcome of <see cref="DecideBodylessRevokedRecord"/> — what a V2 caller should do
+        /// with a REVOKED disposition that has no downloadable certificate body (issue 0049).
+        /// </summary>
+        private enum BodylessRevokedDecision
+        {
+            /// <summary>Gateway already holds a body for this order — emit REVOKED with no
+            /// body, exactly as before (this is how out-of-band CA revokes propagate).</summary>
+            EmitRevoked,
+            /// <summary>Gateway has a row but no body — downgrade to FAILED so the gateway
+            /// never persists a REVOKED row with <c>Certificate = null</c>.</summary>
+            EmitFailed,
+            /// <summary>Gateway has no row at all (or the reader can't be consulted) —
+            /// the caller should not create a brand-new poisoned row.</summary>
+            Skip
+        }
+
+        /// <summary>
+        /// Issue 0049: the CERTInext V2 CA refuses to serve a revoked certificate's body
+        /// (422 EMS-1165), so a V2 order whose first gateway sighting is already revoked has
+        /// no body to attach. Emitting that as a body-less REVOKED record is what poisons the
+        /// gateway: it persists the row with <c>RevocationDate</c> set and <c>Certificate =
+        /// null</c>, never clears the date afterward, and its own revoked-certificate search
+        /// then calls <c>FromDER(null)</c> on every future scan of this CA — a 500 that blocks
+        /// *all* Command sync for the CA, not just this record.
+        ///
+        /// A body-less REVOKED record is safe — and required, to propagate out-of-band CA
+        /// revokes — only when the gateway already holds a certificate body for this
+        /// CARequestID (confirmed live, issue 0049 evidence log: the gateway keeps the stored
+        /// body and applies status/date/reason on top of it). <see
+        /// cref="ICertificateDataReader.GetExpirationDateByRequestId"/> is the per-order probe
+        /// for that: it returns the stored cert's NotAfter when a body is held, <c>null</c> when
+        /// the row exists but has no body, and throws <see cref="ArgumentException"/> when there
+        /// is no row at all.
+        /// </summary>
+        private BodylessRevokedDecision DecideBodylessRevokedRecord(string caRequestId)
+        {
+            if (_certificateDataReader == null)
+            {
+                _logger.LogWarning(
+                    "V2: no ICertificateDataReader available to check whether the gateway holds a " +
+                    "certificate body for revoked order '{Id}' — skipping this cycle rather than risk " +
+                    "poisoning a fresh gateway row with a body-less REVOKED record.", caRequestId);
+                return BodylessRevokedDecision.Skip;
+            }
+
+            try
+            {
+                DateTime? expiry = _certificateDataReader.GetExpirationDateByRequestId(caRequestId);
+                if (expiry.HasValue)
+                {
+                    _logger.LogDebug(
+                        "V2: gateway already holds a certificate body for revoked order '{Id}' " +
+                        "(expires {Expiry:O}) — emitting body-less REVOKED to propagate the revocation.",
+                        caRequestId, expiry.Value);
+                    return BodylessRevokedDecision.EmitRevoked;
+                }
+
+                _logger.LogInformation(
+                    "V2: gateway has a row for revoked order '{Id}' with no certificate body — " +
+                    "emitting FAILED instead of a body-less REVOKED record to avoid poisoning the " +
+                    "gateway's revoked-certificate search.", caRequestId);
+                return BodylessRevokedDecision.EmitFailed;
+            }
+            catch (ArgumentException)
+            {
+                _logger.LogInformation(
+                    "V2: gateway has no row at all for revoked order '{Id}' — skipping rather than " +
+                    "create a body-less REVOKED row the gateway can never un-poison.", caRequestId);
+                return BodylessRevokedDecision.Skip;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2: failed to determine whether the gateway holds a certificate body for revoked " +
+                    "order '{Id}' — skipping this cycle rather than risk emitting a body-less REVOKED " +
+                    "record. The revocation will be retried on a later sync/single-record call.", caRequestId);
+                return BodylessRevokedDecision.Skip;
+            }
+        }
+
+        /// <summary>
+        /// Retrieves a single certificate record via the V2 REST API.
+        /// </summary>
+        private async Task<AnyCAPluginCertificate> GetSingleRecordV2Async(string caRequestID)
+        {
+            _logger.MethodEntry(LogLevel.Debug);
+
+            try
+            {
+                // Use the family-aware resolve so DCV (if needed) hits the correct endpoint for
+                // non-SSL families (private-pki, signature). ResolveAndTrackOrderV2Async discards
+                // the family; here we keep it to thread through PerformDcvV2IfNeededAsync.
+                var (resolvedFamily, statusResp) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(caRequestID);
+                int disposition = StatusMapper.V2StatusToRequestDisposition(statusResp.Status);
+
+#if SUPPORTS_DCV
+                // Mirror V1 GetSingleRecord: attempt DCV on pending-dcv orders so a manual
+                // single-record refresh can unstick an order whose DCV wasn't completed at enroll
+                // time. issue 0042: a UCC order's own domainEntries[] can carry pending SANs even
+                // when the top-level Domain field is populated (the common case) or, defensively,
+                // if it were ever blank — either is enough to attempt DCV.
+                var pendingDomainEntries = statusResp.Verifications?.Domain?.Domains;
+                if (disposition == (int)EndEntityStatus.EXTERNALVALIDATION
+                    && (!string.IsNullOrWhiteSpace(statusResp.Domain) || (pendingDomainEntries?.Count ?? 0) > 0))
+                {
+                    int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+                    using var dcvCts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+                    try
+                    {
+                        bool dcvDone = await PerformDcvV2IfNeededAsync(
+                            caRequestID, statusResp.Domain, resolvedFamily, dcvCts.Token, pendingDomainEntries);
+                        if (dcvDone)
+                        {
+                            statusResp = await _client.ResolveAndTrackOrderV2Async(caRequestID);
+                            disposition = StatusMapper.V2StatusToRequestDisposition(statusResp.Status);
+                        }
+                    }
+                    catch (Exception dcvEx)
+                    {
+                        _logger.LogWarning(dcvEx,
+                            "V2 GetSingleRecord: DCV attempt failed for order {Id}.", caRequestID);
+                    }
+                }
+#endif
+
+                string certPem = null;
+                if (disposition == (int)EndEntityStatus.GENERATED)
+                {
+                    if (!string.IsNullOrWhiteSpace(statusResp.ExpiresAt))
+                        _logger.LogDebug(
+                            "V2 order expiry from status response. CARequestID={Id}, ExpiresAt={ExpiresAt}",
+                            caRequestID, statusResp.ExpiresAt);
+
+                    try
+                    {
+                        var certResp = await _client.ResolveAndDownloadCertificateV2Async(caRequestID);
+                        certPem = AssembleV2CertChain(certResp);
+                    }
+                    catch (Exception dlEx)
+                    {
+                        _logger.LogWarning(dlEx,
+                            "V2 GetSingleRecord: order is issued but certificate download failed. CARequestID={Id}",
+                            caRequestID);
+                    }
+                }
+
+                // Issue 0049: a REVOKED disposition with no certificate body must never be
+                // returned as-is unless the gateway already holds a body for this order — see
+                // DecideBodylessRevokedRecord. GetSingleRecord can't skip (it must return
+                // something), so both the no-row and can't-tell cases fall through to FAILED.
+                int effectiveDisposition = disposition;
+                DateTime? effectiveRevocationDate = statusResp.Revocation?.ProcessedAt;
+                int effectiveRevocationReason = statusResp.Revocation != null
+                    ? StatusMapper.V2RevocationReasonToCrlCode(statusResp.Revocation.Reason)
+                    : 0;
+
+                if (disposition == (int)EndEntityStatus.REVOKED && string.IsNullOrWhiteSpace(certPem))
+                {
+                    var decision = DecideBodylessRevokedRecord(caRequestID);
+                    if (decision != BodylessRevokedDecision.EmitRevoked)
+                    {
+                        effectiveDisposition = (int)EndEntityStatus.FAILED;
+                        effectiveRevocationDate = null;
+                        effectiveRevocationReason = 0;
+                    }
+                }
+
+                _logger.LogInformation(
+                    "GetSingleRecordV2 complete. CARequestID={Id}, V2Status={Status}, Disposition={Disposition}",
+                    caRequestID, statusResp.Status, effectiveDisposition);
+                _logger.MethodExit(LogLevel.Debug);
+
+                return new AnyCAPluginCertificate
+                {
+                    CARequestID = caRequestID,
+                    Certificate = certPem,
+                    Status      = effectiveDisposition,
+                    ProductID   = statusResp.ProductVariant ?? string.Empty,
+                    RevocationDate = effectiveRevocationDate,
+                    RevocationReason = effectiveRevocationReason
+                };
+            }
+            catch (KeyNotFoundException)
+            {
+                _logger.LogWarning("V2: Certificate not found. CARequestID={Id}", caRequestID);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "V2: Error retrieving certificate. CARequestID={Id}", caRequestID);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Synchronizes certificates via the V2 <c>/reports/orders</c> endpoint (issues/0022).
+        /// Called from <see cref="Synchronize"/> when <c>_config.UseV2Api</c> is true; V1
+        /// credentials are not required on this path.
+        ///
+        /// Lookback window (incremental sync): live probing of <c>from</c>/<c>to</c> could not
+        /// determine whether the filter brackets order-placement date or issuance date
+        /// (issues/0022). Rather than depend on that, an incremental pass requests
+        /// <c>from = lastSync - V2SyncLookbackHours</c> (default 72h) so an order created before
+        /// <c>lastSync</c> but issued afterward (e.g. a slow-DCV order) still surfaces.
+        /// </summary>
+        private async Task SynchronizeV2Async(
+            BlockingCollection<AnyCAPluginCertificate> blockingBuffer,
+            DateTime? lastSync,
+            bool fullSync,
+            CancellationToken cancelToken)
+        {
+            _logger.MethodEntry(LogLevel.Debug);
+
+            string from = null;
+            if (!fullSync && lastSync.HasValue)
+            {
+                int lookbackHours = _config.V2SyncLookbackHours > 0
+                    ? _config.V2SyncLookbackHours
+                    : Constants.ApiV2.DefaultSyncLookbackHours;
+                DateTime effectiveFrom = lastSync.Value.ToUniversalTime().AddHours(-lookbackHours);
+                from = effectiveFrom.ToString("yyyy-MM-dd");
+            }
+
+            _logger.LogInformation(
+                "Starting CERTInext V2 synchronization. FullSync={FullSync}, LastSync={LastSync}, " +
+                "LookbackFrom={From}, UseV2Api=true",
+                fullSync, lastSync?.ToString("O") ?? "none", from ?? "(none — full history)");
+
+            int synced = 0;
+            int skipped = 0;
+            int errors = 0;
+            int unresolvedStatusFallbacks = 0; // report rows whose display strings needed a live track call
+
+            // Emit-side accounting (mirrors the V1 path, issue 0003).
+            int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
+            // Issue 0049: bodyless-REVOKED guard decisions — see DecideBodylessRevokedRecord.
+            int emittedFailedFromBodylessRevoked = 0, skippedBodylessRevoked = 0;
+
+#if SUPPORTS_DCV
+            bool dcvOperational = _config.DcvEnabled && _domainValidatorFactory != null;
+            int ageWindowHours = _config.DcvSyncMaxOrderAgeHours;
+            int perPassCap = _config.DcvSyncMaxPerPass;
+            int dcvAttempted = 0, dcvSkippedAge = 0, dcvSkippedCap = 0;
+#endif
+
+            try
+            {
+                await foreach (var row in _client.ListOrdersV2Async(from, null, _config.PageSize, cancelToken))
+                {
+                    cancelToken.ThrowIfCancellationRequested();
+
+                    try
+                    {
+                        DateTime? orderDateUtc = null;
+                        if (DateTime.TryParse(
+                                row.OrderDate, System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+                                out DateTime parsedOrderDate))
+                            orderDateUtc = parsedOrderDate;
+
+                        // Skip expired certificates when IgnoreExpired is configured — mirrors the
+                        // V1 check above (issues/0027, item 3). CertificateExpiryDate is a string
+                        // whose format isn't confirmed live (OrderReportEntryV2 doc comment), so an
+                        // unparseable or missing value must NOT be skipped — only a value that
+                        // parses cleanly and is actually in the past is treated as expired.
+                        DateTime? certExpiryUtc = null;
+                        if (!string.IsNullOrWhiteSpace(row.CertificateExpiryDate)
+                            && DateTime.TryParse(
+                                row.CertificateExpiryDate, System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+                                out DateTime parsedExpiry))
+                            certExpiryUtc = parsedExpiry;
+
+                        if (_config.IgnoreExpired
+                            && certExpiryUtc.HasValue
+                            && certExpiryUtc.Value < DateTime.UtcNow)
+                        {
+                            _logger.LogTrace(
+                                "V2 sync: skipping expired certificate '{Id}' (expires {ExpiresAt:u}).",
+                                row.OrderNumber, certExpiryUtc.Value);
+                            skipped++;
+                            continue;
+                        }
+
+                        int? disposition = MapV2ReportStatusToDisposition(row.OrderStatus, row.CertificateStatus);
+                        string resolvedFamily = null;
+                        V2OrderStatusResponse trackedStatus = null;
+
+                        if (disposition == null)
+                        {
+                            // Unrecognised orderStatus/certificateStatus combination — the display-
+                            // string vocabulary observed so far (issues/0022) is NOT confirmed
+                            // exhaustive. Don't guess: fall back to a live TrackOrder call, which
+                            // returns the authoritative V2 `status` enum via StatusMapper.
+                            unresolvedStatusFallbacks++;
+                            _logger.LogDebug(
+                                "V2 sync: unrecognised report status — falling back to live track. " +
+                                "Id={Id}, OrderStatus={OrderStatus}, CertificateStatus={CertificateStatus}",
+                                row.OrderNumber, row.OrderStatus, row.CertificateStatus);
+                            (resolvedFamily, trackedStatus) =
+                                await _client.ResolveAndTrackOrderV2WithFamilyAsync(row.OrderNumber, cancelToken);
+                            disposition = StatusMapper.V2StatusToRequestDisposition(trackedStatus.Status);
+                        }
+
+                        if (disposition == (int)EndEntityStatus.FAILED)
+                        {
+                            _logger.LogTrace(
+                                "V2 sync: skipping order '{Id}' with terminal status. OrderStatus={OrderStatus}, " +
+                                "CertificateStatus={CertificateStatus}",
+                                row.OrderNumber, row.OrderStatus, row.CertificateStatus);
+                            skipped++;
+                            continue;
+                        }
+
+#if SUPPORTS_DCV
+                        if (dcvOperational && disposition == (int)EndEntityStatus.EXTERNALVALIDATION)
+                        {
+                            var decision = EvaluateDcvSyncEligibility(
+                                orderDateUtc, DateTime.UtcNow, ageWindowHours, dcvAttempted, perPassCap);
+
+                            _logger.LogTrace(
+                                "V2 sync DCV gate: Id={Id}, decision={Decision}, orderDate={OrderDate}, " +
+                                "ageWindowHours={Age}, attemptedSoFar={Attempted}, perPassCap={Cap}",
+                                row.OrderNumber, decision, orderDateUtc?.ToString("o") ?? "(none)",
+                                ageWindowHours, dcvAttempted, perPassCap);
+
+                            if (decision == DcvSyncDecision.SkipByAge)
+                            {
+                                _logger.LogInformation(
+                                    "V2 sync: pending DV order aged out of the DCV-during-sync window and will " +
+                                    "not be advanced. CARequestID={Id}, OrderDate={OrderDate}, AgeWindowHours={Age}.",
+                                    row.OrderNumber, orderDateUtc?.ToString("o") ?? "(none)", ageWindowHours);
+                                dcvSkippedAge++;
+                            }
+                            else if (decision == DcvSyncDecision.SkipByCap)
+                            {
+                                dcvSkippedCap++;
+                            }
+                            else
+                            {
+                                dcvAttempted++;
+
+                                // Resolve family lazily — only for rows actually attempting DCV.
+                                // Report rows carry no family, and productCode is often empty
+                                // (issue 0016), so this costs one extra call per attempted row,
+                                // not per row in the page (per the task's cost concern).
+                                if (resolvedFamily == null)
+                                {
+                                    (resolvedFamily, trackedStatus) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(
+                                        row.OrderNumber, cancelToken);
+                                }
+
+                                string domain = !string.IsNullOrWhiteSpace(trackedStatus?.Domain)
+                                    ? trackedStatus.Domain
+                                    : row.DomainName;
+
+                                if (!string.IsNullOrWhiteSpace(domain))
+                                {
+                                    int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+                                    using var dcvCts = CancellationTokenSource.CreateLinkedTokenSource(cancelToken);
+                                    dcvCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
+                                    try
+                                    {
+                                        bool dcvDone = await PerformDcvV2IfNeededAsync(
+                                            row.OrderNumber, domain, resolvedFamily, dcvCts.Token,
+                                            trackedStatus?.Verifications?.Domain?.Domains);
+                                        if (dcvDone)
+                                        {
+                                            trackedStatus = await _client.ResolveAndTrackOrderV2Async(row.OrderNumber, cancelToken);
+                                            disposition = StatusMapper.V2StatusToRequestDisposition(trackedStatus.Status);
+                                        }
+                                    }
+                                    catch (Exception dcvEx)
+                                    {
+                                        _logger.LogWarning(dcvEx,
+                                            "V2 sync: DCV attempt failed for order {Id}.", row.OrderNumber);
+                                    }
+                                }
+                                else
+                                {
+                                    _logger.LogWarning(
+                                        "V2 sync: no domain available for pending-dcv order {Id} — cannot drive DCV.",
+                                        row.OrderNumber);
+                                }
+                            }
+                        }
+#endif
+
+                        // Report rows carry no revocation reason/date (OrderReportEntryV2 has no
+                        // such fields, issues/0034) — only a live TrackOrder response's nested
+                        // `revocation` object does. Resolve lazily, mirroring the DCV branch's
+                        // "only for rows that actually need it" pattern above: this extra call is
+                        // scoped to revoked rows whose disposition came from the report's display
+                        // strings alone. trackedStatus is already populated (with .Revocation, if
+                        // any) when disposition instead came from the unresolved-status fallback.
+                        if (disposition == (int)EndEntityStatus.REVOKED && trackedStatus == null)
+                        {
+                            try
+                            {
+                                (resolvedFamily, trackedStatus) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(
+                                    row.OrderNumber, cancelToken);
+                            }
+                            catch (Exception revEx)
+                            {
+                                _logger.LogWarning(revEx,
+                                    "V2 sync: failed to fetch revocation detail for revoked order '{Id}' — " +
+                                    "emitting without RevocationDate/RevocationReason.", row.OrderNumber);
+                            }
+                        }
+
+                        string certPem = null;
+                        if (disposition == (int)EndEntityStatus.GENERATED)
+                        {
+                            try
+                            {
+                                var certResp = await _client.ResolveAndDownloadCertificateV2Async(row.OrderNumber, cancelToken);
+                                certPem = AssembleV2CertChain(certResp);
+                            }
+                            catch (Exception dlEx)
+                            {
+                                _logger.LogWarning(dlEx,
+                                    "V2 sync: order '{Id}' is issued but certificate download failed — emitting " +
+                                    "metadata-only record.", row.OrderNumber);
+                            }
+                        }
+
+                        // Prefer the report row's own ProductCode (matches V1's "trust the
+                        // listing" precedent, MapToAnyCAPluginCertificate). Only when that's
+                        // empty (issue 0016), fall back to whatever trackedStatus already exists
+                        // in local scope from one of the lazy TrackOrder fetches above
+                        // (unresolved-status fallback, DCV attempt, or revoked-row lookup) — never
+                        // fetch just to backfill this field (issue 0035).
+                        string productId = !string.IsNullOrWhiteSpace(row.ProductCode)
+                            ? row.ProductCode
+                            : (trackedStatus?.ProductVariant ?? string.Empty);
+
+                        var record = new AnyCAPluginCertificate
+                        {
+                            CARequestID = row.OrderNumber,
+                            Certificate = certPem,
+                            Status      = disposition.Value,
+                            ProductID   = productId,
+                            RevocationDate = trackedStatus?.Revocation?.ProcessedAt,
+                            RevocationReason = trackedStatus?.Revocation != null
+                                ? StatusMapper.V2RevocationReasonToCrlCode(trackedStatus.Revocation.Reason)
+                                : 0
+                        };
+
+                        bool recordHasBody = !string.IsNullOrWhiteSpace(record.Certificate);
+
+                        // Issue 0049: never hand the gateway buffer a REVOKED record with no
+                        // certificate body unless the gateway already holds one for this order —
+                        // see DecideBodylessRevokedRecord's doc comment. "Skip" means this row is
+                        // dropped entirely (not added to blockingBuffer) rather than risk creating
+                        // a row the gateway can never un-poison.
+                        if (record.Status == (int)EndEntityStatus.REVOKED && !recordHasBody)
+                        {
+                            var decision = DecideBodylessRevokedRecord(record.CARequestID);
+                            if (decision == BodylessRevokedDecision.Skip)
+                            {
+                                skipped++;
+                                skippedBodylessRevoked++;
+                                continue;
+                            }
+                            if (decision == BodylessRevokedDecision.EmitFailed)
+                            {
+                                record.Status = (int)EndEntityStatus.FAILED;
+                                record.RevocationDate = null;
+                                record.RevocationReason = 0;
+                                emittedFailedFromBodylessRevoked++;
+                            }
+                            // EmitRevoked falls through — record stays REVOKED with no body,
+                            // exactly as before (propagates an out-of-band CA revoke).
+                        }
+
+                        if (record.Status == (int)EndEntityStatus.GENERATED)
+                        {
+                            if (recordHasBody) emittedGeneratedWithBody++; else emittedGeneratedNoBody++;
+                        }
+                        else if (record.Status == (int)EndEntityStatus.REVOKED)
+                        {
+                            emittedRevoked++;
+                        }
+                        else if (record.Status == (int)EndEntityStatus.EXTERNALVALIDATION)
+                        {
+                            emittedPending++;
+                        }
+
+                        _logger.LogDebug(
+                            "V2 sync emit: CARequestID={Id}, Status={Status}, CertBytes={CertBytes}, " +
+                            "OrderStatus={OrderStatus}, CertificateStatus={CertificateStatus}",
+                            record.CARequestID, record.Status, record.Certificate?.Length ?? 0,
+                            row.OrderStatus, row.CertificateStatus);
+
+                        blockingBuffer.Add(record, cancelToken);
+                        synced++;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _logger.LogWarning(
+                            "CERTInext V2 synchronization cancelled by caller. FullSync={FullSync}, Synced={Synced}, " +
+                            "Skipped={Skipped}, Errors={Errors}",
+                            fullSync, synced, skipped, errors);
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error processing V2 order '{Id}' during synchronization.", row.OrderNumber);
+                        errors++;
+
+                        // SOC1 completeness/accuracy: abort on an error-rate cliff rather than
+                        // silently 'completing' with mostly-failed records (mirrors the V1 gate).
+                        int totalSeen = synced + skipped + errors;
+                        if (totalSeen >= 50 && errors > totalSeen / 4)
+                        {
+                            _logger.LogError(
+                                "CERTInext V2 synchronization aborted — error rate ({Errors}/{Total}) exceeded " +
+                                "25% threshold. Likely CA-side outage; will retry on next sync cycle.",
+                                errors, totalSeen);
+                            throw new Exception(
+                                $"CERTInext V2 synchronization aborted after {errors}/{totalSeen} records failed " +
+                                "(>25% error rate). See gateway logs for the underlying CA errors.");
+                        }
+                    }
+                }
+
+                string dcvClause;
+#if SUPPORTS_DCV
+                if (dcvOperational)
+                    dcvClause = $"DCV-during-sync: Attempted={dcvAttempted}, SkippedByAge={dcvSkippedAge} (>{ageWindowHours}h), SkippedByCap={dcvSkippedCap} (cap={perPassCap}).";
+                else
+                    dcvClause = $"DCV-during-sync: not active (DcvEnabled={_config.DcvEnabled}, DnsProviderInjected={_domainValidatorFactory != null}) — pending orders left as EXTERNALVALIDATION.";
+#else
+                dcvClause = "DCV-during-sync: not supported on this build (IAnyCAPlugin 3.2.0).";
+#endif
+                _logger.LogInformation(
+                    "CERTInext V2 synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}, " +
+                    "UnresolvedStatusFallbacks={Fallbacks}. Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
+                    "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
+                    "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
+                    "BodylessRevokedSkipped={BodylessRevokedSkipped} (issue 0049 guard). {DcvClause}",
+                    synced, skipped, errors, unresolvedStatusFallbacks,
+                    emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
+                    emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
+                    dcvClause);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("CERTInext V2 synchronization was cancelled.");
+                throw;
+            }
+            finally
+            {
+                blockingBuffer.CompleteAdding();
+            }
+
+            _logger.MethodExit(LogLevel.Debug);
+        }
+
+        /// <summary>
+        /// Maps a V2 <c>/reports/orders</c> row's human-readable <c>orderStatus</c>/
+        /// <c>certificateStatus</c> display strings to an <see cref="EndEntityStatus"/>
+        /// disposition (issues/0022). These are display strings (e.g. "Order Accepted",
+        /// "Certificate Downloaded") — NOT the V2 <c>status</c> enum used by TrackOrder (see
+        /// <see cref="StatusMapper.V2StatusToRequestDisposition"/> for that). The vocabulary
+        /// below combines what was actually observed live in Phase 0 (orderStatus "Order
+        /// Accepted"/"Order Fulfilled"; certificateStatus "Pending for Approver"/"Certificate
+        /// Downloaded") with additional values the spec's field-table prose names ("Approved by
+        /// System", "Issued", "Certificate Generated") that have not yet been confirmed live.
+        ///
+        /// Returns <c>null</c> for anything not confidently recognised so the caller falls back
+        /// to a live TrackOrder call rather than guessing — the vocabulary is explicitly NOT
+        /// confirmed exhaustive, and silently misclassifying a row (e.g. treating a still-pending
+        /// order as issued, or dropping a row that is actually revoked) would be worse than the
+        /// cost of an extra API call.
+        /// </summary>
+        internal static int? MapV2ReportStatusToDisposition(string orderStatus, string certificateStatus)
+        {
+            // certificateStatus is the more specific signal when present — prefer it.
+            if (TryMapV2ReportDisplayStatus(certificateStatus, out int certDisposition))
+                return certDisposition;
+
+            if (TryMapV2ReportDisplayStatus(orderStatus, out int orderDisposition))
+                return orderDisposition;
+
+            return null;
+        }
+
+        private static bool TryMapV2ReportDisplayStatus(string status, out int disposition)
+        {
+            disposition = default;
+            if (string.IsNullOrWhiteSpace(status))
+                return false;
+
+            switch (status.Trim().ToLowerInvariant())
+            {
+                // Issued — certificate exists and is downloadable.
+                case "certificate downloaded":
+                case "certificate generated":
+                case "order fulfilled":
+                case "issued":
+                    disposition = (int)EndEntityStatus.GENERATED;
+                    return true;
+
+                // Pending — somewhere in the approval/DCV/issuance workflow.
+                case "order accepted":
+                case "pending for approver":
+                case "approved by system":
+                    disposition = (int)EndEntityStatus.EXTERNALVALIDATION;
+                    return true;
+
+                // Revoked.
+                case "revoked":
+                case "certificate revoked":
+                    disposition = (int)EndEntityStatus.REVOKED;
+                    return true;
+
+                // Expired-but-not-revoked certs remain visible in inventory as GENERATED —
+                // mirrors StatusMapper.ToRequestDisposition's V1 convention.
+                case "expired":
+                    disposition = (int)EndEntityStatus.GENERATED;
+                    return true;
+
+                // Terminal failure — never issued, or explicitly cancelled/rejected.
+                case "rejected":
+                case "cancelled":
+                case "certificate rejected":
+                case "order rejected":
+                case "order cancelled":
+                    disposition = (int)EndEntityStatus.FAILED;
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// Assembles a full PEM chain from a V2 certificate download response.
+        /// Concatenates the leaf <c>certificatePem</c> and any intermediate PEM strings
+        /// in <c>chainPem</c> (when present) in leaf-first order, matching the V1 chain format.
+        /// </summary>
+        private static string AssembleV2CertChain(V2CertificateDownloadResponse certResp)
+        {
+            if (certResp?.ChainPem == null || certResp.ChainPem.Count == 0)
+                return certResp?.CertificatePem;
+
+            var sb = new System.Text.StringBuilder();
+            if (string.IsNullOrWhiteSpace(certResp.CertificatePem))
+                throw new InvalidOperationException(
+                    $"V2 certificate download for order '{certResp?.OrderId}' returned a null or empty leaf " +
+                    "certificate PEM while a chain PEM is present; cannot assemble a valid chain without the leaf.");
+            sb.Append(certResp.CertificatePem.TrimEnd());
+            foreach (var intermediate in certResp.ChainPem)
+            {
+                if (string.IsNullOrWhiteSpace(intermediate)) continue;
+                sb.AppendLine();
+                sb.Append(intermediate.TrimEnd());
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Maps a V2 revoke reason that CERTInext rejects live with "Invalid Revoke Reason
+        /// ID" to an accepted fallback, or <c>null</c> if <paramref name="rejectedV2Reason"/>
+        /// is not one of the known-rejected values. Per issues/0026's live-confirmed 9-value
+        /// matrix, only <c>key-compromise</c>, <c>affiliation-changed</c>, <c>superseded</c>,
+        /// <c>cessation-of-operation</c>, and <c>privilege-withdrawn</c> are actually accepted
+        /// (the same restriction V1's <see cref="StatusMapper.ToRevocationReasonId"/> has
+        /// always documented) — <c>unspecified</c>, <c>ca-compromise</c>,
+        /// <c>certificate-hold</c>, and <c>aa-compromise</c> are all rejected.
+        /// <c>key-compromise</c> is the fallback for the two *-compromise reasons (closest
+        /// semantic match); <c>cessation-of-operation</c> is the fallback for
+        /// <c>unspecified</c> and <c>certificate-hold</c>, neither of which implies an actual
+        /// key compromise — <c>key-compromise</c> there would misrepresent the revoke and
+        /// trigger the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation for no reason.
+        /// </summary>
+        private static string ResolveRejectedRevokeReasonFallback(string rejectedV2Reason) =>
+            rejectedV2Reason switch
+            {
+                Constants.RevocationReasonV2.Unspecified => Constants.RevocationReasonV2.CessationOfOperation,
+                Constants.RevocationReasonV2.CertificateHold => Constants.RevocationReasonV2.CessationOfOperation,
+                Constants.RevocationReasonV2.CACompromise => Constants.RevocationReasonV2.KeyCompromise,
+                Constants.RevocationReasonV2.AACompromise => Constants.RevocationReasonV2.KeyCompromise,
+                _ => null
+            };
+
+        /// <summary>
+        /// Revokes a certificate via the V2 REST API. If CERTInext rejects the resolved
+        /// reason with its "Invalid Revoke Reason ID" 422 and the reason is one of the four
+        /// known-rejected values (<see cref="ResolveRejectedRevokeReasonFallback"/>), retries
+        /// exactly once with an accepted fallback — see issues/0026 for the live-confirmed
+        /// accepted/rejected reason matrix. Any other revoke failure (including a 422 for a
+        /// reason not in that set) is surfaced as-is, with no retry.
+        /// </summary>
+        private async Task<int> RevokeV2Async(string caRequestID, string hexSerialNumber, uint revocationReason)
+        {
+            _logger.MethodEntry(LogLevel.Debug);
+
+            string v2Reason = StatusMapper.ToV2RevocationReason(revocationReason);
+
+            _logger.LogInformation(
+                "Revocation V2 attempt started. CARequestID={Id}, HexSerialNumber={Serial}, " +
+                "ReasonCode={ReasonCode}, V2Reason={V2Reason}",
+                caRequestID, hexSerialNumber, revocationReason, v2Reason);
+
+            // Pre-flight: resolve which product family owns this order (via TrackOrder,
+            // which probes families and 404s cleanly per-family) and verify it is revocable.
+            // This resolves the family definitively *before* we ever call revoke, so a 404
+            // from RevokeOrderV2Async below is unambiguous — issues/0019: revoke's own 404
+            // means "not found or not revokable" (per spec), and probing multiple families
+            // on a revoke 404 previously produced a misleading "not found in any product
+            // family" for orders that legitimately exist but simply aren't revokable yet.
+            V2OrderStatusResponse currentStatus;
+            string resolvedFamily;
+            try
+            {
+                (resolvedFamily, currentStatus) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(caRequestID);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "V2 revocation pre-flight failed. CARequestID={Id}",
+                    caRequestID);
+                throw;
+            }
+
+            int disposition = StatusMapper.V2StatusToRequestDisposition(currentStatus.Status);
+            if (disposition == (int)EndEntityStatus.REVOKED)
+            {
+                _logger.LogWarning(
+                    "V2 revocation skipped — already revoked. CARequestID={Id}",
+                    caRequestID);
+                _logger.MethodExit(LogLevel.Debug);
+                return (int)EndEntityStatus.REVOKED;
+            }
+
+            if (disposition != (int)EndEntityStatus.GENERATED)
+            {
+                // Compliance finding: a revoke denial must leave an audit record (SOX/SOC2
+                // who/what/when/outcome) — mirrors the V1 "Revocation rejected" LogError above.
+                _logger.LogError(
+                    "V2 revocation rejected — certificate is not in a revocable state. " +
+                    "CARequestID={Id}, Family={Family}, CurrentStatus={Status}",
+                    caRequestID, resolvedFamily, currentStatus.Status);
+                throw new Exception(
+                    $"V2 certificate '{caRequestID}' cannot be revoked: current status is '{currentStatus.Status}'. " +
+                    "Only issued certificates may be revoked.");
+            }
+
+            var revokeReq = new V2RevokeRequest
+            {
+                Reason = v2Reason,
+                Note   = $"Revoked via Keyfactor Command. CRL reason code: {revocationReason} ({v2Reason})."
+            };
+
+            string retriedFromReason = null;
+            try
+            {
+                await _client.RevokeOrderV2Async(resolvedFamily, caRequestID, revokeReq);
+            }
+            catch (KeyNotFoundException knf)
+            {
+                // Compliance finding: audit the denial (CARequestID, family, HTTP status, EMS
+                // code) before converting/rethrowing — the client already logged the raw
+                // HTTP/body; this adds the plugin-level who/what/outcome context.
+                _logger.LogWarning(
+                    "V2 revocation denied — order not found or not in a revokable state. " +
+                    "CARequestID={Id}, Family={Family}, HttpStatus={HttpStatus}, EmsCode={EmsCode}",
+                    caRequestID, resolvedFamily, 404, ExtractEmsCode(knf.Message) ?? "(none)");
+                // We already confirmed the order lives in `resolvedFamily` via TrackOrder
+                // above, so a 404 here is the spec's other documented meaning — "not in a
+                // revokable state" — not a genuine family miss. Surface that plainly
+                // instead of retrying other families.
+                throw new InvalidOperationException(
+                    $"V2 order '{caRequestID}' (family '{resolvedFamily}') could not be revoked: " +
+                    $"CERTInext reports it as not found or not in a revokable state. {knf.Message}");
+            }
+            catch (InvalidOperationException ioe) when (
+                ResolveRejectedRevokeReasonFallback(v2Reason) != null &&
+                ioe.Message.IndexOf("Invalid Revoke Reason ID", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                // CERTInext's V2 API rejects several of the spec-documented reason values
+                // outright (422 "Invalid Revoke Reason ID") — confirmed live, independent of
+                // this plugin (issues/0026). Only 5 of the 9 spec-documented reason strings
+                // are actually accepted: key-compromise, affiliation-changed, superseded,
+                // cessation-of-operation, privilege-withdrawn — the same restriction V1's
+                // ToRevocationReasonId has always been documented against. Retry exactly once
+                // with the accepted fallback ResolveRejectedRevokeReasonFallback resolved for
+                // this reason, rather than failing outright on what may be Command's default
+                // revoke call.
+                string originalReason = v2Reason;
+                string fallbackReason = ResolveRejectedRevokeReasonFallback(v2Reason);
+                _logger.LogWarning(
+                    "V2 revoke rejected reason '{OriginalReason}' as invalid (CARequestID={Id}, Family={Family}, " +
+                    "HttpStatus={HttpStatus}, EmsCode={EmsCode}); retrying once with '{FallbackReason}' " +
+                    "per issues/0026.",
+                    originalReason, caRequestID, resolvedFamily, 422, ExtractEmsCode(ioe.Message) ?? "(none)",
+                    fallbackReason);
+                v2Reason = fallbackReason;
+                revokeReq = new V2RevokeRequest
+                {
+                    // CERTInext's "note" field silently rejects a semicolon with the same
+                    // "Invalid Revoke Remarks" 422 (found live while building this retry —
+                    // comma/period/slash/parens are all fine; only ';' triggers it — see
+                    // issues/0026). Avoid semicolons in this string.
+                    Reason = v2Reason,
+                    Note = $"Revoked via Command, reason {originalReason} rejected, retried as {fallbackReason} (see issues/0026)."
+                };
+                retriedFromReason = originalReason;
+                try
+                {
+                    await _client.RevokeOrderV2Async(resolvedFamily, caRequestID, revokeReq);
+                }
+                catch (Exception retryEx)
+                {
+                    // Compliance finding: the retry attempt is itself a revoke call against the
+                    // CA and must leave an audit record on failure, not just succeed silently or
+                    // vanish into the caller's exception.
+                    _logger.LogError(retryEx,
+                        "V2 revocation retry ({FallbackReason}) failed. CARequestID={Id}, Family={Family}",
+                        fallbackReason, caRequestID, resolvedFamily);
+                    throw;
+                }
+            }
+            catch (InvalidOperationException ioe)
+            {
+                // Any 422 not matched by the retry-eligible case above (e.g. a distinct EMS
+                // code/detail, or a reason not in the known-rejected set) — audit the denial
+                // and rethrow unchanged. Never more than the one retry above.
+                _logger.LogWarning(
+                    "V2 revocation denied. CARequestID={Id}, Family={Family}, HttpStatus={HttpStatus}, " +
+                    "EmsCode={EmsCode}, Detail={Detail}",
+                    caRequestID, resolvedFamily, 422, ExtractEmsCode(ioe.Message) ?? "(none)", ioe.Message);
+                throw;
+            }
+
+            _logger.LogInformation(
+                "V2 revocation complete. CARequestID={Id}, HexSerialNumber={Serial}, V2Reason={V2Reason}, " +
+                "Family={Family}, RetriedFromReason={RetriedFromReason}",
+                caRequestID, hexSerialNumber, v2Reason, resolvedFamily, retriedFromReason ?? "(none)");
+            _logger.MethodExit(LogLevel.Debug);
+            return (int)EndEntityStatus.REVOKED;
+        }
+
+        // ---------------------------------------------------------------------------
+        // V2 private utility
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Pulls the first <c>EMS-NNN</c> code out of an exception message, for audit log
+        /// lines that want the CA's own error code as a discrete field rather than only the
+        /// free-text detail. Returns <c>null</c> when no code is present (e.g. a CERTInext
+        /// detail with no EMS code, such as "Certificate Request still being processed").
+        /// </summary>
+        private static string ExtractEmsCode(string message)
+        {
+            if (string.IsNullOrEmpty(message)) return null;
+            var m = System.Text.RegularExpressions.Regex.Match(message, @"\bEMS-\d+\b");
+            return m.Success ? m.Value : null;
+        }
+
+        private static string ExtractCnFromSubject(string subject)
+        {
+            if (string.IsNullOrWhiteSpace(subject)) return null;
+            // subject format: "CN=example.com, O=Org, ..."
+            foreach (var part in subject.Split(','))
+            {
+                var trimmed = part.Trim();
+                if (trimmed.StartsWith("CN=", StringComparison.OrdinalIgnoreCase))
+                    return trimmed.Substring(3).Trim();
+            }
+            return null;
+        }
+
+        // ---------------------------------------------------------------------------
+        // V1 private helpers
+        // ---------------------------------------------------------------------------
+
         /// <summary>
         /// Handles New and Reissue enrollment flows by submitting a fresh certificate
         /// request to CERTInext.
@@ -1094,9 +3533,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 ProfileId = ep.ProfileId,
                 Csr = csr,
+                ValidityYears = ep.ValidityYears > 0 ? ep.ValidityYears : (int?)null,
                 ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                 Subject = subject,
-                Sans = BuildSanList(san),
+                Sans = BuildSanList(san, csr, subject),
                 RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                 RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
                 KeyType = string.IsNullOrWhiteSpace(ep.KeyType) ? null : ep.KeyType,
@@ -1105,12 +3545,38 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var enrollResp = await _client.EnrollCertificateAsync(enrollReq);
 
+            // Whether the DCV block below took ownership of the in-call issuance wait for this
+            // order. Declared outside the #if so both build flavors compile the pickup gate the
+            // same way (it simply stays false on the no-DCV build). When true, the synchronous
+            // pickup poll is skipped: on the DCV build the DCV path already owns the issuance
+            // decision — it either ran WaitForIssuanceAfterDcvAsync itself, deferred to another
+            // in-flight caller, or determined the order is terminal / not yet validated — so a
+            // second stacked poll would either double the wait or burn the budget polling an
+            // order that can never issue in-call (regression guard: a cancelled/rejected order
+            // must not be re-polled here after DCV already short-circuited it).
+            bool dcvIssuanceWaitRan = false;
+
 #if SUPPORTS_DCV
             // DCV: run domain validation if enabled, the factory was injected, and the
             // order was accepted (not immediately failed).
             string orderNumber = enrollResp.Id;
             if (_domainValidatorFactory != null && _config.DcvEnabled && !string.IsNullOrEmpty(orderNumber))
             {
+                // DCV owns the in-call issuance wait for this order from here on: every exit from
+                // this block (duplicate in-flight, DCV-validated + issuance poll, terminal order,
+                // or challenge-not-yet-exposed) is a decision the pickup poll must not second-guess.
+                // Set before any await so it holds on every path out of the block.
+                //
+                // This is intentionally coarse — keyed on "the DCV subsystem engaged for this order",
+                // not on "a DCV wait is actively running". The one case it over-defers is an order
+                // whose pending domains are all assigned to a non-DNS-01 method (HTTP/email): DCV does
+                // no work, yet pickup is skipped. That is an accepted trade: this plugin only drives
+                // DNS-01, so such orders depend on out-of-band validation and would not issue within
+                // the ~55s pickup window anyway — the next sync completes them. Distinguishing that
+                // sub-case from the terminal/cancelled case (which MUST skip pickup) would require a
+                // richer PerformDcvIfNeededAsync result and risk re-opening the terminal-order regression.
+                dcvIssuanceWaitRan = true;
+
                 // SOX CC7.3: bound the entire DCV flow with a hard timeout so a stuck
                 // DNS provider or extreme propagation delay cannot hold a gateway worker
                 // thread indefinitely.  Configurable via DcvTimeoutMinutes (config or
@@ -1170,8 +3636,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 #endif
 
+            // Synchronous certificate pickup (Sectigo-parity): poll for the issued certificate so
+            // a fast-issuing order returns GENERATED + PEM in this same call. No-op for the
+            // already-issued/failed case and for OV/EV orders that CERTInext issues asynchronously
+            // — those fall back to the pending result and are imported by the next sync.
+            var newResult = BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+            newResult = await PickUpEnrolledCertificateAsync(newResult, enrollResp.Id, dcvIssuanceWaitRan);
+
             _logger.MethodExit(LogLevel.Debug);
-            return BuildEnrollmentResult(enrollResp, ep.AutoApprove);
+            return newResult;
         }
 
         /// <summary>
@@ -1196,7 +3669,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation(
                 "Renewal/reissue probe — read PriorCertSN from EnrollmentProductInfo. " +
                 "Subject={Subject}, PriorCertSN={PriorCertSN}, RenewalWindowDays={WindowDays}",
-                subject, string.IsNullOrWhiteSpace(priorCertSn) ? "(none)" : priorCertSn,
+                LogSanitizer.Strip(subject), string.IsNullOrWhiteSpace(priorCertSn) ? "(none)" : priorCertSn,
                 ep.RenewalWindowDays);
 
             if (string.IsNullOrWhiteSpace(priorCertSn))
@@ -1205,7 +3678,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // production log filters and are available for anomaly detection.
                 _logger.LogInformation(
                     "Renewal/reissue has no PriorCertSN — treating as new enrollment. Subject={Subject}",
-                    subject);
+                    LogSanitizer.Strip(subject));
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
 
@@ -1226,7 +3699,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 _logger.LogInformation(
                     "CARequestID for serial '{SN}' is empty — falling back to new enrollment. Subject={Subject}",
-                    priorCertSn, subject);
+                    priorCertSn, LogSanitizer.Strip(subject));
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
 
@@ -1275,11 +3748,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogInformation(
                     "Renewal via CERTInext renew API started. " +
                     "PriorCARequestID={PriorId}, Subject={Subject}, ProfileId={ProfileId}",
-                    priorCaRequestId, subject, ep.ProfileId);
+                    priorCaRequestId, LogSanitizer.Strip(subject), ep.ProfileId);
 
                 var renewReq = new RenewCertificateRequest
                 {
                     Csr = csr,
+                    // Renewals go out as a fresh CERTInext order, so they need the same domain
+                    // set as a new enrollment — otherwise a renewed UCC certificate comes back
+                    // holding only its primary domain.
+                    Subject = subject,
+                    Sans = BuildSanList(san, csr, subject),
+                    ProfileId = ep.ProductCode,
+                    ValidityYears = ep.ValidityYears > 0 ? ep.ValidityYears : (int?)null,
                     ValidityDays = ep.ValidityDays > 0 ? ep.ValidityDays : (int?)null,
                     RequesterName = string.IsNullOrWhiteSpace(ep.RequesterName) ? null : ep.RequesterName,
                     RequesterEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? null : ep.RequesterEmail,
@@ -1297,13 +3777,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "PriorCARequestID={PriorId}, NewCARequestID={NewId}, Status={Status}",
                     priorCaRequestId, renewResult.CARequestID, renewResult.Status);
 
+                // Synchronous certificate pickup (Sectigo-parity), same as the new-enrollment path.
+                // The renew path never runs an in-call DCV issuance wait, so pickup always applies.
+                renewResult = await PickUpEnrolledCertificateAsync(renewResult, renewResp.Id, dcvIssuanceWaitRan: false);
+
                 return renewResult;
             }
             else
             {
                 _logger.LogInformation(
                     "Certificate '{Id}' is outside the renewal window ({Window} days) — issuing new certificate. Subject={Subject}",
-                    priorCaRequestId, ep.RenewalWindowDays, subject);
+                    priorCaRequestId, ep.RenewalWindowDays, LogSanitizer.Strip(subject));
                 return await EnrollNewAsync(csr, subject, san, ep);
             }
         }
@@ -1336,6 +3820,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             bool hasPhrase = msg.IndexOf("Invalid Request for this API", StringComparison.OrdinalIgnoreCase) >= 0;
             bool hasOtherEmsCode = System.Text.RegularExpressions.Regex.IsMatch(msg, @"\bEMS-\d+\b");
             return hasPhrase && !hasOtherEmsCode;
+        }
+
+        /// <summary>
+        /// Strips a leading wildcard label (<c>"*."</c>) so a domain can be used to pick a DNS
+        /// zone / <see cref="Keyfactor.AnyGateway.Extensions.IDomainValidator"/> and to build the
+        /// DCV TXT record hostname. A literal <c>"*"</c> is not a queryable DNS label, so staging
+        /// a record at e.g. <c>_emsign-validation.*.example.com</c> for a wildcard domain can never
+        /// be seen by the CA — confirmed live 2026-10-01 (a <c>*.dcv-fresh-&lt;ts&gt;...</c> order
+        /// stayed pending with a literal-asterisk TXT host staged). Callers must keep using the
+        /// ORIGINAL domain string (including <c>"*."</c>) for every CERTInext API call
+        /// (GetDcv/VerifyDcv/TrackOrder) — that is what the CA itself tracks and reports back
+        /// per-domain; only the DNS-side hostname/zone-resolution inputs use the base domain.
+        ///
+        /// Whether CERTInext's own DCV actually accepts a base-domain TXT record as proof for a
+        /// wildcard domain entry is UNVERIFIED against the live API as of this change — pending
+        /// the principal's live run.
+        /// </summary>
+        private static string StripWildcardPrefix(string domain)
+        {
+            if (string.IsNullOrEmpty(domain))
+                return domain;
+            return domain.StartsWith("*.", StringComparison.Ordinal)
+                ? domain.Substring(2)
+                : domain;
         }
 
         // (`DomainValidatorConfigProvider` nested helper removed — it declared an
@@ -1518,6 +4026,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
                 catch (OperationCanceledException)
                 {
+                    // Rethrow if the gateway-level token is cancelled so shutdown is not blocked;
+                    // only swallow an internal timeout (e.g. a per-poll deadline CTS).
+                    ct.ThrowIfCancellationRequested();
                     return false;
                 }
             }
@@ -1565,26 +4076,63 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // SOX CC6.1: validate domain names before passing them to the DNS provider plugin
             // or the CERTInext API.  A malformed domain (empty, whitespace, or containing
             // characters outside the FQDN alphabet) could cause log injection or unexpected
-            // DNS plugin behaviour.  Invalid entries are rejected loudly rather than silently
-            // skipped so the condition is visible in the audit trail.
-            foreach (var (domain, _) in pendingDomains)
-            {
-                if (string.IsNullOrWhiteSpace(domain))
-                    throw new InvalidOperationException(
-                        $"TrackOrder returned a blank domain key in domainVerification for order '{orderNumber}'. " +
-                        "Cannot proceed with DCV.");
+            // DNS plugin behaviour.  Invalid entries are rejected loudly — LogError, so the
+            // condition is visible in the audit trail — but they are EXCLUDED rather than
+            // thrown on.
+            //
+            // Throwing here would fail the whole order: the exception escapes Enroll (which has
+            // no catch) after the order was already placed at the CA, so the enrollment reports
+            // failure with an orphaned order, and no TXT record is staged for the *valid* domains
+            // on the same order. Worse, it is unrecoverable — every later Synchronize /
+            // GetSingleRecord retry re-enters here, hits the same undrainable domain, and
+            // TryRunDcvDuringSyncAsync swallows the exception and returns false, so the order sits
+            // at EXTERNALVALIDATION forever.
+            //
+            // This is reachable in normal operation now that non-DNS SANs are submitted to
+            // CERTInext (see BuildSanList): the CA registers an email/URI SAN verbatim as an order
+            // domain, and that key is not an FQDN. One such SAN must not strand the DNS names
+            // alongside it. Same principle the EMS-956 branch below states explicitly: do not throw
+            // out of DCV for a condition that leaves the order legitimately pending.
+            var invalidDomains = new List<string>();
+            var validPendingDomains = new List<KeyValuePair<string, DomainVerificationDetail>>();
 
-                // Allow standard FQDN characters plus wildcard prefix (*.example.com)
-                if (!System.Text.RegularExpressions.Regex.IsMatch(domain, @"^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$"))
-                {
-                    _logger.LogError(
-                        "DCV domain name failed validation and will not be processed. OrderNumber={OrderNumber}, Domain={Domain}",
-                        orderNumber, domain);
-                    throw new InvalidOperationException(
-                        $"TrackOrder returned an invalid domain name '{domain}' in domainVerification for order '{orderNumber}'. " +
-                        "Domain names must conform to FQDN syntax.");
-                }
+            foreach (var entry in pendingDomains)
+            {
+                string domain = entry.Key;
+
+                // Allow standard FQDN characters plus wildcard prefix (*.example.com).
+                //
+                // \A/\z, not ^/$: in .NET's default (non-Multiline) mode, $ matches immediately
+                // before a single trailing '\n', not only at the true end of the string — so
+                // "evil.com\n" passes a ^...$ version of this regex. \A and \z are absolute
+                // start/end-of-string anchors regardless of RegexOptions, so a value with any
+                // trailing control character is correctly rejected here rather than reaching the
+                // unsanitized-looking-safe domain this validation exists to guarantee.
+                bool valid = !string.IsNullOrWhiteSpace(domain)
+                    && System.Text.RegularExpressions.Regex.IsMatch(
+                        domain, @"\A(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?\z");
+
+                if (valid)
+                    validPendingDomains.Add(entry);
+                else
+                    invalidDomains.Add(string.IsNullOrWhiteSpace(domain) ? "(blank)" : domain);
             }
+
+            if (invalidDomains.Count > 0)
+            {
+                _logger.LogError(
+                    "{Count} domain(s) on order {OrderNumber} are not valid FQDNs and cannot be DNS-01 validated: " +
+                    "[{Domains}]. They are skipped so the remaining {ValidCount} domain(s) can still be validated. " +
+                    "This order cannot be issued by CERTInext until these are removed — they usually come from a " +
+                    "non-DNS SAN (IP address, email, URI) that was requested on the enrollment.",
+                    // An email SAN submitted to V1 comes back verbatim as an order domain; mask it
+                    // unless LogSensitiveRequestData is on (issue 0040 follow-up).
+                    invalidDomains.Count, orderNumber,
+                    LogSanitizer.FormatUntypedSans(invalidDomains, _config.LogSensitiveRequestData, ", "),
+                    validPendingDomains.Count);
+            }
+
+            pendingDomains = validPendingDomains;
 
             if (pendingDomains.Count == 0)
                 return false;
@@ -1595,62 +4143,294 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             var stagedValidations = new List<(string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator)>();
 
-            // Stage DNS TXT records for all pending domains
-            foreach (var (domain, _) in pendingDomains)
+            // Every domain that got through staging this pass — whether it freshly published a
+            // TXT record or shared an already-staged hostname with a sibling (see
+            // stagedHostnames below). Drives the per-domain CERTInext Verify calls; kept separate
+            // from stagedValidations (which holds only ONE entry per unique hostname) so a
+            // wildcard/apex pair sharing a base-domain hostname still each get their own CA-side
+            // VerifyDcv, without staging — or cleaning up — the shared TXT record twice.
+            var verifyDomains = new List<string>();
+
+            // TXT hostname -> the first domain that staged it this pass. A UCC order can list
+            // both "example.com" and "*.example.com"; StripWildcardPrefix collapses both to the
+            // same base-domain hostname, so the second domain to reach it must reuse the
+            // already-staged record instead of publishing (and later cleaning up) a duplicate.
+            var stagedHostnames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            // Domains this pass could not stage, with why — purely for the summary LogError after
+            // the loop. Every failure mode below is loud (its own LogError, sanitized) before being
+            // skipped, so nothing here is silent; this list just avoids repeating that detail twice.
+            var skippedDomains = new List<(string domain, string reason)>();
+
+            // Set instead of an immediate `return false` inside the loop below, so a not-yet-ready
+            // deferral goes through the same cleanup as every other exit path — see the try/catch
+            // around the loop.
+            bool deferToNextSyncCycle = false;
+
+            // Removes whatever TXT records were already published before an early exit from the
+            // staging loop. Nothing else in this method cleans up mid-loop: the try/finally further
+            // down only runs once every pending domain has been staged, so without this, an early
+            // exit orphans every TXT record already published for the earlier domains in the *same*
+            // order — permanently, since nothing else in the codebase calls CleanupValidation for
+            // them. Kept even though every per-domain failure below is now skip-and-continue rather
+            // than throw: it is the safety net for a genuinely unexpected exception (cancellation, a
+            // bug, a validator implementation that throws instead of returning a failure result).
+            //
+            // Shares its per-entry cleanup logic with the try/finally's own cleanup loop further
+            // down via CleanupOneStagedValidation — the two call sites differ only in when they run
+            // (an early exit here vs. always-run-at-the-end there), not in what "clean up one TXT
+            // record" means.
+            async Task CleanupPartialStagingAsync()
             {
-                GetDcvResponse dcvResp;
+                // Concurrent, not sequential: each cleanup call already has its own independent
+                // CleanupValidationTimeoutSeconds bound (see CleanupOneStagedValidationAsync), but
+                // running them one after another meant that bound was per-call, not in aggregate — a
+                // UCC order with N staged domains could hold the calling request open for up to
+                // N × CleanupValidationTimeoutSeconds if the DNS provider was merely slow (not even
+                // hung) on every delete, which can exceed DcvTimeoutMinutes itself and defeats the
+                // "entire DCV flow is hard-timeout-bounded" guarantee for exactly the multi-SAN case
+                // this diff exists to support. Running them concurrently bounds the wall-clock time
+                // for the whole batch to the slowest single call, regardless of domain count — these
+                // are independent per-domain operations (different hostnames/records) with no shared
+                // mutable state, so there is nothing for concurrent execution to race on.
+                await Task.WhenAll(stagedValidations.Select(entry =>
+                    CleanupOneStagedValidationAsync(entry, " after an early exit from DCV staging")));
+            }
+
+            // Shared by CleanupPartialStagingAsync above and the try/finally's own cleanup loop
+            // below — both mean "remove one already-published TXT record", just at different times
+            // (an early exit vs. always-run-at-the-end). `context` distinguishes the two in the log
+            // text without duplicating the try/catch/log structure itself.
+            async Task CleanupOneStagedValidationAsync(
+                (string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator) entry,
+                string context)
+            {
+                var (domain, hostname, validator) = entry;
                 try
                 {
-                    dcvResp = await _client.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
-                }
-                catch (Exception ex) when (IsDcvNotYetReady(ex))
-                {
-                    // CERTInext occasionally exposes the DCV slot in TrackOrder (so
-                    // domainVerification is populated and dcvStatus="0") before the GetDcv
-                    // endpoint will accept calls for that order — observed as EMS-956
-                    // "Invalid Request for this API" for several hours after enrollment.
-                    // Treat this as "DCV not ready yet": skip the DCV ceremony for now and
-                    // let the sync-driven retry pick it up on a later cycle. We must NOT
-                    // throw, because that would fail the entire Enroll call and prevent the
-                    // gateway from recording the pending order at all.
+                    // A fresh, independently-bounded token — deliberately neither `ct` nor
+                    // CancellationToken.None.
+                    //
+                    // Not `ct`: this is a best-effort compensating action — removing a TXT record we
+                    // already published — and it must run regardless of WHY we are cleaning up,
+                    // including the case where `ct` itself is the reason (the dominant real trigger
+                    // for the early-exit call site is the shared DcvTimeoutMinutes-bound token firing
+                    // mid-loop, which means `ct` is guaranteed already cancelled there). A
+                    // cooperative IDomainValidator that forwards its token into its own HTTP calls —
+                    // the reference CloudflareDomainValidator in this repo does exactly that — would
+                    // throw immediately on an already-cancelled token and never even attempt the
+                    // delete, silently leaving the record published with only a Warning logged.
+                    //
+                    // Not CancellationToken.None either: this method's own SOX CC7.3 guarantee is
+                    // that the whole DCV flow is hard-timeout-bounded so a stuck DNS provider cannot
+                    // hold a gateway worker thread indefinitely. That bound has to come from
+                    // somewhere for THIS call too — including the routine, always-runs finally-block
+                    // cleanup on the ordinary successful-DCV path, which was never cancellation-
+                    // related to begin with and would otherwise hang forever on a DNS provider
+                    // plugin whose underlying network call stalls.
+                    using var cleanupCts = new CancellationTokenSource(
+                        TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
+                    await validator.CleanupValidation(hostname, cleanupCts.Token);
                     _logger.LogInformation(
-                        "GetDcv not yet accepting calls for order {OrderNumber} domain {Domain} ({Error}). " +
-                        "Deferring DCV to the next sync cycle.",
-                        orderNumber, domain, ex.Message);
-                    return false;
+                        "DNS TXT record cleaned up{Context}. Domain={Domain}, Hostname={Hostname}",
+                        context, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "GetDcv failed for order {OrderNumber} domain {Domain}", orderNumber, domain);
-                    throw;
+                    _logger.LogWarning(ex,
+                        "Failed to clean up DNS TXT record{Context}. Domain={Domain}, Hostname={Hostname}. " +
+                        "May require manual removal.",
+                        context, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
                 }
+            }
 
-                string token = dcvResp.DcvDetails?.Token;
-                if (string.IsNullOrWhiteSpace(token))
-                    throw new InvalidOperationException(
-                        $"GetDcv returned no token for order '{orderNumber}' domain '{domain}'.");
+            try
+            {
+                // Stage DNS TXT records for all pending domains. Every failure below is scoped to
+                // the one domain that hit it — logged loudly (LogError, so the audit trail carries
+                // the reason before the domain is dropped) and skipped, never thrown. A throw here
+                // would abort the WHOLE order after Enroll already placed it at the CA — Enroll has
+                // no catch around this call, so the exception would escape as a failed enrollment
+                // with an orphaned CERTInext order, and TryRunDcvDuringSyncAsync would swallow the
+                // same exception on every later sync retry, leaving the order stuck at
+                // EXTERNALVALIDATION forever. That is worse than parking the order pending with a
+                // clear log entry, for EVERY failure shape here — not just the ones distinguishable
+                // as "bad input" — because nothing downstream ever gets to see or act on the
+                // exception anyway. This directly caused three real regressions across the first two
+                // rounds of fixing this file: a GetDcv error or an empty token for a non-DNS SAN
+                // (submitted on purpose — see BuildSanList) aborted co-tenant DNS domains on the same
+                // order; a StageValidation failure on domain N+1 orphaned domain N's TXT record; and
+                // a misconfiguration-detection throw fired on an ordinary non-DNS Subject CN, which
+                // no setting could prevent since SubmitNonDnsSans only filters the SAN list, not the
+                // subject. There is no longer a "this must still throw" case in this loop at all.
+                foreach (var (domain, _) in pendingDomains)
+                {
+                    GetDcvResponse dcvResp;
+                    try
+                    {
+                        dcvResp = await _client.GetDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
+                    }
+                    catch (Exception ex) when (IsDcvNotYetReady(ex))
+                    {
+                        // CERTInext occasionally exposes the DCV slot in TrackOrder (so
+                        // domainVerification is populated and dcvStatus="0") before the GetDcv
+                        // endpoint will accept calls for that order — observed as EMS-956
+                        // "Invalid Request for this API" for several hours after enrollment. This is
+                        // an order-readiness condition, not a per-domain one, so unlike every other
+                        // case in this loop it defers the whole pass rather than skipping one domain.
+                        _logger.LogInformation(
+                            "GetDcv not yet accepting calls for order {OrderNumber} domain {Domain} ({Error}). " +
+                            "Deferring DCV to the next sync cycle.",
+                            orderNumber, LogSanitizer.Strip(domain), ex.Message);
+                        deferToNextSyncCycle = true;
+                        break;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The shared, DcvTimeoutMinutes-bound cancellation firing mid-loop. This is
+                        // NOT a per-domain CA/DNS-provider failure — it must not be caught by the
+                        // generic clause below, which would mislabel it as "GetDcv failed" for
+                        // whichever domain happened to be in flight and send an operator chasing the
+                        // wrong cause. Propagate to the outer catch, which logs and cleans up.
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        // Any other GetDcv failure — genuinely unmeasured against the live API for a
+                        // non-DNS order-domain, which is exactly why this must not be allowed to fail
+                        // the whole order on a guess. Skip just this domain.
+                        _logger.LogError(ex,
+                            "GetDcv failed for order {OrderNumber} domain {Domain}; skipping this domain so the " +
+                            "rest of the order can still be validated.", orderNumber, LogSanitizer.Strip(domain));
+                        skippedDomains.Add((domain, "GetDcv failed"));
+                        continue;
+                    }
 
-                string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
-                    ? Constants.Dcv.DefaultTxtRecordTemplate
-                    : _config.DcvTxtRecordTemplate;
-                string hostname = string.Format(template, domain);
+                    string token = dcvResp.DcvDetails?.Token;
+                    if (string.IsNullOrWhiteSpace(token))
+                    {
+                        _logger.LogError(
+                            "GetDcv returned no token for order {OrderNumber} domain {Domain}; skipping this " +
+                            "domain so the rest of the order can still be validated.",
+                            orderNumber, LogSanitizer.Strip(domain));
+                        skippedDomains.Add((domain, "no DCV token returned"));
+                        continue;
+                    }
 
-                var validator = DomainValidatorFactory.ResolveDomainValidator(domain, "dns-01");
-                if (validator == null)
-                    throw new InvalidOperationException(
-                        $"No DNS provider plugin is configured for domain '{domain}'. " +
-                        "Ensure the appropriate DNS provider plugin is deployed and configured on the gateway.");
+                    string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
+                        ? Constants.Dcv.DefaultTxtRecordTemplate
+                        : _config.DcvTxtRecordTemplate;
+                    // DCV publishes/looks up the TXT record under the BASE domain — a wildcard's
+                    // "*." label is not a queryable DNS name. CERTInext's own GetDcv/VerifyDcv
+                    // calls above/below still use the original `domain` (including "*."), since
+                    // that is what Track Order reports back per-domain.
+                    string baseDomain = StripWildcardPrefix(domain);
+                    string hostname = string.Format(template, baseDomain);
 
-                _logger.LogInformation(
-                    "Staging DNS TXT record for DCV. OrderNumber={OrderNumber}, Domain={Domain}, Hostname={Hostname}",
-                    orderNumber, domain, hostname);
+                    if (stagedHostnames.TryGetValue(hostname + "|" + token, out string sharedWithDomain))
+                    {
+                        // Sibling domain (e.g. the wildcard/apex pair of the same base domain)
+                        // already staged this exact TXT hostname this pass — reuse it instead of
+                        // publishing a second record at the same name. This domain still gets its
+                        // own CA-side GetDcv/VerifyDcv (CERTInext tracks DCV per domain entry); it
+                        // just doesn't need its own TXT record.
+                        _logger.LogInformation(
+                            "DCV hostname {Hostname} for domain {Domain} on order {OrderNumber} is already " +
+                            "staged (shared with {SharedWith}); reusing it instead of publishing a second " +
+                            "TXT record.",
+                            LogSanitizer.Strip(hostname), LogSanitizer.Strip(domain), orderNumber,
+                            LogSanitizer.Strip(sharedWithDomain));
+                        verifyDomains.Add(domain);
+                        continue;
+                    }
 
-                var stageResult = await validator.StageValidation(hostname, token, ct);
-                if (!stageResult.Success)
-                    throw new InvalidOperationException(
-                        $"Failed to stage DNS validation for '{domain}': {stageResult.ErrorMessage}");
+                    var validator = DomainValidatorFactory.ResolveDomainValidator(baseDomain, "dns-01");
+                    if (validator == null)
+                    {
+                        // The canonical case: an IP-literal SAN (or a non-DNS Subject CN) satisfies
+                        // the FQDN regex above but no DNS zone can ever match it.
+                        _logger.LogError(
+                            "No DNS provider plugin resolved for domain '{Domain}' on order {OrderNumber}; " +
+                            "skipping this domain so the rest of the order can still be validated. If this is " +
+                            "a real domain, ensure the appropriate DNS provider plugin is deployed and " +
+                            "configured on the gateway; if it came from a non-DNS SAN (e.g. an IP address) or a " +
+                            "non-DNS Subject CN, remove it from the request.",
+                            LogSanitizer.Strip(domain), orderNumber);
+                        skippedDomains.Add((domain, "no DNS provider resolved"));
+                        continue;
+                    }
 
-                stagedValidations.Add((domain, hostname, validator));
+                    _logger.LogInformation(
+                        "Staging DNS TXT record for DCV. OrderNumber={OrderNumber}, Domain={Domain}, Hostname={Hostname}",
+                        orderNumber, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
+
+                    DomainValidationResult stageResult;
+                    try
+                    {
+                        stageResult = await validator.StageValidation(hostname, token, ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Same reasoning as the GetDcv cancellation catch above: not a per-domain
+                        // failure, must reach the outer catch rather than the generic clause below.
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "DNS provider plugin threw while staging '{Domain}' for order {OrderNumber}; " +
+                            "skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(domain), orderNumber);
+                        skippedDomains.Add((domain, "DNS provider plugin threw"));
+                        continue;
+                    }
+
+                    if (!stageResult.Success)
+                    {
+                        _logger.LogError(
+                            "Failed to stage DNS validation for '{Domain}' on order {OrderNumber}: {Error}. " +
+                            "Skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(domain), orderNumber, LogSanitizer.Strip(stageResult.ErrorMessage));
+                        skippedDomains.Add((domain, $"stage failed: {stageResult.ErrorMessage}"));
+                        continue;
+                    }
+
+                    stagedHostnames[hostname + "|" + token] = domain;
+                    stagedValidations.Add((domain, hostname, validator));
+                    verifyDomains.Add(domain);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Nothing in the loop above throws for a per-domain reason any more — this is the
+                // safety net for a genuinely unexpected failure: cancellation (the shared
+                // DcvTimeoutMinutes-bound token expiring mid-loop — explicitly re-thrown past the
+                // per-domain catches above rather than mislabeled as a per-domain failure) or a bug.
+                // Log before rethrowing: neither caller (EnrollNewAsync's try/finally, or Enroll
+                // itself) adds a catch, so without a log line here an unanticipated failure on the
+                // synchronous Enroll-time DCV path would leave no plugin-emitted record at all
+                // identifying the order or cause — only whatever the gateway host's own unhandled-
+                // exception logging happens to capture.
+                _logger.LogError(ex,
+                    "Unexpected failure during DCV staging for order {OrderNumber}; cleaning up any " +
+                    "already-staged TXT records before this propagates.", orderNumber);
+                await CleanupPartialStagingAsync();
+                throw;
+            }
+
+            if (deferToNextSyncCycle)
+            {
+                await CleanupPartialStagingAsync();
+                return false;
+            }
+
+            if (skippedDomains.Count > 0)
+            {
+                _logger.LogError(
+                    "{Count} domain(s) on order {OrderNumber} could not be staged for DCV and were skipped: " +
+                    "[{Domains}]. This order cannot be issued by CERTInext until they are resolved.",
+                    skippedDomains.Count, orderNumber,
+                    LogSanitizer.Strip(string.Join(", ", skippedDomains.Select(d => $"{d.domain} ({d.reason})"))));
             }
 
             if (stagedValidations.Count == 0)
@@ -1668,38 +4448,781 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     delaySeconds, orderNumber);
                 await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
 
-                foreach (var (domain, hostname, _) in stagedValidations)
+                // Every domain that got through staging — including hostname-sharing siblings —
+                // still gets its own CA-side verify call; CERTInext tracks DCV per domain entry
+                // even when two domains share one TXT record.
+                foreach (var domain in verifyDomains)
                 {
                     _logger.LogInformation(
-                        "Triggering CERTInext DCV verification. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        "Triggering CERTInext DCV verification. OrderNumber={OrderNumber}, Domain={Domain}",
+                        orderNumber, LogSanitizer.Strip(domain));
                     await _client.VerifyDcvAsync(orderNumber, domain, Constants.Dcv.MethodDnsTxt, ct);
                 }
 
                 // Poll TrackOrder until CERTInext confirms all staged domains are verified
                 // before removing TXT records — VerifyDcv triggers an async DNS lookup on
                 // their side, so cleanup must wait for dcvStatus=1 on every domain.
-                await WaitForDcvVerificationAsync(orderNumber, stagedValidations.Select(s => s.domain).ToList(), ct);
+                await WaitForDcvVerificationAsync(orderNumber, verifyDomains, ct);
             }
             finally
             {
-                // Always clean up staged DNS records — even on failure
-                foreach (var (domain, hostname, validator) in stagedValidations)
+                // Always clean up staged DNS records — even on failure. Concurrent, not sequential
+                // — see CleanupPartialStagingAsync's comment above for why: sequential cleanup made
+                // the aggregate wall-clock time for this block scale with the number of staged SAN
+                // domains, unbounded relative to DcvTimeoutMinutes, on this ordinary success path too.
+                await Task.WhenAll(stagedValidations.Select(entry =>
+                    CleanupOneStagedValidationAsync(entry, "")));
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// True when the exception's message contains the CERTInext V2 EMS-1080 code
+        /// ("Domain is already verified"), the spec's documented no-op for both
+        /// GetDcv and VerifyDcv on a domain that is still within its DCV reuse window
+        /// (issues/0020). Message-based rather than a typed field because the API's
+        /// RFC 7807 body carries the EMS code as text embedded in `detail`/`title`,
+        /// not as a separate structured field (see <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2ProblemDetails"/>).
+        /// </summary>
+        private static bool IsEms1080DomainAlreadyVerified(Exception ex) =>
+            ex?.Message?.IndexOf("EMS-1080", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        /// <summary>
+        /// Performs DNS-01 DCV for a V2 SSL order using the V2 DCV endpoints.
+        ///
+        /// Issue 0042: a UCC order's additional SAN domains each carry their own DCV state in
+        /// Track Order's <c>verifications.domain.domains[]</c> block. This entry point owns the
+        /// single per-order <see cref="_dcvInFlight"/> guard (enrollment + sync overlap
+        /// protection — one guard entry regardless of how many domains the order has), then
+        /// dispatches to whichever flow applies:
+        ///   - <paramref name="domainEntries"/> non-empty → <see cref="PerformDcvV2MultiDomainAsync"/>,
+        ///     which loops every domain whose own <c>dcvStatus</c> isn't VERIFIED.
+        ///   - <paramref name="domainEntries"/> null/empty (single-domain orders, or an older/
+        ///     simpler response shape that never populated the block) → the original,
+        ///     byte-for-byte-unchanged single-domain flow in
+        ///     <see cref="PerformDcvV2SingleDomainAsync"/>.
+        ///
+        /// Returns <c>true</c> when DCV steps were executed for at least one domain, <c>false</c>
+        /// when skipped entirely (not configured, no domain(s) to act on, or already in flight).
+        /// </summary>
+        private async Task<bool> PerformDcvV2IfNeededAsync(
+            string orderId,
+            string domain,
+            string productFamilySlug,
+            CancellationToken ct,
+            IReadOnlyList<API.V2.V2DomainVerificationEntry> domainEntries = null)
+        {
+            if (_domainValidatorFactory == null || !_config.DcvEnabled)
+            {
+                _logger.LogDebug(
+                    "V2 DCV skipped: DCV factory not configured or DcvEnabled=false. OrderId={OrderId}", orderId);
+                return false;
+            }
+
+            // Issue 0033: domain control validation exists only for the SSL/TLS family — the
+            // spec's DCV endpoints live under /ssl-certificates only, the Private PKI folder says
+            // "No DCV - your CA trusts you", and the Document Signer folder has no DCV step. This
+            // single gate covers every caller (EnrollV2Async, GetSingleRecordV2Async and V2
+            // Synchronize), so a non-SSL order that is merely pending approval/documents is never
+            // sent to a nonexistent /{family}/{orderId}/dcv endpoint.
+            if (!string.Equals(productFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug(
+                    "V2 DCV skipped: product family '{Family}' has no domain control validation step. OrderId={OrderId}",
+                    productFamilySlug, orderId);
+                return false;
+            }
+
+            bool multiDomainMode = domainEntries != null && domainEntries.Count > 0;
+
+            if (!multiDomainMode && string.IsNullOrWhiteSpace(domain))
+            {
+                _logger.LogWarning(
+                    "V2 DCV skipped: no domain name available for order {OrderId}.", orderId);
+                return false;
+            }
+
+            // Prevent concurrent DCV staging for the same order (enrollment + sync overlap).
+            // Mirrors the _dcvInFlight guard in TryRunDcvDuringSyncAsync (V1 path). One guard
+            // entry per ORDER, not per domain — a UCC order with several pending SANs is still
+            // a single in-flight unit of work.
+            if (!_dcvInFlight.TryAdd(orderId, 0))
+            {
+                _logger.LogInformation(
+                    "DCV already in flight for V2 order {OrderId}; skipping concurrent attempt.", orderId);
+                return false;
+            }
+
+            try
+            {
+                return multiDomainMode
+                    ? await PerformDcvV2MultiDomainAsync(orderId, domainEntries, productFamilySlug, ct)
+                    : await PerformDcvV2SingleDomainAsync(orderId, domain, productFamilySlug, ct);
+            }
+            finally
+            {
+                _dcvInFlight.TryRemove(orderId, out _);
+            }
+        }
+
+        /// <summary>
+        /// Original single-domain V2 DCV flow (pre-issue-0042), preserved byte-for-byte except
+        /// for the <c>_dcvInFlight</c> guard, which its caller <see cref="PerformDcvV2IfNeededAsync"/>
+        /// now owns for the whole call. Used whenever the order has no per-domain
+        /// <c>verifications.domain.domains[]</c> block to drive from (single-domain orders, or an
+        /// older/simpler response shape) — see issue 0042's "keep today's primary-domain
+        /// behaviour exactly" requirement.
+        ///
+        /// Flow:
+        ///   1. GET /ssl-certificates/{orderId}/dcv → retrieve token (<c>token</c>)
+        ///   2. Publish TXT record at the configured <c>DcvTxtRecordTemplate</c> hostname
+        ///      (default <c>Constants.Dcv.DefaultTxtRecordTemplate</c>) via <see cref="IDomainValidator"/>
+        ///   3. POST /ssl-certificates/{orderId}/dcv/verify → trigger CA-side verification
+        ///   4. Poll <see cref="ICERTInextClient.TrackOrderV2Async"/> until status != "pending-dcv"
+        ///   5. Clean up TXT record
+        ///
+        /// EMS-1080 ("Domain is already verified") from either GetDcv or VerifyDcv is
+        /// treated as DCV already satisfied (issues/0020): publishing is skipped and
+        /// the flow proceeds straight to step 4.
+        ///
+        /// Returns <c>true</c> when DCV steps were executed, <c>false</c> when skipped.
+        /// </summary>
+        private async Task<bool> PerformDcvV2SingleDomainAsync(
+            string orderId,
+            string domain,
+            string productFamilySlug,
+            CancellationToken ct)
+        {
+            _logger.LogInformation(
+                "V2 DCV starting for order {OrderId}, domain {Domain}.", orderId, LogSanitizer.Strip(domain));
+
+            // 1. Fetch challenge
+            V2DcvChallengeResponse challenge = null;
+            bool dcvAlreadySatisfied = false;
+            try
+            {
+                challenge = await _client.GetDcvV2Async(orderId, productFamilySlug, ct);
+            }
+            catch (Exception ex) when (IsEms1080DomainAlreadyVerified(ex))
+            {
+                // EMS-1080 "Domain is already verified" is a documented no-op (issues/0020),
+                // not a failure: the domain is account-scoped and reusable, so there is no
+                // fresh challenge to fetch. Treat DCV as already satisfied and skip straight
+                // to tracking/issuance instead of deferring to the next sync cycle.
+                _logger.LogInformation(
+                    "V2 DCV already satisfied (EMS-1080 domain already verified) for order {OrderId}; " +
+                    "skipping TXT publish and proceeding to tracking.", orderId);
+                dcvAlreadySatisfied = true;
+            }
+            catch (Exception ex)
+            {
+                _dcvInFlight.TryRemove(orderId, out _);
+                _logger.LogWarning(ex,
+                    "V2 GetDcv failed for order {OrderId}; deferring DCV to next sync cycle.", orderId);
+                return false;
+            }
+
+            string token = null;
+            string hostname = null;
+            Keyfactor.AnyGateway.Extensions.IDomainValidator validator = null;
+
+            if (!dcvAlreadySatisfied)
+            {
+                token = challenge?.Token;
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    _dcvInFlight.TryRemove(orderId, out _);
+                    _logger.LogWarning(
+                        "V2 GetDcv returned no token for order {OrderId}; deferring DCV.", orderId);
+                    return false;
+                }
+
+                // TXT record hostname template — config-driven, mirroring V1's
+                // PerformDcvIfNeededAsync (issues/0027, item 5a). Falls back to the same
+                // Constants.Dcv.DefaultTxtRecordTemplate default V1 uses when unconfigured;
+                // {0} is substituted with the BASE domain name via string.Format, same as V1 —
+                // a wildcard's "*." label is not a queryable DNS name, so the DNS-side hostname
+                // and zone resolution use StripWildcardPrefix(domain); the CERTInext calls above
+                // and below keep using the original `domain` string, since that is what Track
+                // Order reports back.
+                string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
+                    ? Constants.Dcv.DefaultTxtRecordTemplate
+                    : _config.DcvTxtRecordTemplate;
+                string baseDomain = StripWildcardPrefix(domain);
+                hostname = string.Format(template, baseDomain);
+
+                validator = DomainValidatorFactory.ResolveDomainValidator(baseDomain, "dns-01");
+                if (validator == null)
+                {
+                    _dcvInFlight.TryRemove(orderId, out _);
+                    _logger.LogError(
+                        "No DNS provider plugin resolved for domain '{Domain}' on V2 order {OrderId}. " +
+                        "Ensure the appropriate DNS provider plugin is deployed and configured.",
+                        LogSanitizer.Strip(domain), orderId);
+                    return false;
+                }
+            }
+
+            // staged=true only after a successful StageValidation so the finally only attempts
+            // cleanup when there is a record to remove (Finding C — cleanup skipped on !Success).
+            bool staged = false;
+            try
+            {
+                if (!dcvAlreadySatisfied)
+                {
+                    // 2. Publish TXT record
+                    _logger.LogInformation(
+                        "Staging V2 DNS TXT record. OrderId={OrderId}, Hostname={Hostname}", orderId, LogSanitizer.Strip(hostname));
+
+                    DomainValidationResult stageResult;
+                    try
+                    {
+                        // Non-null here: only reached when !dcvAlreadySatisfied, and
+                        // validator/hostname are always assigned together in that branch above.
+                        stageResult = await validator!.StageValidation(hostname!, token, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "V2 DCV: DNS provider threw while staging '{Domain}' for order {OrderId}.",
+                            LogSanitizer.Strip(domain), orderId);
+                        return false;
+                    }
+
+                    if (!stageResult.Success)
+                    {
+                        _logger.LogError(
+                            "V2 DCV: Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}.",
+                            LogSanitizer.Strip(domain), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
+                        return false;
+                    }
+                    staged = true;
+
+                    // Wait for DNS propagation
+                    int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
+                    _logger.LogInformation(
+                        "Waiting {Delay}s for DNS propagation before V2 DCV verify. OrderId={OrderId}", delaySeconds, orderId);
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+
+                    // 3. Trigger CA-side verification
+                    _logger.LogInformation(
+                        "Triggering V2 DCV verification. OrderId={OrderId}, Domain={Domain}", orderId, LogSanitizer.Strip(domain));
+                    try
+                    {
+                        var verifyResp = await _client.VerifyDcvV2Async(orderId, domain, productFamilySlug, ct);
+                        _logger.LogInformation(
+                            "V2 DCV verify response. OrderId={OrderId}, OverallStatus={Status}",
+                            orderId, verifyResp?.OverallStatus ?? "(null)");
+
+                        if (!string.Equals(verifyResp?.OverallStatus, "VERIFIED", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogWarning(
+                                "V2 DCV verify did not return VERIFIED for order {OrderId}. Status={Status}",
+                                orderId, verifyResp?.OverallStatus);
+                            return false;
+                        }
+                    }
+                    catch (Exception ex) when (IsEms1080DomainAlreadyVerified(ex))
+                    {
+                        // Same no-op as the GetDcv branch above, but surfaced at Verify time
+                        // instead — the domain became/was already verified between the two
+                        // calls. Treat as verified and continue to tracking rather than
+                        // deferring (issues/0020).
+                        _logger.LogInformation(
+                            "V2 DCV already satisfied (EMS-1080 domain already verified) for order {OrderId} " +
+                            "during VerifyDcv; treating as verified and proceeding to tracking.", orderId);
+                    }
+                }
+
+                // 4. Poll TrackOrderV2 until status leaves pending-dcv
+                int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+                var deadline = DateTime.UtcNow.AddMinutes(timeoutMinutes);
+                // Fixed short cadence — decoupled from DcvPropagationDelaySeconds (one-shot
+                // DNS wait), not a poll interval. Reusing it here would yield only ~2 polls
+                // before the 5-minute timeout.
+                int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
+
+                while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
+                    try
+                    {
+                        var trackResp = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
+                        _logger.LogDebug(
+                            "V2 DCV poll. OrderId={OrderId}, Status={Status}", orderId, trackResp.Status);
+                        if (!string.Equals(trackResp.Status, "pending-dcv", StringComparison.OrdinalIgnoreCase))
+                            break;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "V2 DCV: TrackOrderV2 poll failed for order {OrderId}.", orderId);
+                        break;
+                    }
+                }
+
+                return true;
+            }
+            finally
+            {
+                // Release the in-flight guard regardless of how the staged block exits.
+                _dcvInFlight.TryRemove(orderId, out _);
+
+                // 5. Clean up TXT record — only when staging succeeded (staged=true).
+                if (staged)
                 {
                     try
                     {
-                        await validator.CleanupValidation(hostname, ct);
+                        using var cleanupCts = new CancellationTokenSource(
+                            TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
+                        // Non-null here: staged is only true when !dcvAlreadySatisfied, in
+                        // which case validator/hostname were assigned before staging began.
+                        await validator!.CleanupValidation(hostname!, cleanupCts.Token);
                         _logger.LogInformation(
-                            "DNS TXT record cleaned up. Domain={Domain}, Hostname={Hostname}", domain, hostname);
+                            "V2 DCV: DNS TXT record cleaned up. OrderId={OrderId}, Hostname={Hostname}",
+                            orderId, LogSanitizer.Strip(hostname));
                     }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex,
-                            "Failed to clean up DNS TXT record. Domain={Domain}, Hostname={Hostname}", domain, hostname);
+                            "V2 DCV: Failed to clean up DNS TXT record. OrderId={OrderId}, Hostname={Hostname}. " +
+                            "May require manual removal.", orderId, LogSanitizer.Strip(hostname));
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Generalized V2 DCV for orders whose Track Order response surfaced a per-domain
+        /// <c>verifications.domain.domains[]</c> block (issue 0042) — chiefly UCC orders with
+        /// additional SAN domains. Every entry whose own <c>dcvStatus</c> isn't VERIFIED is
+        /// processed: stage a TXT record for each pending domain, wait once for DNS propagation
+        /// (not once per domain), verify each domain individually, poll Track Order until every
+        /// domain just verified is confirmed (or the shared DCV timeout elapses), then always
+        /// clean up every staged record regardless of outcome.
+        ///
+        /// Partial failure: a domain that fails GetDcv/staging/verification is logged and
+        /// skipped — the others keep going. The order is left pending for any domain not
+        /// resolved this pass; because the caller always re-derives <paramref name="domainEntries"/>
+        /// from its own most recent Track Order response, the next sync/GetSingleRecord call
+        /// naturally retries only whichever domains are still not VERIFIED.
+        ///
+        /// The per-order <c>_dcvInFlight</c> guard is already held by the caller
+        /// (<see cref="PerformDcvV2IfNeededAsync"/>) for the whole call.
+        ///
+        /// Returns <c>true</c> when DCV steps were executed for at least one domain (staged, or
+        /// found already verified via EMS-1080); <c>false</c> only when every domain in
+        /// <paramref name="domainEntries"/> was already VERIFIED (nothing to do).
+        /// </summary>
+        private async Task<bool> PerformDcvV2MultiDomainAsync(
+            string orderId,
+            IReadOnlyList<API.V2.V2DomainVerificationEntry> domainEntries,
+            string productFamilySlug,
+            CancellationToken ct)
+        {
+            var pendingDomains = domainEntries
+                .Where(e => !string.IsNullOrWhiteSpace(e?.Domain)
+                    && !string.Equals(e.DcvStatus, Constants.ApiV2.DcvStatusVerified, StringComparison.OrdinalIgnoreCase))
+                .Select(e => e.Domain)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (pendingDomains.Count == 0)
+            {
+                _logger.LogDebug(
+                    "V2 DCV (multi-domain) skipped: every domain on order {OrderId} is already VERIFIED.",
+                    orderId);
+                return false;
+            }
+
+            _logger.LogInformation(
+                "V2 DCV (multi-domain) starting for order {OrderId}. PendingDomains=[{Domains}]",
+                orderId, LogSanitizer.Strip(string.Join(", ", pendingDomains)));
+
+            var staged = new List<(string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator)>();
+            var verifiedDomains = new List<string>();
+            var failedDomains = new List<(string domain, string reason)>();
+
+            // Every domain that got through staging this pass — whether it freshly published a
+            // TXT record or shared an already-staged hostname with a sibling (see
+            // stagedHostnames below). Drives the per-domain CA Verify calls in Phase 2; kept
+            // separate from `staged` (which holds only ONE entry per unique hostname, for
+            // cleanup) so a wildcard/apex pair sharing a base-domain hostname still each get
+            // their own VerifyDcv call without staging — or cleaning up — the shared TXT record
+            // twice.
+            var verifyCandidates = new List<string>();
+
+            // TXT hostname -> the first domain that staged it this pass. A UCC order can list
+            // both "example.com" and "*.example.com"; StripWildcardPrefix collapses both to the
+            // same base-domain hostname, so the second domain to reach it must reuse the
+            // already-staged record instead of publishing (and later cleaning up) a duplicate.
+            var stagedHostnames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            async Task CleanupStagedAsync()
+            {
+                // Concurrent, not sequential — mirrors the V1 multi-SAN cleanup rationale
+                // (CleanupPartialStagingAsync above): a UCC order with N staged domains must not
+                // let the aggregate cleanup time scale with N.
+                await Task.WhenAll(staged.Select(entry => CleanupOneV2StagedRecordAsync(orderId, entry)));
+            }
+
+            try
+            {
+                // Phase 1: stage a TXT record for every pending domain. Every failure here is
+                // scoped to the one domain that hit it (logged loudly, then skipped) — never
+                // thrown — so one bad SAN cannot abort DCV for the co-tenant domains on the same
+                // order (issue 0042's "partial failure: keep going").
+                foreach (var d in pendingDomains)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    V2DcvChallengeResponse challenge = null;
+                    bool alreadySatisfied = false;
+                    try
+                    {
+                        challenge = await _client.GetDcvV2Async(orderId, d, productFamilySlug, ct);
+                    }
+                    catch (Exception ex) when (IsEms1080DomainAlreadyVerified(ex))
+                    {
+                        _logger.LogInformation(
+                            "V2 DCV already satisfied (EMS-1080) for domain {Domain} on order {OrderId}; " +
+                            "skipping TXT publish for this domain.", LogSanitizer.Strip(d), orderId);
+                        alreadySatisfied = true;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The shared, DcvTimeoutMinutes-bound cancellation — not a per-domain
+                        // failure. Propagate to the outer catch, which logs and cleans up.
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "V2 GetDcv failed for domain {Domain} on order {OrderId}; skipping this domain " +
+                            "so the rest of the order can still be validated.", LogSanitizer.Strip(d), orderId);
+                        failedDomains.Add((d, "GetDcv failed"));
+                        continue;
+                    }
+
+                    if (alreadySatisfied)
+                    {
+                        verifiedDomains.Add(d);
+                        continue;
+                    }
+
+                    string token = challenge?.Token;
+                    if (string.IsNullOrWhiteSpace(token))
+                    {
+                        _logger.LogError(
+                            "V2 GetDcv returned no token for domain {Domain} on order {OrderId}; skipping " +
+                            "this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(d), orderId);
+                        failedDomains.Add((d, "no DCV token returned"));
+                        continue;
+                    }
+
+                    string template = string.IsNullOrWhiteSpace(_config.DcvTxtRecordTemplate)
+                        ? Constants.Dcv.DefaultTxtRecordTemplate
+                        : _config.DcvTxtRecordTemplate;
+                    // DCV publishes/looks up the TXT record under the BASE domain — a wildcard's
+                    // "*." label is not a queryable DNS name. CERTInext's own GetDcv/VerifyDcv
+                    // calls keep using the original `d` string, since that is what Track Order
+                    // reports back per-domain.
+                    string baseDomain = StripWildcardPrefix(d);
+                    string hostname = string.Format(template, baseDomain);
+
+                    if (stagedHostnames.TryGetValue(hostname + "|" + token, out string sharedWithDomain))
+                    {
+                        // Sibling domain (e.g. the wildcard/apex pair of the same base domain)
+                        // already staged this exact TXT hostname this pass — reuse it instead of
+                        // publishing a second record at the same name. This domain still gets its
+                        // own CA-side VerifyDcv in Phase 2 below.
+                        _logger.LogInformation(
+                            "V2 DCV hostname {Hostname} for domain {Domain} on order {OrderId} is already " +
+                            "staged (shared with {SharedWith}); reusing it instead of publishing a second " +
+                            "TXT record.",
+                            LogSanitizer.Strip(hostname), LogSanitizer.Strip(d), orderId,
+                            LogSanitizer.Strip(sharedWithDomain));
+                        verifyCandidates.Add(d);
+                        continue;
+                    }
+
+                    var validator = DomainValidatorFactory.ResolveDomainValidator(baseDomain, "dns-01");
+                    if (validator == null)
+                    {
+                        _logger.LogError(
+                            "No DNS provider plugin resolved for domain '{Domain}' on V2 order {OrderId}; " +
+                            "skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(d), orderId);
+                        failedDomains.Add((d, "no DNS provider resolved"));
+                        continue;
+                    }
+
+                    _logger.LogInformation(
+                        "Staging V2 DNS TXT record for DCV. OrderId={OrderId}, Domain={Domain}, Hostname={Hostname}",
+                        orderId, LogSanitizer.Strip(d), LogSanitizer.Strip(hostname));
+
+                    DomainValidationResult stageResult;
+                    try
+                    {
+                        stageResult = await validator.StageValidation(hostname, token, ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "V2 DCV: DNS provider threw while staging '{Domain}' for order {OrderId}; " +
+                            "skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(d), orderId);
+                        failedDomains.Add((d, "DNS provider plugin threw"));
+                        continue;
+                    }
+
+                    if (!stageResult.Success)
+                    {
+                        _logger.LogError(
+                            "V2 DCV: Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}. " +
+                            "Skipping this domain so the rest of the order can still be validated.",
+                            LogSanitizer.Strip(d), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
+                        failedDomains.Add((d, $"stage failed: {stageResult.ErrorMessage}"));
+                        continue;
+                    }
+
+                    stagedHostnames[hostname + "|" + token] = d;
+                    staged.Add((d, hostname, validator));
+                    verifyCandidates.Add(d);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Safety net for a genuinely unexpected failure: cancellation (the shared
+                // DcvTimeoutMinutes-bound token expiring mid-loop, explicitly re-thrown past the
+                // per-domain catches above) or a bug. Clean up whatever was already staged before
+                // this propagates — none of the callers add their own cleanup.
+                _logger.LogError(ex,
+                    "Unexpected failure during V2 DCV staging for order {OrderId}; cleaning up any " +
+                    "already-staged TXT records before this propagates.", orderId);
+                await CleanupStagedAsync();
+                throw;
+            }
+
+            if (verifyCandidates.Count > 0)
+            {
+                try
+                {
+                    // One propagation wait for the whole batch, not one per domain.
+                    int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
+                    _logger.LogInformation(
+                        "Waiting {Delay}s for DNS propagation before V2 DCV verify. OrderId={OrderId}, DomainCount={Count}",
+                        delaySeconds, orderId, verifyCandidates.Count);
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+
+                    // Phase 2: verify each domain that got through staging individually — the
+                    // spec's Verify DCV body takes a single `domain`, mirroring Get DCV
+                    // Challenges' per-domain shape (per-SAN semantics unconfirmed live
+                    // end-to-end — see v2-api-support-questions.md Finding 9, question 3). This
+                    // includes hostname-sharing siblings (verifyCandidates), not just the domains
+                    // that staged a fresh TXT record (staged) — CERTInext tracks DCV per domain
+                    // entry even when two domains share one TXT record.
+                    foreach (var d in verifyCandidates)
+                    {
+                        try
+                        {
+                            _logger.LogInformation(
+                                "Triggering V2 DCV verification. OrderId={OrderId}, Domain={Domain}",
+                                orderId, LogSanitizer.Strip(d));
+                            var verifyResp = await _client.VerifyDcvV2Async(orderId, d, productFamilySlug, ct);
+                            _logger.LogInformation(
+                                "V2 DCV verify response. OrderId={OrderId}, Domain={Domain}, OverallStatus={Status}",
+                                orderId, LogSanitizer.Strip(d), verifyResp?.OverallStatus ?? "(null)");
+
+                            if (string.Equals(verifyResp?.OverallStatus, "VERIFIED", StringComparison.OrdinalIgnoreCase))
+                            {
+                                verifiedDomains.Add(d);
+                            }
+                            else
+                            {
+                                _logger.LogWarning(
+                                    "V2 DCV verify did not return VERIFIED for domain {Domain} on order {OrderId}. " +
+                                    "Status={Status}", LogSanitizer.Strip(d), orderId, verifyResp?.OverallStatus);
+                                failedDomains.Add((d, $"verify returned {verifyResp?.OverallStatus ?? "(null)"}"));
+                            }
+                        }
+                        catch (Exception ex) when (IsEms1080DomainAlreadyVerified(ex))
+                        {
+                            // Same no-op as the GetDcv branch above, but surfaced at Verify time
+                            // instead — the domain became/was already verified between the two
+                            // calls. Treat as verified rather than deferring (issues/0020).
+                            _logger.LogInformation(
+                                "V2 DCV already satisfied (EMS-1080) for domain {Domain} on order {OrderId} " +
+                                "during VerifyDcv; treating as verified.", LogSanitizer.Strip(d), orderId);
+                            verifiedDomains.Add(d);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex,
+                                "V2 DCV verify failed for domain {Domain} on order {OrderId}; skipping this " +
+                                "domain so the rest of the order can still be validated.",
+                                LogSanitizer.Strip(d), orderId);
+                            failedDomains.Add((d, "verify failed"));
+                        }
+                    }
+
+                    // Phase 3: poll Track Order until every domain just verified this pass is
+                    // confirmed there too, before cleanup — mirrors the V1 rationale
+                    // (WaitForDcvVerificationAsync): VerifyDcv's synchronous response may not yet
+                    // be reflected by the CA's own async DNS lookup.
+                    var stagedDomainNames = new HashSet<string>(
+                        verifyCandidates, StringComparer.OrdinalIgnoreCase);
+                    var justVerifiedStaged = verifiedDomains
+                        .Where(d => stagedDomainNames.Contains(d))
+                        .ToList();
+                    if (justVerifiedStaged.Count > 0)
+                    {
+                        await WaitForDomainsVerifiedV2Async(orderId, productFamilySlug, justVerifiedStaged, ct);
+                    }
+                }
+                finally
+                {
+                    await CleanupStagedAsync();
+                }
+            }
+
+            if (failedDomains.Count > 0)
+            {
+                _logger.LogError(
+                    "{FailedCount} domain(s) on V2 order {OrderId} could not be validated this pass and " +
+                    "were skipped: [{Domains}]. The order remains pending; a later sync/GetSingleRecord " +
+                    "retries only the still-unverified domains.",
+                    failedDomains.Count, orderId,
+                    LogSanitizer.Strip(string.Join(", ", failedDomains.Select(f => $"{f.domain} ({f.reason})"))));
+            }
+
+            _logger.LogInformation(
+                "V2 DCV (multi-domain) summary. OrderId={OrderId}, PendingCount={Pending}, VerifiedCount={Verified}, FailedCount={Failed}",
+                orderId, pendingDomains.Count, verifiedDomains.Count, failedDomains.Count);
 
             return true;
+        }
+
+        /// <summary>
+        /// Removes one already-published V2 DCV TXT record. Shared cleanup logic for
+        /// <see cref="PerformDcvV2MultiDomainAsync"/>'s staged-domain list — mirrors the
+        /// single-domain V2 path's own inline cleanup (and V1's
+        /// <c>CleanupOneStagedValidationAsync</c>) in both bound and best-effort behavior: a
+        /// fresh, independently-bounded token (neither the ambient <c>ct</c> nor
+        /// <see cref="CancellationToken.None"/>) so a stuck DNS provider cannot hang this
+        /// best-effort compensating action indefinitely, regardless of why cleanup was
+        /// triggered.
+        /// </summary>
+        private async Task CleanupOneV2StagedRecordAsync(
+            string orderId,
+            (string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator) entry)
+        {
+            var (domain, hostname, validator) = entry;
+            try
+            {
+                using var cleanupCts = new CancellationTokenSource(
+                    TimeSpan.FromSeconds(Constants.Dcv.CleanupValidationTimeoutSeconds));
+                await validator.CleanupValidation(hostname, cleanupCts.Token);
+                _logger.LogInformation(
+                    "V2 DCV: DNS TXT record cleaned up. OrderId={OrderId}, Domain={Domain}, Hostname={Hostname}",
+                    orderId, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 DCV: Failed to clean up DNS TXT record. OrderId={OrderId}, Domain={Domain}, " +
+                    "Hostname={Hostname}. May require manual removal.",
+                    orderId, LogSanitizer.Strip(domain), LogSanitizer.Strip(hostname));
+            }
+        }
+
+        /// <summary>
+        /// Polls <see cref="ICERTInextClient.TrackOrderV2Async"/> until every domain in
+        /// <paramref name="domains"/> reaches a VERIFIED <c>dcvStatus</c> in
+        /// <c>verifications.domain.domains[]</c>, reaches REJECTED (terminal — confirmed live
+        /// after an order cancellation, issue 0042), or <paramref name="ct"/> is cancelled /
+        /// the internal deadline elapses. V2 analogue of <see cref="WaitForDcvVerificationAsync"/>.
+        /// </summary>
+        private async Task WaitForDomainsVerifiedV2Async(
+            string orderId, string productFamilySlug, IReadOnlyList<string> domains, CancellationToken ct)
+        {
+            if (domains.Count == 0) return;
+
+            var pending = new HashSet<string>(domains, StringComparer.OrdinalIgnoreCase);
+            // Fixed short cadence — decoupled from DcvPropagationDelaySeconds (a one-shot DNS
+            // wait), not a poll interval.
+            int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
+
+            // Defense-in-depth deadline, same rationale as WaitForDcvVerificationAsync: bounded
+            // even if a future refactor breaks the cancellation chain.
+            var deadline = DateTime.UtcNow.AddMinutes(_config.GetEffectiveDcvTimeoutMinutes());
+
+            while (pending.Count > 0 && !ct.IsCancellationRequested)
+            {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    _logger.LogWarning(
+                        "V2 DCV verification poll exceeded its internal deadline ({Minutes}min). " +
+                        "OrderId={OrderId}, StillPendingDomains=[{Pending}]. Exiting and leaving TXT " +
+                        "records for the caller's cleanup.",
+                        _config.GetEffectiveDcvTimeoutMinutes(), orderId,
+                        LogSanitizer.Strip(string.Join(",", pending)));
+                    return;
+                }
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                V2OrderStatusResponse poll;
+                try
+                {
+                    poll = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "V2 TrackOrder polling failed during DCV wait. OrderId={OrderId}", orderId);
+                    return;
+                }
+
+                var entries = poll.Verifications?.Domain?.Domains;
+                if (entries == null) continue;
+
+                foreach (var entry in entries)
+                {
+                    if (entry?.Domain == null || !pending.Contains(entry.Domain)) continue;
+
+                    if (string.Equals(entry.DcvStatus, Constants.ApiV2.DcvStatusVerified, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation(
+                            "V2 DCV verified by CERTInext. OrderId={OrderId}, Domain={Domain}",
+                            orderId, LogSanitizer.Strip(entry.Domain));
+                        pending.Remove(entry.Domain);
+                    }
+                    else if (string.Equals(entry.DcvStatus, Constants.ApiV2.DcvStatusRejected, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogWarning(
+                            "V2 DCV rejected by CERTInext. OrderId={OrderId}, Domain={Domain}",
+                            orderId, LogSanitizer.Strip(entry.Domain));
+                        pending.Remove(entry.Domain);
+                    }
+                }
+            }
         }
 #endif
 
@@ -1805,7 +5328,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (domains.Count == 0) return;
 
             var pending = new HashSet<string>(domains, StringComparer.OrdinalIgnoreCase);
-            int pollSeconds = Math.Max(1, _config.DcvPropagationDelaySeconds);
+            // Fixed short cadence — decoupled from DcvPropagationDelaySeconds, which is a
+            // one-shot DNS propagation wait, not a polling interval. Reusing it here would
+            // reduce the number of polls to ~2 before the 5-minute timeout.
+            int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
 
             // Defense-in-depth deadline: SOX CC7.3 requires every wait to be bounded.
             // The caller passes a `ct` derived from a CancellationTokenSource that already
@@ -1823,7 +5349,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "DCV verification poll exceeded its internal deadline ({Minutes}min). " +
                         "OrderNumber={OrderNumber}, StillPendingDomains=[{Pending}].  " +
                         "Exiting and leaving TXT records for the caller's finally block to clean up.",
-                        _config.GetEffectiveDcvTimeoutMinutes(), orderNumber, string.Join(",", pending));
+                        _config.GetEffectiveDcvTimeoutMinutes(), orderNumber,
+                        LogSanitizer.Strip(string.Join(",", pending)));
                     return;
                 }
 
@@ -1856,16 +5383,431 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                     if (string.Equals(detail.DcvStatus, Constants.Dcv.StatusValidated, StringComparison.Ordinal))
                     {
-                        _logger.LogInformation("DCV verified by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        _logger.LogInformation("DCV verified by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}",
+                            orderNumber, LogSanitizer.Strip(domain));
                         pending.Remove(domain);
                     }
                     else if (string.Equals(detail.DcvStatus, Constants.Dcv.StatusRejected, StringComparison.Ordinal))
                     {
-                        _logger.LogWarning("DCV rejected by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domain);
+                        _logger.LogWarning("DCV rejected by CERTInext. OrderNumber={OrderNumber}, Domain={Domain}",
+                            orderNumber, LogSanitizer.Strip(domain));
                         pending.Remove(domain);
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Synchronous certificate pickup — parity with the legacy Sectigo connector's
+        /// <c>PickUpEnrolledCertificate</c>. After an order is submitted, polls
+        /// <c>GetCertificate</c> up to <c>PickupRetries</c> times, <c>PickupDelay</c> seconds
+        /// apart (after a fixed initial delay), so an order that issues quickly is returned
+        /// GENERATED + PEM in the same enrollment call instead of waiting for the next
+        /// synchronization. If the certificate has not issued within the budget, the original
+        /// pending result is returned unchanged and the order is imported by a later sync —
+        /// behaviour identical to before this feature.
+        ///
+        /// Applies to ALL products. CERTInext issues OV/EV asynchronously (organization
+        /// verification, minutes to hours; confirmed by CERTInext support ticket #162763), so
+        /// those typically exhaust the budget and fall back to pending; only DV / already-approved
+        /// orders return in-call. Never throws — any polling error degrades to the pending result.
+        /// </summary>
+        private async Task<EnrollmentResult> PickUpEnrolledCertificateAsync(
+            EnrollmentResult pendingResult, string orderNumber, bool dcvIssuanceWaitRan,
+            CancellationToken ct = default)
+        {
+            // The DCV path already owns the in-call issuance wait for this order — running a second
+            // stacked poll here would double the wait budget (when DCV ran WaitForIssuanceAfterDcvAsync)
+            // or waste it polling an order DCV already found terminal / not-yet-validated. Defer to
+            // the pending result; a later sync completes it.
+            if (dcvIssuanceWaitRan)
+                return pendingResult;
+
+            // Only a still-pending (external-validation) result can benefit from a pickup poll.
+            // An already issued/failed/revoked result is returned as-is.
+            if (pendingResult == null
+                || pendingResult.Status != (int)EndEntityStatus.EXTERNALVALIDATION)
+                return pendingResult;
+
+            // A pending result with no order number cannot be polled — surface the anomaly rather
+            // than silently returning, so an un-pollable pending state leaves an audit trace.
+            if (string.IsNullOrWhiteSpace(orderNumber))
+            {
+                _logger.LogWarning(
+                    "Synchronous pickup skipped: a pending enrollment was returned with no order " +
+                    "number to poll. The certificate can only be reconciled by a later synchronization.");
+                return pendingResult;
+            }
+
+            int retries = _config.GetEffectivePickupRetries();
+            if (retries <= 0)
+            {
+                _logger.LogInformation(
+                    "Synchronous certificate pickup disabled (PickupRetries<=0). Order {OrderNumber} " +
+                    "will be picked up on the next synchronization.", orderNumber);
+                return pendingResult;
+            }
+
+            int delaySeconds = _config.GetEffectivePickupDelaySeconds();
+
+            // Hard ceiling on total in-call occupancy. PickupRetries and PickupDelay are each clamped
+            // independently, but their product can still reach ~30 min at the extremes — enough to push
+            // Enroll() past Command's own enrollment timeout. If the configured budget would exceed the
+            // ceiling, cap the retry count to fit; the remainder is imported by the next synchronization.
+            int maxPollRetries = Math.Max(1,
+                (Constants.Pickup.MaxTotalWaitSeconds - Constants.Pickup.InitialDelaySeconds) / delaySeconds);
+            if (retries > maxPollRetries)
+            {
+                _logger.LogInformation(
+                    "Configured pickup budget (PickupRetries={Configured}, PickupDelaySeconds={Delay}) exceeds the " +
+                    "{MaxTotal}s in-call ceiling; capping to {Capped} attempts. The certificate will be imported by " +
+                    "the next synchronization if it has not issued by then.",
+                    retries, delaySeconds, Constants.Pickup.MaxTotalWaitSeconds, maxPollRetries);
+                retries = maxPollRetries;
+            }
+
+            _logger.LogInformation(
+                "Starting synchronous certificate pickup. OrderNumber={OrderNumber}, PickupRetries={Retries}, " +
+                "PickupDelaySeconds={Delay} (max ~{Max}s including a {Initial}s initial delay).",
+                orderNumber, retries, delaySeconds,
+                Constants.Pickup.InitialDelaySeconds + retries * delaySeconds, Constants.Pickup.InitialDelaySeconds);
+
+            int pollErrors = 0;
+            try
+            {
+                // Small static delay before the first poll — mirrors the Sectigo connector's
+                // attempt to let a fast order finish issuing before we start polling at all.
+                await Task.Delay(TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds), ct);
+
+                for (int attempt = 1; attempt <= retries; attempt++)
+                {
+                    try
+                    {
+                        var cert = await _client.GetCertificateAsync(orderNumber, ct);
+                        int disposition = StatusMapper.ToRequestDisposition(cert.Status);
+
+                        // SOC2 CC7.3: record each poll's observed disposition so the issuance
+                        // timeline is reconstructable (how many polls ran, what each returned).
+                        _logger.LogDebug(
+                            "Pickup poll observed status. OrderNumber={OrderNumber}, Attempt={Attempt}/{Retries}, " +
+                            "MappedDisposition={Disposition}, Status='{Status}', BodyPresent={HasBody}.",
+                            orderNumber, attempt, retries, disposition, cert.Status,
+                            !string.IsNullOrWhiteSpace(cert.Certificate));
+
+                        // Issued: only surface GENERATED when the PEM is actually present — never
+                        // hand Command a body-less "issued" record. A body-less issued state keeps
+                        // polling until the body appears or the budget runs out.
+                        if (disposition == (int)EndEntityStatus.GENERATED
+                            && !string.IsNullOrWhiteSpace(cert.Certificate))
+                        {
+                            _logger.LogInformation(
+                                "Synchronous pickup complete. OrderNumber={OrderNumber}, SerialNumber={Serial}, " +
+                                "Attempt={Attempt}/{Retries}.",
+                                orderNumber,
+                                string.IsNullOrWhiteSpace(cert.SerialNumber) ? "(not provided by CA)" : cert.SerialNumber,
+                                attempt, retries);
+                            return new EnrollmentResult
+                            {
+                                CARequestID = string.IsNullOrWhiteSpace(cert.Id) ? orderNumber : cert.Id,
+                                Certificate = cert.Certificate,
+                                Status = (int)EndEntityStatus.GENERATED,
+                                StatusMessage = $"Certificate issued successfully. CERTInext ID: {orderNumber}."
+                            };
+                        }
+
+                        // Terminal non-issued outcomes carry no body and are surfaced immediately.
+                        if (disposition == (int)EndEntityStatus.REVOKED
+                            || disposition == (int)EndEntityStatus.FAILED)
+                        {
+                            // SOX/SOC2 CC7.2: an issuance FAILURE must cross the error threshold that
+                            // SIEM issuance-failure rules key on (parity with BuildEnrollmentResult's
+                            // enroll-time FAILED handling); a REVOKED terminal state is a warning.
+                            if (disposition == (int)EndEntityStatus.FAILED)
+                                _logger.LogError(
+                                    "Order {OrderNumber} reached terminal FAILED status '{Status}' during " +
+                                    "synchronous pickup (attempt {Attempt}/{Retries}).",
+                                    orderNumber, cert.Status, attempt, retries);
+                            else
+                                _logger.LogWarning(
+                                    "Order {OrderNumber} was REVOKED ('{Status}') during synchronous pickup " +
+                                    "(attempt {Attempt}/{Retries}).",
+                                    orderNumber, cert.Status, attempt, retries);
+                            return new EnrollmentResult
+                            {
+                                CARequestID = string.IsNullOrWhiteSpace(cert.Id) ? orderNumber : cert.Id,
+                                Certificate = cert.Certificate,
+                                Status = disposition,
+                                StatusMessage = $"Order {orderNumber} reached status '{cert.Status}' during enrollment pickup."
+                            };
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (ex is OperationCanceledException) throw;
+                        // A transient fetch failure consumes an attempt rather than aborting the
+                        // wait; if it never recovers the pending result is returned below.
+                        pollErrors++;
+                        _logger.LogWarning(ex,
+                            "Pickup GetCertificate failed for order {OrderNumber} (attempt {Attempt}/{Retries}).",
+                            orderNumber, attempt, retries);
+                    }
+
+                    // Delay after every attempt (including the last), matching the Sectigo
+                    // connector's pickup cadence so the max-occupancy ceiling is identical.
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+                }
+
+                // SOC1 accuracy: don't attribute non-completion to "OV/EV async by design" when the
+                // real cause was every poll erroring (e.g. a CA-side TrackOrder outage). Distinguish
+                // the two so the log reflects what actually happened.
+                if (pollErrors == retries)
+                    _logger.LogWarning(
+                        "Synchronous pickup exhausted {Retries} attempts for order {OrderNumber} — ALL polls " +
+                        "errored (see preceding warnings). Returning pending result; the next synchronization " +
+                        "will re-attempt retrieval.",
+                        retries, orderNumber);
+                else
+                    _logger.LogInformation(
+                        "Synchronous pickup did not complete within {Retries} attempts for order {OrderNumber} " +
+                        "({Errors} poll error(s); remainder still pending). Returning pending result; the " +
+                        "certificate will be imported by the next synchronization. CERTInext issues OV/EV " +
+                        "asynchronously by design (support ticket #162763).",
+                        retries, orderNumber, pollErrors);
+                pendingResult.StatusMessage =
+                    $"{pendingResult.StatusMessage} The certificate was not issued within the enrollment-pickup " +
+                    "window; it will be imported by a later synchronization.";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Synchronous pickup failed for order {OrderNumber}. Returning pending result; " +
+                    "sync will pick up the certificate later.", orderNumber);
+            }
+
+            return pendingResult;
+        }
+
+        /// <summary>
+        /// Synchronous certificate pickup for the V2 API — parity with
+        /// <see cref="PickUpEnrolledCertificateAsync"/> above (issue 0051: V2 enrollment had no
+        /// analogous poll, so a DV order that CERTInext issues within seconds of CSR submission
+        /// only ever reached Command via a gateway sync plus a Command full scan). After a V2
+        /// order is created and its CSR submitted, polls <see cref="ICERTInextClient.TrackOrderV2Async"/>
+        /// up to <c>PickupRetries</c> times, <c>PickupDelay</c> seconds apart (after the same
+        /// fixed initial delay), so a fast-issuing order is returned GENERATED + PEM in this same
+        /// enrollment call instead of waiting for the next synchronization. Reuses the identical
+        /// config knobs and wait-budget ceiling as the V1 method (<c>Constants.Pickup</c>,
+        /// <c>GetEffectivePickupRetries</c>, <c>GetEffectivePickupDelaySeconds</c>) so the two
+        /// behave identically from an operator's perspective. Never throws — any polling error
+        /// degrades to the pending result.
+        ///
+        /// Also returns the freshest raw CA status string observed while producing the result
+        /// (falling back to <paramref name="lastKnownCaStatus"/> when no fresher poll ran) — issue
+        /// 0052 needs this so <see cref="EnrollV2Async"/>'s terminal REVOKED-to-FAILED
+        /// normalization can log/report the CA's own status text, not just Command's mapped
+        /// disposition. Note: a REVOKED result reaching that normalization is never "surfaced
+        /// immediately" as REVOKED any more — see <c>NormalizeV2RevokedEnrollResult</c>.
+        /// </summary>
+        private async Task<(EnrollmentResult Result, string RawCaStatus)> PickUpEnrolledCertificateV2Async(
+            EnrollmentResult pendingResult, string orderId, string productFamilySlug,
+            bool dcvV2Ran, string lastKnownCaStatus, CancellationToken ct = default)
+        {
+            // The inline V2 DCV path already owns the in-call issuance wait for this order —
+            // running a second stacked poll here would double the wait budget (when
+            // PerformDcvV2IfNeededAsync ran its own tracking poll) or waste it re-polling an
+            // order DCV already left mid-flight. Defer to the pending result; a later sync
+            // completes it. Mirrors dcvIssuanceWaitRan's role in the V1 method above.
+            if (dcvV2Ran)
+                return (pendingResult, lastKnownCaStatus);
+
+            // Only a still-pending (external-validation) result can benefit from a pickup poll.
+            // An already issued/failed/revoked result is returned unpolled — the caller's own
+            // terminal normalization (NormalizeV2RevokedEnrollResult) decides what a REVOKED
+            // disposition here ultimately becomes; this method no longer surfaces it as-is.
+            if (pendingResult == null
+                || pendingResult.Status != (int)EndEntityStatus.EXTERNALVALIDATION)
+                return (pendingResult, lastKnownCaStatus);
+
+            // A pending result with no order id cannot be polled — surface the anomaly rather
+            // than silently returning, so an un-pollable pending state leaves an audit trace.
+            if (string.IsNullOrWhiteSpace(orderId))
+            {
+                _logger.LogWarning(
+                    "V2 synchronous pickup skipped: a pending enrollment was returned with no order " +
+                    "id to poll. The certificate can only be reconciled by a later synchronization.");
+                return (pendingResult, lastKnownCaStatus);
+            }
+
+            int retries = _config.GetEffectivePickupRetries();
+            if (retries <= 0)
+            {
+                _logger.LogInformation(
+                    "V2 synchronous certificate pickup disabled (PickupRetries<=0). Order {OrderId} " +
+                    "will be picked up on the next synchronization.", orderId);
+                return (pendingResult, lastKnownCaStatus);
+            }
+
+            int delaySeconds = _config.GetEffectivePickupDelaySeconds();
+
+            // Hard ceiling on total in-call occupancy — identical rationale to the V1 method:
+            // PickupRetries and PickupDelay are each clamped independently, but their product can
+            // still reach ~30 min at the extremes. Cap the retry count to fit; the remainder is
+            // imported by the next synchronization.
+            int maxPollRetries = Math.Max(1,
+                (Constants.Pickup.MaxTotalWaitSeconds - Constants.Pickup.InitialDelaySeconds) / delaySeconds);
+            if (retries > maxPollRetries)
+            {
+                _logger.LogInformation(
+                    "Configured pickup budget (PickupRetries={Configured}, PickupDelaySeconds={Delay}) exceeds the " +
+                    "{MaxTotal}s in-call ceiling; capping to {Capped} attempts. The certificate will be imported by " +
+                    "the next synchronization if it has not issued by then.",
+                    retries, delaySeconds, Constants.Pickup.MaxTotalWaitSeconds, maxPollRetries);
+                retries = maxPollRetries;
+            }
+
+            _logger.LogInformation(
+                "Starting V2 synchronous certificate pickup. OrderId={OrderId}, PickupRetries={Retries}, " +
+                "PickupDelaySeconds={Delay} (max ~{Max}s including a {Initial}s initial delay).",
+                orderId, retries, delaySeconds,
+                Constants.Pickup.InitialDelaySeconds + retries * delaySeconds, Constants.Pickup.InitialDelaySeconds);
+
+            int pollErrors = 0;
+            try
+            {
+                // Small static delay before the first poll — mirrors the V1 method's attempt to
+                // let a fast order finish issuing before we start polling at all.
+                await Task.Delay(TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds), ct);
+
+                for (int attempt = 1; attempt <= retries; attempt++)
+                {
+                    try
+                    {
+                        var tracked = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
+                        int disposition = StatusMapper.V2StatusToRequestDisposition(tracked.Status);
+                        lastKnownCaStatus = tracked.Status;
+
+                        // SOC2 CC7.3: record each poll's observed disposition so the issuance
+                        // timeline is reconstructable (how many polls ran, what each returned).
+                        _logger.LogDebug(
+                            "V2 pickup poll observed status. OrderId={OrderId}, Attempt={Attempt}/{Retries}, " +
+                            "MappedDisposition={Disposition}, Status='{Status}'.",
+                            orderId, attempt, retries, disposition, tracked.Status);
+
+                        if (disposition == (int)EndEntityStatus.GENERATED)
+                        {
+                            // Issued: only surface GENERATED when the certificate body actually
+                            // downloads — never hand Command a body-less "issued" record. A failed
+                            // or empty download keeps polling until the body appears or the budget
+                            // runs out, same invariant the V1 method already enforces.
+                            try
+                            {
+                                var certResp = await _client.DownloadCertificateV2Async(productFamilySlug, orderId, ct);
+                                string fullChain = AssembleV2CertChain(certResp);
+
+                                if (!string.IsNullOrWhiteSpace(fullChain))
+                                {
+                                    _logger.LogInformation(
+                                        "V2 synchronous pickup complete. OrderId={OrderId}, SerialNumber={Serial}, " +
+                                        "Attempt={Attempt}/{Retries}.",
+                                        orderId,
+                                        string.IsNullOrWhiteSpace(certResp.SerialNumber) ? "(not provided by CA)" : certResp.SerialNumber,
+                                        attempt, retries);
+                                    return (new EnrollmentResult
+                                    {
+                                        CARequestID   = orderId,
+                                        Certificate   = fullChain,
+                                        Status        = (int)EndEntityStatus.GENERATED,
+                                        StatusMessage = "Certificate issued via V2 API."
+                                    }, lastKnownCaStatus);
+                                }
+
+                                _logger.LogDebug(
+                                    "V2 pickup poll: order {OrderId} reports issued but returned no certificate " +
+                                    "body yet (attempt {Attempt}/{Retries}); continuing to poll.",
+                                    orderId, attempt, retries);
+                            }
+                            catch (Exception dlEx)
+                            {
+                                // Issued but the download itself failed — consume the attempt and
+                                // keep polling rather than aborting; a later attempt (or the next
+                                // sync) may succeed.
+                                pollErrors++;
+                                _logger.LogWarning(dlEx,
+                                    "V2 pickup: order {OrderId} is issued but certificate download failed " +
+                                    "(attempt {Attempt}/{Retries}).", orderId, attempt, retries);
+                            }
+                        }
+                        else if (disposition == (int)EndEntityStatus.REVOKED
+                                 || disposition == (int)EndEntityStatus.FAILED)
+                        {
+                            // Terminal non-issued outcomes carry no body and stop the poll
+                            // immediately — but neither is "returned as-is" any more: the REVOKED
+                            // case still comes back from this method with Status=REVOKED, but
+                            // EnrollV2Async's terminal NormalizeV2RevokedEnrollResult call maps it
+                            // to FAILED before it ever reaches the gateway (issue 0052), since a
+                            // REVOKED order observed here never has a downloadable certificate body.
+                            if (disposition == (int)EndEntityStatus.FAILED)
+                                _logger.LogError(
+                                    "V2 order {OrderId} reached terminal FAILED status '{Status}' during " +
+                                    "synchronous pickup (attempt {Attempt}/{Retries}).",
+                                    orderId, tracked.Status, attempt, retries);
+                            else
+                                _logger.LogWarning(
+                                    "V2 order {OrderId} was REVOKED ('{Status}') during synchronous pickup " +
+                                    "(attempt {Attempt}/{Retries}).",
+                                    orderId, tracked.Status, attempt, retries);
+                            return (new EnrollmentResult
+                            {
+                                CARequestID   = orderId,
+                                Certificate   = null,
+                                Status        = disposition,
+                                StatusMessage = $"Order {orderId} reached status '{tracked.Status}' during enrollment pickup."
+                            }, lastKnownCaStatus);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (ex is OperationCanceledException) throw;
+                        // A transient status-fetch failure consumes an attempt rather than aborting
+                        // the wait; if it never recovers the pending result is returned below.
+                        pollErrors++;
+                        _logger.LogWarning(ex,
+                            "V2 pickup TrackOrderV2Async failed for order {OrderId} (attempt {Attempt}/{Retries}).",
+                            orderId, attempt, retries);
+                    }
+
+                    // Delay after every attempt (including the last), matching the V1 method's
+                    // pickup cadence so the max-occupancy ceiling is identical.
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+                }
+
+                // SOC1 accuracy: don't attribute non-completion to "still validating" when the
+                // real cause was every poll erroring (e.g. a CA-side TrackOrder outage). Distinguish
+                // the two so the log reflects what actually happened.
+                if (pollErrors == retries)
+                    _logger.LogWarning(
+                        "V2 synchronous pickup exhausted {Retries} attempts for order {OrderId} — ALL polls " +
+                        "errored (see preceding warnings). Returning pending result; the next synchronization " +
+                        "will re-attempt retrieval.",
+                        retries, orderId);
+                else
+                    _logger.LogInformation(
+                        "V2 synchronous pickup did not complete within {Retries} attempts for order {OrderId} " +
+                        "({Errors} poll error(s); remainder still pending). Returning pending result; the " +
+                        "certificate will be imported by the next synchronization.",
+                        retries, orderId, pollErrors);
+                pendingResult.StatusMessage =
+                    $"{pendingResult.StatusMessage} The certificate was not issued within the enrollment-pickup " +
+                    "window; it will be imported by a later synchronization.";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 synchronous pickup failed for order {OrderId}. Returning pending result; " +
+                    "sync will pick up the certificate later.", orderId);
+            }
+
+            return (pendingResult, lastKnownCaStatus);
         }
 
         /// <summary>
@@ -1878,6 +5820,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 throw new Exception("CERTInext returned a null enrollment response.");
 
             int status = StatusMapper.ToRequestDisposition(resp.Status);
+
+            // CertiNext's "auto-approved"/"downloadable" statuses can arrive before the
+            // certificate bytes are actually generated — GetCertificate right after order
+            // placement then fails, leaving resp.Certificate null while resp.Status still
+            // says issued. Never hand Command a GENERATED result with no PEM (it crashes
+            // CertificateConverterFactory.FromPEM downstream); demote to pending instead,
+            // matching the same invariant PickUpEnrolledCertificateAsync already enforces.
+            if (status == (int)EndEntityStatus.GENERATED && string.IsNullOrWhiteSpace(resp.Certificate))
+                status = (int)EndEntityStatus.EXTERNALVALIDATION;
+
             string message;
 
             switch (status)
@@ -1958,44 +5910,482 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Converts the multi-valued SAN dictionary from the AnyCA gateway into the
-        /// <see cref="SanEntry"/> list expected by the CERTInext API.
+        /// Builds the <see cref="SanEntry"/> list submitted to CERTInext: the multi-valued SAN
+        /// dictionary the AnyCA gateway hands us, falling back to the subjectAltName extension
+        /// carried inside the CSR itself only when the gateway supplies nothing at all.
+        ///
+        /// Fallback, not union, deliberately: Command's SAN dictionary is the channel through
+        /// which an enrollment pattern's SAN policy is expressed for this request, and a signed
+        /// CSR — typically generated by the subscriber's own tooling, not by Command — can
+        /// legitimately carry more names than that policy allows. Unioning them in would
+        /// re-introduce a name the policy excluded. The CSR is only consulted when the dictionary
+        /// argument is <c>null</c> — not merely empty or all-empty-arrays. A non-null dictionary,
+        /// even one that computes to zero names, means Command's enrollment pattern ran and
+        /// deliberately produced no SANs for this request; only its literal absence means no
+        /// policy-derived set exists to defer to.
+        ///
+        /// The CSR still matters even though CERTInext ignores its subjectAltName extension
+        /// outright — measured on the US sandbox in <c>SanSubmissionProbeTests</c>: a CSR
+        /// carrying two DNS names, submitted with <c>additionalDomains</c> omitted, produced an
+        /// order with only the CN registered. Production behaves the same way: the customer
+        /// report that prompted this fix was a production UCC order whose CSR carried the SANs
+        /// and whose issued certificate held only the CN. So on whichever path populates the
+        /// gateway dictionary — or, in the fallback case, the CSR — this method is the only way
+        /// those names reach <c>additionalDomains</c> and therefore the certificate.
+        ///
+        /// History (UCC SANs silently dropped): the gateway keys this dictionary
+        /// <c>dnsname</c>, not <c>dns</c>. <see cref="MapSanType"/> did not recognize
+        /// <c>dnsname</c>, so every DNS SAN was typed <c>"dnsname"</c>, filtered out by the
+        /// DNS-only test in <c>BuildAdditionalDomains</c>, and the order went to CERTInext
+        /// with no <c>additionalDomains</c> at all. The certificate came back holding only
+        /// the CN, which reads as the CA stripping SANs supplied on the CSR.
         /// </summary>
-        private static List<SanEntry> BuildSanList(Dictionary<string, string[]> san)
+        private List<SanEntry> BuildSanList(Dictionary<string, string[]> san, string csr, string subject)
+            => BuildSanList(san, csr, subject, dnsOnly: false, out _);
+
+        /// <summary>
+        /// <see cref="BuildSanList(Dictionary{string, string[]}, string, string)"/> with an explicit
+        /// DNS-only mode for callers whose wire field cannot carry non-DNS SANs at all — the V2
+        /// SSL UCC <c>additionalDomains</c> path (issue 0046). With <paramref name="dnsOnly"/> set,
+        /// non-DNS entries are removed before any logging, regardless of
+        /// <see cref="CERTInextConfig.SubmitNonDnsSans"/> (a V1-only switch), and handed back via
+        /// <paramref name="excludedNonDns"/> so the caller can log its own accurate message. The
+        /// V1-worded "DROPPED because SubmitNonDnsSans is false" / "submitted rather than dropped"
+        /// warnings are only emitted when <paramref name="dnsOnly"/> is false.
+        /// </summary>
+        private List<SanEntry> BuildSanList(
+            Dictionary<string, string[]> san, string csr, string subject,
+            bool dnsOnly, out List<SanEntry> excludedNonDns)
         {
-            if (san == null || san.Count == 0)
-                return null;
+            excludedNonDns = new List<SanEntry>();
 
-            var result = new List<SanEntry>();
+            // "type|value" keys of entries that came from the CSR fallback, not the gateway
+            // dictionary — used only to word the provenance log accurately once the final,
+            // possibly-filtered result is known (see below).
+            var result = CollectRequestedSanEntries(san, csr, out var fromCsrKeys, out var skippedCsrTags);
 
-            // AnyCA passes SANs keyed by type name (e.g. "Dns", "Ip", "Email", "Uri")
-            foreach (var kvp in san)
+            // Issue 0040 follow-up: email SAN values masked unless LogSensitiveRequestData is on.
+            string FormatSans(IEnumerable<SanEntry> sans) =>
+                LogSanitizer.FormatSans(sans, _config.LogSensitiveRequestData);
+
+            if (skippedCsrTags.Count > 0)
             {
-                string sanType = MapSanType(kvp.Key);
-                if (kvp.Value == null) continue;
+                // GeneralName types with no domain-name rendering (otherName — e.g. a UPN from a
+                // Windows-generated CSR — directoryName, x400Address, ediPartyName, registeredID).
+                // They cannot be expressed in additionalDomains, so they are not forwarded. Warn
+                // rather than drop silently: the operator needs to know the CSR asked for something
+                // the certificate will not carry.
+                _logger.LogWarning(
+                    "{Count} SAN(s) in the CSR use a type that cannot be represented as a domain name " +
+                    "and were not submitted (ASN.1 GeneralName tag(s): {Tags}). CERTInext's " +
+                    "additionalDomains field carries domain names only, so these cannot appear on the " +
+                    "issued certificate. Remove them from the CSR if they are required. Subject={Subject}",
+                    skippedCsrTags.Count, string.Join(", ", skippedCsrTags), LogSanitizer.Strip(subject));
+            }
 
-                foreach (string value in kvp.Value)
+            if (result.Count == 0)
+            {
+                _logger.LogDebug(
+                    "No SANs supplied by the gateway and none found in the CSR — submitting the order " +
+                    "with domainName only. Subject={Subject}", LogSanitizer.Strip(subject));
+                return null;
+            }
+
+            // CERTInext's certificateInformation.additionalDomains is a domain-name field, and
+            // non-DNS SANs are submitted into it deliberately rather than discarded: dropping
+            // them would issue a certificate silently missing names the subscriber asked for,
+            // which is the worse failure.
+            //
+            // Measured on the US SANDBOX only (SanSubmissionProbeTests, product 844,
+            // 2026-08-12): CERTInext did NOT reject these at order placement. It accepted the
+            // order and registered the value verbatim as an order domain — an email address, an
+            // IP literal and a URI all came back as domainVerification keys. The order then
+            // cannot pass domain validation, so it parks pending instead of failing fast.
+            //
+            // Production is UNVERIFIED for this case and may reject the order outright instead.
+            // The warning below therefore describes the sandbox outcome as the expected one
+            // without promising it: either way the operator is told which SANs are the problem,
+            // which is the part that matters for diagnosis.
+            //
+            // This filtering runs BEFORE any of the logging below, and all of that logging is
+            // computed from `result` as it stands afterward — not from the pre-filter set. A
+            // prior version of this method logged "resolved" and "added to the order" against the
+            // pre-filter set and only THEN applied this filter, so with SubmitNonDnsSans=false the
+            // audit trail could claim a SAN was added when it had in fact just been dropped two
+            // lines later — a self-contradicting record for the same enrollment. The fix is
+            // ordering, not new logic: decide what is actually being submitted first, describe
+            // that.
+            var nonDns = result.Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (dnsOnly)
+            {
+                // DNS-only caller (V2 SSL UCC additionalDomains, issue 0046): non-DNS SANs can
+                // never reach the wire there, whatever SubmitNonDnsSans says, so exclude them
+                // here — before the logging below — and leave the wording to the caller, which
+                // knows which field they were excluded from. No V1-worded warning is raised.
+                excludedNonDns = nonDns;
+                result = result
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                nonDns = new List<SanEntry>();
+
+                if (result.Count == 0)
+                    return null;
+            }
+            else if (nonDns.Count > 0 && !_config.SubmitNonDnsSans)
+            {
+                _logger.LogWarning(
+                    "{Count} requested SAN(s) are not DNS names and are being DROPPED because " +
+                    "SubmitNonDnsSans is false: {Sans}. The order will issue, but the certificate will " +
+                    "NOT contain these names. Set SubmitNonDnsSans back to true to submit them and have " +
+                    "CERTInext surface the problem instead. Subject={Subject}",
+                    nonDns.Count, FormatSans(nonDns), LogSanitizer.Strip(subject));
+
+                result = result
+                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                nonDns = new List<SanEntry>();
+
+                if (result.Count == 0)
+                    return null;
+            }
+
+            // The blind spot that hid the original defect was that nothing logged what we
+            // resolved. Log the final, post-filter resolved set and its provenance at Information.
+            int fromCsrKept = result.Count(s => fromCsrKeys.Contains($"{s.Type}|{s.Value}"));
+            // Post-filter, not the pre-filter `fromGateway` snapshot: gateway- and CSR-sourced
+            // entries are mutually exclusive by construction (the CSR fallback only ever runs when
+            // the gateway supplied nothing at all), so whatever's left in `result` and isn't
+            // fromCsrKept must be gateway-sourced. Using the pre-filter count here reproduced the
+            // exact self-contradicting-audit-trail bug this method was already restructured once to
+            // fix — with SubmitNonDnsSans=false this line could read e.g. "Resolved 1 SAN(s) ...
+            // FromGatewayRequest=3", an arithmetic impossibility for anyone reconciling counts.
+            int fromGatewayKept = result.Count - fromCsrKept;
+            _logger.LogInformation(
+                "Resolved {Total} SAN(s) for submission. FromGatewayRequest={FromGateway}, " +
+                "AddedFromCsrFallback={FromCsr}, Sans={Sans}, Subject={Subject}",
+                result.Count, fromGatewayKept, fromCsrKept, FormatSans(result),
+                LogSanitizer.Strip(subject));
+
+            if (fromCsrKept > 0)
+            {
+                // Worth a Warning, not Debug: it means Command handed us no SAN data at all for
+                // this enrollment, which is a gateway/template wiring smell even though the CSR
+                // fallback recovers it here.
+                _logger.LogWarning(
+                    "Command supplied no SAN data for this enrollment; {Count} SAN(s) present in the CSR " +
+                    "have been added to the order instead. Review the enrollment pattern / template SAN " +
+                    "configuration. Subject={Subject}",
+                    fromCsrKept, LogSanitizer.Strip(subject));
+            }
+
+            if (nonDns.Count > 0)
+            {
+                // Reaching this line means dnsOnly is false and SubmitNonDnsSans is true (both
+                // other cases emptied nonDns above), so these are being submitted, not dropped.
+                _logger.LogWarning(
+                    "{Count} requested SAN(s) are not DNS names: {Sans}. CERTInext's additionalDomains " +
+                    "field takes domain names, so this order will either be rejected outright or be " +
+                    "created and then fail domain validation and sit pending — on the US sandbox it was " +
+                    "accepted verbatim and parked pending. They are submitted rather than dropped on " +
+                    "purpose: a visible failure is preferable to a certificate issued without names the " +
+                    "subscriber requested. Remove them from the CSR or the enrollment pattern if the " +
+                    "order should proceed. Subject={Subject}",
+                    nonDns.Count, FormatSans(nonDns), LogSanitizer.Strip(subject));
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// The SAN source rule shared by <see cref="BuildSanList"/> and
+        /// <see cref="BuildPrivatePkiAdditionalHosts"/> (issue 0033 extracted it verbatim from
+        /// <see cref="BuildSanList"/> so both honour it identically): the gateway-supplied SAN
+        /// dictionary (types normalized by <see cref="MapSanType"/>), falling back to the CSR's own
+        /// subjectAltName extension only when the dictionary is itself <c>null</c> — see
+        /// <see cref="BuildSanList"/> for why this is a fallback, not a union. Entries are trimmed
+        /// and de-duplicated by type+value. No filtering and no logging happens here.
+        /// </summary>
+        /// <param name="fromCsrKeys">"type|value" keys of the entries that came from the CSR fallback.</param>
+        /// <param name="skippedCsrTags">GeneralName tags present in the CSR that have no string rendering.</param>
+        private static List<SanEntry> CollectRequestedSanEntries(
+            Dictionary<string, string[]> san, string csr,
+            out HashSet<string> fromCsrKeys, out List<int> skippedCsrTags)
+        {
+            var result = new List<SanEntry>();
+            // Type+value identity, so the same name requested as two different SAN types is
+            // preserved while an exact repeat across the two sources collapses.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var csrKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void Add(string type, string value, bool fromCsr = false)
+            {
+                if (string.IsNullOrWhiteSpace(value)) return;
+                string trimmed = value.Trim();
+                string key = $"{type}|{trimmed}";
+                if (!seen.Add(key)) return;
+                result.Add(new SanEntry { Type = type, Value = trimmed });
+                if (fromCsr) csrKeys.Add(key);
+            }
+
+            // AnyCA passes SANs keyed by type name — the real gateway uses "dnsname",
+            // "rfc822name", "ipaddress"; MapSanType normalizes the spelling variants.
+            if (san != null)
+            {
+                foreach (var kvp in san)
                 {
-                    if (!string.IsNullOrWhiteSpace(value))
-                        result.Add(new SanEntry { Type = sanType, Value = value.Trim() });
+                    string sanType = MapSanType(kvp.Key);
+                    if (kvp.Value == null) continue;
+
+                    foreach (string value in kvp.Value)
+                        Add(sanType, value);
                 }
             }
 
-            return result.Count > 0 ? result : null;
+            // CSR fallback — only when the gateway dictionary is itself absent (san == null), NOT
+            // merely "computed to zero SAN entries" (i.e. result.Count == 0 at this point). Those
+            // are different things:
+            // a non-null dictionary — even an empty one, or one whose keys all map to empty arrays
+            // — means Command's enrollment pattern ran and deliberately produced no SANs for this
+            // request, which the CSR fallback must respect rather than override. san == null means
+            // Command never populated SAN data for this enrollment path at all, which is the one
+            // case this fallback exists for. Checking "computed to zero" instead of "san is null"
+            // would let an enrollment pattern that explicitly computes zero SANs still have
+            // CSR-derived names spliced back in — reopening the policy-reintroduction risk the
+            // fallback-over-union redesign exists to close.
+            skippedCsrTags = new List<int>();
+            if (san == null)
+            {
+                var csrSans = ExtractSanEntriesFromCsr(csr, out skippedCsrTags);
+                foreach (var csrSan in csrSans)
+                    Add(csrSan.Type, csrSan.Value, fromCsr: true);
+            }
+
+            fromCsrKeys = csrKeys;
+            return result;
+        }
+
+        /// <summary>
+        /// Issue 0033: resolves the <c>additionalHosts</c> list for a V2 private-pki order. Spec
+        /// ("Private PKI Certificates" -> Create - Intranet SSL): "<c>additionalHosts[]</c> - SAN
+        /// list (DNS names or IPv4 / IPv6)"; the example body sends
+        /// <c>["portal.acme.local", "reports.acme.local", "10.0.0.50"]</c> with the primary host in
+        /// <c>hostname</c>, not repeated here.
+        ///
+        /// - Source: <see cref="CollectRequestedSanEntries"/> — the same gateway-dictionary-with-
+        ///   CSR-fallback rule the SSL UCC path uses via <see cref="BuildSanList"/>.
+        /// - DNS and IP SANs are both submitted. Unlike SSL's FQDN-only <c>additionalDomains</c>,
+        ///   IP literals are native to this field, so the V1-era <c>SubmitNonDnsSans</c> switch
+        ///   (whose purpose is keeping SANs CERTInext cannot validate out of a domain-name field)
+        ///   is deliberately not consulted — dropping a requested IP SAN here would silently issue
+        ///   a certificate without it.
+        /// - Email/URI SANs (and CSR GeneralName types with no string form) have no place in a
+        ///   host list: excluded with a warning that names only their types (an email SAN value is
+        ///   personal data).
+        /// - The primary <paramref name="hostname"/> is excluded; duplicates collapse
+        ///   case-insensitively. Returns <c>null</c> (field omitted) when nothing remains.
+        /// </summary>
+        private List<string> BuildPrivatePkiAdditionalHosts(
+            Dictionary<string, string[]> san, string csr, string subject, string hostname)
+        {
+            var requested = CollectRequestedSanEntries(san, csr, out var fromCsrKeys, out var skippedCsrTags);
+
+            if (skippedCsrTags.Count > 0)
+            {
+                _logger.LogWarning(
+                    "{Count} SAN(s) in the CSR use a type that cannot be represented as a host name or IP " +
+                    "address and were not submitted (ASN.1 GeneralName tag(s): {Tags}). V2 private-pki " +
+                    "additionalHosts carries DNS names and IPv4/IPv6 addresses only, so these cannot appear " +
+                    "on the issued certificate. Subject={Subject}",
+                    skippedCsrTags.Count, string.Join(", ", skippedCsrTags), LogSanitizer.Strip(subject));
+            }
+
+            bool IsHostType(SanEntry s) =>
+                string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(s.Type, "ip", StringComparison.OrdinalIgnoreCase);
+
+            var unsupported = requested.Where(s => !IsHostType(s)).ToList();
+            if (unsupported.Count > 0)
+            {
+                _logger.LogWarning(
+                    "EnrollV2Async: {Count} requested SAN(s) are neither DNS names nor IP addresses and cannot " +
+                    "be submitted via V2 private-pki additionalHosts (DNS names or IPv4/IPv6 only) — they will " +
+                    "NOT appear on the issued certificate. Types=[{Types}]",
+                    unsupported.Count, string.Join(", ", unsupported.Select(s => s.Type)));
+            }
+
+            var hosts = requested
+                .Where(IsHostType)
+                .Select(s => s.Value?.Trim())
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Where(v => !string.Equals(v, hostname, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            // Gateway- and CSR-sourced entries are mutually exclusive by construction (the CSR is
+            // only read when the gateway dictionary is null), so when any entry came from the CSR,
+            // every surviving host did. Same wiring-smell warning BuildSanList raises for SSL.
+            if (fromCsrKeys.Count > 0 && hosts.Count > 0)
+            {
+                _logger.LogWarning(
+                    "Command supplied no SAN data for this enrollment; {Count} SAN(s) present in the CSR " +
+                    "have been added to the private-pki order's additionalHosts instead. Review the " +
+                    "enrollment pattern / template SAN configuration. Subject={Subject}",
+                    hosts.Count, LogSanitizer.Strip(subject));
+            }
+
+            return hosts.Count == 0 ? null : hosts;
         }
 
         private static string MapSanType(string anyCAType)
         {
             switch (anyCAType?.ToLowerInvariant())
             {
-                case "dns": return "dns";
+                // "dnsname" is what the AnyCA REST Gateway actually sends; "dns"/"dnsnames"
+                // are kept for callers and older hosts that use the shorter spelling.
+                case "dns":
+                case "dnsname":
+                case "dnsnames": return "dns";
                 case "ip":
-                case "ipaddress": return "ip";
+                case "ipaddress":
+                case "ipaddresses": return "ip";
                 case "email":
-                case "rfc822": return "email";
-                case "uri": return "uri";
+                case "rfc822":
+                case "rfc822name": return "email";
+                case "uri":
+                case "uniformresourceidentifier": return "uri";
                 default: return anyCAType?.ToLowerInvariant() ?? "dns";
             }
+        }
+
+        /// <summary>
+        /// Extracts the subjectAltName entries from a PEM-encoded PKCS#10 CSR.
+        ///
+        /// Implemented with BouncyCastle (per the project's crypto policy: all certificate
+        /// and key handling goes through BouncyCastle, never BCL System.Security.Cryptography).
+        /// Never throws — an absent, truncated, or otherwise unparseable CSR returns an empty
+        /// list so enrollment continues on the gateway-supplied SAN data alone.
+        /// </summary>
+        /// <param name="csrPem">PEM-encoded PKCS#10 request, or null/garbage.</param>
+        /// <param name="skippedTagNumbers">
+        /// ASN.1 GeneralName tag numbers present in the CSR that have no domain-name rendering and
+        /// were therefore not returned (otherName, directoryName, x400Address, ediPartyName,
+        /// registeredID, and any malformed IPAddress). Reported so the caller can warn instead of
+        /// dropping them silently.
+        /// </param>
+        private static List<SanEntry> ExtractSanEntriesFromCsr(string csrPem, out List<int> skippedTagNumbers)
+        {
+            var result = new List<SanEntry>();
+            skippedTagNumbers = new List<int>();
+            if (string.IsNullOrWhiteSpace(csrPem))
+                return result;
+
+            try
+            {
+                string b64 = csrPem
+                    .Replace("-----BEGIN CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("-----END CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("-----BEGIN NEW CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("-----END NEW CERTIFICATE REQUEST-----", string.Empty)
+                    .Replace("\r", string.Empty)
+                    .Replace("\n", string.Empty)
+                    .Trim();
+
+                if (string.IsNullOrWhiteSpace(b64))
+                    return result;
+
+                var csr = new Org.BouncyCastle.Pkcs.Pkcs10CertificationRequest(Convert.FromBase64String(b64));
+
+                // SANs live in the PKCS#9 extensionRequest attribute, not the CSR body.
+                var extensions = csr.GetRequestedExtensions();
+                var sanExtension = extensions?.GetExtension(
+                    Org.BouncyCastle.Asn1.X509.X509Extensions.SubjectAlternativeName);
+                if (sanExtension == null)
+                    return result;
+
+                var names = Org.BouncyCastle.Asn1.X509.GeneralNames.GetInstance(sanExtension.GetParsedValue());
+                foreach (var generalName in names.GetNames())
+                {
+                    var entry = GeneralNameToSanEntry(generalName);
+                    if (entry != null)
+                        result.Add(entry);
+                    else
+                        skippedTagNumbers.Add(generalName.TagNo);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Enrollment must not fail because we could not read the CSR's SANs — the
+                // gateway-supplied set still applies, and CERTInext validates the CSR itself.
+                // Debug so an operator diagnosing a missing SAN can see the parse was skipped.
+                LogHandler.GetClassLogger(typeof(CERTInextCAPlugin))
+                    .LogDebug(ex, "ExtractSanEntriesFromCsr suppressed CSR parse failure");
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Maps a GeneralName to the <see cref="SanEntry"/> this plugin would submit for it, or null
+        /// for a name whose value cannot be rendered meaningfully — skipped rather than submitted as
+        /// ASN.1 debris. One switch, not two: a separate tag→type mapping alongside this one used to
+        /// assign a type string ("directoryname", "registeredid", ...) to tags that always return a
+        /// null value here anyway, so those branches were dead — the type never reached a caller
+        /// with no value to pair it with.
+        /// </summary>
+        private static SanEntry GeneralNameToSanEntry(Org.BouncyCastle.Asn1.X509.GeneralName generalName)
+        {
+            string type;
+            string value;
+
+            switch (generalName.TagNo)
+            {
+                case Org.BouncyCastle.Asn1.X509.GeneralName.DnsName:
+                    type = "dns";
+                    value = Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    break;
+
+                case Org.BouncyCastle.Asn1.X509.GeneralName.Rfc822Name:
+                    type = "email";
+                    value = Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    break;
+
+                case Org.BouncyCastle.Asn1.X509.GeneralName.UniformResourceIdentifier:
+                    type = "uri";
+                    value = Org.BouncyCastle.Asn1.DerIA5String.GetInstance(generalName.Name).GetString();
+                    break;
+
+                case Org.BouncyCastle.Asn1.X509.GeneralName.IPAddress:
+                    type = "ip";
+                    // Octet string → dotted-quad / RFC 5952 text, so what we submit and log is
+                    // the address the subscriber asked for rather than its hex encoding.
+                    byte[] octets = Org.BouncyCastle.Asn1.Asn1OctetString.GetInstance(generalName.Name).GetOctets();
+                    value = octets.Length == 4 || octets.Length == 16
+                        ? new System.Net.IPAddress(octets).ToString()
+                        : null;
+                    break;
+
+                default:
+                    // otherName, directoryName, x400Address, ediPartyName, registeredID.
+                    //
+                    // Deliberately null, not Name.ToString(). BouncyCastle renders these as an
+                    // ASN.1 dump — a UPN otherName from a Windows-generated CSR stringifies to
+                    // "[1.3.6.1.4.1.311.20.2.3, [CONTEXT 0]svc@corp.example.com]" and a
+                    // directoryName to "CN=host.example.com,O=Acme". Submitting that as an entry in
+                    // additionalDomains is not "forwarding the name the subscriber asked for" — it
+                    // is putting ASN.1 debris in a domain-name field, which cannot become a
+                    // certificate SAN under any circumstances and only breaks the order. That is
+                    // different from a well-formed non-DNS SAN (IP/email/URI), which we do submit
+                    // on purpose so nothing the subscriber requested is dropped silently.
+                    //
+                    // Skipped is not silent: BuildSanList warns with the tag numbers so the
+                    // operator can see a SAN was present and not forwarded.
+                    type = null;
+                    value = null;
+                    break;
+            }
+
+            return string.IsNullOrWhiteSpace(value) ? null : new SanEntry { Type = type, Value = value };
         }
 
         private static string GetStringValue(
@@ -2007,9 +6397,47 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Extracts the X.509 serial number from a PEM-encoded certificate for inclusion
-        /// in audit log entries.  Returns "(parse-error)" rather than throwing, so that a
-        /// logging failure never suppresses an audit record.
+        /// Validates that <paramref name="url"/> is an absolute URI using https, or http only
+        /// when the host is loopback (localhost/127.0.0.1/::1). Shared by every config field
+        /// that receives a credential on every outbound request — currently <c>ApiUrl</c>
+        /// (<see cref="ValidateCAConnectionInfo"/>, <see cref="Initialize"/>) and, in V1 OAuth
+        /// mode, <c>OAuthTokenUrl</c> (same two call sites) — so the http-cleartext rule can
+        /// never drift between connection-test time and actual startup. Does NOT check for
+        /// null/empty; callers that need a distinct "is required" message should check that
+        /// first and only call this helper once the value is known to be non-blank.
+        /// </summary>
+        /// <returns><c>null</c> when <paramref name="url"/> passes; otherwise an actionable
+        /// error message naming <paramref name="fieldName"/>.</returns>
+        private static string ValidateHttpsOrLoopbackUrl(string fieldName, string url)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri parsed))
+                return $"'{fieldName}' is not a valid absolute URI.";
+
+            if (!string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                && !parsed.IsLoopback)
+            {
+                return $"'{fieldName}' must use https — credentials (the OAuth client secret or API " +
+                       "key) are sent to this URL on every request, and http would transmit them in " +
+                       "cleartext. http is only allowed for a loopback host (localhost/127.0.0.1/::1).";
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Extracts the X.509 serial number of the *leaf* (first) certificate from a
+        /// PEM-encoded certificate — or from a PEM chain — for inclusion in audit log
+        /// entries.  Returns "(parse-error)" rather than throwing, so that a logging
+        /// failure never suppresses an audit record.
+        ///
+        /// V2 enrollment/sync pass this a full chain PEM (<see cref="AssembleV2CertChain"/>:
+        /// leaf followed by intermediate blocks). Decoding that as a single base64 blob is
+        /// wrong on two counts: each PEM block carries its own base64 padding, so a '='
+        /// from the leaf block lands mid-string once concatenated (Convert.FromBase64String
+        /// throws FormatException), and even if it didn't, the leaf and intermediate DER
+        /// would be mashed into one invalid ASN.1 structure. Reading block-by-block via
+        /// BouncyCastle's PemReader and stopping after the first block sidesteps both:
+        /// it returns exactly the leaf block's own decoded DER bytes, ignoring the rest.
         ///
         /// Implemented with BouncyCastle (per the project's crypto policy: all certificate
         /// and key handling goes through BouncyCastle, never BCL System.Security.Cryptography).
@@ -2018,20 +6446,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             try
             {
-                // Strip PEM headers and decode the DER bytes
-                string b64 = pem
-                    .Replace("-----BEGIN CERTIFICATE-----", string.Empty)
-                    .Replace("-----END CERTIFICATE-----", string.Empty)
-                    .Replace("\r", string.Empty)
-                    .Replace("\n", string.Empty)
-                    .Trim();
-
-                if (string.IsNullOrWhiteSpace(b64))
+                if (string.IsNullOrWhiteSpace(pem))
                     return "(empty-pem)";
 
-                byte[] der = Convert.FromBase64String(b64);
+                using var stringReader = new System.IO.StringReader(pem);
+                var pemReader = new Org.BouncyCastle.Utilities.IO.Pem.PemReader(stringReader);
+                var pemObject = pemReader.ReadPemObject();
+                if (pemObject == null)
+                    return "(parse-error)"; // no "-----BEGIN"/"-----END" block found at all
+                if (pemObject.Content == null || pemObject.Content.Length == 0)
+                    return "(empty-pem)"; // block markers present but body is empty
+
                 var parser = new Org.BouncyCastle.X509.X509CertificateParser();
-                var cert = parser.ReadCertificate(der);
+                var cert = parser.ReadCertificate(pemObject.Content);
                 if (cert == null)
                     return "(parse-error)";
                 // Match X509Certificate2.SerialNumber's format precisely: uppercase hex,

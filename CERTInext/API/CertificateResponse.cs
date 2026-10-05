@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -587,6 +587,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
                         ProductCode = p.ProductCode,
                         ProductName = p.ProductName,
                         ProductType = cat.CategoryName,
+                        ProductTypeId = p.ProductTypeId,
                         Active = true  // API does not return an active flag at this level
                     });
                 }
@@ -657,6 +658,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         /// </summary>
         [JsonPropertyName("productType")]
         public string ProductType { get; set; }
+
+        /// <summary>
+        /// Numeric product type ID from the wire (<see cref="ProductCategoryEntry.ProductTypeId"/>),
+        /// e.g. "13" for DV SSL. UCC (multi-SAN) family values are 15/18/20/21/22 — see
+        /// issues/f3-v2-multi-san-limitation.md. Not populated by every parse path (only set
+        /// where the source shape actually carries a <c>productTypeID</c> field).
+        /// </summary>
+        [JsonPropertyName("productTypeID")]
+        public string ProductTypeId { get; set; }
 
         /// <summary>
         /// Always <c>true</c> for products returned by the API — the API only
