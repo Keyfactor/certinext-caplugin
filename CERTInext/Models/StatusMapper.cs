@@ -1,11 +1,13 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions
 // and limitations under the License.
 
+using Keyfactor.Logging;
 using Keyfactor.PKI.Enums.EJBCA;
+using Microsoft.Extensions.Logging;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 {
@@ -19,6 +21,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
     /// </summary>
     internal static class StatusMapper
     {
+        private static readonly ILogger Logger = LogHandler.GetClassLogger(typeof(StatusMapper));
+
         // -----------------------------------------------------------------------
         // Certificate status ID mapping (TrackOrder.orderDetails.certificateStatusId)
         // -----------------------------------------------------------------------
@@ -188,6 +192,136 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
                 case 9: return Constants.RevocationReason.PrivilegeWithdrawn;
                 case 10: return Constants.RevocationReason.AACompromise;
                 default: return Constants.RevocationReason.Unspecified;
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // V2 API status mapping
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// Maps a V2 REST API order status string to the Keyfactor
+        /// <see cref="EndEntityStatus"/> integer code expected by the gateway.
+        ///
+        /// Covers the status values documented by the V2 spec's <c>/reports/orders</c>
+        /// <c>status</c> filter (issues/0031). <c>pending-organization-verification</c>,
+        /// <c>pending-documents</c>, and <c>pending-approval</c> join the existing
+        /// pending-* values as EXTERNALVALIDATION — they are OV/EV/DV orders still
+        /// actively progressing toward issuance, not failures. <c>rejected</c> is a
+        /// terminal negative outcome mapped to FAILED deliberately, same as the
+        /// pre-existing <c>cancelled</c>. <c>expired</c> maps to GENERATED instead —
+        /// an expired-but-not-revoked certificate remains issued inventory, mirroring
+        /// <see cref="ToRequestDisposition"/>'s V1 convention and the sync/report path's
+        /// own "expired" case (<c>CERTInextCAPlugin.TryMapV2ReportDisplayStatus</c>). The
+        /// spec-documented <c>unknown</c> maps to
+        /// EXTERNALVALIDATION (issue 0039): the order may still be live. Any value not in this list falls
+        /// through to the default arm, which also returns FAILED but logs a warning —
+        /// see issues/0031 for why "deliberately FAILED" and "unmapped, degrading to
+        /// FAILED" are kept distinguishable in the logs even though the return value
+        /// is the same today.
+        /// </summary>
+        /// <param name="v2Status">Status string from the V2 order response.</param>
+        public static int V2StatusToRequestDisposition(string v2Status)
+        {
+            switch (v2Status?.ToLowerInvariant())
+            {
+                case Constants.ApiV2.StatusIssued:
+                // Expired-but-not-revoked certs remain in inventory as GENERATED —
+                // mirrors StatusMapper.ToRequestDisposition's V1 convention and the
+                // sync/report path's own "expired" case.
+                case Constants.ApiV2.StatusExpired:
+                    return (int)EndEntityStatus.GENERATED;
+
+                case Constants.ApiV2.StatusPendingDcv:
+                case Constants.ApiV2.StatusPendingCsr:
+                case Constants.ApiV2.StatusPendingAgreement:
+                case Constants.ApiV2.StatusPendingOrganizationVerification:
+                case Constants.ApiV2.StatusPendingDocuments:
+                case Constants.ApiV2.StatusPendingApproval:
+                    return (int)EndEntityStatus.EXTERNALVALIDATION;
+
+                case Constants.ApiV2.StatusRevoked:
+                    return (int)EndEntityStatus.REVOKED;
+
+                case Constants.ApiV2.StatusCancelled:
+                case Constants.ApiV2.StatusRejected:
+                    return (int)EndEntityStatus.FAILED;
+
+                case Constants.ApiV2.StatusUnknown:
+                    // Issue 0039: `unknown` is in the spec's documented status list, so it is NOT
+                    // the "status we've never heard of" case below — CERTInext is saying it can't
+                    // currently report where the order is, not that the order is dead. Treat it as
+                    // pending so Command keeps the order and sync/pickup keep re-checking it, rather
+                    // than dropping a possibly-live order as FAILED. Warn so an order stuck here is
+                    // visible to operators.
+                    Logger.LogWarning(
+                        "V2StatusToRequestDisposition: CERTInext reported V2 order status 'unknown' — " +
+                        "treating the order as pending (EXTERNALVALIDATION) rather than FAILED; it will be " +
+                        "re-checked on the next status poll or sync. If an order stays 'unknown', raise it with CERTInext.");
+                    return (int)EndEntityStatus.EXTERNALVALIDATION;
+
+                default:
+                    // Distinct from the deliberate cancelled/rejected/expired -> FAILED
+                    // mappings above: this status string isn't recognized at all. Log so
+                    // an operator (or issues/0031-style audit) can tell "legitimately
+                    // failed" apart from "gateway doesn't know this status yet" — degrade
+                    // to FAILED rather than guessing EXTERNALVALIDATION, since an
+                    // unrecognized value could just as easily be a new terminal state.
+                    Logger.LogWarning(
+                        "V2StatusToRequestDisposition: unmapped V2 order status '{V2Status}' — " +
+                        "defaulting to FAILED. This is not one of the V2 spec's documented status " +
+                        "values; if CERTInext has added a new status, StatusMapper needs updating.",
+                        v2Status);
+                    return (int)EndEntityStatus.FAILED;
+            }
+        }
+
+        /// <summary>
+        /// Converts an RFC 5280 CRL reason code to the V2 API revocation reason string.
+        /// Values are the CERTInext V2 spec's kebab-case `reason` enum (see
+        /// <see cref="Constants.RevocationReasonV2"/> and issues/0019 — sending the
+        /// legacy camelCase strings gets HTTP 400). Codes without a direct V2
+        /// equivalent (e.g. RFC 5280 code 8, "removeFromCRL", which is CRL-only and
+        /// not a valid revocation request reason) are mapped to "unspecified".
+        /// </summary>
+        /// <param name="crlReason">RFC 5280 CRL reason code from the gateway.</param>
+        public static string ToV2RevocationReason(uint crlReason) =>
+            crlReason switch
+            {
+                1  => Constants.RevocationReasonV2.KeyCompromise,        // RFC: keyCompromise
+                2  => Constants.RevocationReasonV2.CACompromise,         // RFC: cACompromise
+                3  => Constants.RevocationReasonV2.AffiliationChanged,  // RFC: affiliationChanged
+                4  => Constants.RevocationReasonV2.Superseded,          // RFC: superseded
+                5  => Constants.RevocationReasonV2.CessationOfOperation,// RFC: cessationOfOperation
+                6  => Constants.RevocationReasonV2.CertificateHold,     // RFC: certificateHold
+                9  => Constants.RevocationReasonV2.PrivilegeWithdrawn,  // RFC: privilegeWithdrawn
+                10 => Constants.RevocationReasonV2.AACompromise,        // RFC: aACompromise
+                _  => Constants.RevocationReasonV2.Unspecified
+            };
+
+        /// <summary>
+        /// Converts a V2 API revocation reason string (the CERTInext V2 spec's kebab-case
+        /// <c>reason</c> enum on the Track Order response's nested <c>revocation</c> object,
+        /// e.g. "cessation-of-operation") back to the RFC 5280 CRL reason code for storage in
+        /// the Keyfactor Command database (issues/0034). Inverse of
+        /// <see cref="ToV2RevocationReason"/>. Unrecognized or null input (including the
+        /// not-revoked case, where the caller should not invoke this at all) falls back to 0
+        /// (unspecified), mirroring <see cref="ToRevocationReason"/>'s V1 default.
+        /// </summary>
+        /// <param name="v2Reason">Raw <c>revocation.reason</c> string from the V2 Track Order response.</param>
+        public static int V2RevocationReasonToCrlCode(string v2Reason)
+        {
+            switch (v2Reason?.ToLowerInvariant())
+            {
+                case Constants.RevocationReasonV2.KeyCompromise: return 1;
+                case Constants.RevocationReasonV2.CACompromise: return 2;
+                case Constants.RevocationReasonV2.AffiliationChanged: return 3;
+                case Constants.RevocationReasonV2.Superseded: return 4;
+                case Constants.RevocationReasonV2.CessationOfOperation: return 5;
+                case Constants.RevocationReasonV2.CertificateHold: return 6;
+                case Constants.RevocationReasonV2.PrivilegeWithdrawn: return 9;
+                case Constants.RevocationReasonV2.AACompromise: return 10;
+                default: return 0;
             }
         }
 

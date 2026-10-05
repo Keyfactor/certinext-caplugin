@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -14,6 +15,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
 using Keyfactor.Logging;
 using Microsoft.Extensions.Logging;
@@ -41,10 +43,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         private readonly CERTInextConfig _config;
         private readonly RestClient _http;
 
-        // OAuth2 token cache — refreshed when expired
+        // OAuth2 token cache — refreshed when expired (V1)
         private string _cachedToken;
         private DateTime _tokenExpiry = DateTime.MinValue;
         private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
+
+        // V2 API HTTP client and token cache
+        private readonly RestClient _httpV2;
+        private string _v2Token;
+        private DateTime _v2TokenExpiry = DateTime.MinValue;
+        private readonly SemaphoreSlim _v2TokenLock = new SemaphoreSlim(1, 1);
 
         // ---------------------------------------------------------------------------
         // Construction
@@ -67,6 +75,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             };
 
             _http = new RestClient(options);
+
+            // V2 client — only constructed when V2 is enabled and ApiUrl is set. A single ApiUrl
+            // serves both modes (its meaning follows UseV2Api — issues/0022 config consolidation);
+            // in V2 mode it is the V2 base URL (no trailing path suffix).
+            // No authenticator: tokens are injected per-request via BuildV2RequestAsync.
+            if (config.UseV2Api && !string.IsNullOrWhiteSpace(config.ApiUrl))
+            {
+                var v2Options = new RestClientOptions(config.ApiUrl.TrimEnd('/'))
+                {
+                    ThrowOnAnyError = false,
+                    Timeout = TimeSpan.FromSeconds(120)
+                };
+                _httpV2 = new RestClient(v2Options);
+            }
         }
 
         // ---------------------------------------------------------------------------
@@ -77,6 +99,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             _http?.Dispose();
             _tokenLock?.Dispose();
+            _httpV2?.Dispose();
+            _v2TokenLock?.Dispose();
         }
 
         // ---------------------------------------------------------------------------
@@ -186,9 +210,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (request.Meta == null)
                 request.Meta = await BuildMetaAsync(ct);
 
+            // The domain set is logged here, at the wire, not just where Command hands it to us.
+            // A UCC order that silently lost its SANs upstream of this point is otherwise
+            // indistinguishable in the gateway log from one the CA stripped — reconciling the
+            // enrollment-start "SANs=" line against this one localizes the loss immediately.
+            var certInfo = request.OrderDetails?.CertificateInformation;
             Logger.LogInformation(
-                "Submitting order to CERTInext. ProductCode={ProductCode}",
-                request.OrderDetails?.ProductCode);
+                "Submitting order to CERTInext. ProductCode={ProductCode}, DomainName={DomainName}, " +
+                "AdditionalDomainCount={AdditionalDomainCount}, AdditionalDomains={AdditionalDomains}",
+                request.OrderDetails?.ProductCode,
+                LogSanitizer.Strip(certInfo?.DomainName),
+                certInfo?.AdditionalDomains?.Count ?? 0,
+                // Untyped by now: an email SAN submitted here is masked unless
+                // LogSensitiveRequestData is on (issue 0040 follow-up).
+                LogSanitizer.FormatUntypedSans(certInfo?.AdditionalDomains, _config.LogSensitiveRequestData));
 
             GenerateOrderResponse result = null;
             RestResponse resp = null;
@@ -213,10 +248,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     request.Meta = await BuildMetaAsync(ct);
 
                 var req = new RestRequest(Constants.Api.GenerateOrderSslPath, Method.Post);
-                req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
+                string jsonBody = JsonSerializer.Serialize(request, GetJsonOptions());
+                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}",
+                    ApplyLoggingRedaction(jsonBody, _config.LogSensitiveRequestData));
+                req.AddJsonBody(jsonBody);
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                resp = await ExecuteWithRetryAsync(req, ct);
+                // idempotent:false — order submission is non-idempotent. A network-level
+                // timeout may occur after CERTInext already created the order, so re-sending the
+                // same requestTxn would be rejected as EMS-947 and orphan the created order
+                // Rate-limit retries are still handled below (with a fresh txn).
+                resp = await ExecuteWithRetryAsync(req, ct, idempotent: false);
                 sw.Stop();
 
                 Logger.LogInformation(
@@ -230,6 +272,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         (int)resp.StatusCode, _config.AuthMode);
                     throw new Exception(
                         $"Authentication failure during certificate order. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
+                }
+
+                // Transient/network failure (5xx or no HTTP status) on a non-idempotent submit:
+                // CERTInext may have already created the order (the response just didn't reach us).
+                // We deliberately did not retry (see idempotent:false above). Fail clearly instead
+                // of deserializing an empty body; if the order was created, the next sync imports it.
+                bool transientFailure = !resp.IsSuccessful
+                    && !((int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500);
+                if (transientFailure)
+                {
+                    Logger.LogWarning(
+                        "PlaceOrder received no usable response (DomainName={Domain}, HttpStatus={Status}, LatencyMs={Latency}). " +
+                        "Not retrying to avoid a duplicate order (EMS-947). If CERTInext created the order it " +
+                        "will be imported by the next synchronization.",
+                        LogSanitizer.Strip(request.OrderDetails?.CertificateInformation?.DomainName),
+                        (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                    throw new Exception(
+                        "CERTInext did not return a usable response to the order submission. If the order was " +
+                        "created it will be imported by the next synchronization — do not resubmit immediately. " +
+                        "See gateway logs for details.");
                 }
 
                 result = DeserializeOrThrow<GenerateOrderResponse>(resp, "place order");
@@ -257,6 +319,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             throw;
                         }
                         continue; // retry
+                    }
+
+                    // EMS-947 "Duplicate requestTxn": CERTInext already received an order for this
+                    // transaction. With the non-idempotent-retry fix above this should no longer be
+                    // caused by our own retry, but if it still surfaces the order exists on the CA
+                    // side and will be imported by the next sync — say so, not a generic failure.
+                    bool isDuplicateTxn =
+                        string.Equals(result.Meta.ErrorCode, "EMS-947", StringComparison.OrdinalIgnoreCase)
+                        || (result.Meta.ErrorMessage?.IndexOf("Duplicate requestTxn", StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (isDuplicateTxn)
+                    {
+                        // Log the classification decision itself (parity with the transient-failure
+                        // branch above) so an auditor sees the plugin deliberately treated this as a
+                        // benign duplicate rather than a hard failure.
+                        Logger.LogWarning(
+                            "PlaceOrder classified {ErrorCode} as a duplicate transaction (not a hard failure). " +
+                            "DomainName={Domain}, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}. If an order exists " +
+                            "for this transaction it will be imported by the next synchronization.",
+                            result.Meta.ErrorCode,
+                            LogSanitizer.Strip(request.OrderDetails?.CertificateInformation?.DomainName),
+                            Constants.Api.GenerateOrderSslPath, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                        throw new Exception(
+                            "CERTInext reported a duplicate order transaction (EMS-947). If an order was created " +
+                            "for this transaction it will be imported by the next synchronization — do not resubmit " +
+                            "immediately. See gateway logs for details.");
                     }
 
                     throw new Exception(
@@ -300,7 +387,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var resp = await ExecuteWithRetryAsync(req, ct);
+            // idempotent:false — submitting a CSR is non-idempotent; do not resend on a network
+            // timeout (the first attempt may have been received). See PlaceOrderAsync.
+            var resp = await ExecuteWithRetryAsync(req, ct, idempotent: false);
             sw.Stop();
 
             Logger.LogInformation(
@@ -310,6 +399,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (!resp.IsSuccessful)
             {
                 LogApiFailure(Constants.Api.SubmitCsrPath, resp);
+                // Parity with PlaceOrderAsync: a transient/network failure on this non-idempotent
+                // submit was NOT retried, so record that decision (the CSR may already have been
+                // received). 4xx client errors fall through to the generic failure below.
+                bool transientFailure = !((int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500);
+                if (transientFailure)
+                {
+                    Logger.LogWarning(
+                        "SubmitCSR received no usable response (OrderNumber={OrderNumber}, HttpStatus={Status}, " +
+                        "LatencyMs={Latency}); not retrying (non-idempotent). If CERTInext already received the CSR, " +
+                        "do not resubmit immediately.",
+                        request.OrderDetails?.OrderNumber, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+                    // Parity with PlaceOrderAsync: carry the actionable guidance into the surfaced
+                    // exception, not only the log line.
+                    throw new Exception(
+                        "CERTInext did not return a usable response to the CSR submission. If the CSR was received " +
+                        "it will take effect — do not resubmit immediately. See gateway logs for details.");
+                }
                 throw new Exception($"CERTInext SubmitCSR failed. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
             }
 
@@ -354,6 +460,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
 
             var result = DeserializeOrThrow<TrackOrderResponse>(resp, $"track order {orderNumber}");
+            Logger.LogTrace("TrackOrderAsync response payload (Order={OrderNumber}): {Payload}",
+                orderNumber, ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
 
             // A meta status of "0" with errorCode EMS-913 or similar means the order was not found
             if (result.Meta != null && !result.Meta.IsSuccess)
@@ -710,26 +818,75 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 throw new KeyNotFoundException($"Cannot renew: prior order '{certificateId}' was not found in CERTInext.");
             }
 
-            // We don't have the product code from TrackOrder — build an order using
-            // the config defaults and the CSR from the renewal request.
+            // Primary domain for the renewal order. Prefer the CN of the subject Command gave
+            // us; the prior order's requestorName is only a last resort and is not a domain —
+            // it is retained solely so an old caller that sets no Subject behaves as before.
+            // Hoisted: the same parse drives both the domain and the "did we get a CN?" warning,
+            // mirroring BuildOrderRequestFromLegacyEnrollRequest.
+            string subjectCn = ExtractCnFromSubject(request.Subject);
+
+            string renewalDomainName =
+                subjectCn
+                ?? priorTrack.OrderDetails?.RequestorInformation?.RequestorName
+                ?? "unknown";
+
+            if (subjectCn == null)
+            {
+                Logger.LogWarning(
+                    "Renewal of order {PriorId} has no usable CN in its subject; falling back to " +
+                    "DomainName='{DomainName}' from the prior order. Verify the renewed certificate's " +
+                    "primary domain.",
+                    certificateId, LogSanitizer.Strip(renewalDomainName));
+            }
+
+            // Prefer the template's own product code (threaded through via request.ProfileId);
+            // only fall back to the connector-level default when the caller didn't supply one.
+            // EnrollmentParams.ProductCode never returns null (it returns string.Empty when it
+            // can't resolve a code), so this must be a blank check, not a null-coalesce — a
+            // null-coalesce here would make the DefaultProductCode fallback unreachable, the
+            // same dead-fallback bug that made DefaultProductCode a no-op for new enrollments.
             var orderReq = new GenerateOrderSslRequest
             {
                 Meta = await BuildMetaAsync(ct),
                 OrderDetails = new SslOrderDetails
                 {
-                    ProductCode = _config.DefaultProductCode ?? string.Empty,
+                    ProductCode = string.IsNullOrWhiteSpace(request.ProfileId)
+                        ? (_config.DefaultProductCode ?? string.Empty)
+                        : request.ProfileId,
                     SaveAndHold = "0",
+                    // Mirrors BuildOrderRequestFromLegacyEnrollRequest — omit when blank so the
+                    // order falls back to the unvetted/ungroup path, same as new enrollments.
+                    DelegationInformation = !string.IsNullOrWhiteSpace(_config.GroupNumber)
+                        ? new DelegationInformation { GroupNumber = _config.GroupNumber }
+                        : null,
                     RequestorInformation = new RequestorInformation
                     {
                         RequestorName = request.RequesterName ?? _config.RequestorName,
                         RequestorEmail = request.RequesterEmail ?? _config.RequestorEmail,
                         RequestorIsdCode = _config.RequestorIsdCode ?? "1",
-                        RequestorMobileNumber = _config.RequestorMobileNumber ?? string.Empty
+                        RequestorMobileNumber = _config.RequestorMobileNumber ?? string.Empty,
+                        RequestorDesignation = string.IsNullOrWhiteSpace(_config.RequestorDesignation) ? null : _config.RequestorDesignation.Trim()
+                    },
+                    TechnicalPointOfContact = new TechnicalPointOfContact
+                    {
+                        TpcName = string.IsNullOrWhiteSpace(_config.TechnicalContactName)
+                            ? (request.RequesterName ?? _config.RequestorName)
+                            : _config.TechnicalContactName,
+                        TpcEmail = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail)
+                            ? (request.RequesterEmail ?? _config.RequestorEmail)
+                            : _config.TechnicalContactEmail,
+                        TpcIsdCode = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode)
+                            ? (string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode)
+                            : _config.TechnicalContactIsdCode,
+                        TpcMobileNumber = string.IsNullOrWhiteSpace(_config.TechnicalContactMobileNumber)
+                            ? (_config.RequestorMobileNumber ?? string.Empty)
+                            : _config.TechnicalContactMobileNumber
                     },
                     SubscriptionDetails = new SubscriptionDetails { Validity = "1" },
                     CertificateInformation = new CertificateInformation
                     {
-                        DomainName = priorTrack.OrderDetails?.RequestorInformation?.RequestorName ?? "unknown"
+                        DomainName = renewalDomainName,
+                        AdditionalDomains = BuildAdditionalDomains(request.Sans, renewalDomainName)
                     },
                     Csr = request.Csr,
                     AgreementDetails = BuildDefaultAgreementDetails()
@@ -1143,6 +1300,870 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <summary>
         /// Returns a valid OAuth2 access token, refreshing it if expired. Thread-safe.
         /// </summary>
+        // ---------------------------------------------------------------------------
+        // ICERTInextClient — V2 REST API methods
+        // ---------------------------------------------------------------------------
+
+        /// <inheritdoc/>
+        public async Task<V2AuthMeResponse> GetAuthMeV2Async(CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            var req = await BuildV2RequestAsync(Constants.ApiV2.AuthMePath, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            ThrowOnV2Failure(resp, "auth/me");
+            var result = DeserializeV2OrThrow<V2AuthMeResponse>(resp, "auth/me");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task PingV2Async(CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var me = await GetAuthMeV2Async(ct);
+            Logger.LogInformation(
+                "CERTInext V2 ping successful. AccountNumber={AccountNumber}, AuthType={AuthType}",
+                me.AccountNumber, me.AuthType);
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2CreateOrderResponse> PlaceOrderV2Async(
+            string productFamilySlug,
+            string productCode,
+            V2CreateSslOrderRequest request,
+            CancellationToken ct = default)
+        {
+            // Issue 0033: the SSL-shaped body must only ever go to the SSL endpoint. Previously
+            // the slug was substituted into the URL unchecked, so a private-pki/signature
+            // template silently sent this body to the wrong family's create endpoint.
+            if (!string.Equals(productFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException(
+                    $"A V2 SSL/TLS order body can only be sent to the '{Constants.ApiV2.FamilySsl}' family, " +
+                    $"not '{productFamilySlug}'. Use the Private PKI or Document Signer PlaceOrderV2Async overload.",
+                    nameof(productFamilySlug));
+
+            return await PlaceOrderV2CoreAsync(Constants.ApiV2.SslCertificatesPath, productCode, request, ct);
+        }
+
+        /// <inheritdoc/>
+        public Task<V2CreateOrderResponse> PlaceOrderV2Async(
+            string productCode,
+            V2CreatePrivatePkiOrderRequest request,
+            CancellationToken ct = default)
+            => PlaceOrderV2CoreAsync(Constants.ApiV2.PrivatePkiCertificatesPath, productCode, request, ct);
+
+        /// <inheritdoc/>
+        public Task<V2CreateOrderResponse> PlaceOrderV2Async(
+            string productCode,
+            V2CreateSignatureOrderRequest request,
+            CancellationToken ct = default)
+            => PlaceOrderV2CoreAsync(Constants.ApiV2.SignatureCertificatesPath, productCode, request, ct);
+
+        /// <summary>
+        /// Shared V2 create-order transport for every product family (issue 0033): POSTs the
+        /// family-specific body to <paramref name="path"/> with the X-Product-Code and
+        /// Idempotency-Key headers. Request and response bodies are only ever logged (Trace)
+        /// through <see cref="ApplyLoggingRedaction"/>, so credentials are always scrubbed and
+        /// requestor/subject PII is scrubbed unless <c>LogSensitiveRequestData</c> is on.
+        /// X-Product-Code is the spec's "Optional override" on SSL create (and is sent the same
+        /// way for Private PKI / Document Signer, issue 0054 item #4): a null/blank
+        /// <paramref name="productCode"/> omits the header entirely rather than sending it empty,
+        /// which is not itself a valid override value.
+        /// </summary>
+        private async Task<V2CreateOrderResponse> PlaceOrderV2CoreAsync<TRequest>(
+            string path,
+            string productCode,
+            TRequest request,
+            CancellationToken ct)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string idempotencyKey = Guid.NewGuid().ToString();
+            var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
+            if (!string.IsNullOrWhiteSpace(productCode))
+                req.AddHeader("X-Product-Code", productCode);
+            string json = JsonSerializer.Serialize(request, GetJsonOptions());
+            Logger.LogTrace("PlaceOrderV2Async request payload: {Payload}",
+                ApplyLoggingRedaction(json, _config.LogSensitiveRequestData));
+            req.AddJsonBody(json);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            sw.Stop();
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
+                path, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+            Logger.LogTrace("PlaceOrderV2Async response: {Body}",
+                ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
+            ThrowOnV2Failure(resp, "V2 place order");
+            var result = DeserializeV2OrThrow<V2CreateOrderResponse>(resp, "V2 place order");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task SubmitCsrV2Async(
+            string productFamilySlug,
+            string orderId,
+            string csrPem,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/csr";
+            var req = await BuildV2RequestAsync(path, Method.Put, ct);
+            var body = new V2SubmitCsrRequest { Csr = csrPem };
+            req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            ThrowOnV2Failure(resp, "V2 submit CSR");
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2OrderStatusResponse> TrackOrderV2Async(
+            string productFamilySlug,
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = BuildV2OrderPath(productFamilySlug, orderId);
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            if (resp.StatusCode == HttpStatusCode.NotFound)
+            {
+                Logger.MethodExit(LogLevel.Trace);
+                throw new KeyNotFoundException($"V2 order '{orderId}' not found in family '{productFamilySlug}'.");
+            }
+            ThrowOnV2Failure(resp, "V2 track order");
+            var result = DeserializeV2OrThrow<V2OrderStatusResponse>(resp, "V2 track order");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2CertificateDownloadResponse> DownloadCertificateV2Async(
+            string productFamilySlug,
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/certificate";
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            if (resp.StatusCode == HttpStatusCode.NotFound)
+            {
+                Logger.MethodExit(LogLevel.Trace);
+                throw new KeyNotFoundException($"V2 certificate for order '{orderId}' not found in family '{productFamilySlug}'.");
+            }
+            ThrowOnV2Failure(resp, "V2 download certificate");
+            var result = DeserializeV2OrThrow<V2CertificateDownloadResponse>(resp, "V2 download certificate");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task RevokeOrderV2Async(
+            string productFamilySlug,
+            string orderId,
+            V2RevokeRequest request,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string idempotencyKey = Guid.NewGuid().ToString();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/revoke";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
+            req.AddJsonBody(JsonSerializer.Serialize(request, GetJsonOptions()));
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            if (resp.StatusCode == HttpStatusCode.NotFound)
+            {
+                // Compliance finding: a revoke denial must leave an audit trail (SOX/SOC2
+                // who/what/when/outcome) even though this branch returns before
+                // ThrowOnV2Failure/LogV2ApiFailure would otherwise run it. Log explicitly with
+                // the order/family identity plus the usual HTTP-status+redacted-body line.
+                Logger.LogWarning(
+                    "V2 revoke denied — order not found or not in a revokable state. " +
+                    "OrderId={OrderId}, ProductFamily={Family}, HttpStatus={HttpStatus}",
+                    orderId, productFamilySlug, (int)resp.StatusCode);
+                LogV2ApiFailure("V2 revoke order", resp, LogLevel.Warning);
+                Logger.MethodExit(LogLevel.Trace);
+                // Per the V2 spec ("Revoke Certificate", 404 response): "Order not found
+                // or not in a revokable state." This is deliberately ambiguous on the
+                // wire — callers that have already confirmed the order lives in
+                // `productFamilySlug` (e.g. via TrackOrderV2Async) should treat a 404
+                // here as "not revokable", not as a family miss (issues/0019).
+                throw new KeyNotFoundException(
+                    $"V2 order '{orderId}' in family '{productFamilySlug}' not found or not in a revokable state.");
+            }
+            if (resp.StatusCode == (HttpStatusCode)422)
+            {
+                // Label by whatever EMS code/detail CERTInext actually returned rather
+                // than presuming "not in issued state" — 422s here cover multiple
+                // distinct conditions (EMS-969 revoke reason ID missing, sandbox-timing
+                // "Certificate Request still being processed", etc. — see issues/0019).
+                string detail = ExtractV2ErrorMessage(resp.Content, "V2 revoke");
+                // Compliance finding: same audit-trail requirement as the 404 branch above —
+                // this also returns before ThrowOnV2Failure would otherwise log it.
+                Logger.LogWarning(
+                    "V2 revoke rejected. OrderId={OrderId}, ProductFamily={Family}, HttpStatus={HttpStatus}, " +
+                    "Detail={Detail}",
+                    orderId, productFamilySlug, (int)resp.StatusCode, detail);
+                LogV2ApiFailure("V2 revoke order", resp, LogLevel.Warning);
+                throw new InvalidOperationException($"V2 revoke rejected. {detail}");
+            }
+            ThrowOnV2Failure(resp, "V2 revoke order");
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2CancelOrderOutcome> CancelOrderV2Async(
+            string productFamilySlug,
+            string orderId,
+            string reason,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            if (string.IsNullOrWhiteSpace(reason))
+                throw new ArgumentException(
+                    "A cancel reason is required (CERTInext rejects an empty one with EMS-984).", nameof(reason));
+            EnsureV2Client();
+            string idempotencyKey = Guid.NewGuid().ToString();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/cancel";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
+            req.AddJsonBody(JsonSerializer.Serialize(new V2CancelOrderRequest { Reason = reason }, GetJsonOptions()));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            sw.Stop();
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
+                path, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+            if (resp.StatusCode == (HttpStatusCode)422)
+            {
+                // Spec "Cancel Order" 422: "order already in a terminal state" (e.g. already
+                // issued — use /revoke). Not an exception: the caller reports it as "not cancelled".
+                LogV2ApiFailure("V2 cancel order", resp, LogLevel.Warning);
+                Logger.MethodExit(LogLevel.Trace);
+                return V2CancelOrderOutcome.AlreadyTerminal;
+            }
+            ThrowOnV2Failure(resp, "V2 cancel order");
+            Logger.MethodExit(LogLevel.Trace);
+            return V2CancelOrderOutcome.Cancelled;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2OrderStatusResponse> ResolveAndTrackOrderV2Async(
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var (_, status) = await ResolveV2OrderFamilyAsync(orderId, ct);
+            Logger.MethodExit(LogLevel.Trace);
+            return status;
+        }
+
+        /// <inheritdoc/>
+        public async Task<(string family, V2OrderStatusResponse status)> ResolveAndTrackOrderV2WithFamilyAsync(
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var result = await ResolveV2OrderFamilyAsync(orderId, ct);
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2CertificateDownloadResponse> ResolveAndDownloadCertificateV2Async(
+            string orderId,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var (family, _) = await ResolveV2OrderFamilyAsync(orderId, ct);
+            var cert = await DownloadCertificateV2Async(family, orderId, ct);
+            Logger.MethodExit(LogLevel.Trace);
+            return cert;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, string familySlug, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = $"/api/certinext/v2/{familySlug}/{orderId}/dcv";
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 get DCV challenge");
+            var result = DeserializeV2OrThrow<V2DcvChallengeResponse>(resp, "V2 get DCV challenge");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2DcvChallengeResponse> GetDcvV2Async(
+            string orderId, string domain, string familySlug, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            // Per-domain scope (issue 0042) — confirmed live to return a distinct token per SAN
+            // on a UCC order (v2-api-support-questions.md Finding 9).
+            string path = $"/api/certinext/v2/{familySlug}/{orderId}/dcv?domain=" + Uri.EscapeDataString(domain);
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 get DCV challenge (per-domain)");
+            var result = DeserializeV2OrThrow<V2DcvChallengeResponse>(resp, "V2 get DCV challenge (per-domain)");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2DcvVerifyResponse> VerifyDcvV2Async(string orderId, string domain, string familySlug, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = $"/api/certinext/v2/{familySlug}/{orderId}/dcv/verify";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct);
+            var body = new V2DcvVerifyRequest { Domain = domain, Method = "dns-txt" };
+            req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+
+            if (resp.StatusCode == (HttpStatusCode)422)
+            {
+                string detail = ExtractV2ErrorMessage(resp.Content, "V2 verify DCV");
+                throw new InvalidOperationException(
+                    $"V2 DCV verification failed for order '{orderId}', domain '{domain}'. {detail}");
+            }
+
+            // 204 No Content is a valid success — return an empty verified response
+            if (resp.StatusCode == System.Net.HttpStatusCode.NoContent || string.IsNullOrWhiteSpace(resp.Content))
+            {
+                Logger.MethodExit(LogLevel.Trace);
+                return new V2DcvVerifyResponse { OverallStatus = "VERIFIED" };
+            }
+
+            ThrowOnV2Failure(resp, "V2 verify DCV");
+            var result = DeserializeV2OrThrow<V2DcvVerifyResponse>(resp, "V2 verify DCV");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<List<ProductDetail>> GetProductDetailsV2Async(CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+
+            // Scope the catalog to the connector's configured billing group, mirroring V1's
+            // GetProductDetailsAsync (ProductDetailsFilter.GroupNumber). Omitted entirely when
+            // unconfigured so the account's default group is used, same as V1 (issue 0029).
+            string path = Constants.ApiV2.CatalogProductsPath;
+            if (!string.IsNullOrWhiteSpace(_config.GroupNumber))
+                path += "?groupNumber=" + Uri.EscapeDataString(_config.GroupNumber);
+
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                Constants.ApiV2.CatalogProductsPath, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 get product details");
+            var result = ParseProductDetailsV2Response(resp.Content);
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async IAsyncEnumerable<OrderReportEntryV2> ListOrdersV2Async(
+            string from = null,
+            string to = null,
+            int pageSize = Constants.Api.DefaultPageSize,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+
+            // Server clamps size to 100 and treats page=0 as page 1 (issues/0022 Phase 0 probe);
+            // the client always sends 1-based pages itself so that quirk never surfaces here.
+            int size = pageSize <= 0
+                ? Constants.Api.DefaultPageSize
+                : Math.Min(pageSize, Constants.ApiV2.OrdersReportMaxPageSize);
+
+            int page = 1;
+            int totalPages = int.MaxValue; // sentinel until the first response tells us
+
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var query = new StringBuilder();
+                query.Append(Constants.ApiV2.OrdersReportPath)
+                     .Append("?page=").Append(page)
+                     .Append("&size=").Append(size);
+                if (!string.IsNullOrWhiteSpace(from))
+                    query.Append("&from=").Append(Uri.EscapeDataString(from));
+                if (!string.IsNullOrWhiteSpace(to))
+                    query.Append("&to=").Append(Uri.EscapeDataString(to));
+                // Scope the orders report to the connector's configured billing group, mirroring
+                // V1's DelegationInformation.GroupNumber. Omitted entirely when unconfigured so
+                // the account's default group is used, same as V1 (issue 0029).
+                if (!string.IsNullOrWhiteSpace(_config.GroupNumber))
+                    query.Append("&groupNumber=").Append(Uri.EscapeDataString(_config.GroupNumber));
+
+                var req = await BuildV2RequestAsync(query.ToString(), Method.Get, ct);
+
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var resp = await _httpV2.ExecuteAsync(req, ct);
+                sw.Stop();
+
+                Logger.LogInformation(
+                    "CERTInext V2 API call: Method=GET, Path={Path}, Page={Page}, HttpStatus={Status}, LatencyMs={Latency}",
+                    Constants.ApiV2.OrdersReportPath, page, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+
+                ThrowOnV2Failure(resp, "V2 list orders");
+                var listResp = DeserializeV2OrThrow<V2OrdersReportResponse>(resp, $"V2 list orders page {page}");
+
+                var rows = listResp.Content;
+                if (rows == null || rows.Count == 0)
+                    break;
+
+                if (page == 1)
+                    totalPages = listResp.TotalPages > 0 ? listResp.TotalPages : 1;
+
+                Logger.LogDebug(
+                    "V2 orders report: fetched page {Page}/{TotalPages} with {Count} rows (totalElements={Total}).",
+                    page, totalPages, rows.Count, listResp.TotalElements);
+
+                foreach (var row in rows)
+                    yield return row;
+
+                if (page >= totalPages)
+                    break;
+
+                page++;
+            }
+
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        /// <summary>
+        /// Minimal, read-only escape hatch for probing V2 endpoints that don't yet have a
+        /// typed client method (e.g. <c>/reports/orders</c>, <c>/domains</c> during discovery).
+        /// Issues a GET against the V2 base URL using the same token/header machinery as the
+        /// typed V2 methods, and returns the raw status/content instead of throwing on
+        /// non-success so callers can inspect 4xx/5xx bodies directly. Intended for
+        /// integration-test spikes — prefer a typed method once the response shape is known.
+        /// </summary>
+        public async Task<(int StatusCode, string ContentType, string Content)> ProbeV2GetAsync(
+            string pathAndQuery, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            var req = await BuildV2RequestAsync(pathAndQuery, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 probe call: Method=GET, Path={Path}, HttpStatus={Status}",
+                pathAndQuery, (int)resp.StatusCode);
+            Logger.MethodExit(LogLevel.Trace);
+            return ((int)resp.StatusCode, resp.ContentType, resp.Content);
+        }
+
+        // ---------------------------------------------------------------------------
+        // V2 private helpers
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Parses the GET /api/certinext/v2/catalog/products response into a flat
+        /// <see cref="ProductDetail"/> list.  The endpoint may return a bare JSON array
+        /// or a JSON object that wraps the list under a known property name
+        /// ("products", "data", "items", or "catalog"). Confirmed live 2026-09-24
+        /// (issues/0025 step 0, issues/0016): the sandbox account returns the SAME nested
+        /// category-envelope shape as V1's GetProductDetails — each top-level array element
+        /// is a category ("categoryName"/"categoryID"/"currencyType") containing its own
+        /// nested "products" array of {productCode, productName, productTypeID, ...}. The
+        /// Postman spec's flat "productId" example is also handled as a fallback in case a
+        /// different account/API version returns it. Per-element, not per-response, so a
+        /// mixed response (unlikely but not contractually excluded) is still flattened.
+        /// </summary>
+        private List<ProductDetail> ParseProductDetailsV2Response(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return new List<ProductDetail>();
+
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+
+            JsonElement arr;
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                arr = root;
+            }
+            else if (root.ValueKind == JsonValueKind.Object)
+            {
+                // Log the top-level property names so the actual schema is visible in test output.
+                var keys = string.Join(", ", root.EnumerateObject().Select(p => p.Name));
+                Logger.LogInformation(
+                    "GetProductDetailsV2Async: response is a JSON object with top-level keys: [{Keys}]", keys);
+
+                JsonElement? found = null;
+                foreach (string candidate in new[] { "products", "data", "items", "catalog" })
+                {
+                    if (root.TryGetProperty(candidate, out JsonElement candidateArr) && candidateArr.ValueKind == JsonValueKind.Array)
+                    {
+                        found = candidateArr;
+                        break;
+                    }
+                }
+
+                if (found == null)
+                {
+                    // No recognised array property found — surface the object keys in the exception
+                    // so the caller/test can see the actual schema and create a proper DTO.
+                    throw new InvalidOperationException(
+                        $"V2 catalog/products returned an unexpected JSON object. Top-level keys: [{keys}]. " +
+                        "Update ParseProductDetailsV2Response with the correct property name.");
+                }
+
+                arr = found.Value;
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    $"V2 catalog/products returned unexpected JSON kind: {root.ValueKind}.");
+            }
+
+            var result = new List<ProductDetail>();
+            foreach (var element in arr.EnumerateArray())
+            {
+                if (element.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                if (element.TryGetProperty("products", out JsonElement nestedProducts)
+                    && nestedProducts.ValueKind == JsonValueKind.Array)
+                {
+                    // Nested category envelope — mirror V1's GetProductDetailsResponse.FlattenProducts().
+                    string categoryName = element.TryGetProperty("categoryName", out var cn) && cn.ValueKind == JsonValueKind.String
+                        ? cn.GetString()
+                        : null;
+
+                    foreach (var product in nestedProducts.EnumerateArray())
+                    {
+                        if (product.ValueKind != JsonValueKind.Object)
+                            continue;
+
+                        result.Add(new ProductDetail
+                        {
+                            ProductCode = product.TryGetProperty("productCode", out var pc) && pc.ValueKind == JsonValueKind.String ? pc.GetString() : null,
+                            ProductName = product.TryGetProperty("productName", out var pn) && pn.ValueKind == JsonValueKind.String ? pn.GetString() : null,
+                            ProductType = categoryName,
+                            ProductTypeId = product.TryGetProperty("productTypeID", out var pt)
+                                ? (pt.ValueKind == JsonValueKind.String ? pt.GetString() : pt.ToString())
+                                : null,
+                            Active = true // the API only returns products available on the account
+                        });
+                    }
+                }
+                else if (element.TryGetProperty("productCode", out _))
+                {
+                    // Flat row already shaped like ProductDetail.
+                    result.Add(JsonSerializer.Deserialize<ProductDetail>(element.GetRawText(), GetJsonOptions()));
+                }
+                else if (element.TryGetProperty("productId", out var pid))
+                {
+                    // Flat row using the Postman example's "productId" key instead of "productCode".
+                    result.Add(new ProductDetail
+                    {
+                        ProductCode = pid.ValueKind == JsonValueKind.String ? pid.GetString() : pid.ToString(),
+                        ProductName = element.TryGetProperty("productName", out var pn2) && pn2.ValueKind == JsonValueKind.String ? pn2.GetString() : null,
+                        ProductType = element.TryGetProperty("masterProductName", out var mpn) && mpn.ValueKind == JsonValueKind.String ? mpn.GetString() : null,
+                        ProductTypeId = element.TryGetProperty("productTypeID", out var pt2)
+                            ? (pt2.ValueKind == JsonValueKind.String ? pt2.GetString() : pt2.ToString())
+                            : null,
+                        Active = true
+                    });
+                }
+                else
+                {
+                    Logger.LogWarning(
+                        "GetProductDetailsV2Async: skipping catalog element with unrecognised shape. Keys: [{Keys}]",
+                        string.Join(", ", element.EnumerateObject().Select(p => p.Name)));
+                }
+            }
+
+            return result;
+        }
+
+        private void EnsureV2Client()
+        {
+            if (_httpV2 == null)
+                throw new InvalidOperationException(
+                    "V2 API client is not initialised. Ensure UseV2Api=true and ApiUrl is set in the connector configuration.");
+        }
+
+        private static string BuildV2OrderPath(string productFamilySlug, string orderId)
+            => $"/api/certinext/v2/{productFamilySlug}/{orderId}";
+
+        /// <summary>
+        /// Probes all three V2 product families (SSL → Private PKI → Signature) to find
+        /// which one owns the given order ID.  Returns the matching family slug and the
+        /// TrackOrder response.  Throws <see cref="KeyNotFoundException"/> if not found.
+        /// </summary>
+        private async Task<(string family, V2OrderStatusResponse status)> ResolveV2OrderFamilyAsync(
+            string orderId,
+            CancellationToken ct)
+        {
+            foreach (var family in new[]
+            {
+                Constants.ApiV2.FamilySsl,
+                Constants.ApiV2.FamilyPrivatePki,
+                Constants.ApiV2.FamilySignature
+            })
+            {
+                try
+                {
+                    var status = await TrackOrderV2Async(family, orderId, ct);
+                    return (family, status);
+                }
+                catch (KeyNotFoundException)
+                {
+                    // Not in this family — try the next one
+                }
+            }
+            throw new KeyNotFoundException($"V2 order '{orderId}' not found in any product family.");
+        }
+
+        /// <summary>
+        /// Fetches or returns the cached V2 OAuth2 bearer token.
+        /// Uses standard client_credentials grant with form-encoded body.
+        /// Token is cached until 60 seconds before its expiry.
+        /// </summary>
+        private async Task<string> GetOrRefreshV2TokenAsync(CancellationToken ct)
+        {
+            if (!string.IsNullOrEmpty(_v2Token) && DateTime.UtcNow < _v2TokenExpiry)
+                return _v2Token;
+
+            await _v2TokenLock.WaitAsync(ct);
+            try
+            {
+                if (!string.IsNullOrEmpty(_v2Token) && DateTime.UtcNow < _v2TokenExpiry)
+                    return _v2Token;
+
+                Logger.LogInformation(
+                    "V2 OAuth2 token acquisition started. ApiUrl={ApiUrl}, ClientId={ClientId}",
+                    _config.ApiUrl, _config.OAuthClientId);
+
+                string tokenUrl = _config.ApiUrl.TrimEnd('/') + Constants.ApiV2.TokenPath;
+                using var tokenClient = new RestClient(tokenUrl);
+                var tokenReq = new RestRequest(string.Empty, Method.Post);
+                tokenReq.AddHeader("Content-Type", "application/x-www-form-urlencoded");
+                tokenReq.AddParameter("grant_type", "client_credentials");
+                tokenReq.AddParameter("client_id", _config.OAuthClientId);
+                tokenReq.AddParameter("client_secret", _config.OAuthClientSecret);
+
+                var tokenResp = await tokenClient.ExecuteAsync(tokenReq, ct);
+                if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
+                {
+                    // SOX CC6.1: never log tokenResp.Content — may contain client_secret.
+                    // Per the V2 spec's OAuth2 error table: 401 invalid_client = wrong client_id /
+                    // client_secret (or a revoked key); 403 unauthorized_client = the key exists but
+                    // was never generated in OAuth mode in the portal. These are distinct failure
+                    // modes with distinct fixes, so each gets its own hint rather than sharing one.
+                    if ((int)tokenResp.StatusCode == 401)
+                    {
+                        Logger.LogError(
+                            "V2 OAuth2 token acquisition failed with 401 Unauthorized (invalid_client). " +
+                            "ApiUrl={ApiUrl}, ClientId={ClientId}. " +
+                            "Hint: the OAuthClientId or OAuthClientSecret is wrong, or the key was revoked in the portal.",
+                            _config.ApiUrl, _config.OAuthClientId);
+                        throw new Exception(
+                            "V2 OAuth2 token request denied (401 Unauthorized, invalid_client). " +
+                            "The OAuthClientId or OAuthClientSecret is incorrect, or the key was revoked. " +
+                            "Regenerate the client secret in the CERTInext portal (Integration → REST APIs → OAuth2) " +
+                            "and update the connector config. See gateway logs for details.");
+                    }
+                    if ((int)tokenResp.StatusCode == 403)
+                    {
+                        Logger.LogError(
+                            "V2 OAuth2 token acquisition failed with 403 Forbidden (unauthorized_client). " +
+                            "ApiUrl={ApiUrl}, ClientId={ClientId}. " +
+                            "Hint: the access key exists but was not generated in OAuth mode in the portal.",
+                            _config.ApiUrl, _config.OAuthClientId);
+                        throw new Exception(
+                            "V2 OAuth2 token request denied (403 Forbidden, unauthorized_client). " +
+                            "The access key was not generated in OAuth mode. Recreate the key in the CERTInext " +
+                            "portal (Integration → REST APIs → OAuth2) with the OAuth radio button selected. " +
+                            "See gateway logs for details.");
+                    }
+                    Logger.LogError(
+                        "V2 OAuth2 token acquisition failed. ApiUrl={ApiUrl}, ClientId={ClientId}, HttpStatus={Status}",
+                        _config.ApiUrl, _config.OAuthClientId, (int)tokenResp.StatusCode);
+                    throw new Exception(
+                        $"Failed to obtain V2 OAuth2 token. HTTP {(int)tokenResp.StatusCode}. See gateway logs for details.");
+                }
+
+                var tokenPayload = JsonSerializer.Deserialize<V2TokenResponse>(tokenResp.Content, GetJsonOptions());
+                if (tokenPayload == null || string.IsNullOrEmpty(tokenPayload.AccessToken))
+                {
+                    Logger.LogError(
+                        "V2 OAuth2 token response did not contain access_token. ApiUrl={ApiUrl}",
+                        _config.ApiUrl);
+                    throw new Exception("V2 OAuth2 token response did not contain an access_token.");
+                }
+
+                _v2Token = tokenPayload.AccessToken;
+                _v2TokenExpiry = DateTime.UtcNow.AddSeconds(Math.Max(tokenPayload.ExpiresIn - 60, 30));
+
+                Logger.LogInformation(
+                    "V2 OAuth2 token acquired. ApiUrl={ApiUrl}, ClientId={ClientId}, ExpiresAt={Expiry:u}",
+                    _config.ApiUrl, _config.OAuthClientId, _v2TokenExpiry);
+                return _v2Token;
+            }
+            finally
+            {
+                _v2TokenLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Builds a V2 REST request with the Authorization: Bearer header populated from
+        /// the cached/refreshed V2 token. Optionally adds an Idempotency-Key header.
+        /// </summary>
+        private async Task<RestRequest> BuildV2RequestAsync(
+            string path,
+            Method method,
+            CancellationToken ct,
+            string idempotencyKey = null)
+        {
+            string token = await GetOrRefreshV2TokenAsync(ct);
+            var req = new RestRequest(path, method);
+            req.AddHeader("Authorization", $"Bearer {token}");
+            req.AddHeader("Accept", "application/json");
+            if (!string.IsNullOrEmpty(idempotencyKey))
+                req.AddHeader("Idempotency-Key", idempotencyKey);
+            return req;
+        }
+
+        /// <summary>
+        /// Throws an appropriate exception for V2 API non-success responses.
+        /// Handles RFC 7807 problem+json and plain HTTP errors.
+        /// </summary>
+        // Instance (not static) — calls LogV2ApiFailure, which needs _config.LogSensitiveRequestData.
+        private void ThrowOnV2Failure(RestResponse resp, string operation)
+        {
+            if (resp.IsSuccessful) return;
+
+            if (resp.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                LogV2ApiFailure(operation, resp, LogLevel.Error);
+                throw new Exception($"V2 authentication failure during '{operation}'. HTTP 401. See gateway logs for details.");
+            }
+
+            if (resp.StatusCode == HttpStatusCode.Forbidden)
+            {
+                LogV2ApiFailure(operation, resp, LogLevel.Error);
+                string hint = ExtractV2ErrorMessage(resp.Content, operation);
+                throw new Exception(
+                    $"V2 access denied during '{operation}'. HTTP 403. {hint} " +
+                    "If error code is EMS-2022, ensure OAuth2 is enabled in the CERTInext portal.");
+            }
+
+            LogV2ApiFailure(operation, resp, LogLevel.Warning);
+            string msg = ExtractV2ErrorMessage(resp.Content, operation);
+            throw new Exception($"CERTInext V2 API error during '{operation}'. HTTP {(int)resp.StatusCode}. {msg}");
+        }
+
+        /// <summary>
+        /// Writes a structured log for a V2 API non-success response — matching the V1
+        /// <see cref="LogApiFailure"/> pattern but adapted for V2's RFC 7807 error shape.
+        /// Call immediately before throwing so the exception's "See gateway logs for details"
+        /// message has a corresponding structured entry in the gateway log.
+        /// </summary>
+        // Instance (not static) so it can read _config.LogSensitiveRequestData — see issue 0040.
+        private void LogV2ApiFailure(string operation, RestResponse resp, LogLevel level = LogLevel.Warning)
+        {
+            string sanitizedBody = Truncate(
+                ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)",
+                LoggedResponseBodyCapBytes);
+            Logger.Log(
+                level,
+                "CERTInext V2 API non-success. Operation={Operation}, Method={Method}, Path={Path}, " +
+                "HttpStatus={HttpStatus}, ResponseBody={ResponseBody}",
+                operation,
+                resp?.Request?.Method.ToString() ?? "(unknown)",
+                resp?.Request?.Resource ?? "(unknown)",
+                (int?)resp?.StatusCode ?? 0,
+                sanitizedBody);
+        }
+
+        /// <summary>
+        /// Parses an RFC 7807 problem+json body and returns a human-readable message.
+        /// Falls back to a generic message on parse failure.
+        /// </summary>
+        private static string ExtractV2ErrorMessage(string content, string operation)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return $"CERTInext V2 returned no body for '{operation}'.";
+
+            string capped = content.Length > MaxErrorBodyBytes
+                ? content.Substring(0, MaxErrorBodyBytes)
+                : content;
+
+            try
+            {
+                var problem = JsonSerializer.Deserialize<V2ProblemDetails>(capped, GetJsonOptions());
+                if (problem != null && (!string.IsNullOrWhiteSpace(problem.Detail) || !string.IsNullOrWhiteSpace(problem.Title)
+                    || (problem.Errors != null && problem.Errors.Count > 0)))
+                {
+                    string msg = $"{problem.Title}: {problem.Detail}".Trim(':').Trim();
+
+                    // RFC 7807 per-field validation errors (spec's "errors[]", e.g. a 400 on
+                    // order create naming exactly which field failed) — fold them into the
+                    // message so the operator doesn't have to go dig the raw response out of
+                    // the gateway log to find out which field CERTInext rejected.
+                    if (problem.Errors != null && problem.Errors.Count > 0)
+                    {
+                        string fieldErrors = string.Join("; ", problem.Errors
+                            .Where(e => !string.IsNullOrWhiteSpace(e?.Field) || !string.IsNullOrWhiteSpace(e?.Message))
+                            .Select(e => $"{e.Field}: {e.Message}".Trim(':').Trim()));
+                        if (!string.IsNullOrWhiteSpace(fieldErrors))
+                            msg = string.IsNullOrWhiteSpace(msg) ? fieldErrors : $"{msg} [{fieldErrors}]";
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(msg))
+                        return msg;
+                }
+            }
+            catch
+            {
+                // Not a problem+json body — fall through
+            }
+
+            return $"See gateway logs for raw response. Operation='{operation}'.";
+        }
+
+        private static T DeserializeV2OrThrow<T>(RestResponse resp, string operation) where T : class
+        {
+            if (string.IsNullOrWhiteSpace(resp.Content))
+                throw new Exception($"CERTInext V2 returned an empty body for '{operation}'.");
+            var result = JsonSerializer.Deserialize<T>(resp.Content, GetJsonOptions());
+            if (result == null)
+                throw new Exception($"CERTInext V2 returned a null/unrecognised body for '{operation}'.");
+            return result;
+        }
+
+        // ---------------------------------------------------------------------------
+        // V1 token helper (unchanged)
+        // ---------------------------------------------------------------------------
+
         private async Task<string> GetOrRefreshTokenAsync(CancellationToken ct)
         {
             if (!string.IsNullOrEmpty(_cachedToken) && DateTime.UtcNow < _tokenExpiry)
@@ -1213,27 +2234,78 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// attempts, retrying on HTTP 5xx and network-level failures (no status code).
         /// 4xx responses are returned immediately — client errors will not be resolved
         /// by retrying.
+        ///
+        /// When <paramref name="idempotent"/> is <c>false</c> the request is sent exactly
+        /// once and transient failures are NOT retried. This is required for non-idempotent
+        /// order-submission calls: a network-level timeout can occur *after* CERTInext has
+        /// already received and created the order, so re-sending the same body (same
+        /// <c>requestTxn</c>) is rejected as "Duplicate requestTxn" (EMS-947) and orphans the
+        /// order the first attempt actually created.
         /// </summary>
         private async Task<RestResponse> ExecuteWithRetryAsync(
             RestRequest req,
             CancellationToken ct,
-            int maxAttempts = 3)
+            int maxAttempts = 3,
+            bool idempotent = true)
         {
+            int attempts = idempotent ? maxAttempts : 1;
             RestResponse resp = null;
-            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            for (int attempt = 1; attempt <= attempts; attempt++)
             {
                 resp = await _http.ExecuteAsync(req, ct);
 
-                // Success or 4xx client error — return immediately
+                // Success or 4xx client error — return immediately, checked BEFORE the
+                // cancellation check below. `_http.ExecuteAsync` already ran to completion by the
+                // time control reaches this line; whether `ct` has *since* flipped to cancelled is
+                // a separate, unsynchronized fact (a check-after-await race, not a fabricated one —
+                // a CancellationTokenSource(TimeSpan) callback and this awaited Task's completion
+                // are not mutually exclusive events). A deadline (the shared DcvTimeoutMinutes
+                // budget) firing at essentially the same instant a call genuinely succeeded must not
+                // discard that success: for VerifyDcv specifically, discarding it here would abort
+                // PerformDcvIfNeededAsync's loop before WaitForDcvVerificationAsync ever ran, and
+                // its finally block would delete the just-staged TXT record even though CERTInext
+                // had genuinely received the verify trigger — turning a real CA-side success into a
+                // self-inflicted DCV failure.
                 bool isClientError = (int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500;
                 if (resp.IsSuccessful || isClientError)
                     return resp;
 
-                if (attempt < maxAttempts)
+                // Only for a call that did NOT succeed: this client is built with
+                // ThrowOnAnyError=false (see the constructor), so a cancelled ct does not surface as
+                // OperationCanceledException from ExecuteAsync — RestSharp catches
+                // HttpClient.SendAsync's cancellation internally and returns a non-throwing,
+                // unsuccessful RestResponse instead. Left unchecked, that response reaches
+                // DeserializeOrThrow and becomes a plain Exception indistinguishable from a genuine
+                // API failure — which is exactly how a caller such as PerformDcvIfNeededAsync's
+                // shared DCV-timeout cancellation was still landing in a generic "GetDcv failed"
+                // per-domain catch instead of the cancellation-specific one, even after that method
+                // was hardened to re-throw a real OperationCanceledException past its per-domain
+                // catches. Surface the true cancellation here, at the one place in the client that
+                // actually holds `ct`, before any retry or error-wrapping logic sees the response.
+                //
+                // Throwing here means every caller's own per-call audit line (Method/Path/HttpStatus/
+                // LatencyMs, logged after ExecuteWithRetryAsync returns) never executes for the
+                // cancelled call — that specific attempt would otherwise vanish from the audit trail
+                // entirely, leaving only a coarser, order-level "unexpected failure" log with no
+                // domain/endpoint/status/latency. Log that record here instead, at the one place that
+                // reliably sees every cancellation regardless of which of ExecuteWithRetryAsync's ~10
+                // callers is in flight.
+                if (ct.IsCancellationRequested)
+                {
+                    Logger.LogWarning(
+                        "CERTInext API call cancelled: Method={Method}, Path={Path}, HttpStatus={Status}, " +
+                        "ResponseStatus={ResponseStatus}, LatencyMs={Latency}, Attempt={Attempt}/{Max}.",
+                        req.Method, req.Resource, (int)resp.StatusCode, resp.ResponseStatus,
+                        sw.ElapsedMilliseconds, attempt, attempts);
+                }
+                ct.ThrowIfCancellationRequested();
+
+                if (attempt < attempts)
                 {
                     Logger.LogWarning(
                         "CERTInext API returned {Status} on attempt {Attempt}/{Max} — retrying...",
-                        (int)resp.StatusCode, attempt, maxAttempts);
+                        (int)resp.StatusCode, attempt, attempts);
                 }
             }
 
@@ -1312,17 +2384,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private GenerateOrderSslRequest BuildOrderRequestFromLegacyEnrollRequest(EnrollCertificateRequest request)
         {
-            // Map ValidityDays → CERTInext's year-based validity. Default 1.
-            string validityYears = request.ValidityDays.HasValue
-                ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
-                : (string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears)
-                    ? "1"
-                    : _config.SubscriptionValidityYears);
+            // ValidityYears takes precedence; ValidityDays is converted to years as a fallback.
+            string validityYears = request.ValidityYears.HasValue
+                ? request.ValidityYears.Value.ToString()
+                : request.ValidityDays.HasValue
+                    ? Math.Ceiling(request.ValidityDays.Value / 365.0).ToString("0")
+                    : (string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears)
+                        ? "1"
+                        : _config.SubscriptionValidityYears);
 
             string requestorName  = request.RequesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
             string requestorEmail = request.RequesterEmail ?? _config.RequestorEmail ?? string.Empty;
             string requestorIsd   = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
             string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
+
+            // Hoisted: additionalDomains is de-duplicated against the primary domain, so both
+            // fields have to be built from the same value.
+            string domainName = ExtractCnFromSubject(request.Subject) ?? "unknown";
 
             return new GenerateOrderSslRequest
             {
@@ -1359,7 +2437,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         RequestorName = requestorName,
                         RequestorEmail = requestorEmail,
                         RequestorIsdCode = requestorIsd,
-                        RequestorMobileNumber = requestorMobile
+                        RequestorMobileNumber = requestorMobile,
+                        RequestorDesignation = string.IsNullOrWhiteSpace(_config.RequestorDesignation) ? null : _config.RequestorDesignation.Trim()
                     },
                     SubscriptionDetails = new SubscriptionDetails
                     {
@@ -1369,8 +2448,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     },
                     CertificateInformation = new CertificateInformation
                     {
-                        DomainName = ExtractCnFromSubject(request.Subject) ?? "unknown",
-                        AdditionalDomains = BuildAdditionalDomains(request.Sans),
+                        DomainName = domainName,
+                        AdditionalDomains = BuildAdditionalDomains(request.Sans, domainName),
                         AutoSecureWww = string.IsNullOrWhiteSpace(_config.AutoSecureWww) ? "0" : _config.AutoSecureWww
                     },
 
@@ -1415,6 +2494,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 AcceptAgreement = "1",
                 SignerName = _config.RequestorName ?? "Keyfactor Gateway",
+                // Effectively dead fallback (issue 0039): SignerPlace defaults to "", not null, so a blank setting sends "" (only an explicit JSON null reaches "Gateway"). V1 wire behaviour intentionally unchanged.
                 SignerPlace = _config.SignerPlace ?? "Gateway",
                 SignerIp = signerIp
             };
@@ -1432,16 +2512,57 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return null;
         }
 
-        private static List<string> BuildAdditionalDomains(System.Collections.Generic.List<SanEntry> sans)
+        /// <summary>
+        /// Projects the resolved SAN list onto <c>certificateInformation.additionalDomains</c>.
+        ///
+        /// Every requested SAN is submitted regardless of type. Filtering to DNS-only (the
+        /// original behaviour) issued certificates quietly missing names the subscriber had
+        /// requested, which is the worse failure; the caller warns about the non-DNS entries
+        /// before we get here.
+        ///
+        /// <paramref name="domainName"/> is the value already going out as the order's primary
+        /// domain, and Command normally includes the CN in the SAN set as well. On the US
+        /// sandbox CERTInext was measured to collapse that repetition itself
+        /// (SanSubmissionProbeTests: CN submitted twice came back registered once), but that is
+        /// undocumented and unverified against production — which is exactly why we exclude it
+        /// here rather than relying on CA-side de-duplication. It also keeps the submitted body
+        /// matching what we log.
+        /// </summary>
+        private List<string> BuildAdditionalDomains(
+            System.Collections.Generic.List<SanEntry> sans,
+            string domainName)
         {
             if (sans == null || sans.Count == 0) return null;
+
             var domains = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            bool haveDomainName = !string.IsNullOrWhiteSpace(domainName);
+            if (haveDomainName)
+                seen.Add(domainName.Trim());
+
+            int duplicates = 0;
             foreach (var san in sans)
             {
-                if (string.Equals(san.Type, "dns", StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrWhiteSpace(san.Value))
-                    domains.Add(san.Value);
+                if (san == null || string.IsNullOrWhiteSpace(san.Value)) continue;
+
+                string value = san.Value.Trim();
+                if (!seen.Add(value))
+                {
+                    duplicates++;
+                    continue;
+                }
+                domains.Add(value);
             }
+
+            if (duplicates > 0)
+            {
+                Logger.LogDebug(
+                    "Collapsed {Count} duplicate SAN value(s) out of additionalDomains " +
+                    "(already submitted as domainName '{DomainName}', or repeated in the SAN set).",
+                    duplicates, LogSanitizer.Strip(domainName));
+            }
+
             return domains.Count > 0 ? domains : null;
         }
 
@@ -1449,14 +2570,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // Deserialization helpers
         // ---------------------------------------------------------------------------
 
-        private static T DeserializeOrThrow<T>(RestResponse resp, string operation) where T : class
+        // Instance (not static) — calls LogApiFailure, which needs _config.LogSensitiveRequestData.
+        private T DeserializeOrThrow<T>(RestResponse resp, string operation) where T : class
         {
             if (!resp.IsSuccessful)
             {
-                string errMsg = ExtractErrorMessage(resp.Content, operation);
-                Logger.LogError(
-                    "CERTInext API error during '{Operation}': HttpStatus={Status}, Error={Error}",
-                    operation, (int)resp.StatusCode, errMsg);
+                // Issue 0044: V1 documents errors only as HTTP-200 meta envelopes, so a non-2xx
+                // body here is usually not from the V1 application at all (e.g. ApiUrl missing the
+                // /emSignHub-API/ segment). Log the redacted body and put the HTTP status in the
+                // message so "See gateway logs for details" has something to point at.
+                string errMsg = ExtractErrorMessage(resp.Content, operation, (int)resp.StatusCode);
+                LogApiFailure(operation, resp, errorMessage: errMsg, level: LogLevel.Error);
                 throw new Exception(errMsg);
             }
 
@@ -1617,6 +2741,246 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return body;
         }
 
+        // Exact JSON key names that carry a person's email address across the V1 and V2 wire
+        // shapes (see CERTInext/API/CertificateRequest.cs and CERTInext/API/V2/CertificateRequestV2.cs).
+        // Every one of these is a full, exact key — never a substring of an unrelated key (e.g.
+        // "domainName"/"organizationName" do not end in a bare "email" key) — so matching the key
+        // by exact name cannot cross-contaminate unrelated fields.
+        private static readonly string[] PersonalEmailFieldNames =
+        {
+            "requestorEmail", "requesterEmail", "tpcEmail", "requestorEmailId", "dcvEmail", "email"
+        };
+
+        // Exact JSON key names carrying other person/contact data (name, phone/ISD/mobile,
+        // designation, signer place/IP). "name" is bare only inside the V2 requestor /
+        // technicalPointOfContact blocks in every currently-logged body — it is never used as an
+        // exact top-level key anywhere else on the CERTInext wire shapes this plugin logs raw.
+        //
+        // Issue 0033: the V2 Document Signer (signature) body's `subject` block and its create
+        // response add a natural person's name, identity-document and street-address fields
+        // (firstName, lastName, identityDocumentType, identificationNumber, streetAddress1/2,
+        // locality, postalCode) and a `subjectDisplayName` (full name for natural/legal person).
+        // subject.email / subject.phone / subject.designation are already covered by the bare
+        // "email"/"phone"/"designation" keys. Deliberately NOT added: organizationName,
+        // organizationUnit, organizationIdentificationNumber, businessCategory, state,
+        // countryCode — organization or coarse-location data, and "organizationName" is also a
+        // V1 order/report key whose value is an OV organization, not a person. The V2
+        // private-pki body (issue 0033) adds no new personal keys: its requestor /
+        // technicalPointOfContact blocks reuse the bare keys above, and hostname /
+        // additionalHosts are host names / IP literals, not personal data.
+        private static readonly string[] PersonalOtherFieldNames =
+        {
+            "requestorName", "requesterName", "tpcName", "signerName", "name",
+            "requestorIsdCode", "requestorMobileNumber", "requestorDesignation",
+            "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signedPlace", "signerip", "phone", "designation",
+            "firstName", "lastName", "subjectDisplayName", "identityDocumentType", "identificationNumber",
+            "streetAddress1", "streetAddress2", "locality", "postalCode"
+        };
+
+        /// <summary>
+        /// Scrubs known person/contact-bearing keys out of a JSON-ish body before it goes into a
+        /// log line, when <c>LogSensitiveRequestData</c> is off (issue 0040). Covers the V1
+        /// <c>requestorInformation</c> / <c>technicalPointOfContact</c> / <c>agreementDetails</c>
+        /// shapes (<c>requestorName</c>, <c>requestorEmail</c>, <c>requestorIsdCode</c>,
+        /// <c>requestorMobileNumber</c>, <c>requestorDesignation</c>, <c>tpcName</c>,
+        /// <c>tpcEmail</c>, <c>tpcIsdCode</c>, <c>tpcMobileNumber</c>, <c>signerName</c>,
+        /// <c>signerPlace</c>, <c>signerIP</c>/<c>signerIp</c>, the legacy <c>requesterName</c>/
+        /// <c>requesterEmail</c> aliases, and the <c>requestorEmailId</c> search filter) and the
+        /// V2 nested <c>requestor</c> / <c>technicalPointOfContact</c> shapes (bare <c>name</c>/
+        /// <c>email</c>/<c>phone</c>/<c>designation</c>), plus the V2 Document Signer
+        /// <c>subject</c> block's person fields and <c>subjectDisplayName</c> (issue 0033 — see
+        /// <c>PersonalOtherFieldNames</c> for the exact list and what is deliberately excluded).
+        ///
+        /// Email values are masked via <see cref="LogSanitizer.MaskEmail"/> so the domain stays
+        /// visible (e.g. <c>"j***@example.com"</c>) while the local part is hidden. Every other
+        /// matched field is replaced outright with <c>"***REDACTED***"</c>. Fields that are
+        /// already blank/empty on the wire are left untouched — there is nothing to redact.
+        ///
+        /// Conservative substring/regex pass, same style as <see cref="RedactCredentials"/> —
+        /// tolerant of whitespace around the JSON <c>key : value</c> separator (including
+        /// pretty-printed bodies), and anchored on the opening/closing quote of the key so it
+        /// cannot match a key name as a substring of a longer one. Email SANs inside SAN arrays
+        /// (<c>additionalDomains</c>/<c>additionalHosts</c>) and <c>domainVerification</c> keys are
+        /// masked afterwards by <see cref="MaskEmailsInSanContainers"/>. Exposed <c>internal</c>
+        /// for unit testing.
+        /// </summary>
+        internal static string RedactPersonalData(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+
+            foreach (var key in PersonalEmailFieldNames)
+                body = RedactJsonField(body, key, LogSanitizer.MaskEmail);
+
+            foreach (var key in PersonalOtherFieldNames)
+                body = RedactJsonField(body, key, _ => "***REDACTED***");
+
+            return MaskEmailsInSanContainers(body);
+        }
+
+        // Exact JSON keys whose value is an array of SAN strings. V1 additionalDomains carries every
+        // requested SAN regardless of type, emails included (SanSubmissionProbeTests finding B).
+        // V2 SSL additionalDomains and private-pki additionalHosts are filtered to DNS / IP before
+        // submission, so they are covered only as defence in depth: a DNS name or IP literal never
+        // contains '@', so masking there can only ever touch a mis-typed email.
+        private static readonly string[] SanArrayFieldNames = { "additionalDomains", "additionalHosts" };
+
+        // Exact JSON keys whose value is an object keyed by SAN value. The V1 TrackOrder
+        // domainVerification block is { "<Domain Name>": { ... }, "status": "..." }, and an email
+        // submitted in additionalDomains comes back as one of those keys (SanSubmissionProbeTests
+        // finding B: "san-probe@example.com" was returned as a domainVerification key).
+        private static readonly string[] SanKeyedObjectFieldNames = { "domainVerification" };
+
+        /// <summary>
+        /// Masks email addresses (issue 0040 follow-up) in the two SAN-bearing container shapes the
+        /// key/value regex in <see cref="RedactJsonField"/> cannot reach: string elements of a
+        /// <see cref="SanArrayFieldNames"/> array, and property names directly inside a
+        /// <see cref="SanKeyedObjectFieldNames"/> object. Only values containing <c>@</c> are masked,
+        /// with <see cref="LogSanitizer.MaskEmail"/>. DNS / IP values, every other key, and anything
+        /// nested deeper inside those containers are left alone. Keys match exactly and
+        /// case-insensitively, the same as <see cref="RedactJsonField"/>.
+        ///
+        /// Uses <see cref="Utf8JsonReader"/> to find the exact token spans, then splices masked
+        /// tokens into the original bytes. The rest of the body stays byte-for-byte as it was, with
+        /// its whitespace and escaping unchanged. A regex cannot follow nesting depth or escaped
+        /// quotes reliably, and a DOM re-serialize would reformat the whole logged body. Never
+        /// throws: a body that does not start with <c>{</c>/<c>[</c> is returned unchanged, and on
+        /// malformed or truncated JSON the masks found before the fault are still applied.
+        /// </summary>
+        internal static string MaskEmailsInSanContainers(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+            if (body.IndexOf('@') < 0 && body.IndexOf("\\u0040", StringComparison.OrdinalIgnoreCase) < 0)
+                return body;
+
+            int first = 0;
+            while (first < body.Length && char.IsWhiteSpace(body[first])) first++;
+            if (first == body.Length || (body[first] != '{' && body[first] != '[')) return body;
+
+            byte[] utf8 = Encoding.UTF8.GetBytes(body);
+            var edits = new List<(int Start, int Length, string Replacement)>();
+
+            try
+            {
+                var reader = new Utf8JsonReader(utf8, new JsonReaderOptions
+                {
+                    CommentHandling = JsonCommentHandling.Skip,
+                    AllowTrailingCommas = true
+                });
+
+                string pendingProperty = null;
+                int containerDepth = -1;   // CurrentDepth of tokens directly inside the targeted container
+                bool containerIsArray = false;
+
+                while (reader.Read())
+                {
+                    if (containerDepth >= 0)
+                    {
+                        if (reader.CurrentDepth < containerDepth)
+                        {
+                            containerDepth = -1;   // the container's own End token
+                            continue;
+                        }
+
+                        bool candidate = reader.CurrentDepth == containerDepth &&
+                            (containerIsArray
+                                ? reader.TokenType == JsonTokenType.String
+                                : reader.TokenType == JsonTokenType.PropertyName);
+                        if (candidate)
+                        {
+                            string value = reader.GetString();
+                            if (value != null && value.IndexOf('@') >= 0)
+                            {
+                                // TokenStartIndex is the opening quote; ValueSpan is the raw content.
+                                string masked = reader.ValueIsEscaped
+                                    ? JsonSerializer.Serialize(LogSanitizer.MaskEmail(value))
+                                    : "\"" + LogSanitizer.MaskEmail(Encoding.UTF8.GetString(reader.ValueSpan)) + "\"";
+                                edits.Add(((int)reader.TokenStartIndex, reader.ValueSpan.Length + 2, masked));
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (reader.TokenType == JsonTokenType.PropertyName)
+                    {
+                        pendingProperty = reader.GetString();
+                        continue;
+                    }
+
+                    if (pendingProperty != null)
+                    {
+                        if (reader.TokenType == JsonTokenType.StartArray && MatchesAny(SanArrayFieldNames, pendingProperty))
+                        {
+                            containerDepth = reader.CurrentDepth + 1;
+                            containerIsArray = true;
+                        }
+                        else if (reader.TokenType == JsonTokenType.StartObject && MatchesAny(SanKeyedObjectFieldNames, pendingProperty))
+                        {
+                            containerDepth = reader.CurrentDepth + 1;
+                            containerIsArray = false;
+                        }
+                    }
+                    pendingProperty = null;
+                }
+            }
+            catch (JsonException)
+            {
+                // Malformed or truncated body: keep the masks collected before the fault. Everything
+                // up to that point was well-formed, so those spans are correct.
+            }
+
+            if (edits.Count == 0) return body;
+
+            var output = new System.IO.MemoryStream(utf8.Length);
+            int cursor = 0;
+            foreach (var (start, length, replacement) in edits)
+            {
+                output.Write(utf8, cursor, start - cursor);
+                byte[] replacementBytes = Encoding.UTF8.GetBytes(replacement);
+                output.Write(replacementBytes, 0, replacementBytes.Length);
+                cursor = start + length;
+            }
+            output.Write(utf8, cursor, utf8.Length - cursor);
+            return Encoding.UTF8.GetString(output.GetBuffer(), 0, (int)output.Length);
+
+            static bool MatchesAny(string[] keys, string name)
+            {
+                foreach (var key in keys)
+                    if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Replaces the value of every occurrence of a JSON string field named <paramref name="keyName"/>
+        /// (case-insensitive, exact key match) with <paramref name="transform"/> applied to the
+        /// original value. Leaves already-empty values untouched. Whitespace around the colon and
+        /// around the key's own quotes is tolerated.
+        /// </summary>
+        private static string RedactJsonField(string body, string keyName, Func<string, string> transform)
+        {
+            return System.Text.RegularExpressions.Regex.Replace(
+                body,
+                $@"(?i)(""{System.Text.RegularExpressions.Regex.Escape(keyName)}""\s*:\s*"")([^""]*)("")",
+                m => string.IsNullOrEmpty(m.Groups[2].Value)
+                    ? m.Value
+                    : m.Groups[1].Value + transform(m.Groups[2].Value) + m.Groups[3].Value);
+        }
+
+        /// <summary>
+        /// Applies the standard logging redaction pipeline to a request/response body before it
+        /// is written to a log line: credentials are always scrubbed via
+        /// <see cref="RedactCredentials"/>, and personal-data fields are additionally scrubbed via
+        /// <see cref="RedactPersonalData"/> unless <paramref name="logSensitiveRequestData"/> is
+        /// true (issue 0040). Centralizing this here keeps all six raw-body log sites in this
+        /// class (and <c>LogApiFailure</c>/<c>LogV2ApiFailure</c>) consistent and gives the on/off
+        /// behavior one place to unit-test.
+        /// </summary>
+        internal static string ApplyLoggingRedaction(string body, bool logSensitiveRequestData)
+        {
+            string redacted = RedactCredentials(body);
+            return logSensitiveRequestData ? redacted : RedactPersonalData(redacted);
+        }
+
         /// <summary>
         /// Writes a structured log capturing every diagnostic field available for a
         /// non-success CERTInext API response — HTTP status, the CERTInext-side error
@@ -1644,14 +3008,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <see cref="LogLevel.Error"/> so SOX-loggable authentication events match
         /// the SIEM-alert level convention.
         /// </summary>
-        private static void LogApiFailure(
+        // Instance (not static) so it can read _config.LogSensitiveRequestData — see issue 0040.
+        private void LogApiFailure(
             string operationContext,
             RestResponse resp,
             string errorCode = null,
             string errorMessage = null,
             LogLevel level = LogLevel.Warning)
         {
-            string sanitizedBody = RedactCredentials(resp?.Content) ?? "(empty)";
+            string sanitizedBody = ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)";
             Logger.Log(
                 level,
                 "CERTInext API non-success. Operation={Operation}, HttpStatus={HttpStatus}, " +
@@ -1663,10 +3028,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Truncate(sanitizedBody, LoggedResponseBodyCapBytes));
         }
 
-        private static string ExtractErrorMessage(string content, string operation)
+        internal static string ExtractErrorMessage(string content, string operation, int? httpStatus = null)
         {
+            string status = httpStatus.HasValue ? $" (HTTP {httpStatus.Value})" : string.Empty;
+
             if (string.IsNullOrWhiteSpace(content))
-                return $"CERTInext returned no body for operation '{operation}'.";
+                return $"CERTInext returned no body{status} for operation '{operation}'.";
 
             if (content.Length > MaxErrorBodyBytes)
             {
@@ -1688,19 +3055,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     if (meta.TryGetProperty("errorMessage", out var em)) errMsg = em.GetString();
                     if (meta.TryGetProperty("errorCode", out var ec)) errCode = ec.GetString();
                     if (!string.IsNullOrWhiteSpace(errMsg) || !string.IsNullOrWhiteSpace(errCode))
-                        return $"CERTInext error during '{operation}': {errMsg ?? errCode} [{errCode}]";
+                        return $"CERTInext error during '{operation}'{status}: {errMsg ?? errCode} [{errCode}]";
                 }
 
                 // Fall back to legacy ApiErrorResponse shape
                 if (doc.RootElement.TryGetProperty("message", out var legacyMsg))
-                    return $"CERTInext error during '{operation}': {legacyMsg.GetString()}";
+                    return $"CERTInext error during '{operation}'{status}: {legacyMsg.GetString()}";
             }
             catch
             {
                 // Fall through to safe generic message
             }
 
-            return $"CERTInext returned an unrecognised error body for operation '{operation}'. " +
+            return $"CERTInext returned an unrecognised error body{status} for operation '{operation}'. " +
                    "See gateway logs for details.";
         }
 
