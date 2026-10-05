@@ -50,7 +50,7 @@ the host (see issue 0003).
 | Build | Command | IAnyCAPlugin | DCV | Target gateway host |
 |---|---|---|---|---|
 | **No-DCV (default)** | `make build` / `dotnet build` | `3.2.0` (stable) | fenced out (`#if SUPPORTS_DCV`) | AnyCA Gateway **25.5.x** (IAnyCAPlugin 3.2.0) |
-| **DCV** | `dotnet build -p:DcvSupport=true` | `3.3.0-PRERELEASE` | enabled | AnyCA Gateway **26.x** (IAnyCAPlugin ≥ 3.3) |
+| **DCV** | `dotnet build -p:DcvSupport=true` | `3.3.0` | enabled | AnyCA Gateway **26.x** (IAnyCAPlugin ≥ 3.3) |
 
 The **default is the no-DCV / 3.2.0 build** — it is the GA artifact that loads and persists on the
 current GA gateway (25.5.x) and depends only on a stable package, so it is what CI ships. Build the
