@@ -1,0 +1,1605 @@
+// Copyright 2026 Keyfactor
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Threading.Tasks;
+using FluentAssertions;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
+using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
+using WireMock.RequestBuilders;
+using WireMock.ResponseBuilders;
+using WireMock.Server;
+using Xunit;
+
+namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
+{
+    /// <summary>
+    /// WireMock-based tests for V2 REST API methods on <see cref="CERTInextClient"/>.
+    /// A real WireMockServer handles the V2 token endpoint and all V2 REST paths so
+    /// serialisation, routing, and token caching are fully exercised.
+    /// </summary>
+    public class CERTInextClientV2Tests : IDisposable
+    {
+        private readonly WireMockServer _server;
+        private readonly string _baseUrl;
+
+        public CERTInextClientV2Tests()
+        {
+            _server = WireMockServer.Start();
+            _baseUrl = _server.Urls[0];
+        }
+
+        public void Dispose() => _server.Stop();
+
+        // ---------------------------------------------------------------------------
+        // Helpers
+        // ---------------------------------------------------------------------------
+
+        private CERTInextClient BuildV2Client(string groupNumber = null) =>
+            new CERTInextClient(new CERTInextConfig
+            {
+                // A single ApiUrl now serves both V1 and V2 (issues/0022 config consolidation).
+                ApiUrl        = _baseUrl,
+                AuthMode      = "AccessKey",
+                ApiKey        = "test-v1-key",
+                AccountNumber = "12345",
+                UseV2Api          = true,
+                OAuthClientId     = "my-v2-client",
+                OAuthClientSecret = "my-v2-secret",
+                RequestorName  = "Test User",
+                RequestorEmail = "test@example.com",
+                PageSize       = 100,
+                // Unset by default (matches CERTInextConfig.GroupNumber's own default of
+                // string.Empty) — issues/0029 test cases override this explicitly.
+                GroupNumber    = groupNumber ?? string.Empty
+            });
+
+        private void StubV2Token(int expiresIn = 3600)
+        {
+            _server
+                .Given(Request.Create()
+                    .WithPath("/oauth/token")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TokenResponseJson(expiresIn)));
+        }
+
+        // ---------------------------------------------------------------------------
+        // Token fetch
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task PingV2Async_FetchesTokenAndCallsAuthMe()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/auth/me")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2AuthMeJson()));
+
+            using var client = BuildV2Client();
+            await client.PingV2Async();
+
+            // Verify both token and auth/me endpoints were called
+            _server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/oauth/token");
+            _server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/api/certinext/v2/auth/me");
+        }
+
+        [Fact]
+        public async Task GetAuthMeV2Async_ReturnsAccountNumber()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/auth/me")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2AuthMeJson("99887766")));
+
+            using var client = BuildV2Client();
+            var result = await client.GetAuthMeV2Async();
+
+            result.AccountNumber.Should().Be("99887766");
+            result.AuthType.Should().Be("oauth2");
+        }
+
+        [Fact]
+        public async Task PingV2Async_TokenCached_OnlyOneFetch()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/auth/me")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2AuthMeJson()));
+
+            using var client = BuildV2Client();
+            await client.PingV2Async();
+            await client.PingV2Async(); // second call — should reuse cached token
+
+            var tokenCalls = 0;
+            foreach (var entry in _server.LogEntries)
+                if (entry.RequestMessage.Path == "/oauth/token") tokenCalls++;
+
+            tokenCalls.Should().Be(1, "token should be cached after the first fetch");
+        }
+
+        // ---------------------------------------------------------------------------
+        // PlaceOrderV2Async
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task PlaceOrderV2Async_ReturnsPendingOrder()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/ssl-certificates")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl,
+                "842",
+                new V2CreateSslOrderRequest
+                {
+                    ProductVariant = "dv",
+                    Requestor      = new V2Requestor { Name = "Test", Email = "t@t.com", Phone = "555", Designation = "IT" },
+                    Certificate    = new V2CertificateParams { Domain = "example.com" },
+                    Subscription   = new V2SubscriptionParams { ValidityYears = 1 },
+                    Agreement      = new V2AgreementParams { SignerName = "Test", SignerIp = "1.2.3.4", SignerPlace = "NY", Accepted = true }
+                });
+
+            result.OrderId.Should().Be(MockCertificateData.V2OrderId1);
+            result.Status.Should().Be("pending-dcv");
+        }
+
+        [Fact]
+        public async Task PlaceOrderV2Async_SetsProductCodeHeader()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/ssl-certificates")
+                    .UsingPost()
+                    .WithHeader("X-Product-Code", "842"))
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+
+            using var client = BuildV2Client();
+            var result = await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, "842",
+                new V2CreateSslOrderRequest
+                {
+                    Requestor    = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
+                    Certificate  = new V2CertificateParams { Domain = "example.com" },
+                    Subscription = new V2SubscriptionParams(),
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                });
+
+            result.Should().NotBeNull();
+        }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0054 item #4: a null/blank product code must omit X-Product-Code
+        // entirely (spec: "Optional override" on SSL create — an empty override value
+        // is not itself valid) rather than sending the header empty.
+        // ---------------------------------------------------------------------------
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task PlaceOrderV2Async_Ssl_NullOrBlankProductCode_OmitsProductCodeHeader(string productCode)
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/ssl-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, productCode,
+                new V2CreateSslOrderRequest
+                {
+                    Requestor    = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
+                    Certificate  = new V2CertificateParams { Domain = "example.com" },
+                    Subscription = new V2SubscriptionParams(),
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                });
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates");
+            entry.RequestMessage.Headers.Should().NotContainKey("X-Product-Code",
+                "a null/blank product code is not a valid header override and must be omitted entirely");
+        }
+
+        [Fact]
+        public async Task PlaceOrderV2Async_Ssl_NonBlankProductCode_StillSendsHeader()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/ssl-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, "842",
+                new V2CreateSslOrderRequest
+                {
+                    Requestor    = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
+                    Certificate  = new V2CertificateParams { Domain = "example.com" },
+                    Subscription = new V2SubscriptionParams(),
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                });
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates");
+            entry.RequestMessage.Headers.Should().ContainKey("X-Product-Code")
+                .WhoseValue.Should().Contain("842");
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        public async Task PlaceOrderV2Async_PrivatePki_NullOrBlankProductCode_OmitsProductCodeHeader(string productCode)
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/private-pki-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"orderId\":\"ord_pki_002\",\"requestId\":\"req_3\",\"status\":\"pending-csr\"," +
+                              "\"variant\":\"intranet-ssl\",\"hostname\":\"intranet.example.com\"}"));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(productCode, new V2CreatePrivatePkiOrderRequest
+            {
+                Variant      = "intranet-ssl",
+                Hostname     = "intranet.example.com",
+                Requestor    = new V2Requestor { Name = "DevOps", Email = "devops@example.com" },
+                Subscription = new V2SubscriptionParams { ValidityYears = 1 }
+            });
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/private-pki-certificates");
+            entry.RequestMessage.Headers.Should().NotContainKey("X-Product-Code");
+        }
+
+        [Fact]
+        public async Task PlaceOrderV2Async_Signature_NullProductCode_OmitsProductCodeHeader()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/signature-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"orderId\":\"ord_sig_002\",\"requestId\":\"req_4\",\"status\":\"pending-documents\"," +
+                              "\"subjectType\":\"natural-person\",\"subjectDisplayName\":\"Test Person\"}"));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(null, new V2CreateSignatureOrderRequest
+            {
+                SubjectType = "natural-person",
+                Requestor   = new V2Requestor { Name = "Test Person", Email = "test.person@example.com" },
+                Subject     = new V2SignatureSubject { FirstName = "Test", LastName = "Person", Email = "test.person@example.com" }
+            });
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/signature-certificates");
+            entry.RequestMessage.Headers.Should().NotContainKey("X-Product-Code");
+        }
+
+        // ---------------------------------------------------------------------------
+        // V2CertificateParams.AdditionalDomains wire serialization (issues/f3-v2-multi-san-limitation.md)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task PlaceOrderV2Async_UccOrder_IncludesAdditionalDomainsInWireBody()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/ssl-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, "844",
+                new V2CreateSslOrderRequest
+                {
+                    ProductVariant = "dv",
+                    Requestor      = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
+                    Certificate    = new V2CertificateParams
+                    {
+                        Domain            = "example.com",
+                        AdditionalDomains = new List<string> { "san1.example.com", "san2.example.com" }
+                    },
+                    Subscription = new V2SubscriptionParams(),
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                });
+
+            string requestBody = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates")
+                .RequestMessage.Body;
+            requestBody.Should().Contain("\"additionalDomains\"");
+            requestBody.Should().Contain("san1.example.com");
+            requestBody.Should().Contain("san2.example.com");
+        }
+
+        [Fact]
+        public async Task PlaceOrderV2Async_SingleDomainOrder_OmitsAdditionalDomainsFromWireBody()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/ssl-certificates").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+
+            using var client = BuildV2Client();
+            await client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, "842",
+                new V2CreateSslOrderRequest
+                {
+                    ProductVariant = "dv",
+                    Requestor      = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
+                    Certificate    = new V2CertificateParams { Domain = "example.com" }, // AdditionalDomains left null
+                    Subscription   = new V2SubscriptionParams(),
+                    Agreement      = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                });
+
+            string requestBody = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates")
+                .RequestMessage.Body;
+            requestBody.Should().NotContain("additionalDomains",
+                "single-domain orders must not send additionalDomains at all — preserves the pre-fix wire shape");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Issue 0033: family-specific PlaceOrderV2Async overloads
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task PlaceOrderV2Async_PrivatePki_PostsPrivatePkiBodyToPrivatePkiPath_WithProductCodeHeader()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/private-pki-certificates")
+                    .UsingPost()
+                    .WithHeader("X-Product-Code", "149"))
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"orderId\":\"ord_pki_001\",\"requestId\":\"req_1\",\"status\":\"pending-csr\"," +
+                              "\"variant\":\"intranet-ssl\",\"hostname\":\"intranet.acme.local\",\"resolvedProductCode\":\"149\"}"));
+
+            using var client = BuildV2Client();
+            var result = await client.PlaceOrderV2Async("149", new V2CreatePrivatePkiOrderRequest
+            {
+                Variant         = "intranet-ssl",
+                Hostname        = "intranet.acme.local",
+                AdditionalHosts = new List<string> { "portal.acme.local", "10.0.0.50" },
+                Requestor       = new V2Requestor { Name = "DevOps Team", Email = "devops@acme.com" },
+                Subscription    = new V2SubscriptionParams { ValidityYears = 1 }
+            });
+
+            result.OrderId.Should().Be("ord_pki_001");
+            result.Status.Should().Be("pending-csr");
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/private-pki-certificates");
+            entry.RequestMessage.Headers.Should().ContainKey("Idempotency-Key");
+            entry.RequestMessage.Body.Should().NotBeNullOrEmpty();
+            using var body = System.Text.Json.JsonDocument.Parse(entry.RequestMessage.Body ?? string.Empty);
+            body.RootElement.GetProperty("variant").GetString().Should().Be("intranet-ssl");
+            body.RootElement.GetProperty("hostname").GetString().Should().Be("intranet.acme.local");
+            body.RootElement.GetProperty("additionalHosts").EnumerateArray().Select(e => e.GetString())
+                .Should().Equal("portal.acme.local", "10.0.0.50");
+            body.RootElement.TryGetProperty("productVariant", out _).Should().BeFalse();
+            body.RootElement.TryGetProperty("certificate", out _).Should().BeFalse();
+            body.RootElement.TryGetProperty("agreement", out _).Should().BeFalse();
+            _server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates");
+        }
+
+        [Fact]
+        public async Task PlaceOrderV2Async_Signature_PostsSignatureBodyToSignaturePath_WithProductCodeHeader()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/signature-certificates")
+                    .UsingPost()
+                    .WithHeader("X-Product-Code", "819"))
+                .RespondWith(Response.Create()
+                    .WithStatusCode(201)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"orderId\":\"ord_sig_001\",\"requestId\":\"req_2\",\"status\":\"pending-documents\"," +
+                              "\"subjectType\":\"natural-person\",\"subjectDisplayName\":\"Sarah Johnson\",\"resolvedProductCode\":\"819\"}"));
+
+            using var client = BuildV2Client();
+            var result = await client.PlaceOrderV2Async("819", new V2CreateSignatureOrderRequest
+            {
+                SubjectType = "natural-person",
+                Requestor   = new V2Requestor { Name = "Sarah Johnson", Email = "sarah.johnson@example.com" },
+                Subject     = new V2SignatureSubject { FirstName = "Sarah", LastName = "Johnson", Email = "sarah.johnson@example.com" }
+            });
+
+            result.OrderId.Should().Be("ord_sig_001");
+
+            var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/signature-certificates");
+            entry.RequestMessage.Body.Should().NotBeNullOrEmpty();
+            using var body = System.Text.Json.JsonDocument.Parse(entry.RequestMessage.Body ?? string.Empty);
+            body.RootElement.GetProperty("subjectType").GetString().Should().Be("natural-person");
+            body.RootElement.GetProperty("subject").GetProperty("email").GetString().Should().Be("sarah.johnson@example.com");
+        }
+
+        [Theory]
+        [InlineData(Constants.ApiV2.FamilyPrivatePki)]
+        [InlineData(Constants.ApiV2.FamilySignature)]
+        public async Task PlaceOrderV2Async_SslBody_ToNonSslFamily_Throws_AndSendsNothing(string family)
+        {
+            // Regression (issue 0033): the SSL overload used to substitute any slug into the URL,
+            // which is how a private-pki/signature template sent the SSL body to the wrong family.
+            StubV2Token();
+
+            using var client = BuildV2Client();
+            Func<Task> act = () => client.PlaceOrderV2Async(
+                family, "149",
+                new V2CreateSslOrderRequest
+                {
+                    Requestor   = new V2Requestor { Name = "T", Email = "t@t.com" },
+                    Certificate = new V2CertificateParams { Domain = "example.com" }
+                });
+
+            await act.Should().ThrowAsync<ArgumentException>().WithMessage($"*{family}*");
+            _server.LogEntries.Should().NotContain(e => e.RequestMessage.Path.StartsWith("/api/certinext/v2/"),
+                "no order request may be sent when the SSL body is aimed at another family");
+        }
+
+        // ---------------------------------------------------------------------------
+        // TrackOrderV2Async
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task TrackOrderV2Async_Issued_ReturnsIssuedStatus()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TrackOrderIssuedJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            result.Status.Should().Be("issued");
+            result.OrderId.Should().Be(MockCertificateData.V2OrderId1);
+        }
+
+        [Fact]
+        public async Task TrackOrderV2Async_NotFound_ThrowsKeyNotFoundException()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/nonexistent")
+                    .UsingGet())
+                .RespondWith(Response.Create().WithStatusCode(404));
+
+            using var client = BuildV2Client();
+            await Assert.ThrowsAsync<KeyNotFoundException>(
+                () => client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, "nonexistent"));
+        }
+
+        // ---------------------------------------------------------------------------
+        // TrackOrderV2Async — nested `revocation` object (issues/0034)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task TrackOrderV2Async_Revoked_DeserializesNestedRevocationObject()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TrackOrderRevokedJson(
+                        MockCertificateData.V2OrderId1,
+                        reason: "cessation-of-operation",
+                        processedAt: "2026-09-24T20:44:41Z")));
+
+            using var client = BuildV2Client();
+            var result = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            result.Status.Should().Be("revoked");
+            // issues/0034: `revocation` is a nested object — not flat top-level
+            // revocationReason/revocationDate properties.
+            result.Revocation.Should().NotBeNull();
+            result.Revocation!.Status.Should().Be("Certificate Revoked");
+            result.Revocation.Reason.Should().Be("cessation-of-operation");
+            result.Revocation.ProcessedAt.Should().Be(
+                new DateTime(2026, 9, 24, 20, 44, 41, DateTimeKind.Utc));
+        }
+
+        [Fact]
+        public async Task TrackOrderV2Async_NotRevoked_RevocationIsNull()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TrackOrderIssuedJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            // issues/0034: the `revocation` key is absent entirely (not present-but-null) on
+            // an order that has never been revoked.
+            result.Revocation.Should().BeNull();
+        }
+
+        // ---------------------------------------------------------------------------
+        // DownloadCertificateV2Async
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task DownloadCertificateV2Async_ReturnsPem()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/certificate")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CertificateDownloadJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.DownloadCertificateV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            result.CertificatePem.Should().StartWith("-----BEGIN CERTIFICATE-----");
+            result.SerialNumber.Should().Be("0A1B2C3D4E5F");
+            result.OrderId.Should().Be(MockCertificateData.V2OrderId1);
+        }
+
+        // ---------------------------------------------------------------------------
+        // RevokeOrderV2Async
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task RevokeOrderV2Async_SuccessfulRevoke()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/revoke")
+                    .UsingPost())
+                .RespondWith(Response.Create().WithStatusCode(204));
+
+            using var client = BuildV2Client();
+            // Should not throw
+            await client.RevokeOrderV2Async(
+                Constants.ApiV2.FamilySsl,
+                MockCertificateData.V2OrderId1,
+                new V2RevokeRequest { Reason = "superseded", Note = "Replaced." });
+        }
+
+        [Fact]
+        public async Task RevokeOrderV2Async_422_ThrowsInvalidOperationException()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/revoke")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(422)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(422, "Unprocessable Entity", "Order not in issued state", "EMS-931")));
+
+            using var client = BuildV2Client();
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => client.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl,
+                    MockCertificateData.V2OrderId1,
+                    new V2RevokeRequest { Reason = "superseded" }));
+        }
+
+        // ---------------------------------------------------------------------------
+        // Regression (issues/0019): 422 message reflects the CA's actual detail
+        // rather than presuming "order not in issued state" for every 422.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task RevokeOrderV2Async_422_LabelsByActualDetail_NotHardcodedIssuedStateMessage()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/revoke")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(422)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    // Observed live sandbox behavior for a revoke attempted while the
+                    // order is still internally finalizing — no EMS code in this detail.
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(
+                        422, "Unprocessable Entity", "Certificate Request still being processed")));
+
+            using var client = BuildV2Client();
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => client.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl,
+                    MockCertificateData.V2OrderId1,
+                    new V2RevokeRequest { Reason = "superseded" }));
+
+            ex.Message.Should().Contain("still being processed");
+            ex.Message.Should().NotContain("not in issued state",
+                "the message must reflect the CA's actual detail text, not a hardcoded assumption");
+        }
+
+        [Fact]
+        public async Task RevokeOrderV2Async_422_DistinctEmsCode_LabelsByThatCode()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/revoke")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(422)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(
+                        422, "Unprocessable Entity", "EMS-969 Revoke reason ID missing")));
+
+            using var client = BuildV2Client();
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => client.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl,
+                    MockCertificateData.V2OrderId1,
+                    new V2RevokeRequest { Reason = "superseded" }));
+
+            ex.Message.Should().Contain("EMS-969");
+            ex.Message.Should().NotContain("not in issued state");
+        }
+
+        [Fact]
+        public async Task RevokeOrderV2Async_404_ThrowsNotFoundOrNotRevokable_NotGenericNotFound()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/revoke")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(404)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(
+                        404, "Not Found", "Order not found or not in a revokable state.")));
+
+            using var client = BuildV2Client();
+            var ex = await Assert.ThrowsAsync<KeyNotFoundException>(
+                () => client.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl,
+                    MockCertificateData.V2OrderId1,
+                    new V2RevokeRequest { Reason = "superseded" }));
+
+            ex.Message.Should().Contain("not found or not in a revokable state");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Product-family resolution
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ResolveAndTrackOrderV2Async_FindsOrderInSslFamily()
+        {
+            StubV2Token();
+            // SSL family returns 404 → should try private-pki... wait, we want to find it in SSL
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TrackOrderIssuedJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.ResolveAndTrackOrderV2Async(MockCertificateData.V2OrderId1);
+
+            result.OrderId.Should().Be(MockCertificateData.V2OrderId1);
+            result.Status.Should().Be("issued");
+        }
+
+        [Fact]
+        public async Task ResolveAndTrackOrderV2Async_FindsOrderInPrivatePkiFamily()
+        {
+            StubV2Token();
+            // SSL → 404, private-pki → 200
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId2}")
+                    .UsingGet())
+                .RespondWith(Response.Create().WithStatusCode(404));
+
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/private-pki-certificates/{MockCertificateData.V2OrderId2}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2TrackOrderIssuedJson(MockCertificateData.V2OrderId2)));
+
+            using var client = BuildV2Client();
+            var result = await client.ResolveAndTrackOrderV2Async(MockCertificateData.V2OrderId2);
+
+            result.OrderId.Should().Be(MockCertificateData.V2OrderId2);
+        }
+
+        [Fact]
+        public async Task ResolveAndTrackOrderV2Async_NotInAnyFamily_ThrowsKeyNotFoundException()
+        {
+            StubV2Token();
+            foreach (var family in new[] { "ssl-certificates", "private-pki-certificates", "signature-certificates" })
+            {
+                _server
+                    .Given(Request.Create()
+                        .WithPath($"/api/certinext/v2/{family}/ord_missing")
+                        .UsingGet())
+                    .RespondWith(Response.Create().WithStatusCode(404));
+            }
+
+            using var client = BuildV2Client();
+            await Assert.ThrowsAsync<KeyNotFoundException>(
+                () => client.ResolveAndTrackOrderV2Async("ord_missing"));
+        }
+
+        // ---------------------------------------------------------------------------
+        // GetDcvV2Async
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetDcvV2Async_ReturnsChallengeWithToken()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2DcvChallengeJson("my-dcv-token")));
+
+            using var client = BuildV2Client();
+            var result = await client.GetDcvV2Async(MockCertificateData.V2OrderId1, Constants.ApiV2.FamilySsl);
+
+            result.Token.Should().Be("my-dcv-token");
+            result.TokenExpiryDate.Should().Be("2026-12-31 23:59:59");
+        }
+
+        /// <summary>
+        /// Regression (issues/0037): the live GetDcv response on a fresh-domain order came
+        /// back as exactly <c>{"tokenExpiryDate":"...","token":"..."}</c> — a shape that
+        /// matches neither the spec's worked example (<c>orderNumber</c>/<c>domainName</c>/
+        /// <c>dcvMethod</c>/<c>fileNameContent</c>, the shape the DTO originally modeled) nor
+        /// the spec's prose (<c>method</c>/<c>txtToken</c>). Before the fix, deserializing this
+        /// body left <c>FileNameContent</c> null (unmapped JSON properties are silently
+        /// ignored), which drove the plugin's null-token guard and stranded the order at
+        /// EXTERNALVALIDATION forever. This pins the real field name (<c>token</c>) against
+        /// the exact live body captured in issues/0037, verbatim.
+        /// </summary>
+        [Fact]
+        public async Task GetDcvV2Async_LiveShape_DeserializesTokenField_NotFileNameContent()
+        {
+            StubV2Token();
+            const string liveBody = @"{""tokenExpiryDate"":""2026-09-27 15:27:00"",""token"":""D6026954B9EB7D31E3FE8B2194F07087""}";
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(liveBody));
+
+            using var client = BuildV2Client();
+            var result = await client.GetDcvV2Async(MockCertificateData.V2OrderId1, Constants.ApiV2.FamilySsl);
+
+            result.Should().NotBeNull();
+            result.Token.Should().Be("D6026954B9EB7D31E3FE8B2194F07087",
+                "the live wire field is 'token', not 'fileNameContent' (issues/0037)");
+            result.TokenExpiryDate.Should().Be("2026-09-27 15:27:00");
+        }
+
+        [Fact]
+        public async Task GetDcvV2Async_NonSuccess_Throws()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(400)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(400, "Bad Request", "Order not found")));
+
+            using var client = BuildV2Client();
+            await Assert.ThrowsAsync<Exception>(
+                () => client.GetDcvV2Async(MockCertificateData.V2OrderId1, Constants.ApiV2.FamilySsl));
+        }
+
+        // ---------------------------------------------------------------------------
+        // VerifyDcvV2Async
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task VerifyDcvV2Async_200Ok_ReturnsVerified()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv/verify")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2DcvVerifySuccessJson()));
+
+            using var client = BuildV2Client();
+            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com", Constants.ApiV2.FamilySsl);
+
+            result.OverallStatus.Should().Be("VERIFIED");
+        }
+
+        [Fact]
+        public async Task VerifyDcvV2Async_204NoContent_ReturnsVerified()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv/verify")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(204));
+
+            using var client = BuildV2Client();
+            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com", Constants.ApiV2.FamilySsl);
+
+            result.OverallStatus.Should().Be("VERIFIED");
+        }
+
+        [Fact]
+        public async Task VerifyDcvV2Async_422_ThrowsInvalidOperationException()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv/verify")
+                    .UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(422)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(MockCertificateData.V2ProblemDetailsJson(422, "Unprocessable Entity", "DNS record not found")));
+
+            using var client = BuildV2Client();
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com", Constants.ApiV2.FamilySsl));
+
+            ex.Message.Should().Contain("DCV verification failed");
+        }
+
+        [Fact]
+        public async Task VerifyDcvV2Async_SendsDnsTxtMethod()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/dcv/verify")
+                    .UsingPost()
+                    .WithBody(b => b != null && b.Contains("\"dns-txt\"")))
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2DcvVerifySuccessJson()));
+
+            using var client = BuildV2Client();
+            var result = await client.VerifyDcvV2Async(MockCertificateData.V2OrderId1, "example.com", Constants.ApiV2.FamilySsl);
+
+            result.OverallStatus.Should().Be("VERIFIED");
+        }
+
+        // ---------------------------------------------------------------------------
+        // DownloadCertificateV2Async — chain PEM assembly
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task DownloadCertificateV2Async_WithChainPem_DeserializesChain()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/certificate")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CertificateDownloadWithChainJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.DownloadCertificateV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            result.CertificatePem.Should().StartWith("-----BEGIN CERTIFICATE-----");
+            result.ChainPem.Should().NotBeNullOrEmpty("API returned a chainPem array");
+            result.ChainPem.Should().HaveCount(1);
+            result.ChainPem[0].Should().Contain("INTERMEDIATE");
+        }
+
+        [Fact]
+        public async Task DownloadCertificateV2Async_WithoutChainPem_ChainIsNull()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/certificate")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2CertificateDownloadJson(MockCertificateData.V2OrderId1)));
+
+            using var client = BuildV2Client();
+            var result = await client.DownloadCertificateV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            result.CertificatePem.Should().StartWith("-----BEGIN CERTIFICATE-----");
+            result.ChainPem.Should().BeNullOrEmpty("API did not return chainPem");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Token refresh when expired
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Token_CachedAndReused_WhenNotNearExpiry()
+        {
+            // Restates PingV2Async_TokenCached_OnlyOneFetch's proof via GetAuthMeV2Async — kept
+            // as its own case (G11) so cache-reuse and expiry-refetch (below) are each one
+            // single-purpose test rather than folded into one.
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/auth/me")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2AuthMeJson()));
+
+            using var client = BuildV2Client();
+            await client.GetAuthMeV2Async();
+            await client.GetAuthMeV2Async();
+
+            TokenFetchCount(_server).Should().Be(1, "a non-expired cached token must be reused");
+        }
+
+        /// <summary>
+        /// G11: a cached token past its early-expiry window must be re-fetched via a fresh
+        /// <c>client_credentials</c> call — never via <c>refresh_token</c>. Per the V2 spec,
+        /// refresh tokens are single-use and refreshing invalidates the current access token, so
+        /// this locks in the client's current (safe) behaviour of only ever using
+        /// client_credentials.
+        ///
+        /// The real cache TTL floors at 30 seconds (<c>Math.Max(expires_in - 60, 30)</c> in
+        /// <c>GetOrRefreshV2TokenAsync</c>), which is too slow to wait out in a unit test — so this
+        /// reaches into the private <c>_v2TokenExpiry</c> field via reflection to simulate the
+        /// passage of time instead of actually waiting.
+        /// </summary>
+        [Fact]
+        public async Task Token_RefetchedViaClientCredentials_WhenPastEarlyExpiryWindow()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/auth/me")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2AuthMeJson()));
+
+            using var client = BuildV2Client();
+            await client.GetAuthMeV2Async();
+            TokenFetchCount(_server).Should().Be(1);
+
+            // Simulate the cached token having entered/passed its early-expiry window.
+            SetV2TokenExpiry(client, DateTime.UtcNow.AddSeconds(-1));
+
+            await client.GetAuthMeV2Async();
+            TokenFetchCount(_server).Should().Be(2,
+                "a token past its early-expiry window must be re-fetched, not reused");
+
+            // Every /oauth/token call must use client_credentials — never refresh_token, even
+            // though the stubbed token response includes a refresh_token field.
+            foreach (var entry in _server.LogEntries.Where(e => e.RequestMessage.Path == "/oauth/token"))
+            {
+                string body = entry.RequestMessage.Body ?? string.Empty;
+                body.Should().Contain("grant_type=client_credentials");
+                body.Should().NotContain("grant_type=refresh_token",
+                    "refresh tokens are single-use per the V2 spec — the client must never send this grant proactively");
+            }
+        }
+
+        private static int TokenFetchCount(WireMockServer server) =>
+            server.LogEntries.Count(e => e.RequestMessage.Path == "/oauth/token");
+
+        private static void SetV2TokenExpiry(CERTInextClient client, DateTime value)
+        {
+            var field = typeof(CERTInextClient)
+                .GetField("_v2TokenExpiry", BindingFlags.NonPublic | BindingFlags.Instance);
+            field.Should().NotBeNull("test relies on CERTInextClient's private _v2TokenExpiry field existing");
+            field!.SetValue(client, value);
+        }
+
+        // ---------------------------------------------------------------------------
+        // G2: OAuth2 token failure hints (401 invalid_client vs 403 unauthorized_client)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetOrRefreshV2Token_Throws_DistinctHint_On401InvalidClient()
+        {
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(401)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""error"":""invalid_client"",""error_description"":""Client authentication failed.""}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = () => client.PingV2Async();
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*401*")
+                .Where(ex => ex.Message.Contains("ClientId", StringComparison.OrdinalIgnoreCase)
+                          || ex.Message.Contains("ClientSecret", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public async Task GetOrRefreshV2Token_Throws_DistinctHint_On403UnauthorizedClient()
+        {
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(403)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""error"":""unauthorized_client"",""error_description"":""Key not generated in OAuth mode.""}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = () => client.PingV2Async();
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*403*")
+                .Where(ex => ex.Message.Contains("OAuth mode", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public async Task GetOrRefreshV2Token_401And403_ProduceDifferentMessages()
+        {
+            // The two hints must actually differ — otherwise the distinction above is cosmetic.
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(401)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""error"":""invalid_client""}"));
+            using var client401 = BuildV2Client();
+            Exception ex401 = null;
+            try { await client401.PingV2Async(); } catch (Exception ex) { ex401 = ex; }
+
+            _server.Reset();
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(403)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""error"":""unauthorized_client""}"));
+            using var client403 = BuildV2Client();
+            Exception ex403 = null;
+            try { await client403.PingV2Async(); } catch (Exception ex) { ex403 = ex; }
+
+            ex401.Should().NotBeNull();
+            ex403.Should().NotBeNull();
+            ex401!.Message.Should().NotBe(ex403!.Message);
+        }
+
+        [Fact]
+        public async Task GetOrRefreshV2Token_Throws_WhenTokenResponseLacksAccessToken()
+        {
+            _server
+                .Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{""token_type"":""Bearer"",""expires_in"":3600}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = () => client.PingV2Async();
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*access_token*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // G12: RFC 7807 field-level errors surfaced in the exception message
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ThrowOnV2Failure_IncludesFieldLevelErrors_FromProblemJson()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(400)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(
+                        @"{""type"":""https://api.certinext.io/errors/validation""," +
+                        @"""title"":""Bad Request"",""status"":400," +
+                        @"""detail"":""Body malformed""," +
+                        @"""errors"":[{""field"":""certificate.domain"",""message"":""must not be blank""}]}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = () => client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            await act.Should().ThrowAsync<Exception>()
+                .WithMessage("*certificate.domain*must not be blank*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // ListOrdersV2Async (issues/0022) — V2 /reports/orders page enumeration
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ListOrdersV2Async_MultiplePages_EnumeratesAllRowsInOrder()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("page", "1")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(
+                        page: 1, totalPages: 2, orderNumbers: new[] { "ord_p1_001", "ord_p1_002" })));
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("page", "2")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(
+                        page: 2, totalPages: 2, orderNumbers: new[] { "ord_p2_001" })));
+
+            using var client = BuildV2Client();
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async(pageSize: 2))
+                results.Add(row);
+
+            results.Should().HaveCount(3);
+            results.ConvertAll(r => r.OrderNumber).Should().Equal("ord_p1_001", "ord_p1_002", "ord_p2_001");
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_NoRows_ReturnsEmpty()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/reports/orders").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client();
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async())
+                results.Add(row);
+
+            results.Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_PassesFromAndToAsQueryParams()
+        {
+            StubV2Token();
+            // Only matches if from/to were actually sent as query params — if the client
+            // dropped them, WireMock's default (unmatched) 404 response would make
+            // ThrowOnV2Failure throw, and the test would fail.
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("from", "2026-01-01")
+                    .WithParam("to", "2026-12-31")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client();
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async(from: "2026-01-01", to: "2026-12-31"))
+                results.Add(row);
+
+            results.Should().BeEmpty();
+        }
+
+        // ---------------------------------------------------------------------------
+        // ListOrdersV2Async — GroupNumber query param (issues/0029)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task ListOrdersV2Async_GroupNumberConfigured_PassesGroupNumberQueryParam()
+        {
+            StubV2Token();
+            // Only matches if groupNumber was actually sent as a query param — if the client
+            // dropped it, WireMock's default (unmatched) 404 response would make
+            // ThrowOnV2Failure throw, and the test would fail.
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("groupNumber", "GRP-555")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client(groupNumber: "GRP-555");
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async())
+                results.Add(row);
+
+            results.Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_GroupNumberBlank_OmitsGroupNumberQueryParam()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client(groupNumber: string.Empty);
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async())
+                results.Add(row);
+
+            results.Should().BeEmpty();
+
+            string rawQuery = _server.LogEntries
+                .Last(e => e.RequestMessage.Path == "/api/certinext/v2/reports/orders")
+                .RequestMessage.RawQuery ?? string.Empty;
+            rawQuery.Should().NotContain("groupNumber",
+                "an unconfigured GroupNumber must not appear on the orders-report query string");
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_PageSizeOver100_ClampedServerRequest()
+        {
+            StubV2Token();
+            // Only matches size=100 — if the client sent the raw 500 through, this would 404.
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/reports/orders")
+                    .WithParam("size", "100")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.V2OrdersReportJson(page: 1, totalPages: 1, orderNumbers: Array.Empty<string>())));
+
+            using var client = BuildV2Client();
+            var results = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async(pageSize: 500))
+                results.Add(row);
+
+            results.Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task ListOrdersV2Async_NonSuccessResponse_Throws()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/reports/orders").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(500)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody(@"{""title"":""Internal Server Error"",""status"":500,""detail"":""boom""}"));
+
+            using var client = BuildV2Client();
+
+            Func<Task> act = async () =>
+            {
+                await foreach (var _ in client.ListOrdersV2Async()) { }
+            };
+
+            await act.Should().ThrowAsync<Exception>().WithMessage("*V2 list orders*");
+        }
+
+        // ---------------------------------------------------------------------------
+        // GetProductDetailsV2Async / ParseProductDetailsV2Response (issue 0025 / 0016)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_NestedCategoryEnvelope_FlattensProducts()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().HaveCount(2);
+            products.Should().ContainSingle(p => p.ProductCode == MockCertificateData.ProfileIdTls
+                                                  && p.ProductName == "TLS Server"
+                                                  && p.ProductType == "SSL/TLS Certificates"
+                                                  && p.ProductTypeId == "13"
+                                                  && p.Active);
+            products.Should().ContainSingle(p => p.ProductCode == MockCertificateData.ProfileIdClient);
+        }
+
+        // ---------------------------------------------------------------------------
+        // GetProductDetailsV2Async — GroupNumber query param (issues/0029)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_GroupNumberConfigured_PassesGroupNumberQueryParam()
+        {
+            StubV2Token();
+            // Only matches if groupNumber was actually sent as a query param — if the client
+            // dropped it, WireMock's default (unmatched) 404 response would make
+            // ThrowOnV2Failure throw, and the test would fail.
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/catalog/products")
+                    .WithParam("groupNumber", "GRP-555")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
+
+            using var client = BuildV2Client(groupNumber: "GRP-555");
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().HaveCount(2);
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_GroupNumberBlank_OmitsGroupNumberQueryParam()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath("/api/certinext/v2/catalog/products")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
+
+            using var client = BuildV2Client(groupNumber: string.Empty);
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().HaveCount(2);
+
+            string rawQuery = _server.LogEntries
+                .Last(e => e.RequestMessage.Path == "/api/certinext/v2/catalog/products")
+                .RequestMessage.RawQuery ?? string.Empty;
+            rawQuery.Should().NotContain("groupNumber",
+                "an unconfigured GroupNumber must not appear on the catalog query string");
+        }
+
+        // ---------------------------------------------------------------------------
+        // ProductTypeId flattening (issues/f3-v2-multi-san-limitation.md): productTypeID
+        // must survive every catalog response shape so EnrollV2Async can detect UCC products.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_NestedCategoryEnvelope_UccProductTypeId_Preserved()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{
+  ""products"":[
+    { ""categoryName"":""SSL/TLS Certificates"", ""categoryID"":""1"", ""currencyType"":""USD"",
+      ""products"":[
+        {""productCode"":""844"",""productName"":""DV SSL Certificate UCC"",""productTypeID"":""15""},
+        {""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13""}
+      ]
+    }
+  ]
+}"));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().ContainSingle(p => p.ProductCode == "844" && p.ProductTypeId == "15",
+                "UCC product's productTypeID must survive the nested-category flattening");
+            products.Should().ContainSingle(p => p.ProductCode == "842" && p.ProductTypeId == "13");
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_FlatProductIdRow_UccProductTypeId_Preserved()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"{
+  ""products"":[
+    {""productId"":""845"",""productName"":""DV SSL Certificate Wildcard UCC"",""masterProductName"":""DV SSL Certificate Wildcard UCC"",""productTypeID"":""21""}
+  ]
+}"));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().ContainSingle(p => p.ProductCode == "845" && p.ProductTypeId == "21",
+                "UCC product's productTypeID must survive the flat productId row shape");
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_FlatProductCodeRow_UccProductTypeId_Preserved()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[
+    {""productCode"":""851"",""productName"":""EV SSL Certificate UCC"",""productType"":""SSL/TLS Certificates"",""productTypeID"":""20"",""active"":true}
+]"));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().ContainSingle(p => p.ProductCode == "851" && p.ProductTypeId == "20",
+                "UCC product's productTypeID must survive the flat productCode row shape (direct DTO deserialize)");
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_FlatProductIdRows_MapsToProductCode()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2FlatJson()));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().HaveCount(2);
+            products.Should().Contain(p => p.ProductCode == MockCertificateData.ProfileIdTls && p.Active);
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_BareArray_Parses()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2BareArrayJson()));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().ContainSingle(p => p.ProductCode == MockCertificateData.ProfileIdTls);
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_EmptyCatalog_ReturnsEmptyList()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetCatalogProductsV2EmptyJson()));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().BeEmpty();
+        }
+    }
+}

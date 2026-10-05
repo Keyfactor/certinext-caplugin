@@ -3,10 +3,12 @@ COVERAGE_DIR := /tmp/certinext-coverage
 REPORT_DIR   := /tmp/certinext-coverage-report
 
 # ---------------------------------------------------------------------------
-# V2 API credentials — set CERTINEXT_V2_API_URL in ~/.env_certinext.
-# For the sandbox environment this is the same host as V1 but without the
+# V2 API credentials — CERTINEXT_API_URL / CERTINEXT_CLIENT_ID /
+# CERTINEXT_CLIENT_SECRET in ~/.env_certinext_v2 (override the path with
+# CERTINEXT_V2_ENV_FILE). CERTINEXT_API_URL is the V2 base URL, without the
 # /emSignHub-API/ suffix, e.g.:
-#   CERTINEXT_V2_API_URL=https://sandbox-us.certinext.io
+#   CERTINEXT_API_URL=https://sandbox-us.certinext.io
+# See scripts/v2/README.md.
 # ---------------------------------------------------------------------------
 
 .PHONY: build test integration-test coverage coverage-report open-coverage clean \
@@ -486,16 +488,20 @@ probe-private-pki-payloads: generate-test-csr
 	  --save-and-hold "$(SAVE_AND_HOLD)"
 
 # ---------------------------------------------------------------------------
-# V2 API targets  (credentials + CERTINEXT_V2_API_URL from ~/.env_certinext)
+# V2 API targets  (credentials from ~/.env_certinext_v2)
 #
-# Auth: scripts/lib/certinext-v2-auth.sh exchanges SHA256(accessKey+ts+txn)
-# for a short-lived Bearer JWT at POST {v2BaseURL}/oauth/token.  All V2
-# scripts source that lib automatically — no manual token step needed.
+# Auth: scripts/lib/certinext-v2-auth.sh fetches an OAuth2 client_credentials
+# token at POST {CERTINEXT_API_URL}/oauth/token (same as the plugin's V2 mode).
+# The env file is parsed, not sourced; the secret/token never hit argv, disk,
+# or output.
 #
-# Scripts live in scripts/v2/.  Each script sources ~/.env_certinext and
-# scripts/lib/certinext-v2-auth.sh; jq is used for JSON construction and
-# pretty-printing.
+# Mutating targets (create/verify-dcv/submit-csr/accept/cancel/revoke) only
+# PREVIEW the request unless you pass V2_ARGS=--yes-mutate, e.g.:
+#   make v2-revoke-ssl ORDER_ID=123 V2_ARGS=--yes-mutate
+# Full details: scripts/v2/README.md.
 # ---------------------------------------------------------------------------
+
+V2_ARGS ?=
 
 # ---------------------------------------------------------------------------
 # v2-ping — GET /api/certinext/v2/auth/me
@@ -575,7 +581,7 @@ V2_VARIANT ?= dv
 
 v2-create-ssl-order:
 	@echo "V2 create SSL order — POST /api/certinext/v2/ssl-certificates"
-	@PRODUCT_CODE=$(V2_PRODUCT_CODE) DOMAIN=$(V2_DOMAIN) VARIANT=$(V2_VARIANT) scripts/v2/create-ssl-order.sh
+	@PRODUCT_CODE=$(V2_PRODUCT_CODE) DOMAIN=$(V2_DOMAIN) VARIANT=$(V2_VARIANT) scripts/v2/create-ssl-order.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-track-order — GET /api/certinext/v2/ssl-certificates/{orderId}
@@ -613,7 +619,7 @@ V2_DCV_METHOD ?= http-url
 
 v2-verify-dcv:
 	@echo "V2 verify DCV — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/dcv/verify"
-	@ORDER_ID=$(ORDER_ID) DOMAIN=$(V2_DOMAIN) METHOD=$(V2_DCV_METHOD) scripts/v2/verify-dcv.sh
+	@ORDER_ID=$(ORDER_ID) DOMAIN=$(V2_DOMAIN) METHOD=$(V2_DCV_METHOD) scripts/v2/verify-dcv.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-submit-csr — PUT /api/certinext/v2/ssl-certificates/{orderId}/csr
@@ -625,7 +631,7 @@ V2_CSR_FILE ?=
 
 v2-submit-csr:
 	@echo "V2 submit CSR (SSL) — PUT /api/certinext/v2/ssl-certificates/$(ORDER_ID)/csr"
-	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr.sh
+	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-accept-agreement — POST /api/certinext/v2/ssl-certificates/{orderId}/agreement
@@ -635,7 +641,7 @@ v2-submit-csr:
 
 v2-accept-agreement:
 	@echo "V2 accept agreement — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/agreement"
-	@ORDER_ID=$(ORDER_ID) scripts/v2/accept-agreement.sh
+	@ORDER_ID=$(ORDER_ID) scripts/v2/accept-agreement.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-download-certificate — GET /api/certinext/v2/ssl-certificates/{orderId}/certificate
@@ -661,7 +667,7 @@ V2_REASON ?= superseded
 
 v2-revoke-ssl:
 	@echo "V2 revoke SSL — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/revoke"
-	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-ssl.sh
+	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-ssl.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-cancel-ssl-order — POST /api/certinext/v2/ssl-certificates/{orderId}/cancel
@@ -671,12 +677,14 @@ v2-revoke-ssl:
 
 v2-cancel-ssl-order:
 	@echo "V2 cancel SSL order — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/cancel"
-	@ORDER_ID=$(ORDER_ID) scripts/v2/cancel-ssl-order.sh
+	@ORDER_ID=$(ORDER_ID) scripts/v2/cancel-ssl-order.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-create-private-pki-order — POST /api/certinext/v2/private-pki-certificates
 # Creates a Private PKI certificate order against a customer-owned CA.
-# Required: PRODUCT_CODE=<code>  HOSTNAME=<host>  CA_PROFILE_ID=<id>  MASTER_PRODUCT_ID=<id>
+# Required: V2_HOSTNAME=<host>  V2_CA_PROFILE_ID=<id>  V2_MASTER_PRODUCT_ID=<id>
+# Optional: V2_PRODUCT_CODE=<code>
+# (the script input is CERT_HOSTNAME; bash always sets HOSTNAME to the local machine name)
 #
 # Prints orderId on success.  Use orderId with v2-track-private-pki,
 # v2-submit-csr-private-pki, v2-download-certificate-private-pki, and
@@ -689,7 +697,7 @@ V2_MASTER_PRODUCT_ID ?=
 
 v2-create-private-pki-order:
 	@echo "V2 create Private PKI order — POST /api/certinext/v2/private-pki-certificates"
-	@PRODUCT_CODE=$(V2_PRODUCT_CODE) HOSTNAME=$(V2_HOSTNAME) CA_PROFILE_ID=$(V2_CA_PROFILE_ID) MASTER_PRODUCT_ID=$(V2_MASTER_PRODUCT_ID) scripts/v2/create-private-pki-order.sh
+	@PRODUCT_CODE=$(V2_PRODUCT_CODE) CERT_HOSTNAME=$(V2_HOSTNAME) CA_PROFILE_ID=$(V2_CA_PROFILE_ID) MASTER_PRODUCT_ID=$(V2_MASTER_PRODUCT_ID) scripts/v2/create-private-pki-order.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-track-private-pki — GET /api/certinext/v2/private-pki-certificates/{orderId}
@@ -711,7 +719,7 @@ v2-track-private-pki:
 
 v2-submit-csr-private-pki:
 	@echo "V2 submit CSR (Private PKI) — PUT /api/certinext/v2/private-pki-certificates/$(ORDER_ID)/csr"
-	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr-private-pki.sh
+	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr-private-pki.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-download-certificate-private-pki — GET /api/certinext/v2/private-pki-certificates/{orderId}/certificate
@@ -735,18 +743,20 @@ v2-download-certificate-private-pki:
 
 v2-revoke-private-pki:
 	@echo "V2 revoke Private PKI — POST /api/certinext/v2/private-pki-certificates/$(ORDER_ID)/revoke"
-	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-private-pki.sh
+	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-private-pki.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
-# v2-orders-report — GET /api/certinext/v2/reports/orders?page=0&size=50
-# Paginated order history across all product types.
-# NOTE: currently returns 501 Not Implemented.
-# Use v1 make get-order-report (POST /emSignHub-API/GetOrderReport) meanwhile.
+# v2-orders-report — GET /api/certinext/v2/reports/orders?page=1&size=100
+# One page of order history (the endpoint V2 Synchronize pages through).
+# Optional: V2_PAGE=1 (1-based)  V2_SIZE=100 (server clamps to 100)
 # ---------------------------------------------------------------------------
+
+V2_PAGE ?= 1
+V2_SIZE ?= 100
 
 v2-orders-report:
-	@echo "V2 orders report — GET /api/certinext/v2/reports/orders (NOTE: currently 501)"
-	@scripts/v2/orders-report.sh
+	@echo "V2 orders report — GET /api/certinext/v2/reports/orders?page=$(V2_PAGE)&size=$(V2_SIZE)"
+	@PAGE=$(V2_PAGE) SIZE=$(V2_SIZE) scripts/v2/orders-report.sh
 
 # ---------------------------------------------------------------------------
 # Help
