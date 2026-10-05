@@ -21,6 +21,7 @@
        exist, so exclude these files unless SUPPORTS_DCV is defined. See issue 0003. -->
   <ItemGroup Condition="!$(DefineConstants.Contains('SUPPORTS_DCV'))">
     <Compile Remove="CERTInextCAPluginDcvTests.cs" />
+    <Compile Remove="CERTInextCAPluginV2DcvTests.cs" />
     <Compile Remove="FakeDomainValidator.cs" />
   </ItemGroup>
 
