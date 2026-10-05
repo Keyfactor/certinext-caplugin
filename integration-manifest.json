@@ -35,27 +35,27 @@
                 },
                 {
                     "name": "GroupNumber",
-                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts will queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation \u2192 Groups."
+                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `orderDetails.groupNumber` field of every SSL order (new and renewal) so the order is routed to the configured account group. When blank, CERTInext uses the account's default group. Available in the CERTInext portal under Delegation \u2192 Groups."
                 },
                 {
                     "name": "OrganizationNumber",
-                    "description": "STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric CERTInext organization number for a pre-vetted organization (e.g. your company's pre-vetted entry). When set, every SSL order is submitted with `organizationDetails.preVetting=\"1\"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. Without this value, orders are placed without any organizationDetails block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours). Available in the CERTInext portal under Organizations \u2192 Pre-vetted Organizations."
+                    "description": "OPTIONAL, strongly recommended for OV/EV: numeric CERTInext organization number for a pre-vetted organization. When set, every SSL order is submitted with `organizationDetails.preVetting=\"1\"` and this `organizationNumber`, so CERTInext can reuse that organization's pre-verified domains without fresh DCV. Leave blank to omit `organizationDetails`. Available in the CERTInext portal under Organizations → Pre-vetted Organizations."
                 },
                 {
                     "name": "TechnicalContactName",
-                    "description": "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to the configured RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field."
+                    "description": "OPTIONAL: Technical point of contact name, sent as `technicalPointOfContact.pocFirstName` / `pocLastName` on every SSL order (new and renewal). The name is split on the first whitespace: the first word is the first name and the rest is the last name; a single-word name is sent in both. Defaults to the configured RequestorName when blank."
                 },
                 {
                     "name": "TechnicalContactEmail",
-                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank."
+                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.pocEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank."
                 },
                 {
                     "name": "TechnicalContactIsdCode",
-                    "description": "OPTIONAL: International dialing code for the TPoC phone number. Defaults to the configured RequestorIsdCode when blank."
+                    "description": "OPTIONAL: International dialing code for the technical contact phone number, sent as `technicalPointOfContact.pocIsdCode`. Defaults to the configured RequestorIsdCode when blank."
                 },
                 {
                     "name": "TechnicalContactMobileNumber",
-                    "description": "OPTIONAL: Mobile number for the TPoC (digits only). Defaults to the configured RequestorMobileNumber when blank."
+                    "description": "OPTIONAL: Mobile number for the technical contact (digits only), sent as `technicalPointOfContact.pocMobileNumber`. Defaults to the configured RequestorMobileNumber when blank."
                 },
                 {
                     "name": "AuthMode",
@@ -127,11 +127,15 @@
                 },
                 {
                     "name": "AutoSecureWww",
-                    "description": "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\"."
+                    "description": "OPTIONAL: Sent as `orderDetails.autoSecureWWW` on every SSL order (new and renewal). If \"1\", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN, which must also pass domain validation. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\"."
                 },
                 {
                     "name": "IgnoreExpired",
                     "description": "If true, expired certificates will be skipped during synchronization. Default: false."
+                },
+                {
+                    "name": "SubmitNonDnsSans",
+                    "description": "If true (default), SANs that are not DNS names (IP address, email, URI) are submitted to CERTInext in additionalDomains along with the DNS names. CERTInext registers them verbatim as order domains and they cannot pass domain validation, so such an order will not issue until they are removed — but nothing the subscriber requested is dropped silently. Set to false to submit DNS names only, which restores the pre-1.0.1 behaviour: the order issues, but the certificate will not contain the non-DNS names. Default: true."
                 },
                 {
                     "name": "PageSize",
@@ -140,6 +144,18 @@
                 {
                     "name": "Enabled",
                     "description": "Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true."
+                },
+                {
+                    "name": "LogSensitiveRequestData",
+                    "description": "OPTIONAL diagnostic escape hatch. When true, enabling it writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. Meant for temporary use while verifying a new deployment — confirming exactly what was sent to the CA and that the order succeeded — and should be turned back off once verification is complete. When false (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. 'j***@example.com') and the enrollment log line omits the requester name entirely. Email SAN values (rfc822Name) in log lines are masked the same way; DNS, IP and URI SANs are always logged in full. Credentials (access keys, authKey digests, OAuth secrets, tokens) are always redacted regardless of this setting. Default: false."
+                },
+                {
+                    "name": "PickupRetries",
+                    "description": "OPTIONAL: Number of times Enroll() will poll CERTInext to download the certificate after a successful order submission. If the certificate has not issued within this window it is picked up during the next synchronization instead. Set to 0 to disable the wait. Default: 5. NOTE: CERTInext issues OV/EV certificates asynchronously (organization verification, minutes to hours), so those typically exhaust the wait and are returned pending regardless of this value."
+                },
+                {
+                    "name": "PickupDelay",
+                    "description": "OPTIONAL: Number of seconds between certificate-pickup retries. PickupRetries times this delay (plus a short initial delay) is the maximum time an enrollment call occupies a Command worker thread. If the duration is too long the request may time out, so target a total well under ~90s. As a safety backstop the plugin additionally caps the effective total at 180s regardless of how PickupRetries/PickupDelay are set, reducing the retry count to fit. Default: 10 (with default retries this yields a ~55s ceiling)."
                 },
                 {
                     "name": "DcvEnabled",
@@ -193,7 +209,7 @@
                 },
                 {
                     "name": "AutoApprove",
-                    "description": "OPTIONAL: If true, the gateway will attempt automatic approval of certificates that are returned in a pending-approval state. Default: false."
+                    "description": "Currently has no effect — reserved for future use. The plugin does not call any approval endpoint against CERTInext regardless of this setting."
                 },
                 {
                     "name": "RequesterName",

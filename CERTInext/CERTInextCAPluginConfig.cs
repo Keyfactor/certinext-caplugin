@@ -29,8 +29,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "REQUIRED: CERTInext API base URL. " +
                                "Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ — " +
-                               "Production (US): https://us-api.certinext.io/ — " +
-                               "Production (Global/India): https://api.certinext.io/",
+                               "Production (US): https://us-api.certinext.io/emSignHub-API/ — " +
+                               "Production (Global/India): https://api.certinext.io/emSignHub-API/",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -47,9 +47,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "OPTIONAL: CERTInext group (delegation) number. " +
                                "When set, it is included in GetProductDetails requests AND in the " +
-                               "`delegationInformation.groupNumber` field of every SSL order so the order " +
-                               "is routed to the correct account group. Some accounts will queue orders for " +
-                               "additional review when this field is omitted. " +
+                               "`orderDetails.groupNumber` field of every SSL order (new and renewal) so the " +
+                               "order is routed to the configured account group. " +
+                               "When blank, CERTInext uses the account's default group. " +
                                "Available in the CERTInext portal under Delegation → Groups.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -57,14 +57,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.OrganizationNumber] = new PropertyConfigInfo
                 {
-                    Comments = "STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric " +
-                               "CERTInext organization number for a pre-vetted organization (e.g. " +
-                               "your company's pre-vetted entry). When set, every SSL order is submitted " +
-                               "with `organizationDetails.preVetting=\"1\"` and the configured " +
-                               "`organizationNumber`, telling CERTInext to skip the manual " +
-                               "organization-vetting queue. Without this value, orders are placed without " +
-                               "any organizationDetails block and CERTInext may park them in " +
-                               "`Pending System RA` for extended manual review (observed: tens of hours). " +
+                    Comments = "OPTIONAL, strongly recommended for OV/EV: numeric CERTInext organization " +
+                               "number for a pre-vetted organization. When set, every SSL order is submitted " +
+                               "with `organizationDetails.preVetting=\"1\"` and this `organizationNumber`, so " +
+                               "CERTInext can reuse that organization's pre-verified domains without fresh DCV. " +
+                               "Leave blank to omit `organizationDetails`. " +
                                "Available in the CERTInext portal under Organizations → " +
                                "Pre-vetted Organizations.",
                     Hidden = false,
@@ -73,17 +70,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.TechnicalContactName] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every " +
-                               "SSL order. Defaults to the configured RequestorName when blank. " +
-                               "Some product configurations require a TPoC to be present; omitting it can " +
-                               "cause CERTInext to park orders awaiting manual completion of the field.",
+                    Comments = "OPTIONAL: Technical point of contact name, sent as " +
+                               "`technicalPointOfContact.pocFirstName` / `pocLastName` on every SSL order " +
+                               "(new and renewal). The name is split on the first whitespace: the first word " +
+                               "is the first name and the rest is the last name; a single-word name is sent " +
+                               "in both. Defaults to the configured RequestorName when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.TechnicalContactEmail] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every " +
+                    Comments = "OPTIONAL: Email sent in the `technicalPointOfContact.pocEmail` field of every " +
                                "SSL order. Defaults to the configured RequestorEmail when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -91,7 +89,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.TechnicalContactIsdCode] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: International dialing code for the TPoC phone number. " +
+                    Comments = "OPTIONAL: International dialing code for the technical contact phone number, " +
+                               "sent as `technicalPointOfContact.pocIsdCode`. " +
                                "Defaults to the configured RequestorIsdCode when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -99,7 +98,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.TechnicalContactMobileNumber] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Mobile number for the TPoC (digits only). " +
+                    Comments = "OPTIONAL: Mobile number for the technical contact (digits only), sent as " +
+                               "`technicalPointOfContact.pocMobileNumber`. " +
                                "Defaults to the configured RequestorMobileNumber when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -242,9 +242,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.AutoSecureWww] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the " +
-                               "primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied " +
-                               "with the CSR. Default: \"0\".",
+                    Comments = "OPTIONAL: Sent as `orderDetails.autoSecureWWW` on every SSL order (new and " +
+                               "renewal). If \"1\", CERTInext automatically adds the `www.` variant of the " +
+                               "primary domain as an additional SAN, which must also pass domain validation. " +
+                               "\"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\".",
                     Hidden = false,
                     DefaultValue = "0",
                     Type = "String"
@@ -254,6 +255,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Comments = "If true, expired certificates will be skipped during synchronization. Default: false.",
                     Hidden = false,
                     DefaultValue = false,
+                    Type = "Boolean"
+                },
+                [Constants.Config.SubmitNonDnsSans] = new PropertyConfigInfo
+                {
+                    Comments = "If true (default), SANs that are not DNS names (IP address, email, URI) are " +
+                               "submitted to CERTInext in additionalDomains along with the DNS names. CERTInext " +
+                               "registers them verbatim as order domains and they cannot pass domain validation, " +
+                               "so such an order will not issue until they are removed — but nothing the " +
+                               "subscriber requested is dropped silently. Set to false to submit DNS names only, " +
+                               "which restores the pre-1.0.1 behaviour: the order issues, but the certificate " +
+                               "will not contain the non-DNS names. Default: true.",
+                    Hidden = false,
+                    DefaultValue = true,
                     Type = "Boolean"
                 },
                 [Constants.Config.PageSize] = new PropertyConfigInfo
@@ -271,6 +285,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = true,
                     Type = "Boolean"
+                },
+                [Constants.Config.LogSensitiveRequestData] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL diagnostic escape hatch. When true, requestor personal data (name, email, " +
+                               "phone, and other organization contact details) and full CA request/response payloads " +
+                               "are written to the gateway logs: the Trace-level order request/response bodies and the " +
+                               "API-failure response bodies are left unredacted (beyond the credential scrubbing that " +
+                               "always applies), and the Information-level enrollment-attempt log line includes the " +
+                               "requestor's name and email in full. This is meant for temporary use while verifying a " +
+                               "new deployment — confirming exactly what was sent to the CA and that the order " +
+                               "succeeded — and should be turned back off once verification is complete. When false " +
+                               "(default), personal data fields are redacted to '***REDACTED***' (email is masked but " +
+                               "keeps its domain, e.g. 'j***@example.com'), email SAN values in log lines are masked " +
+                               "the same way, and the enrollment log line omits the requester name entirely. " +
+                               "Credentials (access keys, authKey digests, OAuth secrets, tokens) are always redacted " +
+                               "regardless of this setting. Default: false.",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
+                },
+                [Constants.Config.PickupRetries] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Number of times Enroll() will poll CERTInext to download the certificate after a " +
+                               "successful order submission. If the certificate has not issued within this window it is " +
+                               "picked up during the next synchronization instead. Set to 0 to disable the wait. " +
+                               $"Default: {Constants.Pickup.DefaultRetries}. NOTE: CERTInext issues OV/EV certificates " +
+                               "asynchronously (organization verification, minutes to hours), so those typically exhaust " +
+                               "the wait and are returned pending regardless of this value.",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultRetries,
+                    Type = "Number"
+                },
+                [Constants.Config.PickupDelay] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Number of seconds between certificate-pickup retries. PickupRetries times this " +
+                               "delay (plus a short initial delay) is the maximum time an enrollment call occupies a Command " +
+                               "worker thread. If the duration is too long the request may time out, so target a total well " +
+                               $"under ~90s. As a safety backstop the plugin additionally caps the effective total at " +
+                               $"{Constants.Pickup.MaxTotalWaitSeconds}s regardless of how PickupRetries/PickupDelay are set, " +
+                               $"reducing the retry count to fit. Default: {Constants.Pickup.DefaultDelaySeconds} " +
+                               $"(with default retries this yields a ~{Constants.Pickup.InitialDelaySeconds + Constants.Pickup.DefaultRetries * Constants.Pickup.DefaultDelaySeconds}s ceiling).",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultDelaySeconds,
+                    Type = "Number"
                 },
                 [Constants.Config.DcvEnabled] = new PropertyConfigInfo
                 {
@@ -406,8 +464,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.AutoApprove] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: If true, the gateway will attempt automatic approval of certificates " +
-                               "that are returned in a pending-approval state. Default: false.",
+                    Comments = "Currently has no effect — reserved for future use. The plugin does not call " +
+                               "any approval endpoint against CERTInext regardless of this setting.",
                     Hidden = false,
                     DefaultValue = false,
                     Type = "Boolean"
@@ -507,23 +565,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Optional CERTInext group (delegation) number.  When set, it is passed in
         /// the <c>productDetails.groupNumber</c> field of <c>GetProductDetails</c>
-        /// requests AND in the <c>delegationInformation.groupNumber</c> field of every
-        /// SSL order body so the order is routed to the correct account group.  Some
-        /// accounts queue orders for extra review when this field is omitted.
+        /// requests AND in the <c>orderDetails.groupNumber</c> field of every SSL order
+        /// (new and renewal). When blank, CERTInext uses the account's default group.
         /// </summary>
         [JsonPropertyName("GroupNumber")]
         public string GroupNumber { get; set; } = string.Empty;
 
         /// <summary>
-        /// CERTInext organization number for a pre-vetted organization (e.g. the customer's
-        /// company).  When set, every SSL order is submitted with
-        /// <c>organizationDetails.preVetting="1"</c> and the configured
-        /// <c>organizationNumber</c>, telling CERTInext to skip the manual organization
-        /// vetting queue.  Strongly recommended for OV/EV products; significantly speeds
-        /// up DV issuance because CERTInext otherwise parks orders in <c>Pending System RA</c>
-        /// for extended manual review (observed tens of hours on the sandbox).
-        /// Empty by default — the plugin omits the <c>organizationDetails</c> block when
-        /// this is unset, preserving prior behavior.
+        /// CERTInext organization number for a pre-vetted organization. When set, every SSL
+        /// order is submitted with <c>organizationDetails.preVetting="1"</c> and this
+        /// <c>organizationNumber</c>. Per CERTInext's spec, this lets the order reuse the
+        /// organization's pre-verified domains without fresh DCV. Empty by default; the
+        /// <c>organizationDetails</c> block is omitted when unset, preserving prior behavior.
         /// </summary>
         [JsonPropertyName("OrganizationNumber")]
         public string OrganizationNumber { get; set; } = string.Empty;
@@ -666,11 +719,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("IgnoreExpired")]
         public bool IgnoreExpired { get; set; } = false;
 
+        /// <summary>
+        /// Whether non-DNS SANs (IP address, email, URI) are submitted to CERTInext.
+        ///
+        /// Defaults to <c>true</c>: nothing the subscriber requested is dropped silently. CERTInext
+        /// registers such values verbatim as order domains, and they cannot pass domain validation,
+        /// so the order will not issue until they are removed — a visible failure, deliberately
+        /// preferred over a certificate quietly missing requested names.
+        ///
+        /// Set to <c>false</c> to submit DNS names only, restoring the pre-1.0.1 behaviour where the
+        /// order issues but the non-DNS names are absent from the certificate. This exists as an
+        /// upgrade escape hatch: on a host that was issuing certificates for requests carrying an IP
+        /// or email SAN, the default flips those enrollments from "issues (incomplete)" to "parks
+        /// pending", and an operator needs a way back that does not involve downgrading the plugin.
+        /// </summary>
+        [JsonPropertyName("SubmitNonDnsSans")]
+        public bool SubmitNonDnsSans { get; set; } = true;
+
         [JsonPropertyName("PageSize")]
         public int PageSize { get; set; } = Constants.Api.DefaultPageSize;
 
         [JsonPropertyName("Enabled")]
         public bool Enabled { get; set; } = true;
+
+        /// <summary>
+        /// OPTIONAL diagnostic escape hatch. When true, full CA request/response payloads are
+        /// logged at Trace (beyond the credential scrubbing that always applies), and the
+        /// enrollment-attempt Information log line includes the requestor's name and email in
+        /// full. This writes personal data belonging to whoever placed the order — name, email,
+        /// phone, and other organization contact fields — into the gateway's log files. Intended
+        /// only for temporary use while verifying a new deployment; turn it back off once
+        /// verification is complete. When false (default), personal-data fields are replaced with
+        /// "***REDACTED***" (email values are masked but keep their domain, e.g.
+        /// "j***@example.com"), email SAN values in log lines are masked the same way, and the
+        /// enrollment log line omits the requester name entirely. Credentials (access keys,
+        /// authKey digests, OAuth secrets, tokens) are always redacted regardless of this setting.
+        /// Default: false.
+        /// </summary>
+        [JsonPropertyName("LogSensitiveRequestData")]
+        public bool LogSensitiveRequestData { get; set; } = false;
 
         // -----------------------------------------------------------------------
         // DCV — domain control validation via DNS provider plugins
@@ -690,6 +777,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         [JsonPropertyName("DcvTxtRecordTemplate")]
         public string DcvTxtRecordTemplate { get; set; } = Constants.Dcv.DefaultTxtRecordTemplate;
+
+        /// <summary>
+        /// Number of GetCertificate poll attempts inside <c>Enroll()</c> after an order is
+        /// submitted, before falling back to a pending result (picked up by the next sync).
+        /// Mirrors the legacy Sectigo connector's <c>PickupRetries</c>. Set to 0 to disable.
+        /// Default: 5.
+        /// </summary>
+        [JsonPropertyName("PickupRetries")]
+        public int PickupRetries { get; set; } = Constants.Pickup.DefaultRetries;
+
+        /// <summary>
+        /// Seconds between certificate-pickup retries. <c>PickupRetries * PickupDelay</c> (plus a
+        /// short initial delay) bounds the time an enrollment call occupies a Command worker
+        /// thread. Mirrors the legacy Sectigo connector's <c>PickupDelay</c>. Default: 10.
+        /// </summary>
+        [JsonPropertyName("PickupDelay")]
+        public int PickupDelayInSeconds { get; set; } = Constants.Pickup.DefaultDelaySeconds;
 
         /// <summary>
         /// Seconds to wait after publishing the DNS TXT record before calling VerifyDcv.
@@ -782,5 +886,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return envVal;
             return DcvWaitForIssuanceSeconds >= 0 ? DcvWaitForIssuanceSeconds : 60;
         }
+
+        /// <summary>
+        /// Effective number of certificate-pickup retries, clamped to
+        /// [0, <see cref="Constants.Pickup.MaxRetries"/>]. 0 disables the synchronous pickup.
+        /// </summary>
+        public int GetEffectivePickupRetries()
+            => System.Math.Max(0, System.Math.Min(PickupRetries, Constants.Pickup.MaxRetries));
+
+        /// <summary>
+        /// Effective seconds between pickup retries, clamped to
+        /// [1, <see cref="Constants.Pickup.MaxDelaySeconds"/>]. A non-positive configured value
+        /// falls back to the default rather than producing a tight busy-loop.
+        /// </summary>
+        public int GetEffectivePickupDelaySeconds()
+            => System.Math.Max(1, System.Math.Min(
+                PickupDelayInSeconds > 0 ? PickupDelayInSeconds : Constants.Pickup.DefaultDelaySeconds,
+                Constants.Pickup.MaxDelaySeconds));
     }
 }
