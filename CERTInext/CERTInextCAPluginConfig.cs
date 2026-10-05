@@ -351,9 +351,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Comments = "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) " +
                                "during enrollment for orders that require it, using the configured DNS provider plugin. " +
                                "Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. " +
-                               "Default: false.",
+                               "Default: true.",
                     Hidden = false,
-                    DefaultValue = false,
+                    DefaultValue = true,
                     Type = "Boolean"
                 },
                 [Constants.Config.DcvTxtRecordTemplate] = new PropertyConfigInfo
@@ -857,10 +857,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// When true, the plugin will run DNS DCV for orders that require it during enrollment.
         /// Requires <c>IDomainValidatorFactory</c> to be injected by the gateway (available from
-        /// <c>IAnyCAPlugin 3.3.0-prerelease</c>). Default: false.
+        /// <c>IAnyCAPlugin 3.3.0</c>). Default: true.
         /// </summary>
         [JsonPropertyName("DcvEnabled")]
-        public bool DcvEnabled { get; set; } = false;
+        public bool DcvEnabled { get; set; } = true;
 
         /// <summary>
         /// Format string for the TXT record hostname.  <c>{0}</c> is replaced with the domain.
