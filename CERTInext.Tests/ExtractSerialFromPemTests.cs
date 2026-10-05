@@ -127,5 +127,65 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             InvokeExtractSerialFromPem("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----")
                 .Should().Be("(empty-pem)");
         }
+
+        /// <summary>
+        /// Functional coverage for the minimal chain-PEM shape (acceptance criterion: "leaf +
+        /// intermediate chain PEM -> the leaf's serial"), built the same way V2 enroll/sync
+        /// assemble it (<c>AssembleV2CertChain</c>: leaf PEM, then each intermediate PEM
+        /// appended after a newline, each block keeping its own BEGIN/END markers and base64
+        /// padding). Whether this specific 2-block combination reproduces the pre-fix
+        /// "(parse-error)" bug depends on the leaf's DER byte length modulo 3 (whether its
+        /// base64 body needs '=' padding) — see
+        /// <see cref="ExtractSerialFromPem_LeafPlusTwoIntermediatesChainPem_ReturnsLeafSerial"/>
+        /// for the deterministic reproduction of issue 0050 (matches the live gateway log's
+        /// ChainPemCount=2 evidence). Both must return the leaf's serial, never the
+        /// intermediate's.
+        /// </summary>
+        [Fact]
+        public void ExtractSerialFromPem_LeafPlusIntermediateChainPem_ReturnsLeafSerial()
+        {
+            var leafSerial = new BigInteger("7994334872", 10);
+            var intermediateSerial = new BigInteger("00E0353B0E133906D77D5137E5E5D6A1", 16);
+
+            string leafPem = GeneratePemWithSerial(leafSerial);
+            string intermediatePem = GeneratePemWithSerial(intermediateSerial);
+
+            // Mirrors CERTInextCAPlugin.AssembleV2CertChain: leaf.TrimEnd() + "\n" + intermediate.TrimEnd().
+            string chainPem = leafPem.TrimEnd() + "\n" + intermediatePem.TrimEnd();
+
+            string result = InvokeExtractSerialFromPem(chainPem);
+
+            result.Should().Be(Convert.ToHexString(leafSerial.ToByteArrayUnsigned()).ToUpperInvariant(),
+                "the audit log must report the leaf certificate's serial, matching what Command records");
+            result.Should().NotBe(Convert.ToHexString(intermediateSerial.ToByteArrayUnsigned()).ToUpperInvariant(),
+                "the intermediate's serial must never be mistaken for the leaf's");
+        }
+
+        /// <summary>
+        /// Regression for issue 0050: leaf + two intermediates (three PEM blocks total),
+        /// matching the live gateway log evidence (ChainPemCount=2, both V2 reissue
+        /// enrollments logged "SerialNumber=(parse-error)"). Deterministically reproduces
+        /// the pre-fix bug — verified by reverting <c>ExtractSerialFromPem</c> to its
+        /// pre-fix body and confirming this test fails with "(parse-error)" while the other
+        /// tests in this class still pass, across repeated runs (ruling out flakiness from
+        /// the fresh RSA key generated per run).
+        /// </summary>
+        [Fact]
+        public void ExtractSerialFromPem_LeafPlusTwoIntermediatesChainPem_ReturnsLeafSerial()
+        {
+            var leafSerial = new BigInteger("9817499991", 10);
+            var intermediateSerial1 = new BigInteger("00FEABDFF1B29657D9AF75ABC6CDCAAE", 16);
+            var intermediateSerial2 = new BigInteger("DEADBEEF", 16);
+
+            string leafPem = GeneratePemWithSerial(leafSerial);
+            string intermediatePem1 = GeneratePemWithSerial(intermediateSerial1);
+            string intermediatePem2 = GeneratePemWithSerial(intermediateSerial2);
+
+            string chainPem = leafPem.TrimEnd() + "\n" + intermediatePem1.TrimEnd() + "\n" + intermediatePem2.TrimEnd();
+
+            string result = InvokeExtractSerialFromPem(chainPem);
+
+            result.Should().Be(Convert.ToHexString(leafSerial.ToByteArrayUnsigned()).ToUpperInvariant());
+        }
     }
 }
