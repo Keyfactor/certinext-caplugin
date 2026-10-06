@@ -134,8 +134,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Internal test-injection constructor — pass a mock <see cref="ICERTInextClient"/>
         /// and a specific <see cref="CERTInextConfig"/> for tests that need to override
         /// configuration fields such as <c>IgnoreExpired</c>. <paramref name="certDataReader"/>
-        /// is optional (defaults to <c>null</c>) and lets V2 tests exercise the issue-0049
-        /// bodyless-REVOKED guard, which consults <see cref="ICertificateDataReader"/>.
+        /// is optional (defaults to <c>null</c>) and lets tests exercise the bodyless-REVOKED
+        /// guard, which consults <see cref="ICertificateDataReader"/>.
         /// </summary>
         internal CERTInextCAPlugin(ICERTInextClient client, CERTInextConfig config, ICertificateDataReader certDataReader = null)
         {
@@ -331,7 +331,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "this warning.");
             }
 
-            // Issue 0040 audit trail: this is the one place that records sensitive-data logging
+            // Audit trail: this is the one place that records sensitive-data logging
             // was switched on, so a reviewer scanning gateway logs can see exactly when it started
             // (and, from the absence of a corresponding line on a later restart, when it stopped).
             if (_config.LogSensitiveRequestData)
@@ -455,7 +455,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var errors = new List<string>();
 
             // ApiUrl is always required in both modes — its meaning follows UseV2Api (V1 base
-            // URL incl. /emSignHub-API vs the bare V2 host). See issues/0022 config consolidation.
+            // URL incl. /emSignHub-API vs the bare V2 host).
             string apiUrl = GetStringValue(connectionInfo, Constants.Config.ApiUrl);
             if (string.IsNullOrWhiteSpace(apiUrl))
                 errors.Add($"'{Constants.Config.ApiUrl}' is required.");
@@ -479,7 +479,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // V2 mode: OAuth2 client_credentials against {ApiUrl}/oauth/token, reusing the
                 // same OAuthClientId/OAuthClientSecret fields V1's AuthMode=OAuth uses. V1-only
                 // credentials (AccountNumber, AuthMode, ApiKey, ...) are NOT required here — the
-                // V1 AuthMode switch below is skipped entirely (issues/0022).
+                // V1 AuthMode switch below is skipped entirely.
                 string oauthClientId = GetStringValue(connectionInfo, Constants.Config.OAuthClientId);
                 string oauthClientSecret = GetStringValue(connectionInfo, Constants.Config.OAuthClientSecret);
 
@@ -489,8 +489,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 if (string.IsNullOrWhiteSpace(oauthClientSecret))
                     errors.Add($"'{Constants.Config.OAuthClientSecret}' is required when UseV2Api is true.");
 
-                // Issue 0039: every V2 SSL create order sends an `agreement` block, and the V2 spec
-                // marks agreement.signerPlace "Conditional - required if `agreement` sent". Required
+                // Every V2 SSL create order sends an `agreement` block, and the V2 spec marks
+                // agreement.signerPlace "Conditional - required if `agreement` sent". Required
                 // at the connector level (user decision) even though a per-template SignerPlace
                 // enrollment parameter can override it — EnrollV2Async also fails fast if the
                 // resolved value is blank.
@@ -639,9 +639,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             bool isPrivatePki = useV2
                 && string.Equals(params_.ProductFamilySlug, Constants.ApiV2.FamilyPrivatePki, StringComparison.Ordinal);
-            // Issue 0059: gate the SSL-only ProductVariant cross-check below on the SSL family
-            // specifically (not just "!isPrivatePki") so a signature (Document Signer) template —
-            // which has no productVariant concept — is left unaffected, same as before this fix.
+            // Gate the SSL-only ProductVariant cross-check below on the SSL family specifically
+            // (not just "!isPrivatePki") so a signature (Document Signer) template — which has
+            // no productVariant concept — is left unaffected.
             bool isSsl = useV2
                 && string.Equals(params_.ProductFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.Ordinal);
 
@@ -649,7 +649,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             try
             {
-                // Issue 0033: a V2 private-pki template needs a Private PKI ProductVariant and an
+                // A V2 private-pki template needs a Private PKI ProductVariant and an
                 // explicit ProductCode — checked before any catalog call, with the same rules
                 // EnrollV2Async enforces, so a template that can never enroll is rejected at save
                 // time. Inside the try so the finally block's credential scrubbing still runs.
@@ -665,7 +665,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                 }
 
-                // Issue 0059: an SSL template's explicit ProductVariant must agree with the
+                // An SSL template's explicit ProductVariant must agree with the
                 // product it's paired with — checked before any catalog call, same fail-fast
                 // placement as the private-pki check above, so a template that would silently
                 // send a DV-shaped body for an OV/EV product (or vice versa) is rejected at save
@@ -682,9 +682,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                 }
 
-                // V2 catalog validation mirrors ValidateCAConnectionInfo's UseV2Api branch
-                // (issues/0025): GetProfilesAsync/GetProductDetailsAsync are V1-only and 404
-                // against a V2-shaped ApiUrl. There is no soft-accept difference between modes
+                // V2 catalog validation mirrors ValidateCAConnectionInfo's UseV2Api branch:
+                // GetProfilesAsync/GetProductDetailsAsync are V1-only and 404 against a
+                // V2-shaped ApiUrl. There is no soft-accept difference between modes
                 // — an empty/unusable catalog is treated as "not found", same as V1.
                 List<string> availableIds;
                 bool found;
@@ -696,7 +696,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                     if (isPrivatePki)
                     {
-                        // Issue 0033: the SSL ProductId -> productTypeID cross-check below would
+                        // The SSL ProductId -> productTypeID cross-check below would
                         // always reject a Private PKI code (GetProductIds only advertises SSL/TLS
                         // product names). Check the code against the spec's Private PKI
                         // productTypeID instead ("39" | Private PKI | Private PKI (8)).
@@ -734,9 +734,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     {
                         // Explicit override: the code must exist in the catalog AND the matched
                         // catalog entry's productTypeID must actually correspond to the selected
-                        // ProductId — not just "does this code exist as *some* product" (issue
-                        // 0036: a code can exist and still mean a different, wrong-assurance-level
-                        // product than the one the administrator selected).
+                        // ProductId — not just "does this code exist as *some* product". A code
+                        // can exist and still mean a different, wrong-assurance-level product than
+                        // the one the administrator selected.
                         var matchedProduct = products.FirstOrDefault(p =>
                             string.Equals(p.ProductCode, profileId, StringComparison.OrdinalIgnoreCase));
 
@@ -775,7 +775,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // No explicit override: resolve/validate by matching the live catalog's
                         // productTypeID for the selected ProductId — do NOT fall back to
                         // Constants.Products.DefaultProductCodes (V1-era numbering that does not
-                        // match the live V2 catalog, issue 0036).
+                        // match the live V2 catalog).
                         if (!Constants.Products.ProductTypeIdsV2.TryGetValue(params_.ProductId ?? string.Empty, out string expectedTypeId))
                         {
                             _logger.LogWarning(
@@ -790,7 +790,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // Mirrors EnrollV2Async's own ambiguity handling (so a template is
                         // rejected/flagged at save time, not only discovered at enroll time):
                         // the live catalog can carry MORE THAN ONE entry with this productTypeID
-                        // (sandbox-confirmed for type 13/DV SSL). Resolve automatically only when
+                        // (e.g. type 13/DV SSL on the sandbox). Resolve automatically only when
                         // exactly one match exists, or when the connector's DefaultProductCode
                         // names one of several matches; otherwise reject with the candidates
                         // listed.
@@ -913,15 +913,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // SOX / SOC2 CC7.3: log the enrollment attempt with full identifying context
             // so the event is independently auditable before any API call is made.
-            // Issue 0040 follow-up: email-type SAN values are personal data, masked unless
-            // LogSensitiveRequestData is on; DNS/IP/URI values stay verbatim as audit fields.
+            // Email-type SAN values are personal data, masked unless LogSensitiveRequestData
+            // is on; DNS/IP/URI values stay verbatim as audit fields.
             string sanSummary = LogSanitizer.FormatSans(san, _config.LogSensitiveRequestData);
 
-            // Issue 0040: RequesterName/RequesterEmail are personal data belonging to whoever
-            // placed the order. Off by default (LogSensitiveRequestData=false) — the name is
-            // dropped from the line entirely and the email is masked to keep only its domain.
-            // On, this is the pre-0040 behaviour: both fields logged in full, for deployment
-            // verification.
+            // RequesterName/RequesterEmail are personal data belonging to whoever placed the
+            // order. Off by default (LogSensitiveRequestData=false) — the name is dropped from
+            // the line entirely and the email is masked to keep only its domain. On, both fields
+            // are logged in full, for deployment verification.
             if (_config.LogSensitiveRequestData)
             {
                 _logger.LogInformation(
@@ -1156,7 +1155,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             if (_config.UseV2Api)
             {
-                // V2 mode routes Synchronize through V2 /reports/orders (issues/0022) — the V1
+                // V2 mode routes Synchronize through V2 /reports/orders — the V1
                 // GetOrderReport path below is never used, and V1 credentials are optional.
                 await SynchronizeV2Async(blockingBuffer, lastSync, fullSync, cancelToken);
                 _logger.MethodExit(LogLevel.Debug);
@@ -1437,12 +1436,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // Private helpers
         // ---------------------------------------------------------------------------
 
-        /// <summary>The DCV-during-sync gate outcome for a single pending order (issue 0002).</summary>
+        /// <summary>The DCV-during-sync gate outcome for a single pending order.</summary>
         internal enum DcvSyncDecision { Attempt, SkipByAge, SkipByCap }
 
         /// <summary>
         /// Decides whether to attempt DCV completion for a pending order during a sync pass,
-        /// bounding the work so a large pending backlog can't make sync slow (issue 0002).
+        /// bounding the work so a large pending backlog can't make sync slow.
         /// Pure/stateless so it is unit-testable without the DCV machinery.
         ///
         /// Rules (checked in order):
@@ -1480,8 +1479,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <c>IsdCode</c>/<c>MobileNumber</c> pair. Returns an empty string when
         /// <paramref name="mobileNumber"/> is blank (nothing to compose); returns the bare
         /// mobile number when <paramref name="isdCode"/> is blank (never invents a code).
-        /// Internal + static for direct unit testing (no live precedent existed for this exact
-        /// composition to mirror — see issues/0030-v2-technical-contact-not-sent.md).
+        /// Internal + static for direct unit testing.
         /// </summary>
         internal static string ComposeV2Phone(string isdCode, string mobileNumber)
         {
@@ -1494,7 +1492,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Issue 0033: validates the template parameters a V2 <c>private-pki</c> order needs
+        /// Validates the template parameters a V2 <c>private-pki</c> order needs
         /// beyond the SSL ones, before any CA call. Shared by <see cref="EnrollV2Async"/> (fail
         /// fast with a FAILED result) and <see cref="ValidateProductInfo"/> (reject at template
         /// save time). Returns <c>null</c> when valid, else an actionable message naming the field.
@@ -1533,13 +1531,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Issue 0059: resolves the SSL family's <c>productVariant</c> value to send, and
-        /// validates an explicit template override against the product it's paired with.
-        /// Previously, <see cref="EnrollmentParams.ProductVariant"/> defaulted to "dv" independent
-        /// of <see cref="EnrollmentParams.ProductId"/>, so an OV/EV product with no explicit
-        /// ProductVariant sent <c>productVariant:"dv"</c> — which skips the mandatory OV/EV
-        /// <c>organization</c> block (see <c>isOvOrEv</c> in <see cref="EnrollV2Async"/> and issue
-        /// 0028) — silently ordering a DV-shaped body for an OV/EV product.
+        /// Resolves the SSL family's <c>productVariant</c> value to send, and validates an
+        /// explicit template override against the product it's paired with.
+        /// <see cref="EnrollmentParams.ProductVariant"/> must not simply default to "dv"
+        /// independent of <see cref="EnrollmentParams.ProductId"/>: an OV/EV product with no
+        /// explicit ProductVariant sending <c>productVariant:"dv"</c> would skip the mandatory
+        /// OV/EV <c>organization</c> block (see <c>isOvOrEv</c> in <see cref="EnrollV2Async"/>)
+        /// and silently order a DV-shaped body for an OV/EV product.
         ///
         /// Derivation source: <see cref="Constants.Products.ProductVariantsV2"/>, keyed by
         /// ProductId (the same productTypeID assurance-level grouping
@@ -1549,9 +1547,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///
         /// Returns <c>null</c> and sets <paramref name="resolvedVariant"/> when valid: either the
         /// template's explicit value (when it agrees with the derived variant, or no mapping
-        /// exists for this ProductId — current pre-0059 behavior is kept rather than guessing), or
-        /// the value derived from ProductId when no explicit override is configured. Returns an
-        /// actionable error message (<paramref name="resolvedVariant"/> = <c>null</c>) when an
+        /// exists for this ProductId, in which case the explicit value is kept rather than
+        /// guessing), or the value derived from ProductId when no explicit override is
+        /// configured. Returns an actionable error message
+        /// (<paramref name="resolvedVariant"/> = <c>null</c>) when an
         /// explicit override contradicts the product's derived variant.
         /// </summary>
         internal static string ResolveSslProductVariant(EnrollmentParams ep, out string resolvedVariant)
@@ -1561,8 +1560,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             if (!ep.HasExplicitProductVariant)
             {
-                // No override configured — derive from the product when we have an authoritative
-                // mapping; otherwise fall back to the current (pre-0059) default rather than
+                // No override configured — derive from the product when an authoritative
+                // mapping exists; otherwise fall back to the configured default rather than
                 // inventing a mapping for a product this table doesn't cover.
                 resolvedVariant = hasMapping ? derivedVariant : ep.ProductVariant;
                 return null;
@@ -1601,18 +1600,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 enrollmentType, ep.ProductFamilySlug, ep.ProductVariant, ep.ProductId, ep.HasExplicitProductCode,
                 ep.HasExplicitProductCode ? ep.ProductCode : "(resolved from catalog)");
 
-            // Issue 0033: the create-order body is family-specific. Previously every family got
-            // the SSL body (productVariant/certificate/agreement...), which is not the Private PKI
-            // or Document Signer shape at all. ssl (and any unrecognized ProductFamily, which
-            // ProductFamilySlug already maps to ssl) keeps the exact pre-0033 flow below.
+            // The create-order body is family-specific: Private PKI and Document Signer each need
+            // their own shape, not the SSL body (productVariant/certificate/agreement...). ssl
+            // (and any unrecognized ProductFamily, which ProductFamilySlug already maps to ssl)
+            // uses the SSL flow below.
             bool isPrivatePki = string.Equals(ep.ProductFamilySlug, Constants.ApiV2.FamilyPrivatePki, StringComparison.Ordinal);
 
             // Document Signer (signature): the body DTO exists (V2CreateSignatureOrderRequest),
             // but its mandatory subjectType / subject.email and the per-subject-type subject
-            // name/organization fields have no settled source in the Command enrollment inputs
-            // yet — an open design decision on issue 0033. Fail fast with a clear message, before
-            // any CA call, rather than guessing those values or sending the wrong-family SSL body
-            // (which the CA rejects anyway: subjectType and subject.email are "400 if missing").
+            // name/organization fields have no settled source in the Command enrollment inputs.
+            // Fail fast with a clear message, before any CA call, rather than guessing those
+            // values or sending the wrong-family SSL body (which the CA rejects anyway:
+            // subjectType and subject.email are "400 if missing").
             if (string.Equals(ep.ProductFamilySlug, Constants.ApiV2.FamilySignature, StringComparison.Ordinal))
             {
                 _logger.LogWarning(
@@ -1653,7 +1652,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
             }
 
-            // Issue 0059: the SSL family's productVariant must reflect the actual product ordered
+            // The SSL family's productVariant must reflect the actual product ordered
             // — not the template's independent (and possibly wrong/stale) ProductVariant value.
             // Resolve/validate before any CA call, same fail-fast placement as the private-pki
             // check above. Private PKI (checked above) doesn't use this — its variant enum is
@@ -1677,7 +1676,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
             }
 
-            // Issue 0039: the SSL create body always carries an `agreement` block, and the V2 spec
+            // The SSL create body always carries an `agreement` block, and the V2 spec
             // marks agreement.signerPlace "Conditional - required if `agreement` sent". Resolved
             // per-template SignerPlace -> connector SignerPlace (which ValidateCAConnectionInfo
             // already requires); fail fast here too, before any CA call, in case the connector was
@@ -1716,12 +1715,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // organization is "Conditional — Mandatory for OV / EV" per the V2 spec's SSL field
             // table; every OV/EV create example in the spec sends it, and it is omitted entirely
             // for DV. CERTInext hard-rejects an OV/EV order with no organization block (HTTP 422
-            // EMS-1180 "Organization Name cannot be empty" — confirmed live), so fail fast with a
+            // EMS-1180 "Organization Name cannot be empty"), so fail fast with a
             // clear message here — before any catalog/order-placement call — rather than
-            // sending an incomplete block and letting the CA surface that opaque error. See
-            // issues/0028-v2-organizationnumber-not-sent.md.
+            // sending an incomplete block and letting the CA surface that opaque error.
             // SSL-only: Private PKI "has no DCV, no organization block, and no Subscriber
-            // Agreement" per the spec (issue 0033), and its ProductVariant is intranet-ssl/igtf-host.
+            // Agreement" per the spec, and its ProductVariant is intranet-ssl/igtf-host.
             bool isOvOrEv = !isPrivatePki
                          && (string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantOv, StringComparison.OrdinalIgnoreCase)
                           || string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase));
@@ -1763,7 +1761,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // a clear message rather than surfacing as an opaque CA-side error later, matching the
             // fail-fast convention the OrganizationNumber check above already established. Blank/
             // unset stays null (omitted on the wire; the client's global WhenWritingNull option
-            // means the CA falls back to its documented default of 30). See issue 0027 item 2a/2b.
+            // means the CA falls back to its documented default of 30).
             bool subscriptionAutoRenew = _config.SubscriptionAutoRenew == "1";
             int? subscriptionRenewBeforeDays = null;
             if (!string.IsNullOrWhiteSpace(_config.SubscriptionRenewCriteriaDays))
@@ -1790,12 +1788,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 subscriptionRenewBeforeDays = parsedRenewDays;
             }
 
-            // EmailNotifications — issue 0027 item 1a: previously hardcoded "all" on every V2
-            // order, ignoring the connector's EmailNotifications config entirely. The connector
-            // field uses V1's "0"/"1" vocabulary and defaults to "0". A real-inbox probe
-            // (2026-09-28, see issue 0027) confirmed V2 honors "0" by suppressing the
-            // order-creation emails — it does not silently coerce back to "all" — so the mapping
-            // below is user-decided, not a guess: "1" -> "all" (full notification set), "0" ->
+            // EmailNotifications: the connector field uses V1's "0"/"1" vocabulary and defaults
+            // to "0". V2 honors "0" by suppressing the order-creation emails — it does not
+            // silently coerce back to "all" — so the mapping below is user-decided, not a guess:
+            // "1" -> "all" (full notification set), "0" ->
             // "0" (silent, matching V1's own wire vocabulary), blank/unset -> null (omitted; the
             // client's global WhenWritingNull option drops the key and the CA falls back to its
             // documented default of "all", NOT silent — this is the one place V1 and V2 defaults
@@ -1842,21 +1838,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // catalog lookup failure there must not block enrollment — fall back to non-UCC
             // (single-domain) behavior, the strictly-safer failure mode: the CSR-SAN-count guard
             // below still runs against that non-UCC assumption, so a surplus-SAN CSR is rejected
-            // rather than silently accepted. See issues/f3-v2-multi-san-limitation.md and
-            // issues/0047-v2-multi-san-guard-blocks-ucc-orders.md.
+            // rather than silently accepted.
             //
             // No explicit override: the code must NOT fall back to
             // Constants.Products.DefaultProductCodes (V1-era numbering that does not match the
-            // live V2 catalog — issue 0036, e.g. its "842" is OV SSL but the live V2 catalog's
-            // "842" is DV SSL). Instead resolve the live product code by matching the catalog
+            // live V2 catalog, e.g. its "842" is OV SSL but the live V2 catalog's "842" is DV
+            // SSL). Instead resolve the live product code by matching the catalog
             // entry whose productTypeID equals the stable numeric type ID for ep.ProductId
             // (Constants.Products.ProductTypeIdsV2) — productTypeID is a small CERTInext-documented
             // enum, unlike productCode (wrong table) or productName (spelling varies by
-            // account/catalog version — see issue 0036 triage). Here, a catalog failure or an
+            // account/catalog version). Here, a catalog failure or an
             // unresolvable mapping MUST fail the enrollment loudly: there is no safe fallback code
             // to send on the wire.
             //
-            // Private PKI (issue 0033): the explicit ProductCode is required (validated above) and
+            // Private PKI: the explicit ProductCode is required (validated above) and
             // trusted as-is, exactly like the SSL explicit-override case; the catalog is not
             // fetched at all because its only use on that path — SSL UCC detection — does not
             // apply (ValidateProductInfo checks the code's productTypeID at template save time).
@@ -1915,15 +1910,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     };
                 }
 
-                // Sandbox-confirmed: the live catalog can carry MORE THAN ONE entry with the
-                // same productTypeID (e.g. two type-13 DV SSL entries, "917 SSL DV 1 month"
-                // and "842 DV SSL Certificate") — picking the catalog's first-listed match
-                // (the old behavior) is not safe: on sandbox it silently ordered "917", which
-                // PUT /csr then rejected 422 "PFX based certificate orders are not allowed",
-                // failing every ProductId-only DV SSL enrollment. When more than one catalog
-                // entry shares the expected productTypeID, only resolve automatically if the
-                // connector's DefaultProductCode names one of them; otherwise reject with a
-                // clear message listing the candidates rather than guessing.
+                // The live catalog can carry more than one entry with the same productTypeID
+                // (e.g. two type-13 DV SSL entries, "917 SSL DV 1 month" and "842 DV SSL
+                // Certificate"). Picking the catalog's first-listed match is not safe: CERTInext
+                // rejects some of these entries at PUT /csr with 422 "PFX based certificate
+                // orders are not allowed", which would fail every ProductId-only DV SSL
+                // enrollment that resolved to one. When more than one catalog entry shares the
+                // expected productTypeID, only resolve automatically if the connector's
+                // DefaultProductCode names one of them; otherwise reject with a clear message
+                // listing the candidates rather than guessing.
                 var matchingProducts = (catalog ?? new List<ProductDetail>())
                     .Where(p => string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
                     .ToList();
@@ -1996,21 +1991,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // Non-UCC V2 products support only a single domain plus autoSecureWww's www.<domain>
             // variant; any other DNS SAN — from the CSR OR Command's SAN dictionary — would be
-            // silently dropped (issue 0061) or cause a CA-side rejection, so fail fast with a
+            // silently dropped or cause a CA-side rejection, so fail fast with a
             // clear message rather than letting the CA return an opaque error, or the extra
             // names vanish with no order-side signal at all. UCC (multi-domain) products are
             // exempt — their extra SANs are the expected input and are carried into
             // additionalDomains below instead. This check necessarily runs after UCC detection
             // above (which needs the live catalog lookup to know isUccProduct), not before it,
             // but it still runs before PlaceOrderV2Async, so a rejected non-UCC request never
-            // places a CA order. See issues/f3-v2-multi-san-limitation.md,
-            // issues/0047-v2-multi-san-guard-blocks-ucc-orders.md and
-            // issues/0061-v2-san-dictionary-extras-silently-dropped.md.
+            // places a CA order.
             //
-            // Issue 0061: looking at the CSR alone missed the case where Command's SAN
+            // Looking at the CSR alone misses the case where Command's SAN
             // dictionary carries the extras and the CSR itself carries only the primary domain —
             // a non-UCC order never sends additionalDomains at all, so those dictionary-only
-            // extras had nowhere to go and were dropped with no warning.
+            // extras would have nowhere to go and would be dropped with no warning.
             //
             // This guard deliberately takes the UNION of the CSR's own SANs and the SAN
             // dictionary — NOT CollectRequestedSanEntries'/BuildSanList's "fallback, not union"
@@ -2021,11 +2014,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // of what the SAN dictionary contains, so a CSR-embedded extra domain still reaches
             // the CA even when Command also supplied a (single-domain) SAN dictionary. Deferring
             // to the dictionary alone whenever it is non-null would let that CSR-embedded extra
-            // slip past this guard unrejected — a regression of the pre-0061 CSR-extras reject
-            // (issues/f3-v2-multi-san-limitation.md, issues/0047-v2-multi-san-guard-blocks-ucc-orders.md)
-            // for any enrollment that also happens to pass a SAN dictionary.
+            // slip past this guard unrejected for any enrollment that also happens to pass a SAN
+            // dictionary.
             //
-            // SSL-only (issue 0033): a private-pki order carries its SANs in additionalHosts,
+            // SSL-only: a private-pki order carries its SANs in additionalHosts,
             // which the spec defines as a multi-entry "SAN list (DNS names or IPv4 / IPv6)" for
             // every Private PKI variant, so the single-domain restriction does not apply.
             //
@@ -2036,12 +2028,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // via this guard. Exempt exactly the apex (the wildcard domain with its leading
             // "*." stripped) for wildcard products (productTypeID 14/17,
             // Constants.ApiV2.WildcardProductTypeIds) — any other extra SAN is still rejected.
-            // NOTE (unverified): this only widens what the guard *accepts*; it does not change
+            // NOTE: this only widens what the guard *accepts*; it does not change
             // what is sent to the CA for the apex — additionalDomains is still not populated
-            // for non-UCC products below, exactly as before this fix. Whether CERTInext's V2
-            // order create needs the apex added to additionalDomains (or handles it
-            // automatically for a wildcard product) has not been confirmed live and is left
-            // to the principal to verify.
+            // for non-UCC products below. Whether CERTInext's V2 order create needs the apex
+            // added to additionalDomains (or handles it automatically for a wildcard product)
+            // is unverified and should be confirmed against a live order before relying on it.
             if (!isPrivatePki && !isUccProduct)
             {
                 string wildcardApexDomain = isWildcardProduct && domain != null
@@ -2109,7 +2100,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // dictionary, falling back to CSR SANs only when Command supplied no SAN dictionary at
             // all (BuildSanList's own fallback rule). additionalDomains is a domain-name-only field
             // per the V2 spec, so non-DNS SAN types are excluded (and logged) rather than submitted.
-            // BuildSanList runs in DNS-only mode here (issue 0046): V1's SubmitNonDnsSans switch
+            // BuildSanList runs in DNS-only mode here: V1's SubmitNonDnsSans switch
             // and its "submitted rather than dropped" wording do not apply to this field, so the
             // exclusion is logged below instead — SAN types only, since a value (e.g. an email
             // address) may be personal data.
@@ -2143,7 +2134,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     productCode, additionalDomains?.Count ?? 0);
             }
 
-            // Private PKI additionalHosts (issue 0033): same SAN source rule as the UCC path
+            // Private PKI additionalHosts: same SAN source rule as the UCC path
             // above, but DNS names AND IP addresses are both native here (spec: "SAN list (DNS
             // names or IPv4 / IPv6)"; the Intranet SSL example sends "10.0.0.50").
             List<string> additionalHosts = null;
@@ -2166,16 +2157,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // requestorIsd/requestorMobile are the same Requestor* defaults V1 falls back to for
             // its own TechnicalPointOfContact (CERTInextClient.cs BuildOrderRequestFromLegacyEnrollRequest).
-            // Also used directly for this order's own Requestor.Phone (below) via ComposeV2Phone —
-            // issue 0027 item 5b: Requestor.Phone previously sent the raw mobile number only, with
-            // RequestorIsdCode never combined in. Fixed to reuse the same ComposeV2Phone helper
-            // TechnicalPointOfContact.Phone already uses (issue 0030).
+            // Also used directly for this order's own Requestor.Phone (below) via ComposeV2Phone,
+            // which combines RequestorIsdCode with the mobile number rather than sending the raw
+            // mobile number alone — the same helper TechnicalPointOfContact.Phone uses.
             string requestorIsd    = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
             string requestorMobile = _config.RequestorMobileNumber ?? string.Empty;
 
-            // Requestor.Designation — issue 0027 item 5e: previously hardcoded "IT Administrator"
-            // (the V2 spec's own example value for this Optional free-text field). Now sourced from
-            // the RequestorDesignation config field; blank/unset leaves this null so the property is
+            // Requestor.Designation is sourced from the RequestorDesignation config field
+            // rather than a hardcoded value (the V2 spec's own example for this Optional
+            // free-text field is "IT Administrator"); blank/unset leaves this null so the property is
             // omitted from the wire JSON entirely (relies on the client's global
             // DefaultIgnoreCondition = WhenWritingNull, CERTInextClient.GetJsonOptions()), rather than
             // sending any default designation value.
@@ -2185,7 +2175,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // technicalPointOfContact — each field falls back to the requestor default when its
             // TechnicalContact* counterpart is blank, mirroring V1's BuildOrderRequestFromLegacyEnrollRequest
-            // (CERTInextClient.cs:2335-2341). See issues/0030-v2-technical-contact-not-sent.md.
+            // (CERTInextClient.cs:2335-2341).
             string technicalContactName   = string.IsNullOrWhiteSpace(_config.TechnicalContactName)         ? requestorName   : _config.TechnicalContactName;
             string technicalContactEmail  = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail)        ? requestorEmail  : _config.TechnicalContactEmail;
             string technicalContactIsd    = string.IsNullOrWhiteSpace(_config.TechnicalContactIsdCode)      ? requestorIsd    : _config.TechnicalContactIsdCode;
@@ -2193,7 +2183,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // Blocks shared verbatim by every family's create body — the spec's requestor,
             // subscription and technicalPointOfContact field tables are identical for the SSL/TLS
-            // and Private PKI folders (issue 0033).
+            // and Private PKI folders.
             var requestor = new V2Requestor
             {
                 Name        = requestorName,
@@ -2209,7 +2199,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             };
             // Always populated (never omitted), even though the spec marks every subfield
             // Optional — mirrors V1's fallback-to-Requestor* TechnicalPointOfContact
-            // defaulting rather than leaving the block blank. See issue 0030.
+            // defaulting rather than leaving the block blank.
             var technicalPointOfContact = new V2TechnicalPointOfContact
             {
                 Name        = technicalContactName,
@@ -2219,7 +2209,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             };
             const string remarks = "Issued via Keyfactor Command AnyCA REST Gateway.";
             // Mirrors V1's DelegationInformation.GroupNumber — omit when unconfigured so the
-            // order falls back to the account's default billing group (issue 0029).
+            // order falls back to the account's default billing group.
             string groupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber;
 
             V2CreateOrderResponse createResp;
@@ -2278,7 +2268,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // The V2 API creates the order in 'pending-csr' and requires a separate PUT to submit
             // the CSR before the order can progress to validation or issuance.
-            // Issue 0039 / review finding (B): if Submit CSR throws, the order already exists at
+            // If Submit CSR throws, the order already exists at
             // pending-csr and Command would otherwise never learn its ID. A *definitive* CA
             // rejection (a real HTTP 4xx response body) keeps the original single-best-effort-
             // cancel-and-FAILED behavior. But a transport-level failure or timeout tells us
@@ -2292,7 +2282,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Raw CA status string behind the current `disposition` value — kept in step with it
             // (reassigned everywhere `disposition` is recomputed from a fresh TrackOrderV2Async
             // call) purely so a terminal REVOKED result can be logged/reported with the CA's own
-            // status text (issue 0052), not just Command's mapped disposition.
+            // status text, not just Command's mapped disposition.
             string lastKnownCaStatus = null;
             bool csrStatusResolvedAfterFailure = false;
             try
@@ -2343,7 +2333,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 if (string.Equals(trackedAfterCsrFailure.Status, Constants.ApiV2.StatusPendingCsr,
                         StringComparison.OrdinalIgnoreCase))
                 {
-                    // Confirmed: the CSR never landed. Cancel exactly as before.
+                    // Confirmed: the CSR never landed. Cancel the orphaned order.
                     var orphanResult = await CancelOrphanedV2OrderAfterCsrFailureAsync(
                         ep.ProductFamilySlug, orderId, csrEx);
                     _logger.MethodExit(LogLevel.Debug);
@@ -2394,12 +2384,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             // Whether the inline DCV block below took ownership of the in-call issuance wait for
-            // this order (issue 0051). Declared outside the #if so both build flavors compile the
+            // this order. Declared outside the #if so both build flavors compile the
             // pickup-gate call below the same way (it simply stays false on the no-DCV build).
             // Mirrors dcvIssuanceWaitRan in EnrollNewAsync, but the condition is derived
             // differently: V2's outer gate here is only "order landed in pending-dcv" — whether
             // DCV is actually configured/enabled is checked *inside* PerformDcvV2IfNeededAsync, not
-            // at this call site — so we can't pre-set the flag before calling it (that would also
+            // at this call site — so the flag cannot be pre-set before calling it (that would also
             // catch the DCV-disabled case and wrongly skip pickup for every V2 order). Instead this
             // is set from PerformDcvV2IfNeededAsync's own return contract ("true when DCV steps were
             // executed, false when cleanly skipped"), which is the one source of truth for whether
@@ -2474,8 +2464,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
             }
 
-            // Synchronous certificate pickup (V2 parity with the V1/Sectigo pickup poll, issue
-            // 0051): poll for the issued certificate so a fast-issuing DV order returns GENERATED
+            // Synchronous certificate pickup (V2 parity with the V1/Sectigo pickup poll):
+            // poll for the issued certificate so a fast-issuing DV order returns GENERATED
             // + PEM in this same call instead of waiting for the next synchronization. No-op when
             // the inline DCV block above already ran an in-call wait for this order (dcvV2Ran).
             var pendingResult = new EnrollmentResult
@@ -2490,7 +2480,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var (pickedUpResult, observedCaStatus) = await PickUpEnrolledCertificateV2Async(
                 pendingResult, orderId, ep.ProductFamilySlug, dcvV2Ran, lastKnownCaStatus);
 
-            // Issue 0052: normalize a body-less REVOKED disposition to FAILED once here, right
+            // Normalize a body-less REVOKED disposition to FAILED once here, right
             // before returning — every path above that can surface REVOKED (the post-CSR-submit
             // status check, the post-DCV status re-check, and PickUpEnrolledCertificateV2Async's
             // own poll) funnels through pickedUpResult, so a single check here covers all of them
@@ -2502,7 +2492,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Review finding (B): true when <paramref name="ex"/> (thrown by <c>SubmitCsrV2Async</c>)
+        /// True when <paramref name="ex"/> (thrown by <c>SubmitCsrV2Async</c>)
         /// represents a transport-level failure, timeout, or cancellation — i.e. whether CERTInext
         /// actually received and recorded the CSR is unknown — rather than a definitive CA-side
         /// rejection (a real HTTP 4xx response CERTInext returned after processing the request).
@@ -2529,15 +2519,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Cancel reason sent to CERTInext when Submit CSR fails after the order was created
-        /// (issue 0039). Deliberately fixed text: the CSR exception may carry CA response detail,
+        /// Cancel reason sent to CERTInext when Submit CSR fails after the order was created.
+        /// Deliberately fixed text: the CSR exception may carry CA response detail,
         /// and the reason is persisted in the CA's audit log.
         /// </summary>
         internal const string OrphanedOrderCancelReason =
             "Keyfactor gateway: CSR submission failed; cancelling orphaned order.";
 
         /// <summary>
-        /// Issue 0039: <see cref="EnrollV2Async"/> calls this when <c>SubmitCsrV2Async</c> throws
+        /// <see cref="EnrollV2Async"/> calls this when <c>SubmitCsrV2Async</c> throws
         /// after the order was placed. Makes exactly one best-effort <c>CancelOrderV2Async</c>
         /// call (never retried, never rethrown) and returns a FAILED result that carries the
         /// orderId and says whether the orphaned order was cancelled.
@@ -2597,14 +2587,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Issue 0052: at enroll time the gateway never holds a stored certificate body for a
-        /// brand-new order — unlike the Synchronize/GetSingleRecord 0049 guard (<see
+        /// At enroll time the gateway never holds a stored certificate body for a
+        /// brand-new order — unlike the Synchronize/GetSingleRecord guard (<see
         /// cref="DecideBodylessRevokedRecord"/>), there is no "gateway already holds a body" case
         /// for <see cref="EnrollV2Async"/> to fall back to. A REVOKED disposition surfaced from V2
         /// enrollment — whether observed on the post-CSR-submit status check, the post-DCV status
         /// re-check, or <see cref="PickUpEnrolledCertificateV2Async"/>'s own poll — is therefore
-        /// always body-less. Persisting that as a REVOKED row with <c>Certificate = null</c> is
-        /// exactly what poisons the gateway per issue 0049 (RevocationDate never clears, and every
+        /// always body-less. Persisting that as a REVOKED row with <c>Certificate = null</c> would
+        /// poison the gateway (RevocationDate never clears, and every
         /// later revoked-certificate search calls FromDER(null) and 500s). Mapped to FAILED here,
         /// once, on the final result <see cref="EnrollV2Async"/> is about to return, rather than in
         /// each branch that can produce a REVOKED disposition.
@@ -2620,7 +2610,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "V2 enroll observed order '{OrderId}' as revoked at the CA (raw status='{CaStatus}') " +
                 "before a certificate was ever delivered. Mapping the enrollment result to FAILED " +
                 "instead of a body-less REVOKED record — Enroll has no stored certificate body to " +
-                "fall back on, unlike the Synchronize/GetSingleRecord 0049 guard.",
+                "fall back on, unlike the Synchronize/GetSingleRecord guard.",
                 orderId, string.IsNullOrWhiteSpace(observedCaStatus) ? "(unknown)" : observedCaStatus);
 
             string statusSuffix = string.IsNullOrWhiteSpace(observedCaStatus)
@@ -2640,12 +2630,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// Outcome of <see cref="DecideBodylessRevokedRecord"/> — what a V2 caller should do
-        /// with a REVOKED disposition that has no downloadable certificate body (issue 0049).
+        /// with a REVOKED disposition that has no downloadable certificate body.
         /// </summary>
         private enum BodylessRevokedDecision
         {
             /// <summary>Gateway already holds a body for this order — emit REVOKED with no
-            /// body, exactly as before (this is how out-of-band CA revokes propagate).</summary>
+            /// body (this is how out-of-band CA revokes propagate).</summary>
             EmitRevoked,
             /// <summary>Gateway has a row but no body — downgrade to FAILED so the gateway
             /// never persists a REVOKED row with <c>Certificate = null</c>.</summary>
@@ -2656,7 +2646,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Issue 0049: the CERTInext V2 CA refuses to serve a revoked certificate's body
+        /// The CERTInext V2 CA refuses to serve a revoked certificate's body
         /// (422 EMS-1165), so a V2 order whose first gateway sighting is already revoked has
         /// no body to attach. Emitting that as a body-less REVOKED record is what poisons the
         /// gateway: it persists the row with <c>RevocationDate</c> set and <c>Certificate =
@@ -2666,8 +2656,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///
         /// A body-less REVOKED record is safe — and required, to propagate out-of-band CA
         /// revokes — only when the gateway already holds a certificate body for this
-        /// CARequestID (confirmed live, issue 0049 evidence log: the gateway keeps the stored
-        /// body and applies status/date/reason on top of it). <see
+        /// CARequestID: the gateway keeps the stored body and applies status/date/reason on top
+        /// of it. <see
         /// cref="ICertificateDataReader.GetExpirationDateByRequestId"/> is the per-order probe
         /// for that: it returns the stored cert's NotAfter when a body is held, <c>null</c> when
         /// the row exists but has no body, and throws <see cref="ArgumentException"/> when there
@@ -2737,7 +2727,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 #if SUPPORTS_DCV
                 // Mirror V1 GetSingleRecord: attempt DCV on pending-dcv orders so a manual
                 // single-record refresh can unstick an order whose DCV wasn't completed at enroll
-                // time. issue 0042: a UCC order's own domainEntries[] can carry pending SANs even
+                // time. A UCC order's own domainEntries[] can carry pending SANs even
                 // when the top-level Domain field is populated (the common case) or, defensively,
                 // if it were ever blank — either is enough to attempt DCV.
                 var pendingDomainEntries = statusResp.Verifications?.Domain?.Domains;
@@ -2785,7 +2775,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                 }
 
-                // Issue 0049: a REVOKED disposition with no certificate body must never be
+                // A REVOKED disposition with no certificate body must never be
                 // returned as-is unless the gateway already holds a body for this order — see
                 // DecideBodylessRevokedRecord. GetSingleRecord can't skip (it must return
                 // something), so both the no-row and can't-tell cases fall through to FAILED.
@@ -2834,13 +2824,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Synchronizes certificates via the V2 <c>/reports/orders</c> endpoint (issues/0022).
+        /// Synchronizes certificates via the V2 <c>/reports/orders</c> endpoint.
         /// Called from <see cref="Synchronize"/> when <c>_config.UseV2Api</c> is true; V1
         /// credentials are not required on this path.
         ///
-        /// Lookback window (incremental sync): live probing of <c>from</c>/<c>to</c> could not
-        /// determine whether the filter brackets order-placement date or issuance date
-        /// (issues/0022). Rather than depend on that, an incremental pass requests
+        /// Lookback window (incremental sync): whether the <c>from</c>/<c>to</c> filter brackets
+        /// order-placement date or issuance date is not documented. Rather than depend on that,
+        /// an incremental pass requests
         /// <c>from = lastSync - V2SyncLookbackHours</c> (default 72h) so an order created before
         /// <c>lastSync</c> but issued afterward (e.g. a slow-DCV order) still surfaces.
         /// </summary>
@@ -2872,9 +2862,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int errors = 0;
             int unresolvedStatusFallbacks = 0; // report rows whose display strings needed a live track call
 
-            // Emit-side accounting (mirrors the V1 path, issue 0003).
+            // Emit-side accounting (mirrors the V1 path).
             int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
-            // Issue 0049: bodyless-REVOKED guard decisions — see DecideBodylessRevokedRecord.
+            // Bodyless-REVOKED guard decisions — see DecideBodylessRevokedRecord.
             int emittedFailedFromBodylessRevoked = 0, skippedBodylessRevoked = 0;
 
 #if SUPPORTS_DCV
@@ -2900,8 +2890,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             orderDateUtc = parsedOrderDate;
 
                         // Skip expired certificates when IgnoreExpired is configured — mirrors the
-                        // V1 check above (issues/0027, item 3). CertificateExpiryDate is a string
-                        // whose format isn't confirmed live (OrderReportEntryV2 doc comment), so an
+                        // V1 check above. CertificateExpiryDate is a string
+                        // whose format is not guaranteed (see the OrderReportEntryV2 doc comment), so an
                         // unparseable or missing value must NOT be skipped — only a value that
                         // parses cleanly and is actually in the past is treated as expired.
                         DateTime? certExpiryUtc = null;
@@ -2930,7 +2920,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         if (disposition == null)
                         {
                             // Unrecognised orderStatus/certificateStatus combination — the display-
-                            // string vocabulary observed so far (issues/0022) is NOT confirmed
+                            // string vocabulary mapped below is NOT guaranteed
                             // exhaustive. Don't guess: fall back to a live TrackOrder call, which
                             // returns the authoritative V2 `status` enum via StatusMapper.
                             unresolvedStatusFallbacks++;
@@ -2982,9 +2972,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 dcvAttempted++;
 
                                 // Resolve family lazily — only for rows actually attempting DCV.
-                                // Report rows carry no family, and productCode is often empty
-                                // (issue 0016), so this costs one extra call per attempted row,
-                                // not per row in the page (per the task's cost concern).
+                                // Report rows carry no family, and productCode is often empty,
+                                // so this costs one extra call per attempted row, not per row in
+                                // the page.
                                 if (resolvedFamily == null)
                                 {
                                     (resolvedFamily, trackedStatus) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(
@@ -3028,7 +3018,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 #endif
 
                         // Report rows carry no revocation reason/date (OrderReportEntryV2 has no
-                        // such fields, issues/0034) — only a live TrackOrder response's nested
+                        // such fields) — only a live TrackOrder response's nested
                         // `revocation` object does. Resolve lazily, mirroring the DCV branch's
                         // "only for rows that actually need it" pattern above: this extra call is
                         // scoped to revoked rows whose disposition came from the report's display
@@ -3067,10 +3057,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                         // Prefer the report row's own ProductCode (matches V1's "trust the
                         // listing" precedent, MapToAnyCAPluginCertificate). Only when that's
-                        // empty (issue 0016), fall back to whatever trackedStatus already exists
+                        // empty, fall back to whatever trackedStatus already exists
                         // in local scope from one of the lazy TrackOrder fetches above
                         // (unresolved-status fallback, DCV attempt, or revoked-row lookup) — never
-                        // fetch just to backfill this field (issue 0035).
+                        // fetch just to backfill this field.
                         string productId = !string.IsNullOrWhiteSpace(row.ProductCode)
                             ? row.ProductCode
                             : (trackedStatus?.ProductVariant ?? string.Empty);
@@ -3089,7 +3079,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                         bool recordHasBody = !string.IsNullOrWhiteSpace(record.Certificate);
 
-                        // Issue 0049: never hand the gateway buffer a REVOKED record with no
+                        // Never hand the gateway buffer a REVOKED record with no
                         // certificate body unless the gateway already holds one for this order —
                         // see DecideBodylessRevokedRecord's doc comment. "Skip" means this row is
                         // dropped entirely (not added to blockingBuffer) rather than risk creating
@@ -3111,7 +3101,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 emittedFailedFromBodylessRevoked++;
                             }
                             // EmitRevoked falls through — record stays REVOKED with no body,
-                            // exactly as before (propagates an out-of-band CA revoke).
+                            // (propagates an out-of-band CA revoke).
                         }
 
                         if (record.Status == (int)EndEntityStatus.GENERATED)
@@ -3179,7 +3169,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "UnresolvedStatusFallbacks={Fallbacks}. Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
                     "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
                     "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
-                    "BodylessRevokedSkipped={BodylessRevokedSkipped} (issue 0049 guard). {DcvClause}",
+                    "BodylessRevokedSkipped={BodylessRevokedSkipped} (bodyless-revoked guard). {DcvClause}",
                     synced, skipped, errors, unresolvedStatusFallbacks,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
@@ -3201,17 +3191,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Maps a V2 <c>/reports/orders</c> row's human-readable <c>orderStatus</c>/
         /// <c>certificateStatus</c> display strings to an <see cref="EndEntityStatus"/>
-        /// disposition (issues/0022). These are display strings (e.g. "Order Accepted",
+        /// disposition. These are display strings (e.g. "Order Accepted",
         /// "Certificate Downloaded") — NOT the V2 <c>status</c> enum used by TrackOrder (see
         /// <see cref="StatusMapper.V2StatusToRequestDisposition"/> for that). The vocabulary
-        /// below combines what was actually observed live in Phase 0 (orderStatus "Order
+        /// below combines values seen on live orders (orderStatus "Order
         /// Accepted"/"Order Fulfilled"; certificateStatus "Pending for Approver"/"Certificate
         /// Downloaded") with additional values the spec's field-table prose names ("Approved by
-        /// System", "Issued", "Certificate Generated") that have not yet been confirmed live.
+        /// System", "Issued", "Certificate Generated").
         ///
         /// Returns <c>null</c> for anything not confidently recognised so the caller falls back
-        /// to a live TrackOrder call rather than guessing — the vocabulary is explicitly NOT
-        /// confirmed exhaustive, and silently misclassifying a row (e.g. treating a still-pending
+        /// to a live TrackOrder call rather than guessing — the vocabulary below is NOT
+        /// guaranteed exhaustive, and silently misclassifying a row (e.g. treating a still-pending
         /// order as issued, or dropping a row that is actually revoked) would be worse than the
         /// cost of an extra API call.
         /// </summary>
@@ -3302,10 +3292,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Maps a V2 revoke reason that CERTInext rejects live with "Invalid Revoke Reason
+        /// Maps a V2 revoke reason that CERTInext rejects with "Invalid Revoke Reason
         /// ID" to an accepted fallback, or <c>null</c> if <paramref name="rejectedV2Reason"/>
-        /// is not one of the known-rejected values. Per issues/0026's live-confirmed 9-value
-        /// matrix, only <c>key-compromise</c>, <c>affiliation-changed</c>, <c>superseded</c>,
+        /// is not one of the known-rejected values. Of the 9 spec-documented reason strings,
+        /// only <c>key-compromise</c>, <c>affiliation-changed</c>, <c>superseded</c>,
         /// <c>cessation-of-operation</c>, and <c>privilege-withdrawn</c> are actually accepted
         /// (the same restriction V1's <see cref="StatusMapper.ToRevocationReasonId"/> has
         /// always documented) — <c>unspecified</c>, <c>ca-compromise</c>,
@@ -3330,8 +3320,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Revokes a certificate via the V2 REST API. If CERTInext rejects the resolved
         /// reason with its "Invalid Revoke Reason ID" 422 and the reason is one of the four
         /// known-rejected values (<see cref="ResolveRejectedRevokeReasonFallback"/>), retries
-        /// exactly once with an accepted fallback — see issues/0026 for the live-confirmed
-        /// accepted/rejected reason matrix. Any other revoke failure (including a 422 for a
+        /// exactly once with an accepted fallback. Any other revoke failure (including a 422 for a
         /// reason not in that set) is surfaced as-is, with no retry.
         /// </summary>
         private async Task<int> RevokeV2Async(string caRequestID, string hexSerialNumber, uint revocationReason)
@@ -3347,10 +3336,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // Pre-flight: resolve which product family owns this order (via TrackOrder,
             // which probes families and 404s cleanly per-family) and verify it is revocable.
-            // This resolves the family definitively *before* we ever call revoke, so a 404
-            // from RevokeOrderV2Async below is unambiguous — issues/0019: revoke's own 404
-            // means "not found or not revokable" (per spec), and probing multiple families
-            // on a revoke 404 previously produced a misleading "not found in any product
+            // This resolves the family definitively before revoke is ever called, so a 404
+            // from RevokeOrderV2Async below is unambiguous: revoke's own 404
+            // means "not found or not revokable" (per spec). Probing multiple families
+            // on a revoke 404 instead would produce a misleading "not found in any product
             // family" for orders that legitimately exist but simply aren't revokable yet.
             V2OrderStatusResponse currentStatus;
             string resolvedFamily;
@@ -3409,7 +3398,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "V2 revocation denied — order not found or not in a revokable state. " +
                     "CARequestID={Id}, Family={Family}, HttpStatus={HttpStatus}, EmsCode={EmsCode}",
                     caRequestID, resolvedFamily, 404, ExtractEmsCode(knf.Message) ?? "(none)");
-                // We already confirmed the order lives in `resolvedFamily` via TrackOrder
+                // The order was already confirmed to live in `resolvedFamily` via TrackOrder
                 // above, so a 404 here is the spec's other documented meaning — "not in a
                 // revokable state" — not a genuine family miss. Surface that plainly
                 // instead of retrying other families.
@@ -3422,8 +3411,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 ioe.Message.IndexOf("Invalid Revoke Reason ID", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 // CERTInext's V2 API rejects several of the spec-documented reason values
-                // outright (422 "Invalid Revoke Reason ID") — confirmed live, independent of
-                // this plugin (issues/0026). Only 5 of the 9 spec-documented reason strings
+                // outright (422 "Invalid Revoke Reason ID"), independent of
+                // this plugin. Only 5 of the 9 spec-documented reason strings
                 // are actually accepted: key-compromise, affiliation-changed, superseded,
                 // cessation-of-operation, privilege-withdrawn — the same restriction V1's
                 // ToRevocationReasonId has always been documented against. Retry exactly once
@@ -3434,19 +3423,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 string fallbackReason = ResolveRejectedRevokeReasonFallback(v2Reason);
                 _logger.LogWarning(
                     "V2 revoke rejected reason '{OriginalReason}' as invalid (CARequestID={Id}, Family={Family}, " +
-                    "HttpStatus={HttpStatus}, EmsCode={EmsCode}); retrying once with '{FallbackReason}' " +
-                    "per issues/0026.",
+                    "HttpStatus={HttpStatus}, EmsCode={EmsCode}); retrying once with '{FallbackReason}'.",
                     originalReason, caRequestID, resolvedFamily, 422, ExtractEmsCode(ioe.Message) ?? "(none)",
                     fallbackReason);
                 v2Reason = fallbackReason;
                 revokeReq = new V2RevokeRequest
                 {
                     // CERTInext's "note" field silently rejects a semicolon with the same
-                    // "Invalid Revoke Remarks" 422 (found live while building this retry —
-                    // comma/period/slash/parens are all fine; only ';' triggers it — see
-                    // issues/0026). Avoid semicolons in this string.
+                    // "Invalid Revoke Remarks" 422 — comma/period/slash/parens are all fine;
+                    // only ';' triggers it. Avoid semicolons in this string.
                     Reason = v2Reason,
-                    Note = $"Revoked via Command, reason {originalReason} rejected, retried as {fallbackReason} (see issues/0026)."
+                    Note = $"Revoked via Command, reason {originalReason} rejected, retried as {fallbackReason}."
                 };
                 retriedFromReason = originalReason;
                 try
@@ -3552,7 +3539,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // decision — it either ran WaitForIssuanceAfterDcvAsync itself, deferred to another
             // in-flight caller, or determined the order is terminal / not yet validated — so a
             // second stacked poll would either double the wait or burn the budget polling an
-            // order that can never issue in-call (regression guard: a cancelled/rejected order
+            // order that can never issue in-call (a cancelled/rejected order
             // must not be re-polled here after DCV already short-circuited it).
             bool dcvIssuanceWaitRan = false;
 
@@ -3574,7 +3561,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // DNS-01, so such orders depend on out-of-band validation and would not issue within
                 // the ~55s pickup window anyway — the next sync completes them. Distinguishing that
                 // sub-case from the terminal/cancelled case (which MUST skip pickup) would require a
-                // richer PerformDcvIfNeededAsync result and risk re-opening the terminal-order regression.
+                // richer PerformDcvIfNeededAsync result and risk polling a terminal order.
                 dcvIssuanceWaitRan = true;
 
                 // SOX CC7.3: bound the entire DCV flow with a hard timeout so a stuck
@@ -3798,9 +3785,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// True when a <c>GetDcv</c> failure is the CERTInext-side "DCV slot is exposed in
-        /// TrackOrder but the endpoint won't accept calls yet" condition.  Observed as the
+        /// TrackOrder but the endpoint won't accept calls yet" condition. Surfaces as the
         /// API error <c>EMS-956 "Invalid Request for this API"</c> for several hours after
-        /// enrollment — see <c>analysis/certinext-support-ticket-2026-05-12.md</c>.
+        /// enrollment.
         ///
         /// Detection is intentionally narrow:
         ///  * If the message contains the literal code <c>EMS-956</c>, treat it as the
@@ -3827,15 +3814,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// zone / <see cref="Keyfactor.AnyGateway.Extensions.IDomainValidator"/> and to build the
         /// DCV TXT record hostname. A literal <c>"*"</c> is not a queryable DNS label, so staging
         /// a record at e.g. <c>_emsign-validation.*.example.com</c> for a wildcard domain can never
-        /// be seen by the CA — confirmed live 2026-10-01 (a <c>*.dcv-fresh-&lt;ts&gt;...</c> order
-        /// stayed pending with a literal-asterisk TXT host staged). Callers must keep using the
+        /// be seen by the CA (a wildcard order with a literal-asterisk TXT host staged stays
+        /// pending indefinitely). Callers must keep using the
         /// ORIGINAL domain string (including <c>"*."</c>) for every CERTInext API call
         /// (GetDcv/VerifyDcv/TrackOrder) — that is what the CA itself tracks and reports back
         /// per-domain; only the DNS-side hostname/zone-resolution inputs use the base domain.
         ///
-        /// Whether CERTInext's own DCV actually accepts a base-domain TXT record as proof for a
-        /// wildcard domain entry is UNVERIFIED against the live API as of this change — pending
-        /// the principal's live run.
+        /// NOTE (unverified): whether CERTInext's own DCV actually accepts a base-domain TXT
+        /// record as proof for a wildcard domain entry has not been confirmed against the live
+        /// API — verify before relying on it for a wildcard enrollment.
         /// </summary>
         private static string StripWildcardPrefix(string domain)
         {
@@ -3845,13 +3832,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 ? domain.Substring(2)
                 : domain;
         }
-
-        // (`DomainValidatorConfigProvider` nested helper removed — it declared an
-        // implementation of `Keyfactor.AnyGateway.Extensions.IDomainValidatorConfigProvider`,
-        // a v3.3-only interface, but the type was never instantiated anywhere in the
-        // plugin. Keeping a nested type whose base list references a missing assembly
-        // type is a hazard for CLR class-load on v3.2 hosts (see issue #7). Dead code
-        // that costs nothing to remove.)
 
         /// <summary>
         /// Best-effort DCV retry for an order that may still be pending validation.
@@ -3926,7 +3906,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 #else
             // DCV is not supported on this build (IAnyCAPlugin 3.2.0). No-op: pending orders
-            // are reported as EXTERNALVALIDATION and not advanced during sync. See issue 0003.
+            // are reported as EXTERNALVALIDATION and not advanced during sync.
             await Task.CompletedTask;
             return false;
 #endif
@@ -4040,8 +4020,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // the cert directly from Enroll() instead of leaving it for the next sync.
             //
             // Treat "DCV done" as EITHER the overall aggregate Status flipping to "1"
-            // OR every individual per-domain dcvStatus being "1" — observed in the wild
-            // that the per-domain field can flip before the parent aggregate.
+            // OR every individual per-domain dcvStatus being "1": the per-domain field can
+            // flip before the parent aggregate.
             var allDomainEntries = domainVerification.GetDomainEntries();
             bool aggregateValidated = string.Equals(
                 domainVerification.Status, Constants.Dcv.StatusValidated, StringComparison.Ordinal);
@@ -4126,7 +4106,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "This order cannot be issued by CERTInext until these are removed — they usually come from a " +
                     "non-DNS SAN (IP address, email, URI) that was requested on the enrollment.",
                     // An email SAN submitted to V1 comes back verbatim as an order domain; mask it
-                    // unless LogSensitiveRequestData is on (issue 0040 follow-up).
+                    // unless LogSensitiveRequestData is on.
                     invalidDomains.Count, orderNumber,
                     LogSanitizer.FormatUntypedSans(invalidDomains, _config.LogSensitiveRequestData, ", "),
                     validPendingDomains.Count);
@@ -4172,7 +4152,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // down only runs once every pending domain has been staged, so without this, an early
             // exit orphans every TXT record already published for the earlier domains in the *same*
             // order — permanently, since nothing else in the codebase calls CleanupValidation for
-            // them. Kept even though every per-domain failure below is now skip-and-continue rather
+            // them. Kept even though every per-domain failure below is skip-and-continue rather
             // than throw: it is the safety net for a genuinely unexpected exception (cancellation, a
             // bug, a validator implementation that throws instead of returning a failure result).
             //
@@ -4256,13 +4236,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // EXTERNALVALIDATION forever. That is worse than parking the order pending with a
                 // clear log entry, for EVERY failure shape here — not just the ones distinguishable
                 // as "bad input" — because nothing downstream ever gets to see or act on the
-                // exception anyway. This directly caused three real regressions across the first two
-                // rounds of fixing this file: a GetDcv error or an empty token for a non-DNS SAN
-                // (submitted on purpose — see BuildSanList) aborted co-tenant DNS domains on the same
-                // order; a StageValidation failure on domain N+1 orphaned domain N's TXT record; and
-                // a misconfiguration-detection throw fired on an ordinary non-DNS Subject CN, which
-                // no setting could prevent since SubmitNonDnsSans only filters the SAN list, not the
-                // subject. There is no longer a "this must still throw" case in this loop at all.
+                // exception anyway. Without this guard: a GetDcv error or an empty token for a
+                // non-DNS SAN (submitted on purpose — see BuildSanList) would abort co-tenant DNS
+                // domains on the same order; a StageValidation failure on domain N+1 would orphan
+                // domain N's TXT record; and a misconfiguration-detection throw on an ordinary
+                // non-DNS Subject CN (which no setting can prevent, since SubmitNonDnsSans only
+                // filters the SAN list, not the subject) would abort the whole order. There is no
+                // "this must still throw" case in this loop.
                 foreach (var (domain, _) in pendingDomains)
                 {
                     GetDcvResponse dcvResp;
@@ -4274,7 +4254,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     {
                         // CERTInext occasionally exposes the DCV slot in TrackOrder (so
                         // domainVerification is populated and dcvStatus="0") before the GetDcv
-                        // endpoint will accept calls for that order — observed as EMS-956
+                        // endpoint will accept calls for that order — surfaces as EMS-956
                         // "Invalid Request for this API" for several hours after enrollment. This is
                         // an order-readiness condition, not a per-domain one, so unlike every other
                         // case in this loop it defers the whole pass rather than skipping one domain.
@@ -4402,7 +4382,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             catch (Exception ex)
             {
-                // Nothing in the loop above throws for a per-domain reason any more — this is the
+                // Nothing in the loop above throws for a per-domain reason — this is the
                 // safety net for a genuinely unexpected failure: cancellation (the shared
                 // DcvTimeoutMinutes-bound token expiring mid-loop — explicitly re-thrown past the
                 // per-domain catches above rather than mislabeled as a per-domain failure) or a bug.
@@ -4439,7 +4419,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             try
             {
                 // Allow DNS propagation before asking CERTInext to verify. The sync path passes
-                // a short override (issue 0002) so a bounded set of recent pending orders doesn't
+                // a short override so a bounded set of recent pending orders doesn't
                 // each burn the full configured delay; Enroll uses the full configured value.
                 int delaySeconds = propagationDelaySecondsOverride
                     ?? (_config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30);
@@ -4480,8 +4460,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// True when the exception's message contains the CERTInext V2 EMS-1080 code
         /// ("Domain is already verified"), the spec's documented no-op for both
-        /// GetDcv and VerifyDcv on a domain that is still within its DCV reuse window
-        /// (issues/0020). Message-based rather than a typed field because the API's
+        /// GetDcv and VerifyDcv on a domain that is still within its DCV reuse window.
+        /// Message-based rather than a typed field because the API's
         /// RFC 7807 body carries the EMS code as text embedded in `detail`/`title`,
         /// not as a separate structured field (see <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2ProblemDetails"/>).
         /// </summary>
@@ -4491,7 +4471,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Performs DNS-01 DCV for a V2 SSL order using the V2 DCV endpoints.
         ///
-        /// Issue 0042: a UCC order's additional SAN domains each carry their own DCV state in
+        /// A UCC order's additional SAN domains each carry their own DCV state in
         /// Track Order's <c>verifications.domain.domains[]</c> block. This entry point owns the
         /// single per-order <see cref="_dcvInFlight"/> guard (enrollment + sync overlap
         /// protection — one guard entry regardless of how many domains the order has), then
@@ -4499,8 +4479,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///   - <paramref name="domainEntries"/> non-empty → <see cref="PerformDcvV2MultiDomainAsync"/>,
         ///     which loops every domain whose own <c>dcvStatus</c> isn't VERIFIED.
         ///   - <paramref name="domainEntries"/> null/empty (single-domain orders, or an older/
-        ///     simpler response shape that never populated the block) → the original,
-        ///     byte-for-byte-unchanged single-domain flow in
+        ///     simpler response shape that never populated the block) → the
+        ///     single-domain flow in
         ///     <see cref="PerformDcvV2SingleDomainAsync"/>.
         ///
         /// Returns <c>true</c> when DCV steps were executed for at least one domain, <c>false</c>
@@ -4520,7 +4500,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return false;
             }
 
-            // Issue 0033: domain control validation exists only for the SSL/TLS family — the
+            // Domain control validation exists only for the SSL/TLS family — the
             // spec's DCV endpoints live under /ssl-certificates only, the Private PKI folder says
             // "No DCV - your CA trusts you", and the Document Signer folder has no DCV step. This
             // single gate covers every caller (EnrollV2Async, GetSingleRecordV2Async and V2
@@ -4567,12 +4547,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Original single-domain V2 DCV flow (pre-issue-0042), preserved byte-for-byte except
-        /// for the <c>_dcvInFlight</c> guard, which its caller <see cref="PerformDcvV2IfNeededAsync"/>
-        /// now owns for the whole call. Used whenever the order has no per-domain
+        /// Single-domain V2 DCV flow, used whenever the order has no per-domain
         /// <c>verifications.domain.domains[]</c> block to drive from (single-domain orders, or an
-        /// older/simpler response shape) — see issue 0042's "keep today's primary-domain
-        /// behaviour exactly" requirement.
+        /// older/simpler response shape). The <c>_dcvInFlight</c> guard is owned by its caller
+        /// <see cref="PerformDcvV2IfNeededAsync"/> for the whole call.
         ///
         /// Flow:
         ///   1. GET /ssl-certificates/{orderId}/dcv → retrieve token (<c>token</c>)
@@ -4583,7 +4561,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///   5. Clean up TXT record
         ///
         /// EMS-1080 ("Domain is already verified") from either GetDcv or VerifyDcv is
-        /// treated as DCV already satisfied (issues/0020): publishing is skipped and
+        /// treated as DCV already satisfied: publishing is skipped and
         /// the flow proceeds straight to step 4.
         ///
         /// Returns <c>true</c> when DCV steps were executed, <c>false</c> when skipped.
@@ -4606,7 +4584,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             catch (Exception ex) when (IsEms1080DomainAlreadyVerified(ex))
             {
-                // EMS-1080 "Domain is already verified" is a documented no-op (issues/0020),
+                // EMS-1080 "Domain is already verified" is a documented no-op,
                 // not a failure: the domain is account-scoped and reusable, so there is no
                 // fresh challenge to fetch. Treat DCV as already satisfied and skip straight
                 // to tracking/issuance instead of deferring to the next sync cycle.
@@ -4639,7 +4617,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
 
                 // TXT record hostname template — config-driven, mirroring V1's
-                // PerformDcvIfNeededAsync (issues/0027, item 5a). Falls back to the same
+                // PerformDcvIfNeededAsync. Falls back to the same
                 // Constants.Dcv.DefaultTxtRecordTemplate default V1 uses when unconfigured;
                 // {0} is substituted with the BASE domain name via string.Format, same as V1 —
                 // a wildcard's "*." label is not a queryable DNS name, so the DNS-side hostname
@@ -4728,7 +4706,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // Same no-op as the GetDcv branch above, but surfaced at Verify time
                         // instead — the domain became/was already verified between the two
                         // calls. Treat as verified and continue to tracking rather than
-                        // deferring (issues/0020).
+                        // deferring.
                         _logger.LogInformation(
                             "V2 DCV already satisfied (EMS-1080 domain already verified) for order {OrderId} " +
                             "during VerifyDcv; treating as verified and proceeding to tracking.", orderId);
@@ -4794,7 +4772,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// Generalized V2 DCV for orders whose Track Order response surfaced a per-domain
-        /// <c>verifications.domain.domains[]</c> block (issue 0042) — chiefly UCC orders with
+        /// <c>verifications.domain.domains[]</c> block — chiefly UCC orders with
         /// additional SAN domains. Every entry whose own <c>dcvStatus</c> isn't VERIFIED is
         /// processed: stage a TXT record for each pending domain, wait once for DNS propagation
         /// (not once per domain), verify each domain individually, poll Track Order until every
@@ -4871,7 +4849,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // Phase 1: stage a TXT record for every pending domain. Every failure here is
                 // scoped to the one domain that hit it (logged loudly, then skipped) — never
                 // thrown — so one bad SAN cannot abort DCV for the co-tenant domains on the same
-                // order (issue 0042's "partial failure: keep going").
+                // order; a partial failure keeps the rest going.
                 foreach (var d in pendingDomains)
                 {
                     ct.ThrowIfCancellationRequested();
@@ -5022,11 +5000,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                     // Phase 2: verify each domain that got through staging individually — the
                     // spec's Verify DCV body takes a single `domain`, mirroring Get DCV
-                    // Challenges' per-domain shape (per-SAN semantics unconfirmed live
-                    // end-to-end — see v2-api-support-questions.md Finding 9, question 3). This
-                    // includes hostname-sharing siblings (verifyCandidates), not just the domains
-                    // that staged a fresh TXT record (staged) — CERTInext tracks DCV per domain
-                    // entry even when two domains share one TXT record.
+                    // Challenges' per-domain shape.
+                    // NOTE (unverified): per-SAN semantics have not been confirmed against the
+                    // live API end-to-end. This includes hostname-sharing siblings
+                    // (verifyCandidates), not just the domains that staged a fresh TXT record
+                    // (staged) — CERTInext tracks DCV per domain entry even when two domains
+                    // share one TXT record.
                     foreach (var d in verifyCandidates)
                     {
                         try
@@ -5055,7 +5034,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         {
                             // Same no-op as the GetDcv branch above, but surfaced at Verify time
                             // instead — the domain became/was already verified between the two
-                            // calls. Treat as verified rather than deferring (issues/0020).
+                            // calls. Treat as verified rather than deferring.
                             _logger.LogInformation(
                                 "V2 DCV already satisfied (EMS-1080) for domain {Domain} on order {OrderId} " +
                                 "during VerifyDcv; treating as verified.", LogSanitizer.Strip(d), orderId);
@@ -5148,8 +5127,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Polls <see cref="ICERTInextClient.TrackOrderV2Async"/> until every domain in
         /// <paramref name="domains"/> reaches a VERIFIED <c>dcvStatus</c> in
-        /// <c>verifications.domain.domains[]</c>, reaches REJECTED (terminal — confirmed live
-        /// after an order cancellation, issue 0042), or <paramref name="ct"/> is cancelled /
+        /// <c>verifications.domain.domains[]</c>, reaches REJECTED (terminal — seen
+        /// after an order cancellation), or <paramref name="ct"/> is cancelled /
         /// the internal deadline elapses. V2 analogue of <see cref="WaitForDcvVerificationAsync"/>.
         /// </summary>
         private async Task WaitForDomainsVerifiedV2Async(
@@ -5404,11 +5383,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// apart (after a fixed initial delay), so an order that issues quickly is returned
         /// GENERATED + PEM in the same enrollment call instead of waiting for the next
         /// synchronization. If the certificate has not issued within the budget, the original
-        /// pending result is returned unchanged and the order is imported by a later sync —
-        /// behaviour identical to before this feature.
+        /// pending result is returned unchanged and the order is imported by a later sync.
         ///
         /// Applies to ALL products. CERTInext issues OV/EV asynchronously (organization
-        /// verification, minutes to hours; confirmed by CERTInext support ticket #162763), so
+        /// verification, minutes to hours; per CERTInext support), so
         /// those typically exhaust the budget and fall back to pending; only DV / already-approved
         /// orders return in-call. Never throws — any polling error degrades to the pending result.
         /// </summary>
@@ -5571,7 +5549,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "Synchronous pickup did not complete within {Retries} attempts for order {OrderNumber} " +
                         "({Errors} poll error(s); remainder still pending). Returning pending result; the " +
                         "certificate will be imported by the next synchronization. CERTInext issues OV/EV " +
-                        "asynchronously by design (support ticket #162763).",
+                        "asynchronously by design.",
                         retries, orderNumber, pollErrors);
                 pendingResult.StatusMessage =
                     $"{pendingResult.StatusMessage} The certificate was not issued within the enrollment-pickup " +
@@ -5589,9 +5567,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// Synchronous certificate pickup for the V2 API — parity with
-        /// <see cref="PickUpEnrolledCertificateAsync"/> above (issue 0051: V2 enrollment had no
-        /// analogous poll, so a DV order that CERTInext issues within seconds of CSR submission
-        /// only ever reached Command via a gateway sync plus a Command full scan). After a V2
+        /// <see cref="PickUpEnrolledCertificateAsync"/> above: without this poll, a DV order
+        /// that CERTInext issues within seconds of CSR submission would only ever reach Command
+        /// via a gateway sync plus a Command full scan. After a V2
         /// order is created and its CSR submitted, polls <see cref="ICERTInextClient.TrackOrderV2Async"/>
         /// up to <c>PickupRetries</c> times, <c>PickupDelay</c> seconds apart (after the same
         /// fixed initial delay), so a fast-issuing order is returned GENERATED + PEM in this same
@@ -5602,11 +5580,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// degrades to the pending result.
         ///
         /// Also returns the freshest raw CA status string observed while producing the result
-        /// (falling back to <paramref name="lastKnownCaStatus"/> when no fresher poll ran) — issue
-        /// 0052 needs this so <see cref="EnrollV2Async"/>'s terminal REVOKED-to-FAILED
+        /// (falling back to <paramref name="lastKnownCaStatus"/> when no fresher poll ran), so
+        /// <see cref="EnrollV2Async"/>'s terminal REVOKED-to-FAILED
         /// normalization can log/report the CA's own status text, not just Command's mapped
         /// disposition. Note: a REVOKED result reaching that normalization is never "surfaced
-        /// immediately" as REVOKED any more — see <c>NormalizeV2RevokedEnrollResult</c>.
+        /// immediately" as REVOKED — see <c>NormalizeV2RevokedEnrollResult</c>.
         /// </summary>
         private async Task<(EnrollmentResult Result, string RawCaStatus)> PickUpEnrolledCertificateV2Async(
             EnrollmentResult pendingResult, string orderId, string productFamilySlug,
@@ -5623,7 +5601,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Only a still-pending (external-validation) result can benefit from a pickup poll.
             // An already issued/failed/revoked result is returned unpolled — the caller's own
             // terminal normalization (NormalizeV2RevokedEnrollResult) decides what a REVOKED
-            // disposition here ultimately becomes; this method no longer surfaces it as-is.
+            // disposition here ultimately becomes; this method does not surface it as-is.
             if (pendingResult == null
                 || pendingResult.Status != (int)EndEntityStatus.EXTERNALVALIDATION)
                 return (pendingResult, lastKnownCaStatus);
@@ -5741,11 +5719,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                  || disposition == (int)EndEntityStatus.FAILED)
                         {
                             // Terminal non-issued outcomes carry no body and stop the poll
-                            // immediately — but neither is "returned as-is" any more: the REVOKED
-                            // case still comes back from this method with Status=REVOKED, but
-                            // EnrollV2Async's terminal NormalizeV2RevokedEnrollResult call maps it
-                            // to FAILED before it ever reaches the gateway (issue 0052), since a
-                            // REVOKED order observed here never has a downloadable certificate body.
+                            // immediately. The REVOKED case still comes back from this method with
+                            // Status=REVOKED, but EnrollV2Async's terminal
+                            // NormalizeV2RevokedEnrollResult call maps it to FAILED before it ever
+                            // reaches the gateway, since a REVOKED order observed here never has a
+                            // downloadable certificate body.
                             if (disposition == (int)EndEntityStatus.FAILED)
                                 _logger.LogError(
                                     "V2 order {OrderId} reached terminal FAILED status '{Status}' during " +
@@ -5946,7 +5924,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// <see cref="BuildSanList(Dictionary{string, string[]}, string, string)"/> with an explicit
         /// DNS-only mode for callers whose wire field cannot carry non-DNS SANs at all — the V2
-        /// SSL UCC <c>additionalDomains</c> path (issue 0046). With <paramref name="dnsOnly"/> set,
+        /// SSL UCC <c>additionalDomains</c> path. With <paramref name="dnsOnly"/> set,
         /// non-DNS entries are removed before any logging, regardless of
         /// <see cref="CERTInextConfig.SubmitNonDnsSans"/> (a V1-only switch), and handed back via
         /// <paramref name="excludedNonDns"/> so the caller can log its own accurate message. The
@@ -5964,7 +5942,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // possibly-filtered result is known (see below).
             var result = CollectRequestedSanEntries(san, csr, out var fromCsrKeys, out var skippedCsrTags);
 
-            // Issue 0040 follow-up: email SAN values masked unless LogSensitiveRequestData is on.
+            // Email SAN values masked unless LogSensitiveRequestData is on.
             string FormatSans(IEnumerable<SanEntry> sans) =>
                 LogSanitizer.FormatSans(sans, _config.LogSensitiveRequestData);
 
@@ -5996,30 +5974,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // them would issue a certificate silently missing names the subscriber asked for,
             // which is the worse failure.
             //
-            // Measured on the US SANDBOX only (SanSubmissionProbeTests, product 844,
-            // 2026-08-12): CERTInext did NOT reject these at order placement. It accepted the
-            // order and registered the value verbatim as an order domain — an email address, an
-            // IP literal and a URI all came back as domainVerification keys. The order then
-            // cannot pass domain validation, so it parks pending instead of failing fast.
+            // Measured on the US sandbox only (product 844): CERTInext did NOT reject these at
+            // order placement. It accepted the order and registered the value verbatim as an
+            // order domain — an email address, an IP literal and a URI all came back as
+            // domainVerification keys. The order then cannot pass domain validation, so it parks
+            // pending instead of failing fast.
             //
-            // Production is UNVERIFIED for this case and may reject the order outright instead.
-            // The warning below therefore describes the sandbox outcome as the expected one
-            // without promising it: either way the operator is told which SANs are the problem,
-            // which is the part that matters for diagnosis.
+            // NOTE (unverified): production behavior for this case has not been confirmed and may
+            // reject the order outright instead. The warning below therefore describes the
+            // sandbox outcome as the expected one without promising it: either way the operator is
+            // told which SANs are the problem, which is the part that matters for diagnosis.
             //
             // This filtering runs BEFORE any of the logging below, and all of that logging is
-            // computed from `result` as it stands afterward — not from the pre-filter set. A
-            // prior version of this method logged "resolved" and "added to the order" against the
-            // pre-filter set and only THEN applied this filter, so with SubmitNonDnsSans=false the
-            // audit trail could claim a SAN was added when it had in fact just been dropped two
-            // lines later — a self-contradicting record for the same enrollment. The fix is
-            // ordering, not new logic: decide what is actually being submitted first, describe
-            // that.
+            // computed from `result` as it stands afterward — not from the pre-filter set. Logging
+            // must reflect what is actually submitted, not what was initially collected: with
+            // SubmitNonDnsSans=false, logging against the pre-filter set would claim a SAN was
+            // added to the order when it was in fact dropped — a self-contradicting audit record
+            // for the same enrollment.
             var nonDns = result.Where(s => !string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase)).ToList();
 
             if (dnsOnly)
             {
-                // DNS-only caller (V2 SSL UCC additionalDomains, issue 0046): non-DNS SANs can
+                // DNS-only caller (V2 SSL UCC additionalDomains): non-DNS SANs can
                 // never reach the wire there, whatever SubmitNonDnsSans says, so exclude them
                 // here — before the logging below — and leave the wording to the caller, which
                 // knows which field they were excluded from. No V1-worded warning is raised.
@@ -6050,8 +6026,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     return null;
             }
 
-            // The blind spot that hid the original defect was that nothing logged what we
-            // resolved. Log the final, post-filter resolved set and its provenance at Information.
+            // Log the final, post-filter resolved set and its provenance at Information.
             int fromCsrKept = result.Count(s => fromCsrKeys.Contains($"{s.Type}|{s.Value}"));
             // Post-filter, not the pre-filter `fromGateway` snapshot: gateway- and CSR-sourced
             // entries are mutually exclusive by construction (the CSR fallback only ever runs when
@@ -6099,8 +6074,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// The SAN source rule shared by <see cref="BuildSanList"/> and
-        /// <see cref="BuildPrivatePkiAdditionalHosts"/> (issue 0033 extracted it verbatim from
-        /// <see cref="BuildSanList"/> so both honour it identically): the gateway-supplied SAN
+        /// <see cref="BuildPrivatePkiAdditionalHosts"/> (extracted here so both honour it
+        /// identically): the gateway-supplied SAN
         /// dictionary (types normalized by <see cref="MapSanType"/>), falling back to the CSR's own
         /// subjectAltName extension only when the dictionary is itself <c>null</c> — see
         /// <see cref="BuildSanList"/> for why this is a fallback, not a union. Entries are trimmed
@@ -6166,7 +6141,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Issue 0033: resolves the <c>additionalHosts</c> list for a V2 private-pki order. Spec
+        /// Resolves the <c>additionalHosts</c> list for a V2 private-pki order. Spec
         /// ("Private PKI Certificates" -> Create - Intranet SSL): "<c>additionalHosts[]</c> - SAN
         /// list (DNS names or IPv4 / IPv6)"; the example body sends
         /// <c>["portal.acme.local", "reports.acme.local", "10.0.0.50"]</c> with the primary host in
@@ -6328,10 +6303,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Maps a GeneralName to the <see cref="SanEntry"/> this plugin would submit for it, or null
         /// for a name whose value cannot be rendered meaningfully — skipped rather than submitted as
-        /// ASN.1 debris. One switch, not two: a separate tag→type mapping alongside this one used to
+        /// ASN.1 debris. One switch, not two: a separate tag→type mapping alongside this one would
         /// assign a type string ("directoryname", "registeredid", ...) to tags that always return a
-        /// null value here anyway, so those branches were dead — the type never reached a caller
-        /// with no value to pair it with.
+        /// null value here anyway — the type never reaches a caller with no value to pair it with.
         /// </summary>
         private static SanEntry GeneralNameToSanEntry(Org.BouncyCastle.Asn1.X509.GeneralName generalName)
         {

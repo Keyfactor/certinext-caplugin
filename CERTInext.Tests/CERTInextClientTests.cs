@@ -791,18 +791,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
-        /// Regression: this client is built with ThrowOnAnyError=false, so RestSharp catches a
+        /// This client is built with ThrowOnAnyError=false, so RestSharp catches a
         /// cancelled HttpClient.SendAsync internally and returns a non-throwing, unsuccessful
-        /// RestResponse instead of propagating OperationCanceledException. Before this fix,
-        /// ExecuteWithRetryAsync passed that response straight to DeserializeOrThrow, which wrapped
-        /// it in a plain Exception — indistinguishable from a genuine API failure. A caller such as
-        /// PerformDcvIfNeededAsync's per-domain "catch (OperationCanceledException) { throw; }" guard
-        /// (added specifically to stop a DCV timeout from being mislabeled as an ordinary per-domain
-        /// failure) could never actually see the real cancellation, because it never arrived as
-        /// OperationCanceledException in the first place — a gap a Moq-level test of the plugin alone
-        /// cannot expose, since a mock can be told to throw whatever type is asked for. This test
-        /// exercises the real client against a real (if local) HTTP call, which is the only way to
-        /// pin the actual failure mode.
+        /// RestResponse instead of propagating OperationCanceledException. ExecuteWithRetryAsync
+        /// must surface that as OperationCanceledException rather than passing the response to
+        /// DeserializeOrThrow, which would wrap it in a plain Exception — indistinguishable from
+        /// a genuine API failure. A caller such as PerformDcvIfNeededAsync's per-domain
+        /// "catch (OperationCanceledException) { throw; }" guard (which stops a DCV timeout from
+        /// being mislabeled as an ordinary per-domain failure) depends on seeing the real
+        /// cancellation — a gap a Moq-level test of the plugin alone cannot expose, since a mock
+        /// can be told to throw whatever type is asked for. This test exercises the real client
+        /// against a real (if local) HTTP call, which is the only way to pin the actual failure
+        /// mode.
         /// </summary>
         [Fact]
         public async Task GetDcvAsync_ThrowsOperationCanceled_WhenCancellationTokenIsCancelled()

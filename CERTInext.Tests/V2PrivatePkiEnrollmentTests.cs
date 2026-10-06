@@ -40,9 +40,9 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issue 0033: <c>EnrollV2Async</c> used to build the SSL/TLS create
-    /// body (<see cref="V2CreateSslOrderRequest"/>) for every product family. A
-    /// <c>ProductFamily=private-pki</c> template must now place a
+    /// Tests that <c>EnrollV2Async</c> builds a family-specific create body rather than the
+    /// SSL/TLS one (<see cref="V2CreateSslOrderRequest"/>) for every product family. A
+    /// <c>ProductFamily=private-pki</c> template must place a
     /// <see cref="V2CreatePrivatePkiOrderRequest"/> (spec: <c>variant</c>, <c>hostname</c>,
     /// <c>additionalHosts</c>; no organization / certificate / agreement block) through the
     /// Private PKI client overload, with IP SANs carried into <c>additionalHosts</c>; a
@@ -364,8 +364,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task Enroll_V2_PrivatePki_MultiSanCsr_IsNotRejectedBySslSingleDomainGuard()
         {
-            // The same CSR on a non-UCC SSL product is rejected before any order is placed (issue
-            // f3/0047 guard). Private PKI's additionalHosts is multi-entry for every variant.
+            // The same CSR on a non-UCC SSL product is rejected before any order is placed (multi-SAN
+            // guard). Private PKI's additionalHosts is multi-entry for every variant.
             var mock = NewMock();
             var captured = StubPrivatePkiOrder(mock);
             string csr = GenerateCsrPem(Hostname,
@@ -481,7 +481,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.CARequestID.Should().BeEmpty();
             result.StatusMessage.Should().Contain("signature").And.Contain("not yet supported");
             mock.Invocations.Should().BeEmpty(
-                "pre-0033 this sent the SSL body to /signature-certificates; now nothing is sent at all");
+                "nothing is sent to /signature-certificates (no SSL body is sent to the wrong family endpoint)");
         }
 
         // ---------------------------------------------------------------------------
@@ -513,9 +513,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task ValidateProductInfo_V2_PrivatePki_Succeeds_WhenExplicitCodeIsAPrivatePkiProduct()
         {
-            // Regression: pre-0033 this threw "does not correspond to the selected product",
-            // because the SSL ProductId (DV SSL -> productTypeID 13) was cross-checked against a
-            // Private PKI code (productTypeID 39), so no private-pki template could ever be saved.
+            // The SSL ProductId (DV SSL -> productTypeID 13) must not be cross-checked against a
+            // Private PKI code (productTypeID 39) — otherwise "does not correspond to the selected
+            // product" would be thrown and no private-pki template could ever be saved.
             using var server = WireMockServer.Start();
             StubToken(server);
             StubCatalog(server, "149", Constants.ApiV2.PrivatePkiProductTypeId);

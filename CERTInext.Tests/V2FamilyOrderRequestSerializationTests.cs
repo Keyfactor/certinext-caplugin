@@ -24,10 +24,9 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0033: wire-shape tests for the Private PKI and Document Signer create-order DTOs,
-    /// checked against the request bodies in the V2 spec
-    /// (<c>docs/reference/specs/CERTInext API v2.postman_collection (1).json</c>). Each spec
-    /// example body is copied verbatim below (named after its Postman request); the DTO is
+    /// Wire-shape tests for the Private PKI and Document Signer create-order DTOs, checked
+    /// against the example request bodies in the V2 API spec. Each spec
+    /// example body is copied verbatim below; the DTO is
     /// populated with the same values, serialized with the client's serializer options, and
     /// compared structurally (key names, nesting, values — not whitespace or key order).
     /// </summary>

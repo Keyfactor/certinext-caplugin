@@ -31,11 +31,11 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issues/0059-v2-productvariant-not-derived-from-product.md: the V2
-    /// SSL create body's <c>productVariant</c> defaulted to "dv" regardless of the selected
-    /// product, so an OV/EV template with no explicit <c>ProductVariant</c> enrollment parameter
-    /// sent a DV-shaped body — skipping the mandatory OV/EV <c>organization</c> block (issue 0028)
-    /// — while an explicit-but-contradictory override (e.g. "dv" configured for "OV SSL") passed
+    /// Tests guarding against the V2
+    /// SSL create body's <c>productVariant</c> defaulting to "dv" regardless of the selected
+    /// product: an OV/EV template with no explicit <c>ProductVariant</c> enrollment parameter
+    /// must not send a DV-shaped body — skipping the mandatory OV/EV <c>organization</c> block
+    /// — nor should an explicit-but-contradictory override (e.g. "dv" configured for "OV SSL") pass
     /// through unchecked. Covers <see cref="CERTInextCAPlugin.ResolveSslProductVariant"/> directly,
     /// end-to-end through <see cref="CERTInextCAPlugin.Enroll"/>, and through
     /// <see cref="CERTInextCAPlugin.ValidateProductInfo"/> (template-save-time rejection).
@@ -89,7 +89,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public void ResolveSslProductVariant_ExplicitVariant_ContradictsProduct_ReturnsActionableError()
         {
-            // The exact bug scenario from issue 0059: an OV product with the SSL-only "dv"
+            // An OV product with the SSL-only "dv"
             // default explicitly configured.
             var ep = new Models.EnrollmentParams(new EnrollmentProductInfo
             {
@@ -126,8 +126,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public void ResolveSslProductVariant_UnmappedProductId_NoExplicitVariant_KeepsCurrentSslDefault()
         {
             // No entry in Constants.Products.ProductVariantsV2 for this ProductId (none of the 10
-            // real SSL products are named this) — issue 0059 says: don't invent a mapping, keep
-            // pre-fix behavior (the SSL-only "dv" default) rather than guessing.
+            // real SSL products are named this) — don't invent a mapping, keep
+            // the SSL-only "dv" default rather than guessing.
             var ep = new Models.EnrollmentParams(new EnrollmentProductInfo
             {
                 ProductID = "Some Unmapped Product",
@@ -219,16 +219,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock, "846", "16"); // OV SSL, non-UCC
-            StubHappyOrderPlacement(mock, "ord_0059_ov", "pending-organization-verification");
+            StubHappyOrderPlacement(mock, "ord_variant_ov", "pending-organization-verification");
 
             V2CreateSslOrderRequest captured = null;
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_0059_ov", Status = "pending-organization-verification" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_variant_ov", Status = "pending-organization-verification" });
 
-            var plugin = BuildV2Plugin(mock.Object, organizationNumber: "ORG-0059");
+            var plugin = BuildV2Plugin(mock.Object, organizationNumber: "ORG-TEST");
 
             var result = await plugin.Enroll(
                 csr: MockCertificateData.FakeCsrPem,
@@ -238,13 +238,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
-            result.CARequestID.Should().Be("ord_0059_ov");
+            result.CARequestID.Should().Be("ord_variant_ov");
             captured.Should().NotBeNull();
             captured!.ProductVariant.Should().Be("ov",
                 "with no explicit ProductVariant, the wire value must be derived from ProductID 'OV SSL'");
             captured.Organization.Should().NotBeNull(
                 "deriving 'ov' must engage the same OV/EV organization-block requirement as an explicit 'ov'");
-            captured.Organization.OrganizationNumber.Should().Be("ORG-0059");
+            captured.Organization.OrganizationNumber.Should().Be("ORG-TEST");
         }
 
         [Fact]
@@ -252,16 +252,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock, "847", "19"); // EV SSL, non-UCC
-            StubHappyOrderPlacement(mock, "ord_0059_ev", "pending-organization-verification");
+            StubHappyOrderPlacement(mock, "ord_variant_ev", "pending-organization-verification");
 
             V2CreateSslOrderRequest captured = null;
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_0059_ev", Status = "pending-organization-verification" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_variant_ev", Status = "pending-organization-verification" });
 
-            var plugin = BuildV2Plugin(mock.Object, organizationNumber: "ORG-0059");
+            var plugin = BuildV2Plugin(mock.Object, organizationNumber: "ORG-TEST");
 
             var result = await plugin.Enroll(
                 csr: MockCertificateData.FakeCsrPem,
@@ -271,7 +271,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
-            result.CARequestID.Should().Be("ord_0059_ev");
+            result.CARequestID.Should().Be("ord_variant_ev");
             captured!.ProductVariant.Should().Be("ev");
             captured.Organization.Should().NotBeNull();
         }
@@ -279,18 +279,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task Enroll_V2_DvProduct_NoExplicitProductVariant_StaysDv_NoOrganizationBlock()
         {
-            // Regression guard: the DV default path (the overwhelming majority of existing
-            // templates) must be completely unaffected by 0059.
+            // Guard: the DV default path (the overwhelming majority of existing
+            // templates) must be completely unaffected by variant derivation.
             var mock = NewMock();
             StubCatalog(mock, "842", "13"); // DV SSL, non-UCC
-            StubHappyOrderPlacement(mock, "ord_0059_dv");
+            StubHappyOrderPlacement(mock, "ord_variant_dv");
 
             V2CreateSslOrderRequest captured = null;
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_0059_dv", Status = "pending-dcv" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_variant_dv", Status = "pending-dcv" });
 
             // Deliberately no OrganizationNumber configured — a DV order must not need it.
             var plugin = BuildV2Plugin(mock.Object, organizationNumber: null);
@@ -303,7 +303,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
-            result.CARequestID.Should().Be("ord_0059_dv");
+            result.CARequestID.Should().Be("ord_variant_dv");
             captured!.ProductVariant.Should().Be("dv");
             captured.Organization.Should().BeNull();
         }
@@ -319,7 +319,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // at all (no catalog lookup, no order placement) — mirrors the private-pki variant
             // guard's own Strict-mock test.
             var mock = NewMock();
-            var plugin = BuildV2Plugin(mock.Object, organizationNumber: "ORG-0059");
+            var plugin = BuildV2Plugin(mock.Object, organizationNumber: "ORG-TEST");
 
             var result = await plugin.Enroll(
                 csr: MockCertificateData.FakeCsrPem,

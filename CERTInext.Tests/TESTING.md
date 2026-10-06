@@ -158,10 +158,10 @@ CERTInext has no dedicated renewal endpoint. `RenewCertificateAsync` submits a n
 | `GetProfilesAsync_ReturnsProfiles_WhenServerResponds` | `POST /GetProductDetails` → two products in nested category envelope | Result has 2 items; `ProfileIdTls` and `ProfileIdClient` present; all `Active == true` |
 | `GetProfilesAsync_ReturnsEmptyList_WhenNoProductsReturned` | `POST /GetProductDetails` → empty `productDetails` array | Result is empty |
 
-### GetProductDetailsV2Async — GET /api/certinext/v2/catalog/products (issue 0025 / 0016, `CERTInextClientV2Tests`)
+### GetProductDetailsV2Async — GET /api/certinext/v2/catalog/products (`CERTInextClientV2Tests`)
 
 The live sandbox account returns the SAME nested category envelope as V1's `GetProductDetails`
-(confirmed 2026-09-24), just under a top-level `"products"` key. `ParseProductDetailsV2Response`
+just under a top-level `"products"` key. `ParseProductDetailsV2Response`
 flattens each shape into `ProductDetail`; the flat `productId`/bare-array shapes are kept as
 fallback branches for other accounts/API versions.
 
@@ -172,7 +172,7 @@ fallback branches for other accounts/API versions.
 | `GetProductDetailsV2Async_BareArray_Parses` | `GET catalog/products` → bare JSON array | Parses without a wrapper object |
 | `GetProductDetailsV2Async_EmptyCatalog_ReturnsEmptyList` | `GET catalog/products` → `{"products":[]}` | Returns an empty list (no throw) |
 
-### ValidateProductInfo — `CERTInextCAPluginTests` (V1) / `CERTInextCAPluginV2Tests` (V2), issue 0025
+### ValidateProductInfo — `CERTInextCAPluginTests` (V1) / `CERTInextCAPluginV2Tests` (V2)
 
 `ValidateProductInfo` builds its own `CERTInextClient` from `connectionInfo` (ignoring the
 Moq-injected client), so these tests use a real WireMock server as `ApiUrl`.
@@ -387,8 +387,8 @@ block with `status: "1"` (success) or `status: "0"` (failure).
 | `OrderReportEmptyJson()` | `POST /GetOrderReport` | Empty `ordersArray`, `noOfPages=0` |
 | `GetProductDetailsJson()` | `POST /GetProductDetails` | Nested category envelope with two products |
 | `GetProductDetailsEmptyJson()` | `POST /GetProductDetails` | Empty `productDetails` array |
-| `GetCatalogProductsV2NestedJson()` | `GET catalog/products` | Nested category envelope (live sandbox shape, confirmed 2026-09-24) |
-| `GetCatalogProductsV2FlatJson()` | `GET catalog/products` | Flat `productId` rows (Postman spec example shape, fallback branch) |
+| `GetCatalogProductsV2NestedJson()` | `GET catalog/products` | Nested category envelope (sandbox account shape) |
+| `GetCatalogProductsV2FlatJson()` | `GET catalog/products` | Flat `productId` rows (spec example shape, fallback branch) |
 | `GetCatalogProductsV2BareArrayJson()` | `GET catalog/products` | Bare JSON array, no wrapper object |
 | `GetCatalogProductsV2EmptyJson()` | `GET catalog/products` | `{"products":[]}` |
 | `ApiFailureJson(code, msg)` | Any endpoint | Generic `meta.status="0"` failure |

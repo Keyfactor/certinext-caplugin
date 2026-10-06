@@ -439,7 +439,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         // ValidateProductInfo builds its own CERTInextClient from connectionInfo (like
         // ValidateCAConnectionInfo) rather than using the Moq-injected client, so these tests
-        // need a real WireMock server as ApiUrl (issue 0025 plan, correction 3).
+        // need a real WireMock server as ApiUrl.
 
         [Fact]
         public async Task ValidateProductInfo_V1_Succeeds_WhenProductCodePresent()

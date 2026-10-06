@@ -38,11 +38,10 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issues/0027-v2-request-builder-drops-config-fields.md item 5e: the V2
-    /// order body's <c>requestor.designation</c> field was hardcoded to <c>"IT Administrator"</c>
-    /// (the V2 spec's own example value for this Optional free-text field), rather than sourced
-    /// from a connector config field. V1 never sent <c>requestorDesignation</c> at all — the DTO
-    /// carried the property, but nothing set it.
+    /// Tests that the V2 order body's <c>requestor.designation</c> field is sourced from a
+    /// connector config field rather than hardcoded (the V2 spec's own example value for this
+    /// Optional free-text field is <c>"IT Administrator"</c>). V1 does not send
+    /// <c>requestorDesignation</c> unless configured — the DTO carries the property.
     ///
     /// Covers both paths:
     ///   - V2 (<see cref="CERTInextCAPlugin.Enroll"/> → <c>EnrollV2Async</c>): exercised end-to-end
@@ -322,8 +321,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var requestorInfo = CapturedGenerateOrderSslBody().GetProperty("requestorInformation");
             requestorInfo.TryGetProperty("requestorDesignation", out _).Should().BeFalse(
                 "a blank/unset RequestorDesignation must omit requestorDesignation from the wire " +
-                "JSON entirely (V1 never sent this field before this fix, and blank must preserve " +
-                "that behavior)");
+                "JSON entirely (V1 does not send this field unless configured)");
         }
 
         [Fact]

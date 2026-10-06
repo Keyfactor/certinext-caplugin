@@ -77,7 +77,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             _http = new RestClient(options);
 
             // V2 client — only constructed when V2 is enabled and ApiUrl is set. A single ApiUrl
-            // serves both modes (its meaning follows UseV2Api — issues/0022 config consolidation);
+            // serves both modes (its meaning follows UseV2Api);
             // in V2 mode it is the V2 base URL (no trailing path suffix).
             // No authenticator: tokens are injected per-request via BuildV2RequestAsync.
             if (config.UseV2Api && !string.IsNullOrWhiteSpace(config.ApiUrl))
@@ -222,7 +222,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 LogSanitizer.Strip(certInfo?.DomainName),
                 certInfo?.AdditionalDomains?.Count ?? 0,
                 // Untyped by now: an email SAN submitted here is masked unless
-                // LogSensitiveRequestData is on (issue 0040 follow-up).
+                // LogSensitiveRequestData is on.
                 LogSanitizer.FormatUntypedSans(certInfo?.AdditionalDomains, _config.LogSensitiveRequestData));
 
             GenerateOrderResponse result = null;
@@ -322,7 +322,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     }
 
                     // EMS-947 "Duplicate requestTxn": CERTInext already received an order for this
-                    // transaction. With the non-idempotent-retry fix above this should no longer be
+                    // transaction. The non-idempotent-retry handling above means this should not be
                     // caused by our own retry, but if it still surfaces the order exists on the CA
                     // side and will be imported by the next sync — say so, not a generic failure.
                     bool isDuplicateTxn =
@@ -820,7 +820,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             // Primary domain for the renewal order. Prefer the CN of the subject Command gave
             // us; the prior order's requestorName is only a last resort and is not a domain —
-            // it is retained solely so an old caller that sets no Subject behaves as before.
+            // it is retained solely so an old caller that sets no Subject still gets a domain.
             // Hoisted: the same parse drives both the domain and the "did we get a CN?" warning,
             // mirroring BuildOrderRequestFromLegacyEnrollRequest.
             string subjectCn = ExtractCnFromSubject(request.Subject);
@@ -1335,9 +1335,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             V2CreateSslOrderRequest request,
             CancellationToken ct = default)
         {
-            // Issue 0033: the SSL-shaped body must only ever go to the SSL endpoint. Previously
-            // the slug was substituted into the URL unchecked, so a private-pki/signature
-            // template silently sent this body to the wrong family's create endpoint.
+            // The SSL-shaped body must only ever go to the SSL endpoint: substituting the slug
+            // into the URL unchecked would let a private-pki/signature template silently send
+            // this body to the wrong family's create endpoint.
             if (!string.Equals(productFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException(
                     $"A V2 SSL/TLS order body can only be sent to the '{Constants.ApiV2.FamilySsl}' family, " +
@@ -1362,13 +1362,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             => PlaceOrderV2CoreAsync(Constants.ApiV2.SignatureCertificatesPath, productCode, request, ct);
 
         /// <summary>
-        /// Shared V2 create-order transport for every product family (issue 0033): POSTs the
+        /// Shared V2 create-order transport for every product family: POSTs the
         /// family-specific body to <paramref name="path"/> with the X-Product-Code and
         /// Idempotency-Key headers. Request and response bodies are only ever logged (Trace)
         /// through <see cref="ApplyLoggingRedaction"/>, so credentials are always scrubbed and
         /// requestor/subject PII is scrubbed unless <c>LogSensitiveRequestData</c> is on.
         /// X-Product-Code is the spec's "Optional override" on SSL create (and is sent the same
-        /// way for Private PKI / Document Signer, issue 0054 item #4): a null/blank
+        /// way for Private PKI / Document Signer): a null/blank
         /// <paramref name="productCode"/> omits the header entirely rather than sending it empty,
         /// which is not itself a valid override value.
         /// </summary>
@@ -1494,7 +1494,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 // or not in a revokable state." This is deliberately ambiguous on the
                 // wire — callers that have already confirmed the order lives in
                 // `productFamilySlug` (e.g. via TrackOrderV2Async) should treat a 404
-                // here as "not revokable", not as a family miss (issues/0019).
+                // here as "not revokable", not as a family miss.
                 throw new KeyNotFoundException(
                     $"V2 order '{orderId}' in family '{productFamilySlug}' not found or not in a revokable state.");
             }
@@ -1503,7 +1503,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 // Label by whatever EMS code/detail CERTInext actually returned rather
                 // than presuming "not in issued state" — 422s here cover multiple
                 // distinct conditions (EMS-969 revoke reason ID missing, sandbox-timing
-                // "Certificate Request still being processed", etc. — see issues/0019).
+                // "Certificate Request still being processed", etc.).
                 string detail = ExtractV2ErrorMessage(resp.Content, "V2 revoke");
                 // Compliance finding: same audit-trail requirement as the 404 branch above —
                 // this also returns before ThrowOnV2Failure would otherwise log it.
@@ -1610,8 +1610,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             Logger.MethodEntry(LogLevel.Trace);
             EnsureV2Client();
-            // Per-domain scope (issue 0042) — confirmed live to return a distinct token per SAN
-            // on a UCC order (v2-api-support-questions.md Finding 9).
+            // Per-domain scope: returns a distinct token per SAN on a UCC order.
             string path = $"/api/certinext/v2/{familySlug}/{orderId}/dcv?domain=" + Uri.EscapeDataString(domain);
             var req = await BuildV2RequestAsync(path, Method.Get, ct);
             var resp = await _httpV2.ExecuteAsync(req, ct);
@@ -1666,7 +1665,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             // Scope the catalog to the connector's configured billing group, mirroring V1's
             // GetProductDetailsAsync (ProductDetailsFilter.GroupNumber). Omitted entirely when
-            // unconfigured so the account's default group is used, same as V1 (issue 0029).
+            // unconfigured so the account's default group is used, same as V1.
             string path = Constants.ApiV2.CatalogProductsPath;
             if (!string.IsNullOrWhiteSpace(_config.GroupNumber))
                 path += "?groupNumber=" + Uri.EscapeDataString(_config.GroupNumber);
@@ -1692,8 +1691,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             Logger.MethodEntry(LogLevel.Trace);
             EnsureV2Client();
 
-            // Server clamps size to 100 and treats page=0 as page 1 (issues/0022 Phase 0 probe);
-            // the client always sends 1-based pages itself so that quirk never surfaces here.
+            // Server clamps size to 100 and treats page=0 as page 1; the client always sends
+            // 1-based pages itself so that quirk never surfaces here.
             int size = pageSize <= 0
                 ? Constants.Api.DefaultPageSize
                 : Math.Min(pageSize, Constants.ApiV2.OrdersReportMaxPageSize);
@@ -1715,7 +1714,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     query.Append("&to=").Append(Uri.EscapeDataString(to));
                 // Scope the orders report to the connector's configured billing group, mirroring
                 // V1's DelegationInformation.GroupNumber. Omitted entirely when unconfigured so
-                // the account's default group is used, same as V1 (issue 0029).
+                // the account's default group is used, same as V1.
                 if (!string.IsNullOrWhiteSpace(_config.GroupNumber))
                     query.Append("&groupNumber=").Append(Uri.EscapeDataString(_config.GroupNumber));
 
@@ -1785,12 +1784,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Parses the GET /api/certinext/v2/catalog/products response into a flat
         /// <see cref="ProductDetail"/> list.  The endpoint may return a bare JSON array
         /// or a JSON object that wraps the list under a known property name
-        /// ("products", "data", "items", or "catalog"). Confirmed live 2026-09-24
-        /// (issues/0025 step 0, issues/0016): the sandbox account returns the SAME nested
-        /// category-envelope shape as V1's GetProductDetails — each top-level array element
+        /// ("products", "data", "items", or "catalog"). The sandbox account returns the SAME
+        /// nested category-envelope shape as V1's GetProductDetails — each top-level array element
         /// is a category ("categoryName"/"categoryID"/"currencyType") containing its own
         /// nested "products" array of {productCode, productName, productTypeID, ...}. The
-        /// Postman spec's flat "productId" example is also handled as a fallback in case a
+        /// spec's flat "productId" example shape is also handled as a fallback in case a
         /// different account/API version returns it. Per-element, not per-response, so a
         /// mixed response (unlikely but not contractually excluded) is still flattened.
         /// </summary>
@@ -1879,7 +1877,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 }
                 else if (element.TryGetProperty("productId", out var pid))
                 {
-                    // Flat row using the Postman example's "productId" key instead of "productCode".
+                    // Flat row using the spec example's "productId" key instead of "productCode".
                     result.Add(new ProductDetail
                     {
                         ProductCode = pid.ValueKind == JsonValueKind.String ? pid.GetString() : pid.ToString(),
@@ -2087,7 +2085,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Call immediately before throwing so the exception's "See gateway logs for details"
         /// message has a corresponding structured entry in the gateway log.
         /// </summary>
-        // Instance (not static) so it can read _config.LogSensitiveRequestData — see issue 0040.
+        // Instance (not static) so it can read _config.LogSensitiveRequestData.
         private void LogV2ApiFailure(string operation, RestResponse resp, LogLevel level = LogLevel.Warning)
         {
             string sanitizedBody = Truncate(
@@ -2494,7 +2492,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 AcceptAgreement = "1",
                 SignerName = _config.RequestorName ?? "Keyfactor Gateway",
-                // Effectively dead fallback (issue 0039): SignerPlace defaults to "", not null, so a blank setting sends "" (only an explicit JSON null reaches "Gateway"). V1 wire behaviour intentionally unchanged.
+                // Effectively dead fallback: SignerPlace defaults to "", not null, so a blank setting sends "" (only an explicit JSON null reaches "Gateway"). V1 wire behaviour intentionally unchanged.
                 SignerPlace = _config.SignerPlace ?? "Gateway",
                 SignerIp = signerIp
             };
@@ -2575,7 +2573,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             if (!resp.IsSuccessful)
             {
-                // Issue 0044: V1 documents errors only as HTTP-200 meta envelopes, so a non-2xx
+                // V1 documents errors only as HTTP-200 meta envelopes, so a non-2xx
                 // body here is usually not from the V1 application at all (e.g. ApiUrl missing the
                 // /emSignHub-API/ segment). Log the redacted body and put the HTTP status in the
                 // message so "See gateway logs for details" has something to point at.
@@ -2756,7 +2754,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // technicalPointOfContact blocks in every currently-logged body — it is never used as an
         // exact top-level key anywhere else on the CERTInext wire shapes this plugin logs raw.
         //
-        // Issue 0033: the V2 Document Signer (signature) body's `subject` block and its create
+        // The V2 Document Signer (signature) body's `subject` block and its create
         // response add a natural person's name, identity-document and street-address fields
         // (firstName, lastName, identityDocumentType, identificationNumber, streetAddress1/2,
         // locality, postalCode) and a `subjectDisplayName` (full name for natural/legal person).
@@ -2765,7 +2763,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // organizationUnit, organizationIdentificationNumber, businessCategory, state,
         // countryCode — organization or coarse-location data, and "organizationName" is also a
         // V1 order/report key whose value is an OV organization, not a person. The V2
-        // private-pki body (issue 0033) adds no new personal keys: its requestor /
+        // private-pki body adds no new personal keys: its requestor /
         // technicalPointOfContact blocks reuse the bare keys above, and hostname /
         // additionalHosts are host names / IP literals, not personal data.
         private static readonly string[] PersonalOtherFieldNames =
@@ -2779,7 +2777,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         /// <summary>
         /// Scrubs known person/contact-bearing keys out of a JSON-ish body before it goes into a
-        /// log line, when <c>LogSensitiveRequestData</c> is off (issue 0040). Covers the V1
+        /// log line, when <c>LogSensitiveRequestData</c> is off. Covers the V1
         /// <c>requestorInformation</c> / <c>technicalPointOfContact</c> / <c>agreementDetails</c>
         /// shapes (<c>requestorName</c>, <c>requestorEmail</c>, <c>requestorIsdCode</c>,
         /// <c>requestorMobileNumber</c>, <c>requestorDesignation</c>, <c>tpcName</c>,
@@ -2788,7 +2786,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <c>requesterEmail</c> aliases, and the <c>requestorEmailId</c> search filter) and the
         /// V2 nested <c>requestor</c> / <c>technicalPointOfContact</c> shapes (bare <c>name</c>/
         /// <c>email</c>/<c>phone</c>/<c>designation</c>), plus the V2 Document Signer
-        /// <c>subject</c> block's person fields and <c>subjectDisplayName</c> (issue 0033 — see
+        /// <c>subject</c> block's person fields and <c>subjectDisplayName</c> (see
         /// <c>PersonalOtherFieldNames</c> for the exact list and what is deliberately excluded).
         ///
         /// Email values are masked via <see cref="LogSanitizer.MaskEmail"/> so the domain stays
@@ -2818,7 +2816,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         // Exact JSON keys whose value is an array of SAN strings. V1 additionalDomains carries every
-        // requested SAN regardless of type, emails included (SanSubmissionProbeTests finding B).
+        // requested SAN regardless of type, emails included (see SanSubmissionProbeTests).
         // V2 SSL additionalDomains and private-pki additionalHosts are filtered to DNS / IP before
         // submission, so they are covered only as defence in depth: a DNS name or IP literal never
         // contains '@', so masking there can only ever touch a mis-typed email.
@@ -2826,12 +2824,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         // Exact JSON keys whose value is an object keyed by SAN value. The V1 TrackOrder
         // domainVerification block is { "<Domain Name>": { ... }, "status": "..." }, and an email
-        // submitted in additionalDomains comes back as one of those keys (SanSubmissionProbeTests
-        // finding B: "san-probe@example.com" was returned as a domainVerification key).
+        // submitted in additionalDomains comes back as one of those keys (see
+        // SanSubmissionProbeTests: "san-probe@example.com" was returned as a domainVerification key).
         private static readonly string[] SanKeyedObjectFieldNames = { "domainVerification" };
 
         /// <summary>
-        /// Masks email addresses (issue 0040 follow-up) in the two SAN-bearing container shapes the
+        /// Masks email addresses in the two SAN-bearing container shapes the
         /// key/value regex in <see cref="RedactJsonField"/> cannot reach: string elements of a
         /// <see cref="SanArrayFieldNames"/> array, and property names directly inside a
         /// <see cref="SanKeyedObjectFieldNames"/> object. Only values containing <c>@</c> are masked,
@@ -2971,7 +2969,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// is written to a log line: credentials are always scrubbed via
         /// <see cref="RedactCredentials"/>, and personal-data fields are additionally scrubbed via
         /// <see cref="RedactPersonalData"/> unless <paramref name="logSensitiveRequestData"/> is
-        /// true (issue 0040). Centralizing this here keeps all six raw-body log sites in this
+        /// true. Centralizing this here keeps all six raw-body log sites in this
         /// class (and <c>LogApiFailure</c>/<c>LogV2ApiFailure</c>) consistent and gives the on/off
         /// behavior one place to unit-test.
         /// </summary>
@@ -3008,7 +3006,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <see cref="LogLevel.Error"/> so SOX-loggable authentication events match
         /// the SIEM-alert level convention.
         /// </summary>
-        // Instance (not static) so it can read _config.LogSensitiveRequestData — see issue 0040.
+        // Instance (not static) so it can read _config.LogSensitiveRequestData.
         private void LogApiFailure(
             string operationContext,
             RestResponse resp,

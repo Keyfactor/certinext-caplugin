@@ -18,7 +18,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0040: <c>LogSensitiveRequestData</c> is a new opt-in CA connector setting, off by
+    /// <c>LogSensitiveRequestData</c> is an opt-in CA connector setting, off by
     /// default, that gates whether requestor personal data and full CA request/response bodies
     /// are written to gateway logs.
     /// </summary>

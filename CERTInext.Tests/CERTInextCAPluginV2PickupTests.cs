@@ -28,8 +28,8 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression coverage for issue 0051: V2 enrollment had no synchronous certificate-pickup
-    /// poll analogous to <c>PickUpEnrolledCertificateAsync</c> (V1). These tests exercise
+    /// Coverage for the V2 synchronous certificate-pickup poll, analogous to
+    /// <c>PickUpEnrolledCertificateAsync</c> (V1). These tests exercise
     /// <c>PickUpEnrolledCertificateV2Async</c> end-to-end through <see cref="CERTInextCAPlugin.Enroll"/>
     /// (V2 path), the same way <c>CERTInextCAPluginTests</c>'s "Synchronous certificate pickup"
     /// section exercises the V1 method. No domain validator factory is configured here, so the

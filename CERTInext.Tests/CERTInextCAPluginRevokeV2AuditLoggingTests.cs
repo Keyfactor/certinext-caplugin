@@ -28,7 +28,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Review finding (A): V2 revoke denials must leave an audit record (CARequestID, product
+    /// V2 revoke denials must leave an audit record (CARequestID, product
     /// family, HTTP status, EMS code) even though the denial is surfaced via an exception rather
     /// than a normal return. Pins the plugin-level (<see cref="CERTInextCAPlugin.Revoke"/> →
     /// internal <c>RevokeV2Async</c>) log lines for: 404 (not found/not revokable), 422 ("not in a

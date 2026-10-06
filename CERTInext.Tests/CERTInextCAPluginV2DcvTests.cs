@@ -31,7 +31,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issues/0020: EMS-1080 ("Domain is already verified") from either
+    /// Tests confirming EMS-1080 ("Domain is already verified") from either
     /// V2 DCV entry point (<c>GetDcvV2Async</c> or <c>VerifyDcvV2Async</c>) must be treated as
     /// DCV already satisfied — skip TXT publish, proceed straight to tracking — not as a
     /// failure deferred to the next sync cycle. Driven end-to-end through
@@ -110,7 +110,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             };
 
         // ---------------------------------------------------------------------------
-        // Regression (issues/0020): GetDcv returns EMS-1080
+        // GetDcv returns EMS-1080
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -165,7 +165,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Regression (issues/0020): VerifyDcv returns EMS-1080
+        // VerifyDcv returns EMS-1080
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -225,18 +225,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Regression (issues/0037): live GetDcv response shape has no fileNameContent
+        // Live GetDcv response shape has no fileNameContent
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Regression (issues/0037): a live fresh-domain GetDcv challenge response was
-        /// captured as exactly <c>{"tokenExpiryDate":"...","token":"..."}</c> — no
+        /// A live fresh-domain GetDcv challenge response comes back as exactly
+        /// <c>{"tokenExpiryDate":"...","token":"..."}</c> — no
         /// <c>orderNumber</c>/<c>domainName</c>/<c>dcvMethod</c>/<c>fileNameContent</c>.
-        /// Before the fix, <see cref="V2DcvChallengeResponse"/> modeled <c>fileNameContent</c>
-        /// instead of <c>token</c>, so this shape deserialized with a null token, which drove
-        /// <c>PerformDcvV2IfNeededAsync</c>'s null-token guard and left the order stuck at
+        /// If <see cref="V2DcvChallengeResponse"/> modeled <c>fileNameContent</c>
+        /// instead of <c>token</c>, this shape would deserialize with a null token, which would
+        /// drive <c>PerformDcvV2IfNeededAsync</c>'s null-token guard and leave the order stuck at
         /// EXTERNALVALIDATION forever (no TXT ever staged, no exception, just a returned
-        /// <c>false</c>). This constructs the response exactly as the fixed DTO now
+        /// <c>false</c>). This constructs the response exactly as the DTO
         /// deserializes the real live body, and proves the plugin extracts and publishes the
         /// token instead of deferring.
         /// </summary>
@@ -263,8 +263,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ReturnsAsync(IssuedStatus())
                 .ReturnsAsync(IssuedStatus());
 
-            // Real live shape (issues/0037 probe, 2026-09-25): only Token/TokenExpiryDate are
-            // ever populated — no OrderNumber/DomainName/DcvMethod exist on the DTO anymore.
+            // Real live shape: only Token/TokenExpiryDate are
+            // ever populated — no OrderNumber/DomainName/DcvMethod exist on the DTO.
             const string liveToken = "D6026954B9EB7D31E3FE8B2194F07087";
             mock.Setup(c => c.GetDcvV2Async(OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2DcvChallengeResponse
@@ -291,9 +291,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             validator.StagedRecords.Should().ContainSingle(
                 "GetDcv returned a real token, so a TXT record must be staged from it")
                 .Which.Should().Be(("_emsign-validation.example.com", liveToken),
-                    "the staged value must come from the new Token property, not the removed " +
+                    "the staged value must come from the Token property, not a " +
                     "FileNameContent property; the hostname uses the default " +
-                    "DcvTxtRecordTemplate (issues/0027 item 5a) since none is configured here");
+                    "DcvTxtRecordTemplate since none is configured here");
 
             mock.Verify(c => c.VerifyDcvV2Async(
                 OrderId, "example.com", It.IsAny<string>(), It.IsAny<CancellationToken>()),
@@ -301,7 +301,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Regression (issues/0027 item 5a): DcvTxtRecordTemplate must be honored by the V2
+        // DcvTxtRecordTemplate must be honored by the V2
         // DCV path, not hardcoded to "_emudhra-challenge.{domain}" — mirrors V1's
         // PerformDcvIfNeededAsync (config value if set, else Constants.Dcv.DefaultTxtRecordTemplate).
         // ---------------------------------------------------------------------------
@@ -350,7 +350,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             validator.StagedRecords.Should().ContainSingle()
                 .Which.Should().Be(("_custom-dcv-check.example.com", token),
                     "the configured DcvTxtRecordTemplate must be used to build the TXT " +
-                    "hostname, not the old hardcoded '_emudhra-challenge' label");
+                    "hostname, not a hardcoded '_emudhra-challenge' label");
         }
 
         [Fact]
@@ -400,7 +400,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Issue 0051: the inline DCV path owns the in-call issuance wait — EnrollV2Async must
+        // The inline DCV path owns the in-call issuance wait — EnrollV2Async must
         // not stack a second PickUpEnrolledCertificateV2Async poll on top of it.
         // ---------------------------------------------------------------------------
 
@@ -456,7 +456,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Issue 0052: a REVOKED disposition discovered on the post-DCV status re-check must be
+        // A REVOKED disposition discovered on the post-DCV status re-check must be
         // mapped to FAILED, not returned as a body-less REVOKED record — mirrors
         // EnrollV2_DcvRan_SkipsPickupPoll_EvenThoughPickupIsEnabled above, but the second
         // TrackOrderV2Async observation is "revoked" instead of another pending state.
@@ -504,7 +504,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.Status.Should().Be((int)EndEntityStatus.FAILED,
                 "a REVOKED disposition discovered on the post-DCV re-check has no certificate " +
-                "body and must never be reported as REVOKED (issue 0052)");
+                "body and must never be reported as REVOKED");
             result.Certificate.Should().BeNull();
             result.CARequestID.Should().Be(OrderId);
             result.StatusMessage.Should().Contain(OrderId).And.Contain("revoked");
@@ -517,9 +517,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Synchronize (V2, issues/0022) — DCV-during-sync age-window / per-pass-cap gating.
-        // Reuses EvaluateDcvSyncEligibility/DcvSyncDecision — same bounds V1 sync uses (issue
-        // 0002), applied to the V2 /reports/orders path.
+        // Synchronize (V2) — DCV-during-sync age-window / per-pass-cap gating.
+        // Reuses EvaluateDcvSyncEligibility/DcvSyncDecision — the same bounds V1 sync uses,
+        // applied to the V2 /reports/orders path.
         // ---------------------------------------------------------------------------
 
         private static async IAsyncEnumerable<T> AsyncEnumerable<T>(params T[] items)
@@ -618,8 +618,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Issue 0042 — UCC additionalDomains SANs never got DCV-validated because the V2 DCV
-        // machinery only ever drove the order's primary domain. These tests exercise the
+        // UCC additionalDomains SANs must get DCV-validated too — the V2 DCV
+        // machinery must not only ever drive the order's primary domain. These tests exercise the
         // generalized PerformDcvV2MultiDomainAsync path (driven from Track Order's
         // verifications.domain.domains[] block) end to end through Enroll/Synchronize, the
         // same way the EMS-1080 tests above exercise the single-domain path.
@@ -650,8 +650,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             };
 
         private const string UccPrimary = "example.com";
-        private const string UccSanA = "a.pending0042.example.com";
-        private const string UccSanB = "b.pending0042.example.com";
+        private const string UccSanA = "a.pending-san.example.com";
+        private const string UccSanB = "b.pending-san.example.com";
 
         [Fact]
         public async Task PerformDcvV2_Ucc_PrimaryVerified_TwoPendingSans_StagesAndVerifiesOnlyPendingSans_CleansUpAll()
@@ -768,7 +768,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .ThrowsAsync(new Exception("simulated transient verify failure for SanB"));
 
             var validator = new FakeDomainValidator();
-            // PickupRetries > 0 (mirrors the 0051 regression test above): confirms dcvV2Ran still
+            // PickupRetries > 0 (mirrors the single-domain test above): confirms dcvV2Ran still
             // gates the pickup poll even on the partial-failure multi-domain path.
             var plugin = BuildV2DcvPlugin(mock.Object, new FakeDomainValidatorFactory(validator), pickupRetries: 5);
 
@@ -901,7 +901,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
 
-            // No Verifications block anywhere in this sequence — the pre-0042 shape.
+            // No Verifications block anywhere in this sequence — the single-domain shape.
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PendingDcvStatus())
                 .ReturnsAsync(IssuedStatus())
@@ -923,9 +923,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             validator.StagedRecords.Should().ContainSingle();
 
             // The 4-argument (per-domain) overload is a distinct method — confirming it was
-            // never called proves the domainEntries-absent case took the untouched legacy path,
-            // not the generalized multi-domain one (issue 0042's "keep today's primary-domain
-            // behaviour exactly" requirement).
+            // never called proves the domainEntries-absent case took the single-domain path,
+            // not the generalized multi-domain one, keeping today's primary-domain
+            // behaviour exactly.
             mock.Verify(c => c.GetDcvV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.Never);
@@ -992,20 +992,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public void V2OrderStatusResponse_Deserializes_PendingSanDomainsArray_WithoutDcvMethod()
         {
-            // Raw shape from issues/0042 "Pending-SAN challenge shape (live)" (order 7465857196,
-            // 2026-09-28) — pending entries carry no "dcvMethod" key at all; it only appears once
-            // an entry reaches VERIFIED.
+            // Pending-SAN challenge shape: pending entries carry no "dcvMethod" key at all; it
+            // only appears once an entry reaches VERIFIED.
             const string rawJson = @"{
                 ""orderId"": ""7465857196"",
                 ""status"": ""pending-approval"",
-                ""domain"": ""ucc0042-202609290046.dcv-test.scrup.org"",
+                ""domain"": ""ucc-pending-202609290046.dcv-test.scrup.org"",
                 ""verifications"": {
                     ""domain"": {
                         ""status"": ""PENDING"",
                         ""domains"": [
-                            {""domain"":""a.pending0042-202609290046.example.com"",""domainStatus"":""ACTIVE"",""dcvStatus"":""PENDING"",""caaStatus"":""SKIPPED""},
-                            {""domain"":""b.pending0042-202609290046.example.com"",""domainStatus"":""ACTIVE"",""dcvStatus"":""PENDING"",""caaStatus"":""SKIPPED""},
-                            {""domain"":""ucc0042-202609290046.dcv-test.scrup.org"",""domainStatus"":""ACTIVE"",""dcvMethod"":""dns-txt"",""dcvStatus"":""VERIFIED"",""verifiedAt"":""2026-09-29T00:46:09Z"",""caaStatus"":""PASSED""}
+                            {""domain"":""a.pending-202609290046.example.com"",""domainStatus"":""ACTIVE"",""dcvStatus"":""PENDING"",""caaStatus"":""SKIPPED""},
+                            {""domain"":""b.pending-202609290046.example.com"",""domainStatus"":""ACTIVE"",""dcvStatus"":""PENDING"",""caaStatus"":""SKIPPED""},
+                            {""domain"":""ucc-pending-202609290046.dcv-test.scrup.org"",""domainStatus"":""ACTIVE"",""dcvMethod"":""dns-txt"",""dcvStatus"":""VERIFIED"",""verifiedAt"":""2026-09-29T00:46:09Z"",""caaStatus"":""PASSED""}
                         ]
                     },
                     ""empty"": false
@@ -1024,20 +1023,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.Verifications.Domain.Status.Should().Be("PENDING");
             result.Verifications.Domain.Domains.Should().HaveCount(3);
 
-            var sanA = result.Verifications.Domain.Domains.Single(d => d.Domain == "a.pending0042-202609290046.example.com");
+            var sanA = result.Verifications.Domain.Domains.Single(d => d.Domain == "a.pending-202609290046.example.com");
             sanA.DcvStatus.Should().Be("PENDING");
             sanA.DcvMethod.Should().BeNull("pending entries carry no dcvMethod key at all — absent, not present-but-null-looking");
             sanA.VerifiedAt.Should().BeNull();
 
             var verifiedPrimary = result.Verifications.Domain.Domains.Single(
-                d => d.Domain == "ucc0042-202609290046.dcv-test.scrup.org");
+                d => d.Domain == "ucc-pending-202609290046.dcv-test.scrup.org");
             verifiedPrimary.DcvStatus.Should().Be("VERIFIED");
             verifiedPrimary.DcvMethod.Should().Be("dns-txt");
             verifiedPrimary.VerifiedAt.Should().Be("2026-09-29T00:46:09Z");
         }
 
         // ---------------------------------------------------------------------------
-        // Issue 0033 — DCV exists only for the SSL/TLS family. Spec: the DCV endpoints live
+        // DCV exists only for the SSL/TLS family. Spec: the DCV endpoints live
         // under /ssl-certificates only; Private PKI: "No DCV - your CA trusts you"; Document
         // Signer has no DCV step. PerformDcvV2IfNeededAsync's family gate must stop every caller
         // (Enroll, GetSingleRecord, Synchronize) from hitting a nonexistent
@@ -1131,8 +1130,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task SynchronizeV2_PendingPrivatePkiOrder_ResolvedToPrivatePkiFamily_NeverAttemptsDcv()
         {
             // A private-pki order in pending-approval surfaces in /reports/orders exactly like a
-            // pending DV order ("Order Accepted" / "Pending for Approver", with a domainName) — so
-            // pre-0033 sync resolved its family and then called /private-pki-certificates/{id}/dcv.
+            // pending DV order ("Order Accepted" / "Pending for Approver", with a domainName) — sync
+            // must resolve its family correctly rather than calling /private-pki-certificates/{id}/dcv.
             var mock = NewMock();
             var row = PendingDcvRow("ord_pki_sync_001", DateTime.UtcNow.AddMinutes(-10));
             mock.Setup(c => c.ListOrdersV2Async(
@@ -1167,9 +1166,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // Wildcard domains — TXT hostname must be derived from the BASE domain
         // ---------------------------------------------------------------------------
         //
-        // Live evidence (sandbox, 2026-10-01): a wildcard V2 DV order's TXT host was staged as
-        // "_emsign-validation.*.dcv-fresh-<ts>...scrup.org" — a literal '*' DNS label, which is
-        // not queryable and left the order stuck pending. CERTInext's own GetDcvV2/VerifyDcvV2/
+        // A wildcard V2 DV order's TXT host must not be staged as
+        // "_emsign-validation.*.example.com" — a literal '*' DNS label is
+        // not queryable and leaves the order stuck pending. CERTInext's own GetDcvV2/VerifyDcvV2/
         // TrackOrderV2 calls must still use the original "*."-prefixed domain string; only the
         // DNS-side hostname/zone resolution uses the base domain.
 

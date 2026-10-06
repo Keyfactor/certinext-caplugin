@@ -31,7 +31,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0040 follow-up: with <c>LogSensitiveRequestData</c> off, email-type SAN values are
+    /// With <c>LogSensitiveRequestData</c> off, email-type SAN values are
     /// masked in log lines (<see cref="LogSanitizer.MaskEmail"/>); DNS, IP and URI values stay
     /// verbatim. With the flag on, everything is logged in full.
     /// </summary>
@@ -148,7 +148,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     }
 
     /// <summary>
-    /// Plugin-level log capture for the issue 0040 follow-up: the "Enrollment attempt started"
+    /// Plugin-level log capture for SAN log masking: the "Enrollment attempt started"
     /// line and <c>BuildSanList</c>'s "Resolved N SAN(s)" / "submitted rather than dropped" lines
     /// must mask an email SAN with <c>LogSensitiveRequestData</c> off and log it in full with it
     /// on. Same <see cref="LogHandler.Factory"/> swap seam and non-parallel collection as

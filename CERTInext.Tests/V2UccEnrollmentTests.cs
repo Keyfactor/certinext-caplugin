@@ -35,7 +35,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issues/f3-v2-multi-san-limitation.md: V2 UCC (multi-SAN) order-create
+    /// Tests for V2 UCC (multi-SAN) order-create
     /// support. <see cref="CERTInextCAPlugin.Enroll"/> (V2 path) is driven end-to-end against a
     /// Strict <see cref="ICERTInextClient"/> mock so the assertions exercise
     /// <c>EnrollV2Async</c>'s actual UCC-detection and <c>additionalDomains</c>-population logic,
@@ -173,10 +173,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task Enroll_V2_NonUccProduct_SanDictionaryCarriesExtras_StillFailsFastWithNoPlaceOrderCall()
         {
-            // Issue 0061: the CSR alone carries only the primary domain, so the pre-0061 guard
-            // (which looked at the CSR only) did not trigger, and the SAN dictionary's extra
-            // domain silently vanished — a non-UCC order never sends additionalDomains at all, so
-            // there was nowhere for it to go. The guard must now consider the SAN dictionary too
+            // A CSR-only guard (looking at the CSR alone) would miss the case where the
+            // CSR carries only the primary domain but the SAN dictionary's extra
+            // domain silently vanishes — a non-UCC order never sends additionalDomains at all, so
+            // there is nowhere for it to go. The guard must consider the SAN dictionary too
             // and reject, the same way it already rejects CSR-borne extras
             // (Enroll_V2_NonUccProduct_CsrCarriesExtraSans_StillFailsFastWithNoPlaceOrderCall).
             var mock = NewMock();
@@ -209,8 +209,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task Enroll_V2_NonUccProduct_SanDictionaryHasOnlyPrimary_ButCsrCarriesExtraSan_StillFailsFastWithNoPlaceOrderCall()
         {
-            // Regression for a union-vs-fallback bug introduced while first fixing issue 0061: a
-            // non-null SAN dictionary that carries only the primary domain must not make the
+            // A non-null SAN dictionary that carries only the primary domain must not make the
             // guard defer to the dictionary and skip the CSR. SubmitCsrV2Async sends the CSR to
             // CERTInext verbatim regardless of what the SAN dictionary contains, so a
             // CSR-embedded extra domain still reaches the CA even when the dictionary is
@@ -283,7 +282,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task Enroll_V2_NonUccProduct_SanDictionaryHasOnlyNonDnsExtras_Allowed()
         {
-            // dnsOnly semantics (issue 0046): a non-DNS SAN dictionary entry can never appear in
+            // dnsOnly semantics: a non-DNS SAN dictionary entry can never appear in
             // additionalDomains and must not trip the reject guard either.
             var mock = NewMock();
             StubCatalog(mock, "842", "13"); // DV SSL (non-UCC)
@@ -323,11 +322,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task Enroll_V2_UccProduct_CsrCarriesExtraSans_OrderIsPlacedWithSansAsAdditionalDomains()
         {
-            // Issue 0047: the CSR-SAN-count guard used to run unconditionally before UCC
-            // detection, so a real UCC CSR enrollment (the CSR itself carries the extra DNS
-            // SANs, as Command actually builds it for CSR-based enrollments — confirmed live
-            // 2026-09-28) was always rejected before any CA order was placed. UCC products must
-            // now be exempt: the guard should not fire, and BuildSanList's own CSR fallback
+            // The CSR-SAN-count guard must not run unconditionally before UCC
+            // detection: a real UCC CSR enrollment (the CSR itself carries the extra DNS
+            // SANs, as Command actually builds it for CSR-based enrollments) must not be
+            // rejected before any CA order is placed. UCC products must
+            // be exempt: the guard should not fire, and BuildSanList's own CSR fallback
             // (triggered here via san: null) should carry those same CSR SANs into
             // additionalDomains, exactly like the gateway-SAN-dictionary case already covered by
             // Enroll_V2_UccProduct_PopulatesAdditionalDomainsFromGatewaySanDictionary above.
@@ -372,7 +371,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Enroll_V2_NonUccProduct_CsrCarriesExtraSans_StillFailsFastWithNoPlaceOrderCall()
         {
             // Counterpart to the UCC case above: a non-UCC product with the same multi-SAN CSR
-            // must keep the pre-0047 fail-fast behavior — FAILED, no order placed — even though
+            // must keep the fail-fast behavior — FAILED, no order placed — even though
             // the guard now necessarily runs after the (live) catalog lookup that determines
             // UCC-ness, rather than before it.
             var mock = NewMock();
@@ -392,7 +391,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.StatusMessage.Should().Contain("2 SAN(s) beyond");
             result.StatusMessage.Should().Contain("single domain");
             result.StatusMessage.Should().NotContain("The V2 API only supports single-domain certificates",
-                "the message must no longer claim V2 is single-domain-only in general — it's only true for non-UCC products");
+                "the message must not claim V2 is single-domain-only in general — it's only true for non-UCC products");
 
             mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Once,
                 "UCC-ness can only be known after the catalog lookup, so the guard now runs after it");
@@ -424,8 +423,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var plugin = BuildV2Plugin(mock.Object);
 
-            // Issue 0061: a catalog-lookup failure fails UCC-ness safe to false, so a non-empty
-            // SAN dictionary extra here would now trip the (now dictionary-aware) non-UCC reject
+            // A catalog-lookup failure fails UCC-ness safe to false, so a non-empty
+            // SAN dictionary extra here would trip the dictionary-aware non-UCC reject
             // guard instead of exercising this test's actual intent. Single-domain SAN data keeps
             // the test focused on the catalog-lookup fallback it's named for.
             var result = await plugin.Enroll(

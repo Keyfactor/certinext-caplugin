@@ -30,8 +30,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
     /// assert a different SAN set than the one actually sent.
     ///
     /// Shared between <c>CERTInextCAPlugin</c> and <c>Client.CERTInextClient</c> — both sanitize the
-    /// same kind of value at their respective log sinks, so this used to be defined twice, byte-
-    /// identical, one per class.
+    /// same kind of value at their respective log sinks, so a single shared definition keeps
+    /// them identical.
     /// </summary>
     internal static class LogSanitizer
     {
@@ -49,7 +49,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// (e.g. <c>"j***@example.com"</c>), so an operator can still tell which organization
         /// an order came from without seeing exactly who submitted it. Used by both
         /// <c>CERTInextCAPlugin</c> and <c>Client.CERTInextClient</c> when
-        /// <c>LogSensitiveRequestData</c> is off (issue 0040). Values with no <c>@</c> (blank,
+        /// <c>LogSensitiveRequestData</c> is off. Values with no <c>@</c> (blank,
         /// malformed, or not actually an email) fall back to a full <c>"***REDACTED***"</c>.
         /// </summary>
         internal static string MaskEmail(string value)
@@ -67,7 +67,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
             new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "email", "rfc822", "rfc822name" };
 
         // SAN types logged verbatim even with LogSensitiveRequestData off: host names, IP
-        // literals and URIs are audit fields, not personal data (issue 0040 follow-up).
+        // literals and URIs are audit fields, not personal data.
         private static readonly HashSet<string> VerbatimSanTypes =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -77,7 +77,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
             };
 
         /// <summary>
-        /// Returns a single SAN value as it should appear in a log line (issue 0040 follow-up).
+        /// Returns a single SAN value as it should appear in a log line.
         /// With <paramref name="logSensitiveRequestData"/> on, the value is returned as-is. Off,
         /// an email-type SAN (<c>rfc822name</c> and its spelling variants) is masked with
         /// <see cref="MaskEmail"/>, and so is any value containing <c>@</c> whose type is unknown

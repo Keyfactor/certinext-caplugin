@@ -28,7 +28,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0040: pins the on/off behavior of the "Enrollment attempt started" audit log line in
+    /// Pins the on/off behavior of the "Enrollment attempt started" audit log line in
     /// <see cref="CERTInextCAPlugin.Enroll"/> for the <c>LogSensitiveRequestData</c> connector
     /// setting.
     ///

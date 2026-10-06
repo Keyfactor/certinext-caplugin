@@ -417,12 +417,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData("5")] // OrderStatusId 5 = Order Rejected
         public async Task Dcv_Skipped_WhenOrderStatusIdIsTerminal_EvenIfDcvValidated(string terminalOrderStatusId)
         {
-            // Regression guard for the cached-DCV path: a cancelled or rejected order
+            // Guard for the cached-DCV path: a cancelled or rejected order
             // can still have domainVerification.Status="1" carried over from a prior
             // validated round. Without this guard the plugin would return true from
             // PerformDcvIfNeededAsync and the caller would spend the full
             // DcvWaitForIssuanceSeconds budget polling GetCertificate for a cert that
-            // is never going to issue. Per audit report B2 on PR #2.
+            // is never going to issue.
             var mock = NewMock();
             mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending" });
@@ -540,10 +540,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetDcvAsync(MockCertificateData.DcvOrderId, MockCertificateData.DcvDomain, Constants.Dcv.MethodDnsTxt, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(MockCertificateData.DcvTokenResponse());
 
-            // Factory returns null → no DNS provider configured. Regression: this used to throw and
-            // fail the whole order — including when the "unresolvable" domain was actually just a
-            // non-DNS Subject CN with no config-level way to prevent the throw (SubmitNonDnsSans only
-            // filters the SAN list, not the subject). Now it is logged loudly and deferred instead.
+            // Factory returns null → no DNS provider configured. This must not throw and fail the
+            // whole order — the "unresolvable" domain may just be a non-DNS Subject CN with no
+            // config-level way to prevent it (SubmitNonDnsSans only filters the SAN list, not the
+            // subject). It is logged loudly and deferred instead.
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator: null));
 
             Func<Task> act = () => Enroll(plugin);
@@ -569,7 +569,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             Func<Task> act = () => Enroll(plugin);
 
-            // Regression: a StageValidation failure used to throw and fail the whole order. Now it
+            // A StageValidation failure must not throw and fail the whole order. It
             // is logged loudly and the domain is skipped/deferred — this is the only pending domain,
             // so nothing gets staged and the order defers to the next sync cycle.
             await act.Should().NotThrowAsync();
@@ -624,7 +624,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             Func<Task> act = () => Enroll(plugin);
 
-            // Regression: an empty token used to throw and fail the whole order. It is now logged
+            // An empty token must not throw and fail the whole order. It is logged
             // loudly (LogError) and the domain is skipped — the order defers to the next sync cycle
             // rather than failing Enroll with an order already placed at the CA.
             await act.Should().NotThrowAsync();
@@ -699,14 +699,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task Dcv_SkipsAndDefers_WhenGetDcvFailsWithUnrelatedError()
         {
-            // Regression: this test used to assert the opposite — that a genuine server error (5xx,
-            // transport, auth) must bubble up and fail the whole enrollment. That is exactly the
-            // orphaned-order failure mode: GetDcv's live behavior for a non-DNS order-domain is
-            // unmeasured (see BuildSanList's sandbox-only caveat), so treating any unrecognized
-            // GetDcv error as fatal risks failing perfectly good co-tenant DNS domains on the same
-            // order over one domain's transient or CA-side issue, with the enrollment already
-            // placed at CERTInext and no catch anywhere above this call. The failure is still loud
-            // (LogError, with the underlying exception) — it just no longer fails the call.
+            // A genuine server error (5xx, transport, auth) from GetDcv must not bubble up and
+            // fail the whole enrollment: that would orphan the order. GetDcv's behavior for a
+            // non-DNS order-domain is unmeasured (see BuildSanList's sandbox-only caveat), so
+            // treating any unrecognized GetDcv error as fatal risks failing perfectly good
+            // co-tenant DNS domains on the same order over one domain's transient or CA-side
+            // issue, with the enrollment already placed at CERTInext and no catch anywhere above
+            // this call. The failure is still loud (LogError, with the underlying exception) — it
+            // just does not fail the call.
             var mock = NewMock();
             mock.Setup(c => c.EnrollCertificateAsync(It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new EnrollCertificateResponse { Id = MockCertificateData.DcvOrderId, Status = "pending_dcv" });
@@ -912,8 +912,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
-        /// Regression for the false invariant behind the round-1 fix's own misconfiguration check:
-        /// "the CN is always a pending domain too" is untrue whenever CERTInext has cached a prior
+        /// "The CN is always a pending domain too" is untrue whenever CERTInext has cached a prior
         /// DCV validation for it (a case this same file's cached-validation branch documents), so a
         /// non-DNS SAN sharing the order with an already-validated CN must not throw — it must defer
         /// to the next sync cycle exactly like the single-domain case does.
@@ -959,12 +958,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         /// <summary>
         /// A non-FQDN pending domain must be skipped, not thrown on.
         ///
-        /// Regression: non-DNS SANs are now submitted to CERTInext, which registers them verbatim
-        /// as order domains, so an email/URI SAN turns up as a domainVerification key that fails the
-        /// FQDN check. That check used to throw for the whole order — escaping Enroll (which has no
-        /// catch) after the order was already placed, so the enrollment failed with an orphaned
-        /// order and no TXT record was staged for the *valid* domains beside it. Every sync retry
-        /// re-threw and TryRunDcvDuringSyncAsync swallowed it, so the order could never progress.
+        /// Non-DNS SANs are submitted to CERTInext, which registers them verbatim as order
+        /// domains, so an email/URI SAN turns up as a domainVerification key that fails the FQDN
+        /// check. That check must not throw for the whole order — it would escape Enroll (which
+        /// has no catch) after the order was already placed, leaving an orphaned order with no
+        /// TXT record staged for the *valid* domains beside it, and every sync retry would
+        /// re-throw so the order could never progress.
         /// </summary>
         [Fact]
         public async Task Dcv_NonFqdnPendingDomain_IsSkipped_AndValidDomainStillStaged()
@@ -996,7 +995,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),
                 DcvConfig(dcvWaitForIssuanceSeconds: 10));
 
-            // Must not throw — that is the regression.
+            // Must not throw.
             var result = await Enroll(plugin);
 
             string expectedHostname = string.Format(Constants.Dcv.DefaultTxtRecordTemplate, good);
@@ -1010,13 +1009,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
-        /// Regression: the FQDN validation regex used ^...$ , and in .NET's default (non-Multiline)
+        /// The FQDN validation regex must not use ^...$ : in .NET's default (non-Multiline)
         /// mode $ matches immediately before a single trailing '\n', not only at the true end of the
-        /// string. A domain value ending in '\n' therefore passed as "valid" and reached several log
+        /// string. A domain value ending in '\n' would therefore pass as "valid" and reach several log
         /// sinks unsanitized further down this same method — a CWE-117 log-injection route into the
         /// DCV audit trail, reachable via any order visible through Synchronize/GetSingleRecord (not
         /// just ones this plugin's own Enroll call placed, since TrackOrder's domainVerification keys
-        /// for an externally-created order are never trimmed by this plugin). The regex now anchors
+        /// for an externally-created order are never trimmed by this plugin). The regex anchors
         /// with \A/\z, which are absolute string-start/end regardless of trailing newlines.
         /// </summary>
         [Fact]
@@ -1064,8 +1063,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
-        /// Regression: the generic per-domain catch blocks around GetDcvAsync and StageValidation
-        /// used to catch OperationCanceledException along with genuine GetDcv/DNS-provider failures,
+        /// The generic per-domain catch blocks around GetDcvAsync and StageValidation must not
+        /// catch OperationCanceledException along with genuine GetDcv/DNS-provider failures by
         /// logging and skipping the domain as an ordinary per-domain failure. A cancellation (the
         /// shared DcvTimeoutMinutes-bound token expiring mid-loop) is not that — it must propagate to
         /// the outer catch instead, which is the only place that logs it correctly and is the
@@ -1140,17 +1139,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
-        /// Regression: the compensating cleanup call after an early exit from staging (chiefly the
-        /// shared DcvTimeoutMinutes-bound token firing mid-loop, which is what this scenario
+        /// The compensating cleanup call after an early exit from staging (chiefly the
+        /// shared DcvTimeoutMinutes-bound token firing mid-loop, which this scenario
         /// simulates via a domain whose GetDcv call raises OperationCanceledException) must not reuse
         /// the same token the operation was cancelled by. A cooperative IDomainValidator that forwards
         /// its token into its own HTTP calls (the reference CloudflareDomainValidator in this repo
         /// does exactly that) would otherwise throw immediately on an already-cancelled token and
         /// never even attempt the delete, silently leaving the TXT record published.
         ///
-        /// CancellationToken.None would fix that but removes the cleanup call's timeout bound
-        /// entirely — a second, adversarially-found regression on top of the first — so the correct
-        /// fix is a fresh token with its OWN short timeout: not cancelled going in, but still bounded.
+        /// CancellationToken.None would avoid that but removes the cleanup call's timeout bound
+        /// entirely, so the correct approach is a fresh token with its OWN short timeout: not
+        /// cancelled going in, but still bounded.
         /// </summary>
         [Fact]
         public async Task Dcv_CleanupAfterCancellation_UsesAFreshBoundedToken_NotTheAmbientToken()
@@ -1195,26 +1194,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
-        /// Regression: the routine, always-runs finally-block cleanup used to iterate staged domains
-        /// sequentially. Each cleanup call already has its own independent
-        /// CleanupValidationTimeoutSeconds bound, but running them one after another meant that
-        /// bound was per-call, not in aggregate — a UCC order with N staged domains could hold the
+        /// The routine, always-runs finally-block cleanup must run staged-domain cleanups
+        /// concurrently. Each cleanup call has its own independent
+        /// CleanupValidationTimeoutSeconds bound, but running them one after another would make
+        /// that bound per-call, not in aggregate — a UCC order with N staged domains could hold the
         /// calling request open for up to N x the per-call ceiling if the DNS provider was merely
         /// slow (not even hung) on every delete, which can exceed DcvTimeoutMinutes itself for a
         /// realistic multi-SAN count.
         ///
         /// Proven directly via <see cref="FakeDomainValidator.PeakConcurrentCleanups"/> — the number
         /// of CleanupValidation calls the validator observed in flight at once — rather than total
-        /// wall-clock time. 0023: a prior version of this test asserted elapsed time &lt; 4000ms, which
-        /// failed deterministically (~4801ms) because the surrounding DCV flow carries ~4s of fixed
-        /// overhead unrelated to cleanup concurrency (DcvConfig's 1s propagation delay plus
-        /// WaitForDcvVerificationAsync's separate, hardcoded 3s poll interval,
-        /// Constants.Dcv.SyncPropagationDelaySeconds — not the 1s the old comment assumed), on top of
-        /// which the (already-concurrent) ~800ms cleanup pushed the total past the threshold. That was
-        /// a test-design defect present since the test was introduced, not a cleanup regression — the
-        /// finally block here already runs cleanup via Task.WhenAll. Measuring peak concurrency proves
-        /// the same thing the wall-clock check intended, without being coupled to unrelated fixed
-        /// delays elsewhere in the flow.
+        /// wall-clock time. An elapsed-time threshold is an unreliable proxy because the
+        /// surrounding DCV flow carries ~4s of fixed overhead unrelated to cleanup concurrency
+        /// (DcvConfig's 1s propagation delay plus WaitForDcvVerificationAsync's separate,
+        /// hardcoded 3s poll interval, Constants.Dcv.SyncPropagationDelaySeconds). The finally
+        /// block runs cleanup via Task.WhenAll; measuring peak concurrency proves that directly,
+        /// without being coupled to unrelated fixed delays elsewhere in the flow.
         /// </summary>
         [Fact]
         public async Task Dcv_CleanupOfMultipleDomains_RunsConcurrently_NotSequentially()
@@ -1269,19 +1264,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // Direct proof of concurrency: all three CleanupValidation calls must have been in
             // flight at the same instant. If cleanup ran sequentially, PeakConcurrentCleanups would
             // be 1 regardless of how long the whole call took — this assertion doesn't depend on any
-            // wall-clock budget or on the fixed overhead elsewhere in the DCV flow (see 0023).
+            // wall-clock budget or on the fixed overhead elsewhere in the DCV flow.
             validator.PeakConcurrentCleanups.Should().Be(3,
                 "cleanup for independent domains must run concurrently, not sequentially — " +
                 "all three CleanupValidation calls should have been in flight at once");
         }
 
         /// <summary>
-        /// Regression: a StageValidation failure on one domain of a multi-domain order must not
-        /// leave the TXT records already published for the earlier domains orphaned. Before the
-        /// fix, the staging loop's throw sites were outside the try/finally that owns cleanup, so
-        /// this was reachable only by accident (pre-fix, a UCC order's SANs never reached CERTInext
-        /// at all, so an order rarely had more than one pending domain to stage). Submitting every
-        /// requested SAN makes multi-domain staging the normal case, so this must hold now.
+        /// A StageValidation failure on one domain of a multi-domain order must not
+        /// leave the TXT records already published for the earlier domains orphaned. Every
+        /// requested SAN is submitted, so multi-domain staging is the normal case and the
+        /// staging loop must be covered by the try/finally that owns cleanup.
         /// </summary>
         [Fact]
         public async Task Dcv_StageFailureOnSecondDomain_DoesNotAbortTheGoodDomain()
@@ -1321,10 +1314,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             Func<Task> act = () => Enroll(plugin);
 
-            // Regression: a StageValidation failure on one domain of a multi-domain order must not
-            // abort the whole order any more — it did before this fix, which both failed the
-            // enrollment with an orphaned CERTInext order AND (before an earlier round's fix)
-            // orphaned the 'good' domain's already-published TXT record. Now the bad domain is
+            // A StageValidation failure on one domain of a multi-domain order must not
+            // abort the whole order (which would fail the enrollment with an orphaned CERTInext
+            // order and orphan the 'good' domain's already-published TXT record). The bad domain is
             // skipped (logged loudly) and the good domain proceeds through the normal DCV lifecycle.
             await act.Should().NotThrowAsync();
 
@@ -1344,9 +1336,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // Wildcard domains — TXT hostname must be derived from the BASE domain
         // ---------------------------------------------------------------------------
         //
-        // Live evidence (sandbox, 2026-10-01): a wildcard DV order's TXT host was staged as
-        // "_emsign-validation.*.dcv-fresh-<ts>...scrup.org" — a literal '*' DNS label, which is
-        // not queryable and left the order stuck pending. CERTInext's own GetDcv/VerifyDcv/
+        // A wildcard DV order's TXT host must not be staged as
+        // "_emsign-validation.*.example.com" — a literal '*' DNS label is
+        // not queryable and leaves the order stuck pending. CERTInext's own GetDcv/VerifyDcv/
         // TrackOrder calls must still use the original "*."-prefixed domain string (that is what
         // Track Order reports back per-domain); only the DNS-side hostname/zone resolution uses
         // the base domain.
@@ -1414,8 +1406,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task Dcv_NonWildcardDomain_HostnameDerivationUnchanged()
         {
-            // Baseline/regression guard: an ordinary (non-wildcard) domain must stage a TXT
-            // hostname built from the domain exactly as before — StripWildcardPrefix is a no-op
+            // Baseline: an ordinary (non-wildcard) domain must stage a TXT
+            // hostname built from the domain directly — StripWildcardPrefix is a no-op
             // when there is no leading "*.".
             var (mock, validator) = HappyPathMocks();
             var plugin = BuildPlugin(mock.Object, new FakeDomainValidatorFactory(validator),

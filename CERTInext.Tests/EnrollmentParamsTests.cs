@@ -21,10 +21,9 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression coverage for issue 0036: <see cref="EnrollmentParams.ProductCode"/>'s V1-only
-    /// fallback (<see cref="Constants.Products.DefaultProductCodes"/>) must remain exactly as it
-    /// was before the fix — only V2 dispatch (<c>EnrollV2Async</c> / <c>ValidateProductInfo</c>)
-    /// stopped using it. These tests exercise <see cref="EnrollmentParams"/> directly (it is
+    /// Coverage for <see cref="EnrollmentParams.ProductCode"/>'s V1-only fallback
+    /// (<see cref="Constants.Products.DefaultProductCodes"/>): only V1 dispatch uses it; V2
+    /// dispatch (<c>EnrollV2Async</c> / <c>ValidateProductInfo</c>) does not. These tests exercise <see cref="EnrollmentParams"/> directly (it is
     /// <c>internal</c>; this project has <c>InternalsVisibleTo</c> access) so the V1-unaffected
     /// claim is pinned at the unit that both V1 and V2 share, not just re-derived from other
     /// tests continuing to pass.
@@ -41,8 +40,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public void ProductCode_NoOverride_FallsBackToV1DefaultProductCodesTable_Unchanged()
         {
-            // This is the V1 path's fallback and must be untouched by issue 0036's fix: V1
-            // dispatch (EnrollNewAsync/RenewOrReissueAsync) still relies on this exact value.
+            // This is the V1 path's fallback: V1 dispatch
+            // (EnrollNewAsync/RenewOrReissueAsync) relies on this exact value.
             var ep = new EnrollmentParams(MakeProductInfo(Constants.Products.OvSsl));
 
             ep.HasExplicitProductCode.Should().BeFalse();
@@ -80,7 +79,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             }
         }
 
-        // Issue 0033: private-pki validation must tell "ProductVariant not set" apart from an
+        // Private-pki validation must tell "ProductVariant not set" apart from an
         // explicit value, because the getter's SSL-only "dv" default masks the difference.
         [Theory]
         [InlineData(null, false, "dv")]

@@ -33,7 +33,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0039: when <c>SubmitCsrV2Async</c> throws after the V2 order was placed, the order
+    /// When <c>SubmitCsrV2Async</c> throws after the V2 order was placed, the order
     /// sits at <c>pending-csr</c> and Command never learns its ID. <c>EnrollV2Async</c> must make
     /// exactly one best-effort <c>CancelOrderV2Async</c> call for that order's family and return
     /// FAILED with the orderId — never throwing, never retrying.
@@ -229,7 +229,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     }
 
     /// <summary>
-    /// WireMock coverage for <see cref="CERTInextClient.CancelOrderV2Async"/> (issue 0039): spec
+    /// WireMock coverage for <see cref="CERTInextClient.CancelOrderV2Async"/>: spec
     /// "Cancel Order" is <c>POST /api/certinext/v2/{family}/:orderId/cancel</c> with body
     /// <c>{ "reason": ... }</c>; 204 = cancelled, 422 = already in a terminal state.
     /// </summary>

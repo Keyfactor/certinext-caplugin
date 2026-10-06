@@ -28,14 +28,14 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression coverage for issue 0052: at enroll time the gateway never holds a stored
+    /// At enroll time the gateway never holds a stored
     /// certificate body for a brand-new V2 order, so a REVOKED disposition surfaced from
     /// <c>EnrollV2Async</c> — whether observed on the post-CSR-submit status check or during the
     /// synchronous pickup poll (<c>PickUpEnrolledCertificateV2Async</c>) — is always body-less.
-    /// Before the fix, that flowed straight through to <see cref="CERTInextCAPlugin.Enroll"/>'s
-    /// caller as <c>Status=REVOKED, Certificate=null</c>, which is exactly the shape that poisons
-    /// the gateway per issue 0049 (RevocationDate never clears; every later revoked-certificate
-    /// search calls FromDER(null) and 500s). These tests drive the fix end-to-end through
+    /// Letting that flow straight through to <see cref="CERTInextCAPlugin.Enroll"/>'s
+    /// caller as <c>Status=REVOKED, Certificate=null</c> is exactly the shape that poisons
+    /// the gateway (RevocationDate never clears; every later revoked-certificate
+    /// search calls FromDER(null) and 500s). These tests drive that handling end-to-end through
     /// <see cref="CERTInextCAPlugin.Enroll"/> (V2 path), mirroring
     /// <c>CERTInextCAPluginV2PickupTests</c>'s mocking patterns. The DCV-gated variant of this
     /// scenario (REVOKED observed on the post-DCV status re-check) lives in
@@ -92,7 +92,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } // non-UCC
                 });
 
-        private const string OrderId = "ord_0052_revoked_001";
+        private const string OrderId = "ord_revoked_001";
 
         private static Task<EnrollmentResult> Enroll(CERTInextCAPlugin plugin) =>
             plugin.Enroll(
@@ -134,7 +134,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.Status.Should().Be((int)EndEntityStatus.FAILED,
                 "a REVOKED order observed right after CSR submission has no certificate body and " +
-                "must never be reported as REVOKED (issue 0052)");
+                "must never be reported as REVOKED");
             result.Certificate.Should().BeNull();
             result.CARequestID.Should().Be(OrderId);
             result.StatusMessage.Should().Contain(OrderId).And.Contain("revoked");
@@ -172,7 +172,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.Status.Should().Be((int)EndEntityStatus.FAILED,
                 "a REVOKED disposition discovered mid-poll has no certificate body and must never " +
-                "be reported as REVOKED (issue 0052)");
+                "be reported as REVOKED");
             result.Certificate.Should().BeNull();
             result.CARequestID.Should().Be(OrderId);
             result.StatusMessage.Should().Contain(OrderId).And.Contain("revoked");
@@ -184,7 +184,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Regression: a genuinely FAILED disposition must pass through unchanged
+        // A genuinely FAILED disposition must pass through unchanged
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -206,13 +206,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var result = await Enroll(plugin);
 
             result.Status.Should().Be((int)EndEntityStatus.FAILED,
-                "a genuinely FAILED disposition must pass through the issue-0052 REVOKED->FAILED " +
+                "a genuinely FAILED disposition must pass through the REVOKED->FAILED " +
                 "normalization unchanged");
             result.CARequestID.Should().Be(OrderId);
         }
 
         // ---------------------------------------------------------------------------
-        // Regression: a genuinely issued certificate must pass through unchanged
+        // A genuinely issued certificate must pass through unchanged
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -242,7 +242,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var result = await Enroll(plugin);
 
             result.Status.Should().Be((int)EndEntityStatus.GENERATED,
-                "a genuinely issued certificate must pass through the issue-0052 REVOKED->FAILED " +
+                "a genuinely issued certificate must pass through the REVOKED->FAILED " +
                 "normalization unchanged");
             result.Certificate.Should().StartWith("-----BEGIN CERTIFICATE-----");
             result.CARequestID.Should().Be(OrderId);

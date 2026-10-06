@@ -25,7 +25,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// <summary>
     /// Standard OAuth2 client_credentials token response (flat shape — no tokenDetails wrapper).
     /// POST {ApiUrl}/oauth/token with form-encoded body (ApiUrl is the V2 base URL when
-    /// UseV2Api=true — issues/0022 config consolidation).
+    /// UseV2Api=true).
     /// </summary>
     public class V2TokenResponse
     {
@@ -128,9 +128,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         public V2Links Links { get; set; }
 
         /// <summary>
-        /// Populated only when <see cref="Status"/> is "revoked" (issues/0034 — confirmed live
-        /// against a real revoked SSL order, 2026-09-25). Absent entirely from the wire — not
-        /// present-but-null — when the order has never been revoked, which
+        /// Populated only when <see cref="Status"/> is "revoked". Absent entirely from the wire —
+        /// not present-but-null — when the order has never been revoked, which
         /// <c>System.Text.Json</c> deserializes as a null <see cref="V2RevocationDetails"/>
         /// reference with no special handling required.
         /// </summary>
@@ -146,9 +145,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         public string ExpiresAt { get; set; }
 
         /// <summary>
-        /// Per-domain DCV/CAA verification detail (issue 0042). Present on UCC orders whose
-        /// additional SANs each carry their own DCV state; confirmed live 2026-09-28 (order
-        /// 7465857196). Absent entirely on older/simpler response shapes — callers must treat
+        /// Per-domain DCV/CAA verification detail. Present on UCC orders whose
+        /// additional SANs each carry their own DCV state. Absent entirely on older/simpler
+        /// response shapes — callers must treat
         /// a null <see cref="V2Verifications.Domain"/>/<see cref="V2DomainVerification.Domains"/>
         /// the same as "no per-domain detail available" and fall back to the single top-level
         /// <see cref="Domain"/> field.
@@ -158,7 +157,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// Top-level <c>verifications</c> object on the V2 Track Order response (issue 0042).
+    /// Top-level <c>verifications</c> object on the V2 Track Order response.
     /// Only the <c>domain</c> sub-block is modeled — that is the only one this plugin's DCV
     /// automation drives.
     /// </summary>
@@ -169,8 +168,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// <c>verifications.domain</c> block (issue 0042). <see cref="Status"/> is an aggregate that
-    /// is NOT reliable for driving DCV decisions — confirmed live 2026-09-28 that it stayed
+    /// <c>verifications.domain</c> block. <see cref="Status"/> is an aggregate that
+    /// is NOT reliable for driving DCV decisions — it can stay
     /// "PENDING" even after the parent order was cancelled and every per-domain
     /// <see cref="V2DomainVerificationEntry.DcvStatus"/> had already flipped to REJECTED. Use it
     /// for logging only; always decide per-domain from <see cref="Domains"/>.
@@ -188,8 +187,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// A single entry in <c>verifications.domain.domains[]</c> (issue 0042). Confirmed live
-    /// 2026-09-28, order 7465857196:
+    /// A single entry in <c>verifications.domain.domains[]</c>. Example shape:
     /// <c>{"domain":"a.pending....example.com","domainStatus":"ACTIVE","dcvStatus":"PENDING","caaStatus":"SKIPPED"}</c>
     /// for a still-pending SAN, versus
     /// <c>{"domain":"...","domainStatus":"ACTIVE","dcvMethod":"dns-txt","dcvStatus":"VERIFIED","verifiedAt":"...","caaStatus":"PASSED"}</c>
@@ -227,8 +225,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// Nested <c>revocation</c> object on the V2 Track Order response (issues/0034). Confirmed
-    /// live against a real revoked SSL order (2026-09-25):
+    /// Nested <c>revocation</c> object on the V2 Track Order response. Example shape, from a
+    /// revoked SSL order:
     /// <c>{"status":"Certificate Revoked","reason":"cessation-of-operation","processedAt":"2026-09-24T20:44:41Z"}</c>
     /// </summary>
     public class V2RevocationDetails
@@ -296,10 +294,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// Response body for GET /api/certinext/v2/ssl-certificates/{orderId}/dcv.
     /// Returns the DCV challenge token needed to publish a DNS TXT record.
     ///
-    /// Confirmed live shape (issues/0037, live probe 2026-09-25): exactly two fields —
+    /// Actual wire shape: exactly two fields —
     /// <c>{"tokenExpiryDate": "...", "token": "..."}</c>. This matches neither the spec's
     /// own worked example for this endpoint (<c>orderNumber</c>/<c>domainName</c>/
-    /// <c>dcvMethod</c>/<c>fileNameContent</c>, which this DTO originally modeled) nor the
+    /// <c>dcvMethod</c>/<c>fileNameContent</c>) nor the
     /// spec's prose for the same endpoint (<c>method</c>/<c>txtToken</c>). There is no
     /// <c>orderNumber</c>, <c>domainName</c>, or method field on the wire, so none are
     /// modeled here:
@@ -310,7 +308,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     ///   - the V2 DCV path only ever performs DNS-TXT validation — the hostname
     ///     (<c>_emudhra-challenge.{domain}</c>) and validator ("dns-01") are both hardcoded
     ///     in <see cref="CERTInextCAPlugin.PerformDcvV2IfNeededAsync"/>, which never reads a
-    ///     method from this response even in the pre-fix DTO — so no method field is needed.
+    ///     method from this response — so no method field is needed.
     /// </summary>
     public class V2DcvChallengeResponse
     {
@@ -405,9 +403,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// Spring-style page envelope for GET /api/certinext/v2/reports/orders (issues/0022,
-    /// Phase 0 live probe — confirmed live 2026-09-23; the spec's example body is stale,
-    /// its field table is what's actually returned).
+    /// Spring-style page envelope for GET /api/certinext/v2/reports/orders. The spec's
+    /// example body is stale; its field table is what's actually returned.
     /// </summary>
     public class V2OrdersReportResponse
     {
@@ -430,7 +427,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
     /// <summary>
     /// A single row from the V2 /reports/orders "content" array. Field names match the live
-    /// field table confirmed in issues/0022 Phase 0 (NOT the spec's stale example body, which
+    /// field table (NOT the spec's stale example body, which
     /// uses different field names — state/identifier/account/group/product).
     ///
     /// orderStatus/certificateStatus are human-readable display strings (e.g. "Order Accepted",
@@ -438,7 +435,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// (see <see cref="V2OrderStatusResponse.Status"/> and
     /// <c>Keyfactor.Extensions.CAPlugin.CERTInext.Models.StatusMapper.V2StatusToRequestDisposition</c>).
     /// See <c>CERTInextCAPlugin.MapV2ReportStatusToDisposition</c> for how these display strings
-    /// are mapped, and issues/0022 for the vocabulary observed so far (not confirmed exhaustive).
+    /// are mapped; the vocabulary handled there is not guaranteed exhaustive.
     /// </summary>
     public class OrderReportEntryV2
     {
@@ -461,7 +458,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("certificateSerialNumber")]
         public string CertificateSerialNumber { get; set; }
 
-        /// <summary>Certificate notAfter. Empty until issuance. Kept as string — format not confirmed live.</summary>
+        /// <summary>Certificate notAfter. Empty until issuance. Kept as string — format not guaranteed.</summary>
         [JsonPropertyName("certificateExpiryDate")]
         public string CertificateExpiryDate { get; set; }
 
@@ -470,7 +467,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         public string IssuerCa { get; set; }
 
         /// <summary>
-        /// Catalog product code. Often empty on report rows (issues/0016) — do not rely on this
+        /// Catalog product code. Often empty on report rows — do not rely on this
         /// for family resolution; use <c>ResolveAndTrackOrderV2WithFamilyAsync</c> instead.
         /// </summary>
         [JsonPropertyName("productCode")]

@@ -22,17 +22,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
     /// Pure DTO deserialization tests for <see cref="V2OrderStatusResponse"/>'s nested
-    /// <c>revocation</c> object (issues/0034). No HTTP layer involved — these assert directly
+    /// <c>revocation</c> object. No HTTP layer involved — these assert directly
     /// against <see cref="JsonSerializer"/>, isolated from the client and plugin code that
     /// consumes this type.
     /// </summary>
     public class V2OrderStatusResponseTests
     {
         /// <summary>
-        /// Raw Track Order response body captured live against a real revoked SSL order
-        /// (order 6758681362, family ssl-certificates, 2026-09-25 — see
-        /// issues/0034-v2-revocation-date-reason-dto-mismatch.md's "Live probe findings"
-        /// section). Verbatim except for whitespace; unmapped fields (requestor, orderedBy,
+        /// Raw Track Order response body, as returned against a real revoked SSL order
+        /// (family ssl-certificates). Verbatim except for whitespace; unmapped fields (requestor, orderedBy,
         /// subscriberAgreement, subscription, verifications) are expected to be ignored by
         /// System.Text.Json's default unmapped-member handling.
         /// </summary>
@@ -50,7 +48,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.ProductVariant.Should().Be("dv");
             result.Domain.Should().Be("nt2-20260924204408874594000.dcv-test.scrup.org");
 
-            // issues/0034: `revocation` is a nested object — status/reason/processedAt — not
+            // `revocation` is a nested object — status/reason/processedAt — not
             // flat top-level revocationReason/revocationDate properties.
             result.Revocation.Should().NotBeNull();
             result.Revocation!.Status.Should().Be("Certificate Revoked");
@@ -64,8 +62,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public void Deserialize_NotRevokedOrderBody_RevocationIsNull()
         {
-            // The `revocation` key is absent entirely when an order has never been revoked
-            // (confirmed live, issues/0034) — not present-but-null.
+            // The `revocation` key is absent entirely when an order has never been revoked —
+            // not present-but-null.
             const string issuedJson =
                 @"{""orderId"":""ord_abc001"",""requestId"":""req_xyz001"",""status"":""issued"",""productVariant"":""dv"",""domain"":""example.com""}";
 

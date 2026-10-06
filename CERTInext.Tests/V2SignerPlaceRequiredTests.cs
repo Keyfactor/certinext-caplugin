@@ -31,10 +31,10 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issue 0039 (signerPlace): the V2 spec marks SSL create
+    /// Tests for signerPlace: the V2 spec marks SSL create
     /// <c>agreement.signerPlace</c> "Conditional - required if `agreement` sent", and the plugin
-    /// always sends <c>agreement</c> on V2 SSL orders but used to drop a blank signerPlace.
-    /// V2 connectors now require <c>SignerPlace</c> in <see cref="CERTInextCAPlugin.ValidateCAConnectionInfo"/>
+    /// always sends <c>agreement</c> on V2 SSL orders, so a blank signerPlace must not be dropped.
+    /// V2 connectors require <c>SignerPlace</c> in <see cref="CERTInextCAPlugin.ValidateCAConnectionInfo"/>
     /// (before any network call), and <c>EnrollV2Async</c> fails fast for an SSL order whose
     /// resolved signer place is blank. V1 and V2 Private PKI (no agreement) are unaffected.
     /// </summary>

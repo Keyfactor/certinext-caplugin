@@ -29,14 +29,12 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Review finding (B): a transport-level failure or timeout from <c>SubmitCsrV2Async</c> does
+    /// A transport-level failure or timeout from <c>SubmitCsrV2Async</c> does
     /// not tell <see cref="CERTInextCAPlugin.EnrollV2Async"/> whether CERTInext actually received
-    /// the CSR — only that no successful response was seen. Cancelling unconditionally (the old
-    /// behavior, still covered for a *definitive* CA rejection in
+    /// the CSR — only that no successful response was seen. Cancelling unconditionally (as is done for a *definitive* CA rejection, covered in
     /// <c>V2OrphanedOrderCancelTests</c>) can orphan an order the CA genuinely accepted.
     ///
-    /// Covers the three ambiguous-failure branches: still pending-csr after tracking (cancel, same
-    /// as before), progressed past pending-csr (continue the normal flow, no cancel), and tracking
+    /// Covers the three ambiguous-failure branches: still pending-csr after tracking (cancel), progressed past pending-csr (continue the normal flow, no cancel), and tracking
     /// itself failing (return pending without cancelling). Also pins the pure classification logic
     /// in <see cref="CERTInextCAPlugin.IsTransportLevelCsrFailure"/>.
     /// </summary>

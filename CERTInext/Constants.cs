@@ -32,7 +32,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // times, PickupDelay seconds apart (after a fixed initial delay), so a fast-issuing
             // order returns the issued certificate in the same enrollment call instead of
             // waiting for the next synchronization. On timeout the order is returned pending and
-            // imported by a later sync — behaviour identical to before this feature.
+            // imported by a later sync.
             public const string PickupRetries = "PickupRetries";
             public const string PickupDelay = "PickupDelay";
 
@@ -79,14 +79,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string DcvWaitForIssuanceSeconds = "DcvWaitForIssuanceSeconds";
 
             // Bounds on DCV-during-sync so a large pending backlog can't make a sync pass
-            // slow (issue 0002). Only pending orders younger than DcvSyncMaxOrderAgeHours
+            // slow. Only pending orders younger than DcvSyncMaxOrderAgeHours
             // are eligible for DCV completion during sync, and at most DcvSyncMaxPerPass
             // orders are attempted per pass; the rest are emitted as pending and revisited
             // on a later pass (the per-minute incremental cadence keeps recent orders moving).
             public const string DcvSyncMaxOrderAgeHours = "DcvSyncMaxOrderAgeHours";
             public const string DcvSyncMaxPerPass = "DcvSyncMaxPerPass";
 
-            // V2 mode only: incremental-sync lookback window for /reports/orders (issues/0022).
+            // V2 mode only: incremental-sync lookback window for /reports/orders.
             public const string V2SyncLookbackHours = "V2SyncLookbackHours";
 
             // Environment variable that overrides DcvTimeoutMinutes when set.
@@ -155,8 +155,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // when targeting sandbox.
             //
             // Do NOT reuse this table for V2 dispatch: its numbering does not match the live
-            // V2 catalog (issue 0036 — e.g. this table's "842" is OV SSL, but the live V2
-            // catalog's "842" is DV SSL, a flat +4 offset across all 10 codes). V2 resolves the
+            // V2 catalog — e.g. this table's "842" is OV SSL, but the live V2
+            // catalog's "842" is DV SSL, a flat +4 offset across all 10 codes. V2 resolves the
             // product code live from the Catalog response instead — see ProductTypeIdsV2 below
             // and EnrollV2Async/ValidateProductInfo in CERTInextCAPlugin.cs.
             public static readonly System.Collections.Generic.Dictionary<string, string> DefaultProductCodes =
@@ -176,17 +176,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // V2-ONLY. Maps each product name (ProductId, as advertised by GetProductIds()) to
             // the CERTInext V2 catalog's stable numeric productTypeID value (spec:
-            // docs/reference/specs/CERTInext API v2.postman_collection (1).json, "Get Product
-            // Details" field vocabulary). productTypeID is the CA's own documented mechanism
+            // "Get Product Details" field vocabulary). productTypeID is the CA's own documented mechanism
             // for "programmatic routing" (its docs explicitly say productName is "for display"
             // only) — unlike productCode (V1-era table above, wrong numbering for V2) or
-            // productName (varies by account/catalog version: the live catalog, the V1 Postman
-            // table, and the V2 Postman table each use different spellings/suffixes for the same
-            // product — see issue 0036), productTypeID is a small, stable, CERTInext-documented
-            // enum. F3 independently reached the same conclusion for UCC detection and
-            // live-verified 15/18/20/21/22 against the real V2 sandbox catalog
-            // (issues/f3-v2-multi-san-limitation.md); the other five (13/14/16/17/19) are
-            // spec-documented but not yet independently live-probed.
+            // productName (varies by account/catalog version: the live catalog, the V1 spec
+            // table, and the V2 spec table each use different spellings/suffixes for the same
+            // product), productTypeID is a small, stable, CERTInext-documented
+            // enum.
+            // NOTE: 15/18/20/21/22 match the real V2 sandbox catalog; the other five
+            // (13/14/16/17/19) are spec-documented but have not been checked against it.
             //
             // Used by EnrollV2Async/ValidateProductInfo to resolve/validate the real V2 product
             // code from the live catalog when no explicit ProductCode override is configured.
@@ -207,7 +205,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 };
 
             // V2-ONLY. Maps each SSL product name (ProductId) to the V2 create body's
-            // productVariant value ("dv"/"ov"/"ev") — issue 0059. Grouped by the same
+            // productVariant value ("dv"/"ov"/"ev"). Grouped by the same
             // productTypeID assurance level ProductTypeIdsV2 above already documents (13-15 and
             // 21 -> dv, 16-18 and 22 -> ov, 19-20 -> ev); kept as its own ProductId-keyed table
             // (rather than a second indirection through ProductTypeIdsV2) so it reads the same way
@@ -436,7 +434,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <c>/api/certinext/v2/</c> surface. Auth is OAuth2 client_credentials. The plugin sends
         /// an <c>Idempotency-Key</c> header on order-create/revoke, but the spec only documents
         /// this header (as "parsed today, enforced in a future release") on Verify DCV and Domains
-        /// endpoints, not order-create/revoke — see issue 0032.
+        /// endpoints, not order-create/revoke.
         /// </summary>
         public static class ApiV2
         {
@@ -462,12 +460,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string StatusRevoked                         = "revoked";
             public const string StatusRejected                        = "rejected";
             public const string StatusExpired                         = "expired";
-            // Spec-documented V2 status (issue 0039) — CERTInext can't say where the order is; not terminal.
+            // Spec-documented V2 status — CERTInext can't say where the order is; not terminal.
             public const string StatusUnknown                         = "unknown";
 
             // Per-domain dcvStatus values on Track Order's verifications.domain.domains[]
-            // block (issue 0042). Confirmed live (2026-09-28, order 7465857196): PENDING while
-            // a SAN's DCV is outstanding, VERIFIED once confirmed, REJECTED after the parent
+            // block: PENDING while a SAN's DCV is outstanding, VERIFIED once confirmed,
+            // REJECTED after the parent
             // order is cancelled. Uppercase — distinct from the V1 Dcv class's numeric "0"/"1"
             // dcvStatus values, which belong to a different API generation entirely.
             public const string DcvStatusPending  = "PENDING";
@@ -479,24 +477,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string FamilyPrivatePki = "private-pki-certificates";
             public const string FamilySignature  = "signature-certificates";
 
-            // productVariant values that require an organization block (issue 0028) — every
+            // productVariant values that require an organization block — every
             // other value (dv and its wildcard/UCC combinations) omits it entirely.
             public const string ProductVariantOv = "ov";
             public const string ProductVariantEv = "ev";
 
             // The SSL family's own "no assurance vetting" variant. Given its own named constant
-            // (issue 0059) so Constants.Products.ProductVariantsV2 below doesn't repeat the "dv"
+            // so Constants.Products.ProductVariantsV2 below doesn't repeat the "dv"
             // literal that EnrollmentParams.ProductVariant/V2CreateSslOrderRequest.ProductVariant
             // also default to.
             public const string ProductVariantDv = "dv";
 
-            // Private PKI create-body `variant` enum (issue 0033). Spec, "Private PKI
+            // Private PKI create-body `variant` enum. Spec, "Private PKI
             // Certificates" field table: "`variant` | **Mandatory** (`intranet-ssl` /
             // `igtf-host`)". Sourced from the ProductVariant template parameter (the same
             // "variant within the family" parameter the SSL body's productVariant uses).
             // Note: the spec's create-*response* table echoes a wider enum (`intranet-ssl` /
             // `igtf-host` / `igtf-personal` / `device` / `vpn`) — only the two documented
-            // create values are accepted here; see issue 0033.
+            // create values are accepted here.
             public const string PrivatePkiVariantIntranetSsl = "intranet-ssl";
             public const string PrivatePkiVariantIgtfHost    = "igtf-host";
             public static readonly System.Collections.Generic.HashSet<string> PrivatePkiVariants =
@@ -511,7 +509,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // on the sandbox catalog (product 149, "Sandbox emSign Intranet SSL 1 Year").
             public const string PrivatePkiProductTypeId = "39";
 
-            // Document Signer create-body `subjectType` enum (issue 0033). Spec, "Document
+            // Document Signer create-body `subjectType` enum. Spec, "Document
             // Signer Certificates" field table: "`subjectType` | **Mandatory**
             // (`natural-person` / `legal-person` / `legal-entity`)". Not yet sourced by
             // EnrollV2Async — signature enrollment is still an open design decision.
@@ -523,20 +521,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "legal-entity"
                 };
 
-            // Fixed designation sent on technicalPointOfContact.designation (issue 0030). The
+            // Fixed designation sent on technicalPointOfContact.designation. The
             // spec documents this as free text with no enum (examples: "Technical Contact",
             // "IT Administrator", "PKI Manager", "Authorized Signer") and there is no connector
-            // config field for it — deliberately out of scope for issue 0027 item 5e's
-            // RequestorDesignation fix (Config.RequestorDesignation), which only covers
+            // config field for it — deliberately out of scope for
+            // RequestorDesignation (Config.RequestorDesignation), which only covers
             // requestor.designation. No existing generic designation/title config field was
             // found to reuse for this one, so this remains a fixed default.
             public const string DefaultTechnicalContactDesignation = "Technical Contact";
 
             // UCC (multi-SAN) product family detection — from the live Catalog response's
             // productTypeID field: 15=DV SSL UCC, 18=OV SSL UCC, 20=EV SSL UCC,
-            // 21=DV SSL Wildcard UCC, 22=OV SSL Wildcard UCC (issues/f3-v2-multi-san-limitation.md).
+            // 21=DV SSL Wildcard UCC, 22=OV SSL Wildcard UCC.
             // Deliberately NOT derived from Constants.Products.DefaultProductCodes — that table's
-            // numbering disagrees with the live/spec numbering (issue 0036).
+            // numbering disagrees with the live/spec numbering.
             public static readonly System.Collections.Generic.HashSet<string> UccProductTypeIds =
                 new System.Collections.Generic.HashSet<string> { "15", "18", "20", "21", "22" };
 
@@ -553,12 +551,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Orders report (Synchronize, V2 mode) — GET /api/certinext/v2/reports/orders.
             // Spring-style page envelope: content/page/size/totalPages/totalElements.
             // Paging is 1-based; size is clamped to 100 server-side; page=0 is treated as
-            // page 1 (issues/0022 Phase 0 live probe findings).
+            // page 1.
             public const string OrdersReportPath = "/api/certinext/v2/reports/orders";
             public const int OrdersReportMaxPageSize = 100;
 
-            // Default lookback window (issues/0022): live probing could not determine
-            // whether /reports/orders' from/to filter brackets order date or issue date.
+            // Default lookback window: whether /reports/orders' from/to filter brackets order
+            // date or issue date is not documented.
             // An incremental sync re-requests from (lastSync - this window) rather than
             // exactly lastSync, so an order created before lastSync but issued after it
             // (e.g. a slow-DCV order) still surfaces. See CERTInextConfig.V2SyncLookbackHours.
@@ -575,7 +573,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // V1 never puts these on the wire (RevokeOrderRequest sends a numeric
         // revokeReasonId — see CERTInextClient.RevokeCertificateAsync /
         // MapLegacyReasonStringToCrlCode), so this class is intentionally left
-        // untouched by the 0019 V2 kebab-case fix; see RevocationReasonV2 below.
+        // untouched by the V2 kebab-case fix; see RevocationReasonV2 below.
         public static class RevocationReason
         {
             public const string Unspecified = "unspecified";
@@ -591,10 +589,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         // V2 API revocation reason strings. These must match the CERTInext V2 spec's
-        // kebab-case `reason` enum exactly (docs/reference/specs/CERTInext API
-        // v2.postman_collection.json, "Revoke Certificate"). Sending camelCase (the
-        // pre-fix values, shared with the legacy RevocationReason class above) gets
-        // HTTP 400 — see issues/0019. `AACompromise` is accepted on the
+        // kebab-case `reason` enum exactly ("Revoke Certificate" in the
+        // V2 spec). Sending camelCase (the
+        // values shared with the legacy RevocationReason class above) gets
+        // HTTP 400. `AACompromise` is accepted on the
         // signature-certificates / private-pki-certificates revoke endpoints per spec,
         // but is not documented on ssl-certificates; kept here as the RFC 5280 code-10
         // mapping for those other families. There is no V2 equivalent of the RFC 5280

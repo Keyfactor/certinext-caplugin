@@ -28,10 +28,9 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issue 0039 (`unknown` status): the V2 spec lists `unknown` among
-    /// its documented order statuses, but <c>StatusMapper.V2StatusToRequestDisposition</c> sent
-    /// it to FAILED, so a possibly-live order was reported to Command as failed. It now maps to
-    /// EXTERNALVALIDATION; these tests cover the enroll and single-record callers end to end.
+    /// Tests for the `unknown` status: the V2 spec lists `unknown` among its documented order
+    /// statuses, and <c>StatusMapper.V2StatusToRequestDisposition</c> maps it to
+    /// EXTERNALVALIDATION (not FAILED), since the order may still be live; these tests cover the enroll and single-record callers end to end.
     /// </summary>
     public class V2UnknownStatusTests
     {

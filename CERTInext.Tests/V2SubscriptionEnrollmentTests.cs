@@ -35,10 +35,9 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issues/0027-v2-request-builder-drops-config-fields.md items 2a/2b: the
-    /// V2 order body's <c>subscription</c> block hardcoded <c>autoRenew=false</c> and
-    /// <c>renewBeforeDays=30</c>, ignoring the connector's <c>SubscriptionAutoRenew</c>/
-    /// <c>SubscriptionRenewCriteriaDays</c> config entirely. These tests exercise
+    /// Tests that the V2 order body's <c>subscription</c> block is sourced from the connector's
+    /// <c>SubscriptionAutoRenew</c>/<c>SubscriptionRenewCriteriaDays</c> config rather than
+    /// hardcoded <c>autoRenew=false</c> / <c>renewBeforeDays=30</c>. These tests exercise
     /// <c>EnrollV2Async</c> end-to-end (through <see cref="CERTInextCAPlugin.Enroll"/>) against a
     /// Strict <see cref="ICERTInextClient"/> mock, plus direct DTO serialization checks for
     /// <see cref="V2SubscriptionParams.RenewBeforeDays"/>.
@@ -276,8 +275,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // Unlike GroupNumber/PreVettingToken (which carry their own per-property
         // [JsonIgnore(Condition = WhenWritingNull)]), RenewBeforeDays relies solely on the
         // client's global serializer options (CERTInextClient.GetJsonOptions,
-        // DefaultIgnoreCondition = WhenWritingNull) to omit it when null — by design, per issue
-        // 0027's fix. GetJsonOptions() is private, so these tests build an equivalent
+        // DefaultIgnoreCondition = WhenWritingNull) to omit it when null — by design.
+        // GetJsonOptions() is private, so these tests build an equivalent
         // JsonSerializerOptions inline to verify that global-option omission actually works for
         // this property, rather than relying on plain JsonSerializer.Serialize(req) (whose default
         // options do NOT ignore nulls and would show "renewBeforeDays":null instead of omitting it).

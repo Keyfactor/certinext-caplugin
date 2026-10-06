@@ -204,7 +204,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <see cref="EndEntityStatus"/> integer code expected by the gateway.
         ///
         /// Covers the status values documented by the V2 spec's <c>/reports/orders</c>
-        /// <c>status</c> filter (issues/0031). <c>pending-organization-verification</c>,
+        /// <c>status</c> filter. <c>pending-organization-verification</c>,
         /// <c>pending-documents</c>, and <c>pending-approval</c> join the existing
         /// pending-* values as EXTERNALVALIDATION — they are OV/EV/DV orders still
         /// actively progressing toward issuance, not failures. <c>rejected</c> is a
@@ -214,10 +214,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <see cref="ToRequestDisposition"/>'s V1 convention and the sync/report path's
         /// own "expired" case (<c>CERTInextCAPlugin.TryMapV2ReportDisplayStatus</c>). The
         /// spec-documented <c>unknown</c> maps to
-        /// EXTERNALVALIDATION (issue 0039): the order may still be live. Any value not in this list falls
-        /// through to the default arm, which also returns FAILED but logs a warning —
-        /// see issues/0031 for why "deliberately FAILED" and "unmapped, degrading to
-        /// FAILED" are kept distinguishable in the logs even though the return value
+        /// EXTERNALVALIDATION: the order may still be live. Any value not in this list falls
+        /// through to the default arm, which also returns FAILED but logs a warning,
+        /// so "deliberately FAILED" and "unmapped, degrading to
+        /// FAILED" stay distinguishable in the logs even though the return value
         /// is the same today.
         /// </summary>
         /// <param name="v2Status">Status string from the V2 order response.</param>
@@ -248,7 +248,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
                     return (int)EndEntityStatus.FAILED;
 
                 case Constants.ApiV2.StatusUnknown:
-                    // Issue 0039: `unknown` is in the spec's documented status list, so it is NOT
+                    // `unknown` is in the spec's documented status list, so it is NOT
                     // the "status we've never heard of" case below — CERTInext is saying it can't
                     // currently report where the order is, not that the order is dead. Treat it as
                     // pending so Command keeps the order and sync/pickup keep re-checking it, rather
@@ -263,7 +263,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
                 default:
                     // Distinct from the deliberate cancelled/rejected/expired -> FAILED
                     // mappings above: this status string isn't recognized at all. Log so
-                    // an operator (or issues/0031-style audit) can tell "legitimately
+                    // an operator can tell "legitimately
                     // failed" apart from "gateway doesn't know this status yet" — degrade
                     // to FAILED rather than guessing EXTERNALVALIDATION, since an
                     // unrecognized value could just as easily be a new terminal state.
@@ -279,7 +279,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <summary>
         /// Converts an RFC 5280 CRL reason code to the V2 API revocation reason string.
         /// Values are the CERTInext V2 spec's kebab-case `reason` enum (see
-        /// <see cref="Constants.RevocationReasonV2"/> and issues/0019 — sending the
+        /// <see cref="Constants.RevocationReasonV2"/> — sending the
         /// legacy camelCase strings gets HTTP 400). Codes without a direct V2
         /// equivalent (e.g. RFC 5280 code 8, "removeFromCRL", which is CRL-only and
         /// not a valid revocation request reason) are mapped to "unspecified".
@@ -303,7 +303,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// Converts a V2 API revocation reason string (the CERTInext V2 spec's kebab-case
         /// <c>reason</c> enum on the Track Order response's nested <c>revocation</c> object,
         /// e.g. "cessation-of-operation") back to the RFC 5280 CRL reason code for storage in
-        /// the Keyfactor Command database (issues/0034). Inverse of
+        /// the Keyfactor Command database. Inverse of
         /// <see cref="ToV2RevocationReason"/>. Unrecognized or null input (including the
         /// not-revoked case, where the caller should not invoke this at all) falls back to 0
         /// (unspecified), mirroring <see cref="ToRevocationReason"/>'s V1 default.
