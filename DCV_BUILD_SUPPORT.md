@@ -2,16 +2,16 @@
 
 ## Build flag
 
-DNS-01 DCV support is gated behind a single MSBuild property, **`DcvSupport`**, default `true`. It's defined in `CERTInext/CERTInext.csproj`:
+DNS-01 DCV support is gated behind a single MSBuild property, **`DcvSupport`**, default `false`. It's defined in `CERTInext/CERTInext.csproj`:
 
 ```
-dotnet build -p:DcvSupport=false
+dotnet build -p:DcvSupport=true
 ```
 
-- `DcvSupport=true` (default): compiles against `Keyfactor.AnyGateway.IAnyCAPlugin` **3.3.0** (stable release), defines `SUPPORTS_DCV` — this is what CI ships, targeting 26.x/DCV-capable gateway hosts.
-- `DcvSupport=false`: compiles against **3.2.0**, no `SUPPORTS_DCV` constant, targeting GA gateway hosts (AnyCA Gateway 25.5.x, see issue 0003).
+- `DcvSupport=false` (default): compiles against `Keyfactor.AnyGateway.IAnyCAPlugin` **3.2.0** (stable), no `SUPPORTS_DCV` constant — this is the build that loads and persists records on GA gateway hosts (AnyCA Gateway 25.5.x).
+- `DcvSupport=true`: compiles against **3.3.0-PRERELEASE** and defines `SUPPORTS_DCV`, targeting DCV-capable gateway hosts (AnyCA Gateway 26.x).
 
-The project also only targets **`net10.0`** (single TFM, no more `net8.0`/`net10.0` multi-targeting).
+The project targets both **`net8.0`** and **`net10.0`**.
 
 Relevant lines: [`CERTInext.csproj#L18-L19`](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInext.csproj#L18-L19) (the flag → `SUPPORTS_DCV` define) and [`#L29-L30`](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInext.csproj#L29-L30) (the package-version swap).
 
@@ -36,6 +36,6 @@ All in `CERTInext/CERTInextCAPlugin.cs`:
 | [1373–1424](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L1373-L1424) | `TryRunDcvDuringSyncAsync` — full retry-path body vs. `#else` `return false` no-op |
 | [1442–1704](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L1442-L1704) | `PerformDcvIfNeededAsync` itself — the whole method only exists in the DCV build |
 
-Design note baked into the comments: `_domainValidatorFactory` is deliberately typed as `object` (not `IDomainValidatorFactory`) so the JIT never needs to resolve the 3.3-only type when `SUPPORTS_DCV` is off — casts only happen inside method bodies fenced by `#if`, which is what lets the no-DCV build load cleanly on a 3.2.0 gateway host (see the field comment at [L40-L60](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L40-L60), issue #7).
+Design note baked into the comments: `_domainValidatorFactory` is deliberately typed as `object` (not `IDomainValidatorFactory`) so the JIT never needs to resolve the 3.3-only type when `SUPPORTS_DCV` is off — casts only happen inside method bodies fenced by `#if`, which is what lets the no-DCV build load cleanly on a 3.2.0 gateway host (see the field comment at [L40-L60](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L40-L60)).
 
-Reminder: DCV is now the default build — `-p:DcvSupport=false` is the opt-out for GA/no-DCV hosts. Without it, the build targets 26.x hosts and depends on the stable `3.3.0` package.
+Reminder: the default build is the no-DCV build. Pass `-p:DcvSupport=true` to build for 26.x hosts.
