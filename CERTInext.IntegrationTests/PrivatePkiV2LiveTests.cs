@@ -41,8 +41,8 @@ using Xunit.Abstractions;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 {
     /// <summary>
-    /// Opt-in live verification of the V2 <c>private-pki</c> enrollment path (issue 0033, commit
-    /// 88845bf) end to end through the real plugin surface: <c>plugin.Enroll</c> with
+    /// Opt-in live verification of the V2 <c>private-pki</c> enrollment path end to end through
+    /// the real plugin surface: <c>plugin.Enroll</c> with
     /// <c>ProductFamily=private-pki</c> / <c>ProductVariant=intranet-ssl</c> against the CERTInext
     /// sandbox, then <c>plugin.Revoke</c> (CRL reason 4, superseded) in cleanup.
     ///
@@ -219,13 +219,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 ["ipaddress"] = new[] { IpSan },
             };
 
-            _output.WriteLine("=== Issue 0033 private-pki live enrollment (ONE order, no retries) ===");
+            _output.WriteLine("=== private-pki live enrollment (ONE order, no retries) ===");
             _output.WriteLine($"Family=private-pki, Variant={Constants.ApiV2.PrivatePkiVariantIntranetSsl}, ProductCode={_productCode}");
             _output.WriteLine($"CN={cn}, SANs: dnsname=[{cn}], ipaddress=[{IpSan}]");
 
             string orderId = null;
             // Set only once Enroll returned GENERATED with a certificate body; cleanup revokes an
-            // issued order and cancels anything else (issue 0039).
+            // issued order and cancels anything else.
             bool issued = false;
             try
             {
@@ -314,8 +314,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Best-effort cleanup: exactly one cleanup action, never retried, never throwing (a cleanup
         /// failure must not mask the test's own result). An issued order is revoked via
         /// <c>plugin.Revoke</c> (CRL reason 4, superseded); any other order is cancelled via
-        /// <see cref="ICERTInextClient.CancelOrderV2Async"/> on the private-pki family (issue 0039 —
-        /// <c>plugin.Revoke</c> refuses non-issued orders). Manual-cleanup instructions are printed
+        /// <see cref="ICERTInextClient.CancelOrderV2Async"/> on the private-pki family
+        /// (<c>plugin.Revoke</c> refuses non-issued orders). Manual-cleanup instructions are printed
         /// only when that action fails. If Enroll's own Submit CSR failure path already cancelled the
         /// order, this cancel reports the CA's 422 "already terminal" answer. Finishes with one
         /// read-only GET on the private-pki order.
@@ -349,7 +349,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 try
                 {
                     var outcome = await client.CancelOrderV2Async(
-                        Constants.ApiV2.FamilyPrivatePki, orderId, "Keyfactor plugin live test cleanup (issue 0033).");
+                        Constants.ApiV2.FamilyPrivatePki, orderId, "Keyfactor plugin live test cleanup.");
                     _output.WriteLine($"CancelOrderV2Async(private-pki, order={orderId}) returned {outcome}" +
                                       (outcome == V2CancelOrderOutcome.AlreadyTerminal
                                           ? " (HTTP 422: already in a terminal state; nothing cancelled)."

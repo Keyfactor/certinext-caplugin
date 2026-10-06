@@ -15,9 +15,9 @@
 // V2 release-candidate readiness: DCV against a FRESH, never-before-seen domain. Every DCV
 // test in V2DcvLifecycleTests.cs targets CERTINEXT_DCV_DOMAIN, which this sandbox account has
 // reused across dozens of prior test runs and is therefore typically already VERIFIED
-// account-wide — so those tests observe staged=0 (the reuse path, issue 0020) and never actually
-// exercise the TXT publish/verify/cleanup path. This file's test targets a freshly-generated
-// subdomain instead, so a real TXT challenge must be staged and cleaned up (staged>0).
+// account-wide — so those tests take the reuse path (staged=0) and never actually exercise
+// the TXT publish/verify/cleanup path. This file's test targets a freshly-generated subdomain
+// instead, so a real TXT challenge must be staged and cleaned up (staged>0).
 
 #if SUPPORTS_DCV
 using System;
@@ -189,7 +189,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 else
                 {
-                    await V2RawProbeHelpers.CancelSslOrderRawAsync(
+                    await V2RawHttpHelpers.CancelSslOrderRawAsync(
                         _v2ApiUrl, _v2ClientId, _v2ClientSecret, orderId,
                         "V2 fresh-domain DCV test cleanup — order not issued, cancelling.");
                     _output.WriteLine($"Cleanup: cancelled non-issued order {orderId} (status={current?.Status}).");
@@ -219,7 +219,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Because the domain is guaranteed unseen, this is the one DCV test in the V2 suite that
         /// actually exercises the publish path: every existing V2DcvLifecycleTests case targets
         /// the long-reused CERTINEXT_DCV_DOMAIN, which this account has verified account-wide, so
-        /// those always take the reuse path (issue 0020) and observe staged=0. Asserts staged&gt;0
+        /// those always take the reuse path and observe staged=0. Asserts staged&gt;0
         /// and cleaned==staged.
         /// Expected sandbox order count: 1.
         /// </summary>
@@ -258,12 +258,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 var cleaned = recordingFactory.CleanedUpFqdns;
                 _output.WriteLine($"DNS provider calls: staged={staged.Count}, cleaned={cleaned.Count}");
 
-                // Expected behavior is staged>0 (see class-level remarks). In practice this
-                // sandbox account's CA has been observed treating the fresh subdomain's parent
-                // as already covering it and issuing immediately with zero TXT records staged —
-                // in which case the TXT publish/verify path was never exercised and the
-                // assertions below cannot be meaningfully evaluated. Skip rather than fail; the
-                // finally below still runs cleanup regardless of this skip.
+                // Expected behavior is staged>0 (see class-level remarks). The CA may instead
+                // treat the fresh subdomain's parent as already covering it and issue
+                // immediately with zero TXT records staged — in which case the TXT
+                // publish/verify path was never exercised and the assertions below cannot be
+                // meaningfully evaluated. Skip rather than fail; the finally below still runs
+                // cleanup regardless of this skip.
                 Skip.If(staged.Count == 0,
                     $"blocked by sandbox: CA treated {freshDomain} as pre-validated; TXT publish/verify path not exercised");
 
@@ -271,7 +271,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     $"domain '{freshDomain}' is freshly generated under a genuinely unverified parent " +
                     "and cannot already be VERIFIED on this account — unlike every pre-existing " +
                     "V2DcvLifecycleTests case (which targets the long-reused CERTINEXT_DCV_DOMAIN and " +
-                    "always observes staged=0 via the reuse path, issue 0020), Enroll must actually stage " +
+                    "always takes the reuse path with staged=0), Enroll must actually stage " +
                     "a TXT record here.");
                 cleaned.Count.Should().Be(staged.Count,
                     "every staged DCV TXT record for a fresh domain must be cleaned up after the attempt.");
@@ -358,7 +358,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 var cleaned = recordingFactory.CleanedUpFqdns;
                 _output.WriteLine($"DNS provider calls: staged={staged.Count}, cleaned={cleaned.Count}");
                 foreach (var call in staged)
-                    _output.WriteLine($"OBSERVATION: staged TXT hostname Fqdn='{call.Fqdn}'.");
+                    _output.WriteLine($"Staged TXT hostname: Fqdn='{call.Fqdn}'.");
                 foreach (var fqdn in cleaned)
                     _output.WriteLine($"Cleaned-up TXT hostname: Fqdn='{fqdn}'.");
 
@@ -376,16 +376,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                         {
                             foreach (var entry in domainEntries)
                                 _output.WriteLine(
-                                    $"OBSERVATION: Track Order verifications.domain.domains[]: domain='{entry.Domain}', dcvStatus={entry.DcvStatus ?? "<none>"}.");
+                                    $"Track Order verifications.domain.domains[]: domain='{entry.Domain}', dcvStatus={entry.DcvStatus ?? "<none>"}.");
 
                             bool anyVerified = domainEntries.Any(e =>
                                 string.Equals(e.DcvStatus, "VERIFIED", StringComparison.OrdinalIgnoreCase));
                             _output.WriteLine(anyVerified
-                                ? "OBSERVATION: at least one domain entry reached VERIFIED within this test's wait — " +
-                                  "CA-side acceptance of a base-domain TXT record for a wildcard domain entry is CONFIRMED live."
-                                : "OBSERVATION: no domain entry reached VERIFIED within this test's wait (CA-side " +
-                                  "timing, or the base-domain TXT record is not accepted for a wildcard domain entry " +
-                                  "— still UNVERIFIED; this is an observation, not a test failure).");
+                                ? "At least one domain entry reached VERIFIED within this test's wait — the CA " +
+                                  "accepted a base-domain TXT record for a wildcard domain entry."
+                                : "No domain entry reached VERIFIED within this test's wait (CA-side timing, or " +
+                                  "the base-domain TXT record is not accepted for a wildcard domain entry — still " +
+                                  "UNVERIFIED; this is not asserted as a test failure).");
                         }
                         else
                         {

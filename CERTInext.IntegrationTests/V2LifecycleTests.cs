@@ -81,8 +81,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Builds a <see cref="CERTInextConfig"/> wired for the V2 API. A single
-        /// <see cref="CERTInextConfig.ApiUrl"/> now serves both modes (issues/0022 config
-        /// consolidation) — in V2 mode it is the V2 base URL, and V2 auth reuses
+        /// <see cref="CERTInextConfig.ApiUrl"/> serves both modes — in V2 mode it is the V2
+        /// base URL, and V2 auth reuses
         /// <see cref="CERTInextConfig.OAuthClientId"/>/<see cref="CERTInextConfig.OAuthClientSecret"/>.
         /// Deliberately does NOT set any V1-only field (ApiKey/AccountNumber/AuthMode) — proving
         /// those are optional when UseV2Api is true is itself part of what these tests exercise
@@ -109,8 +109,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 // Default 72h (Constants.ApiV2.DefaultSyncLookbackHours) is always added on top
                 // of lastSync regardless of how recent it is — on a busy shared sandbox that
                 // means every delta-sync test touches several days of orders (each issued row
-                // costs a live certificate download) unless narrowed here. See issues/0022's
-                // "V2 sync per-row download cost" note.
+                // costs a live certificate download) unless narrowed here.
                 V2SyncLookbackHours = syncLookbackHours ?? Constants.ApiV2.DefaultSyncLookbackHours,
 
                 DcvEnabled                 = dcvEnabled,
@@ -213,7 +212,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Resolves the order ID to exercise for tests that need a pre-existing V2 order.
         /// Reads only <c>CERTINEXT_V2_ORDER_ID</c> — deliberately does not fall back to an
         /// order ID produced by another test in this class, so results do not depend on
-        /// test run order (see issues/0017, gap G7).
+        /// test run order.
         /// </summary>
         private static string ResolveOrderId()
             => Environment.GetEnvironmentVariable("CERTINEXT_V2_ORDER_ID");
@@ -223,9 +222,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// that owns it. Prefers <c>CERTINEXT_V2_ORDER_ID</c> if set; otherwise enrolls a
         /// fresh order in this test and polls (bounded) for issuance, so tests using this
         /// helper are self-contained and don't depend on env state or another test's run
-        /// order (V2_TEST_GAP_PLAN.md Phase 1.4b). <c>Skip.If</c>s (via <see cref="SkippableFactAttribute"/>)
-        /// when no env ID is set and the freshly-enrolled order never reaches GENERATED
-        /// within the poll budget — sandboxes may require DCV to auto-issue.
+        /// order. <c>Skip.If</c>s (via <see cref="SkippableFactAttribute"/>) when no env ID
+        /// is set and the freshly-enrolled order never reaches GENERATED within the poll
+        /// budget — sandboxes may require DCV to auto-issue.
         /// </summary>
         private async Task<(string orderId, CERTInextCAPlugin plugin)> EnsureIssuedOrderIdAsync()
         {
@@ -257,7 +256,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 1 — Enroll() via the plugin, V2 path
+        // Enroll() via the plugin, V2 path
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -287,13 +286,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 2 — Revoke() via the plugin, V2 path
+        // Revoke() via the plugin, V2 path
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Opt-in cleanup/probe: revokes one explicit, already-issued order through the plugin's
-        /// V2 <c>Revoke</c> with reason superseded (4), outside Command. Used to clean up lab orders
-        /// Command never imported and to reproduce an out-of-band CA-side revoke (issues/0049).
+        /// Opt-in cleanup: revokes one explicit, already-issued order through the plugin's
+        /// V2 <c>Revoke</c> with reason superseded (4), outside Command. Used to clean up lab
+        /// orders Command never imported and to reproduce an out-of-band CA-side revoke.
         /// Gated behind <c>CERTINEXT_REVOKE_ORDER_ID</c>; never retries.
         /// </summary>
         [SkippableFact]
@@ -337,9 +336,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 // Documented sandbox-timing quirk: the CA reports 'issued' via GetSingleRecord
                 // while still internally finalizing the order, and rejects revoke with 422
-                // ("Certificate Request still being processed") in that window (issues/0019).
-                // Retry once after a short delay before giving up — any other exception (or a
-                // second failure) must fail the test rather than be swallowed here.
+                // ("Certificate Request still being processed") in that window. Retry once
+                // after a short delay before giving up — any other exception (or a second
+                // failure) must fail the test rather than be swallowed here.
                 _output.WriteLine($"Revoke rejected as still-processing; retrying once after 15s: {ex.Message}");
                 await Task.Delay(TimeSpan.FromSeconds(15));
                 try
@@ -359,7 +358,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 3 — GetSingleRecord() via the plugin, V2 path
+        // GetSingleRecord() via the plugin, V2 path
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -382,7 +381,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 4 — Enroll -> Synchronize -> Revoke, full V2 lifecycle via the plugin
+        // Enroll -> Synchronize -> Revoke, full V2 lifecycle via the plugin
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -390,9 +389,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
-            // Narrow lookback (1h) — see issues/0022's "V2 sync per-row download cost" note;
-            // the plugin's default 72h margin makes an un-narrowed delta sync slow against
-            // this busy shared sandbox, and the order enrolled below is only seconds old.
+            // Narrow lookback (1h): the plugin's default 72h margin makes an un-narrowed delta
+            // sync slow against this busy shared sandbox, and the order enrolled below is
+            // only seconds old.
             var config = BuildV2Config(syncLookbackHours: 1);
             var plugin = BuildV2Plugin(config);
 
@@ -412,7 +411,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             _output.WriteLine($"Enrolled V2 order {enrollResult.CARequestID}, status={enrollResult.Status}");
 
-            // --- Synchronize (V2 /reports/orders — issues/0022) ---
+            // --- Synchronize (V2 /reports/orders) ---
             // Delta sync (fullSync=false, lastSync=recent) rather than a full historical
             // pull — this sandbox account has accumulated 1000+ orders from prior test
             // runs, and a full sync of the entire history is unnecessarily slow here; the
@@ -442,13 +441,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("still being processed"))
             {
-                // Documented sandbox-timing quirk: the sandbox has been observed to report an
-                // order as 'issued' via TrackOrder/GetSingleRecord while still internally
-                // finalizing it, and reject a revoke attempted in that window with 422
-                // "Certificate Request still being processed" (see issues/0019). Retry once
-                // after a short delay before giving up — any other exception (e.g. the
-                // camelCase-reason HTTP 400 that 0019 describes) must fail the test rather
-                // than be swallowed here.
+                // Documented sandbox-timing quirk: the sandbox can report an order as 'issued'
+                // via TrackOrder/GetSingleRecord while still internally finalizing it, and
+                // reject a revoke attempted in that window with 422 "Certificate Request
+                // still being processed". Retry once after a short delay before giving up —
+                // any other exception must fail the test rather than be swallowed here.
                 _output.WriteLine($"Revoke rejected as still-processing; retrying once after 15s: {ex.Message}");
                 await Task.Delay(TimeSpan.FromSeconds(15));
                 try
@@ -469,7 +466,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 9 — GetSingleRecord() cert-body regression, V2 path
+        // GetSingleRecord() cert-body check, V2 path
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -506,7 +503,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 10 — GetSingleRecord() across all synced orders, V2-configured plugin
+        // GetSingleRecord() across all synced orders, V2-configured plugin
         // ---------------------------------------------------------------------------
 
         /// <summary>
@@ -527,15 +524,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             // plugin's default 72h lookback margin is always added on top of lastSync
             // regardless of how recent it is, so an un-narrowed delta sync here would touch
             // several days of orders. Every issued row costs a live certificate download, and
-            // family resolution costs a sequential TrackOrder probe when not already known
-            // (see issues/0022's "V2 sync per-row download cost" note) — an un-narrowed window
-            // was observed to take several minutes against this shared sandbox.
+            // family resolution costs a sequential TrackOrder probe when not already known —
+            // an un-narrowed window can take several minutes against this shared sandbox.
             var plugin = BuildV2Plugin(BuildV2Config(syncLookbackHours: 1));
             var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddHours(-1), fullSync: false);
             synced.Should().NotBeNull();
             synced.Should().NotBeEmpty(
                 "the delta sync window must return at least one record from this sandbox account to sample " +
-                "GetSingleRecord against — an empty sync makes the rest of this test vacuous (see gap G6)");
+                "GetSingleRecord against — an empty sync makes the rest of this test vacuous");
 
             var sample = synced.Take(10).ToList();
             _output.WriteLine($"Sampling {sample.Count} of {synced.Count} synced records for GetSingleRecord (V2-configured plugin).");
@@ -563,7 +559,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 11 — Synchronize() uses V2 /reports/orders when UseV2Api=true (issues/0022)
+        // Synchronize() uses V2 /reports/orders when UseV2Api=true
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -573,14 +569,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             // Narrow lookback (1h) — see the comment in GetSingleRecord_V2_AllSyncedOrders_DoNotThrow
             // above for why the plugin's default 72h margin makes an un-narrowed delta sync slow
-            // against this shared, busy sandbox (issues/0022's "V2 sync per-row download cost").
+            // against this shared, busy sandbox.
             var plugin = BuildV2Plugin(BuildV2Config(syncLookbackHours: 1));
             var synced = await RunSyncAsync(plugin, lastSync: DateTime.UtcNow.AddHours(-1), fullSync: false);
 
             synced.Should().NotBeNull();
             synced.Should().NotBeEmpty(
                 "Synchronize must return the account's recent order inventory via V2 /reports/orders " +
-                "(issues/0022 — Synchronize no longer falls back to V1 GetOrderReport when UseV2Api=true)");
+                "(Synchronize no longer falls back to V1 GetOrderReport when UseV2Api=true)");
             synced.Should().OnlyContain(r => !string.IsNullOrWhiteSpace(r.CARequestID));
 
             _output.WriteLine($"Synchronize (V2 /reports/orders) returned {synced.Count} record(s).");
@@ -589,7 +585,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         /// <summary>
-        /// Hard acceptance criterion (Phase 4 parent plan): Synchronize with
+        /// Hard acceptance criterion: Synchronize with
         /// <c>UseV2Api=true</c> must succeed and return records with ZERO V1 credentials
         /// configured at all — no ApiKey, no AccountNumber, no AuthMode, no V1-shaped ApiUrl.
         /// Builds its own config (rather than reusing <see cref="BuildV2Plugin"/>'s default) so
@@ -611,8 +607,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 SignerPlace       = "Gateway Lab",
                 SignerIp          = "127.0.0.1",
                 PageSize          = 100,
-                // See issues/0022's "V2 sync per-row download cost" note — narrowed to keep
-                // this test's live API call volume bounded against a busy shared sandbox.
+                // Narrowed to keep this test's live API call volume bounded against a busy
+                // shared sandbox.
                 V2SyncLookbackHours = 1
                 // Deliberately NOT set: ApiKey, AccountNumber, AuthMode, OAuthTokenUrl — all
                 // V1-only fields. Their CERTInextConfig defaults (empty string / "AccessKey")
@@ -665,7 +661,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             // A narrow (2h) window with pageSize=5 still forces multi-page traversal whenever
             // this busy shared sandbox has more than 5 matching orders — no need for a wide
             // window (e.g. 30 days), which would also multiply live per-row download calls
-            // (issues/0022's "V2 sync per-row download cost" note) for no added pagination proof.
+            // for no added pagination proof.
             var config = BuildV2Config(pageSize: 5, syncLookbackHours: 1);
             var plugin = BuildV2Plugin(config);
 
@@ -681,8 +677,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     /// <summary>
     /// Shared helper for loading <c>~/.env_certinext_v2</c>. V2 test classes must read their
     /// values from the dictionary <see cref="LoadAndPromote"/> returns, never from process env:
-    /// keys the V1 <see cref="IntegrationTestFixture"/> also reads are deliberately NOT promoted
-    /// (issue 0017). Used by <see cref="V2LifecycleTests"/>, <c>V2DcvLifecycleTests</c>, and the
+    /// keys the V1 <see cref="IntegrationTestFixture"/> also reads are deliberately NOT
+    /// promoted. Used by <see cref="V2LifecycleTests"/>, <c>V2DcvLifecycleTests</c>, and the
     /// other V2 test classes so they don't duplicate env-loading logic.
     /// </summary>
     internal static class V2EnvHelper
@@ -693,8 +689,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <c>CERTINEXT_USE_V2_API</c>) are still promoted into process env; keys in
         /// <see cref="IntegrationTestFixture.V1EnvKeys"/> (<c>CERTINEXT_API_URL</c> and the rest)
         /// are never written to process env. The V1 fixture lets real env vars override
-        /// <c>~/.env_certinext</c>, so promoting the V2 values of those shared names corrupted the
-        /// V1 fixture of any class constructed later in the same test process (issues 0017, 0044).
+        /// <c>~/.env_certinext</c>, so promoting the V2 values of those shared names would
+        /// corrupt the V1 fixture of any class constructed later in the same test process.
         /// </summary>
         public static Dictionary<string, string> LoadAndPromote()
         {
@@ -714,8 +710,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// The V2-file keys <see cref="LoadAndPromote"/> may write into process env: every file
         /// key except those the V1 side reads (<see cref="IntegrationTestFixture.V1EnvKeys"/>)
-        /// and the fixture's opt-in-only flags (<see cref="IntegrationTestFixture._optInOnlyFlags"/>
-        /// — issue 0058). Without the latter exclusion, a value left in ~/.env_certinext_v2 for
+        /// and the fixture's opt-in-only flags (<see cref="IntegrationTestFixture._optInOnlyFlags"/>).
+        /// Without the latter exclusion, a value left in ~/.env_certinext_v2 for
         /// one of those flags (e.g. CERTINEXT_V2_GAP_PROBES, CERTINEXT_PRIVATE_PKI_LIVE) would be
         /// read as unset by the first test class constructed in a run (before this method's
         /// promotion step runs), then promoted into real process env, silently arming every

@@ -13,12 +13,9 @@
 // limitations under the License.
 //
 // Opt-in, read-only-by-default sweep over an arbitrary UTC date/time window of the V2 orders
-// report (GET /api/certinext/v2/reports/orders). Unlike V2GapProbeTests' own
-// Sweep_FindsAndCancelsOrphanedGapProbeOrders (hard-scoped to "today" and matched only on
-// domainName starting with "gap-p"), this sweep takes an explicit, caller-supplied window and
+// report (GET /api/certinext/v2/reports/orders). Takes an explicit, caller-supplied window and
 // lists every order it finds in it — a general-purpose tool for manually auditing/cleaning up a
-// broader date range after a batch of live-API work (e.g. a day's worth of V2 lifecycle tests),
-// rather than a probe tied to one issue's naming convention.
+// date range after a batch of live-API work (e.g. a day's worth of V2 lifecycle tests).
 //
 // Env:
 //   CERTINEXT_V2_SWEEP_FROM / CERTINEXT_V2_SWEEP_TO — UTC ISO-8601 timestamps, e.g.
@@ -32,19 +29,18 @@
 //
 // Terminal state is decided by Track Order's own `status` field (via
 // CERTInextClient.ResolveAndTrackOrderV2WithFamilyAsync), not the orders report's human-readable
-// orderStatus/certificateStatus display strings — matching V2GapProbeTests' own sweep. Exactly
-// one cancel attempt per id; never retried, matching every other cleanup/sweep helper in this
-// project (V2FullLifecycleTests.CleanupOrderAsync, V2GapProbeTests' sweep, etc.).
+// orderStatus/certificateStatus display strings. Exactly one cancel attempt per id; never
+// retried, matching every other cleanup/sweep helper in this project
+// (V2FullLifecycleTests.CleanupOrderAsync, etc.).
 //
-// The V2 orders report only filters by calendar date (YYYY-MM-DD) server-side (issues/0022 Phase
-// 0) — this test requests the covering date range, then re-applies the caller's precise sub-day
-// window client-side against each row's own orderDate.
+// The V2 orders report only filters by calendar date (YYYY-MM-DD) server-side — this test
+// requests the covering date range, then re-applies the caller's precise sub-day window
+// client-side against each row's own orderDate.
 //
-// Gating: reuses V2GapProbeTests' existing CERTINEXT_V2_GAP_PROBES=1 opt-in (already present in
+// Gating: reuses the CERTINEXT_V2_GAP_PROBES=1 opt-in (already present in
 // IntegrationTestFixture._optInOnlyFlags, read from the real process environment before
 // V2EnvHelper.LoadAndPromote() runs) rather than introducing a new flag — this sweep can cancel
-// real sandbox orders the same way that file's own sweep can, so it needs the same explicit
-// go/no-go, no more and no less.
+// real sandbox orders, so it needs the same explicit go/no-go as other order-cancelling tests.
 //
 // Logging: every domain value is passed through CERTInextClient.ApplyLoggingRedaction (same
 // default-off PII posture as every other V2 probe in this repo) before being written via
@@ -92,9 +88,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _output = output;
 
             // Read the opt-in flag from the real process environment BEFORE promoting the V2 env
-            // file (mirrors V2GapProbeTests/PrivatePkiV2LiveTests) — a value left in
-            // ~/.env_certinext_v2 must never arm this file. IntegrationTestFixture's own
-            // _optInOnlyFlags list already keeps ~/.env_certinext from arming it either.
+            // file (mirrors PrivatePkiV2LiveTests) — a value left in ~/.env_certinext_v2 must
+            // never arm this file. IntegrationTestFixture's own _optInOnlyFlags list already
+            // keeps ~/.env_certinext from arming it either.
             _armed = Environment.GetEnvironmentVariable(OptInFlag)?.Trim() == "1";
 
             var env = V2EnvHelper.LoadAndPromote();
@@ -136,8 +132,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             Skip.If(!_armed,
                 $"{OptInFlag}=1 not set in the real process environment — this sweep can cancel real sandbox " +
-                "orders when CERTINEXT_V2_SWEEP_CANCEL_IDS is set, and requires the same explicit go/no-go as " +
-                "V2GapProbeTests' own sweep. Skipping.");
+                "orders when CERTINEXT_V2_SWEEP_CANCEL_IDS is set, and requires an explicit go/no-go. Skipping.");
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
             string fromRaw = Environment.GetEnvironmentVariable("CERTINEXT_V2_SWEEP_FROM");

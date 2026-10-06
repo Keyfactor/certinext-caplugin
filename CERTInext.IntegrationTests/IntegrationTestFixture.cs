@@ -32,7 +32,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <see cref="V2EnvHelper.PromotableKeys"/> can exclude the same names from its own
         /// promotion of ~/.env_certinext_v2 — without that, a flag left in the V2 file would
         /// be read as unset by the first test class constructed in a run, then promoted into
-        /// process env, silently arming every later test in the same run (issue 0058).
+        /// process env, silently arming every later test in the same run.
         /// </summary>
         internal static readonly System.Collections.Generic.HashSet<string> _optInOnlyFlags =
             new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -72,7 +72,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Path segment every V1 (<c>emSignHub-API</c>) base URL carries. A resolved
         /// <see cref="ApiUrl"/> without it is almost always the V2 base URL from
-        /// <c>~/.env_certinext_v2</c> (issue 0017).
+        /// <c>~/.env_certinext_v2</c>.
         /// </summary>
         internal const string V1ApiPathSegment = "/emSignHub-API";
 
@@ -81,7 +81,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <c>CERTINEXT_DCV_DOMAIN</c>, which V1 <c>DcvLifecycleTests</c> reads straight from
         /// process env. <see cref="V2EnvHelper.LoadAndPromote"/> must never write these into
         /// process env, because real env vars take precedence over <c>~/.env_certinext</c> here
-        /// and the V2 file defines the same names with V2 values (issue 0017).
+        /// and the V2 file defines the same names with V2 values.
         /// </summary>
         internal static readonly IReadOnlySet<string> V1EnvKeys =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -179,7 +179,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             IsConfigured = !string.IsNullOrWhiteSpace(ApiUrl) &&
                            !string.IsNullOrWhiteSpace(AccessKey);
 
-            // Issue 0017: fail fast (before promoting anything into process env and before any
+            // Fail fast (before promoting anything into process env and before any
             // client/network call) when a V2 base URL has leaked into the V1 fixture. Only
             // checked when the fixture would otherwise be configured, so an unconfigured run
             // still skips cleanly.
@@ -296,10 +296,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Throws <see cref="InvalidOperationException"/> when <paramref name="apiUrl"/> lacks
         /// the V1 <see cref="V1ApiPathSegment"/>, i.e. a V2 base URL has leaked into the V1
-        /// fixture (issue 0017). Left unchecked, every V1 call 404s and surfaces as the
-        /// misleading "unrecognised error body" (issue 0044). The message names the key and
-        /// where it came from, and shows only scheme/host/path — never credentials, userinfo,
-        /// or query strings. Exposed <c>internal</c> for direct unit-testing.
+        /// fixture. Left unchecked, every V1 call 404s and surfaces as a misleading
+        /// "unrecognised error body". The message names the key and where it came from, and
+        /// shows only scheme/host/path — never credentials, userinfo, or query strings.
+        /// Exposed <c>internal</c> for direct unit-testing.
         /// </summary>
         internal static void EnsureV1ApiUrl(string apiUrl, bool fromProcessEnvironment)
         {
@@ -317,7 +317,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             throw new InvalidOperationException(
                 $"IntegrationTestFixture: {ApiUrlKey} resolved to '{shown}' (from {source}), which lacks " +
                 $"the V1 path segment '{V1ApiPathSegment}'. This looks like a CERTInext V2 base URL leaking " +
-                "into the V1 fixture (issue 0017); V1 calls against it fail with 'unrecognised error body'. " +
+                "into the V1 fixture; V1 calls against it fail with 'unrecognised error body'. " +
                 "Source only ~/.env_certinext into the shell (set -a; . ~/.env_certinext; set +a), never " +
                 "~/.env_certinext_v2 — the V2 tests read that file from disk themselves. In an already-" +
                 $"polluted shell, run 'unset {ApiUrlKey}' or open a fresh shell.");

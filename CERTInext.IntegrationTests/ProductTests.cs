@@ -77,11 +77,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         /// <summary>
-        /// V1 parity test for issue 0025 — drives
+        /// Drives
         /// <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin.ValidateProductInfo"/>
         /// (not just the client method) through the plugin, the same path AnyGatewayREST's
         /// <c>ConfigurationValidator</c> exercises when a template is saved. V1 mode (the
-        /// default, <c>UseV2Api</c> unset) must be unaffected by the V2 branch this issue adds.
+        /// default, <c>UseV2Api</c> unset) must be unaffected by V2-specific validation paths.
         /// </summary>
         [SkippableFact]
         public async Task ValidateProductInfo_V1_AcceptsConfiguredProductCode()

@@ -22,8 +22,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     /// <summary>
     /// Read-only helper for querying <c>GET /api/certinext/v2/domains?search=&amp;exactMatch=true</c>
     /// via the existing <see cref="CERTInextClient.ProbeV2GetAsync"/> escape hatch, so DCV-on V2
-    /// tests can tell the reuse path (domain already <c>VERIFIED</c>, see issues/0020) apart from
-    /// the publish path before asserting what the DNS provider spy should have recorded.
+    /// tests can tell the reuse path (domain already <c>VERIFIED</c>) apart from the publish path
+    /// before asserting what the DNS provider spy should have recorded.
     /// </summary>
     internal static class V2DomainStatusHelper
     {

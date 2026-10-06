@@ -143,11 +143,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Builds a <see cref="CERTInextConfig"/> wired for the V2 API. A single
-        /// <see cref="CERTInextConfig.ApiUrl"/> now serves both modes (issues/0022 config
-        /// consolidation), and V2 auth reuses <see cref="CERTInextConfig.OAuthClientId"/>/
-        /// <see cref="CERTInextConfig.OAuthClientSecret"/>. Deliberately omits every V1-only
-        /// field (ApiKey/AccountNumber/AuthMode) — V1 credentials are optional when UseV2Api
-        /// is true, including for Synchronize (now V2 /reports/orders — issues/0022).
+        /// <see cref="CERTInextConfig.ApiUrl"/> serves both modes, and V2 auth reuses
+        /// <see cref="CERTInextConfig.OAuthClientId"/>/<see cref="CERTInextConfig.OAuthClientSecret"/>.
+        /// Deliberately omits every V1-only field (ApiKey/AccountNumber/AuthMode) — V1
+        /// credentials are optional when UseV2Api is true, including for Synchronize
+        /// (which uses V2 /reports/orders).
         /// </summary>
         private CERTInextConfig BuildV2Config(
             bool dcvEnabled = true, int propagationDelaySeconds = 5, int? pageSize = null, int? syncLookbackHours = null)
@@ -161,9 +161,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
                 // Default 72h (Constants.ApiV2.DefaultSyncLookbackHours) is always added on top
                 // of lastSync — on a busy shared sandbox that makes an un-narrowed delta sync
-                // slow, since every issued row costs a live certificate download (issues/0022's
-                // "V2 sync per-row download cost" note). Narrow via syncLookbackHours in tests
-                // that don't need the full margin.
+                // slow, since every issued row costs a live certificate download. Narrow via
+                // syncLookbackHours in tests that don't need the full margin.
                 V2SyncLookbackHours = syncLookbackHours ?? Constants.ApiV2.DefaultSyncLookbackHours,
 
                 RequestorName         = _fixture.IsConfigured ? _fixture.Config.RequestorName : "Keyfactor Test",
@@ -242,7 +241,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 5 — Enroll with DCV on, V2 path, does not throw
+        // Enroll with DCV on, V2 path, does not throw
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -277,12 +276,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             if (domainVerified)
             {
-                // Reuse path (issues/0020): the domain is already verified account-wide, so no
-                // fresh TXT record should ever be staged for it.
+                // Reuse path: the domain is already verified account-wide, so no fresh TXT
+                // record should ever be staged for it.
                 staged.Should().BeEmpty(
                     $"domain '{_v2Domain}' was already VERIFIED before enrollment (reuse path) — no TXT record " +
-                    "should be staged. If this fails, see issues/0020 (the plugin currently treats the CA's " +
-                    "EMS-1080 'already verified' response as a failure and defers, rather than as satisfied).");
+                    "should be staged. The plugin must treat the CA's EMS-1080 'already verified' response as " +
+                    "satisfied rather than as a failure requiring a deferred retry.");
                 new[] { (int)EndEntityStatus.EXTERNALVALIDATION, (int)EndEntityStatus.GENERATED }
                     .Should().Contain(result.Status,
                         $"a reused, already-verified domain must let the order proceed to pending or issued; " +
@@ -300,7 +299,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 6 — Enroll with DCV off, V2 path, does not invoke the DNS provider
+        // Enroll with DCV off, V2 path, does not invoke the DNS provider
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -332,7 +331,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 7 — GetSingleRecord drives DCV for an existing pending V2 order
+        // GetSingleRecord drives DCV for an existing pending V2 order
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -359,7 +358,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 8 — End-to-end DCV-on enrollment, issued cert appears in sync
+        // End-to-end DCV-on enrollment, issued cert appears in sync
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -399,11 +398,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             if (domainVerified)
             {
-                // Reuse path (issues/0020): no fresh TXT record should be staged for an
-                // already-verified domain.
+                // Reuse path: no fresh TXT record should be staged for an already-verified
+                // domain.
                 staged.Should().BeEmpty(
                     $"domain '{_v2Domain}' was already VERIFIED before enrollment (reuse path) — no TXT record " +
-                    "should be staged. See issues/0020.");
+                    "should be staged.");
             }
             else
             {
@@ -425,12 +424,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             if (record.Status == (int)EndEntityStatus.GENERATED)
             {
                 record.Certificate.Should().NotBeNullOrWhiteSpace(
-                    "Synchronize must populate the cert body for an issued V2 order (mirrors issue 0001 for V1)");
+                    "Synchronize must populate the cert body for an issued V2 order (mirroring V1 behavior)");
             }
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 14 — Key-algorithm issuance matrix, V2 path (opt-in)
+        // Key-algorithm issuance matrix, V2 path (opt-in)
         // ---------------------------------------------------------------------------
 
         [SkippableTheory]
@@ -507,7 +506,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         // ---------------------------------------------------------------------------
-        // Gap 15 — Bulk V2 enrollment + pagination smoke test (opt-in)
+        // Bulk V2 enrollment + pagination smoke test (opt-in)
         // ---------------------------------------------------------------------------
 
         [SkippableFact]
@@ -523,13 +522,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             int parallel = int.TryParse(Environment.GetEnvironmentVariable("CERTINEXT_V2_BULK_TEST_PARALLEL"), out int p) ? p : 5;
 
             // PageSize=100 ensures the 101st order forces a second page during Synchronize.
-            // Since this plugin is UseV2Api=true, Synchronize now pages through V2
-            // /reports/orders (ListOrdersV2Async, issues/0022) rather than V1 GetOrderReport —
+            // Since this plugin is UseV2Api=true, Synchronize pages through V2
+            // /reports/orders (ListOrdersV2Async) rather than V1 GetOrderReport —
             // this is the live pagination proof for that path, not just the WireMock-based
             // client unit tests.
             // syncLookbackHours narrowed to 2h: the default 72h margin would otherwise re-download
-            // every issued cert in a multi-day window on EACH of the (up to 8) sync passes below
-            // — issues/0022's "V2 sync per-row download cost" note, compounded by the retry loop.
+            // every issued cert in a multi-day window on EACH of the (up to 8) sync passes below,
+            // compounded by the retry loop.
             var plugin = BuildV2DcvPlugin(dcvEnabled: true, propagationDelaySeconds: 5, pageSize: 100, syncLookbackHours: 2);
 
             var enrolled = new ConcurrentBag<(int idx, string cn, EnrollmentResult result)>();
