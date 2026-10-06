@@ -1,41 +1,35 @@
-# DNS-01 DCV: build flag and code fencing
+# DNS-01 DCV: build and code layout
 
-## Build flag
+DNS-01 domain control validation (DCV) is part of the standard build of the plugin. This page describes how the build is configured and where the DCV code lives. For how the DCV flow behaves, see [docsource/architecture.md](docsource/architecture.md#domain-control-validation); for the connector settings, see the `Dcv*` rows in [docsource/configuration.md](docsource/configuration.md#ca-configuration).
 
-DNS-01 DCV support is gated behind a single MSBuild property, **`DcvSupport`**, default `false`. It's defined in `CERTInext/CERTInext.csproj`:
+## Build
+
+- The plugin compiles against `Keyfactor.AnyGateway.IAnyCAPlugin` **3.3.0**, which provides `IDomainValidatorFactory`, and targets AnyCA Gateway REST **26.2.0** and later.
+- `CERTInext/CERTInext.csproj` sets the `DcvSupport` MSBuild property to `true` by default. That one property selects the IAnyCAPlugin package version, defines the `SUPPORTS_DCV` compile constant, and includes the DCV test files in the two test projects. Plain `dotnet build` and `make build` therefore produce the DCV build; no flag is needed.
+- The project targets both **`net8.0`** and **`net10.0`**.
+- The test projects mirror the property so the DCV test files compile with it: `CERTInext.Tests/CERTInext.Tests.csproj` and `CERTInext.IntegrationTests/CERTInext.IntegrationTests.csproj`.
 
 ```
-dotnet build -p:DcvSupport=true
+dotnet build
 ```
 
-- `DcvSupport=false` (default): compiles against `Keyfactor.AnyGateway.IAnyCAPlugin` **3.2.0** (stable), no `SUPPORTS_DCV` constant — this is the build that loads and persists records on GA gateway hosts (AnyCA Gateway 25.5.x).
-- `DcvSupport=true`: compiles against **3.3.0-PRERELEASE** and defines `SUPPORTS_DCV`, targeting DCV-capable gateway hosts (AnyCA Gateway 26.x).
+## Where the DCV code lives
 
-The project targets both **`net8.0`** and **`net10.0`**.
+The DCV code is in `CERTInext/CERTInextCAPlugin.cs`, compiled under `#if SUPPORTS_DCV`:
 
-Relevant lines: [`CERTInext.csproj#L18-L19`](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInext.csproj#L18-L19) (the flag → `SUPPORTS_DCV` define) and [`#L29-L30`](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInext.csproj#L29-L30) (the package-version swap).
-
-The two test projects mirror this flag so DCV test files only compile in when asked:
-- [`CERTInext.Tests.csproj#L11-L12`](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext.Tests/CERTInext.Tests.csproj#L11-L12)
-- [`CERTInext.IntegrationTests.csproj#L11-L12`](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext.IntegrationTests/CERTInext.IntegrationTests.csproj#L11-L12)
-
-## Where `#if SUPPORTS_DCV` fences the feature
-
-All in `CERTInext/CERTInextCAPlugin.cs`:
-
-| Lines | What's fenced |
+| Member | What it does |
 |---|---|
-| [22–24](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L22-L24) | `using` alias for `IDomainValidatorFactory` |
-| [72–75](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L72-L75) | typed `DomainValidatorFactory` property (casts the untyped `_domainValidatorFactory` field) |
-| [155–163](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L155-L163) | internal test constructor that injects an `IDomainValidatorFactory` |
-| [178–197](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L178-L197) | `SetDomainValidatorFactory` — real assignment vs. `#else` no-op log |
-| [789–798](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L789-L798) | `Synchronize`: DCV-during-sync bookkeeping vars (age window, per-pass cap, counters) |
-| [849–897](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L849-L897) | `Synchronize`: the actual per-order DCV-during-sync gate/attempt/refetch logic |
-| [1014–1021](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L1014-L1021) | `Synchronize`: builds the DCV summary log clause — real stats vs. `#else` "not supported on this build" |
-| [1108–1171](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L1108-L1171) | `EnrollNewAsync`: runs DCV right after a fresh order is placed, then polls for issuance |
-| [1373–1424](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L1373-L1424) | `TryRunDcvDuringSyncAsync` — full retry-path body vs. `#else` `return false` no-op |
-| [1442–1704](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L1442-L1704) | `PerformDcvIfNeededAsync` itself — the whole method only exists in the DCV build |
+| `using` alias and `DomainValidatorFactory` property | Name the `IDomainValidatorFactory` type and cast the stored factory to it |
+| Internal test constructor taking an `IDomainValidatorFactory` | Lets unit and integration tests inject a fake or real DNS validator |
+| `SetDomainValidatorFactory(object)` | Receives the gateway's DNS provider factory and logs which type was offered |
+| `EnrollNewAsync` (V1) | Runs DCV right after a new order is placed, then waits for issuance |
+| `EnrollV2Async` (V2) | Runs DCV when the new order is pending, then re-checks its status |
+| `Synchronize` / `SynchronizeV2Async` | Drive recently placed pending orders through DCV, bounded by `DcvSyncMaxOrderAgeHours` and `DcvSyncMaxPerPass` |
+| `GetSingleRecord` / `GetSingleRecordV2Async` | Drive a pending order through DCV on a manual refresh |
+| `TryRunDcvDuringSyncAsync` | The sync and single-record retry wrapper for V1: in-flight guard, bounded timeout, swallows non-cancellation errors |
+| `PerformDcvIfNeededAsync` | The V1 DCV flow: wait for the challenge, `GetDcv`, publish TXT, `VerifyDcv`, poll, clean up |
+| `PerformDcvV2IfNeededAsync` | The V2 entry point; dispatches to the single-domain or multi-domain V2 flow |
 
-Design note baked into the comments: `_domainValidatorFactory` is deliberately typed as `object` (not `IDomainValidatorFactory`) so the JIT never needs to resolve the 3.3-only type when `SUPPORTS_DCV` is off — casts only happen inside method bodies fenced by `#if`, which is what lets the no-DCV build load cleanly on a 3.2.0 gateway host (see the field comment at [L40-L60](https://github.com/Keyfactor/certinext-caplugin/blob/fb6e414956f708f0bef417bd8a8ddf52854ab11e/CERTInext/CERTInextCAPlugin.cs#L40-L60)).
+The stored factory is held as `object` and cast inside method bodies, so the plugin class loads even when the host doesn't supply `IDomainValidatorFactory`. In that case DCV is simply inactive: when `DcvEnabled` is `true`, the plugin logs a warning at startup, and orders that need validation stay pending until a DNS provider is available or `DcvEnabled` is set to `false`.
 
-Reminder: the default build is the no-DCV build. Pass `-p:DcvSupport=true` to build for 26.x hosts.
+The DNS provider side is a separate gateway plugin that implements `IDomainValidator` (for example `azure-azuredns-dnsplugin`). The integration tests include a Cloudflare-backed validator (`CloudflareDomainValidator`) and a recording wrapper for exercising the flow against the live sandbox.
