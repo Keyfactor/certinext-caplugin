@@ -31,47 +31,47 @@
                 },
                 {
                     "name": "AccountNumber",
-                    "description": "REQUIRED: Your CERTInext account number (numeric string). Available in the CERTInext portal."
+                    "description": "REQUIRED when UseV2Api is false: your CERTInext account number (numeric string). Included in the `meta` block of every V1 request. Not used when UseV2Api is true. Available in the CERTInext portal."
                 },
                 {
                     "name": "GroupNumber",
-                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts will queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation \u2192 Groups."
+                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in product-catalog requests and in the order (`delegationInformation.groupNumber` on V1, `groupNumber` on V2) so the order is routed to the correct account group, and V2 synchronization is scoped to the group. Some accounts will queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation \u2192 Groups."
                 },
                 {
                     "name": "OrganizationNumber",
-                    "description": "STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric CERTInext organization number for a pre-vetted organization (e.g. your company's pre-vetted entry). When set, every SSL order is submitted with `organizationDetails.preVetting=\"1\"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. Without this value, orders are placed without any organizationDetails block and CERTInext may park them in `Pending System RA` for extended manual review (potentially tens of hours). Available in the CERTInext portal under Organizations \u2192 Pre-vetted Organizations."
+                    "description": "STRONGLY RECOMMENDED for OV/EV and faster DV issuance, and REQUIRED for OV/EV orders under V2: numeric CERTInext organization number for a pre-vetted organization (e.g. your company's pre-vetted entry). When set, V1 orders are submitted with `organizationDetails.preVetting=\"1\"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue; V2 OV/EV orders send it as `organization.organizationNumber` with `preVetted=true` (V2 DV orders never send an organization block). Without this value, V1 orders are placed without any organizationDetails block and CERTInext may park them in `Pending System RA` for extended manual review (potentially tens of hours), and V2 OV/EV enrollment fails before any CA call. Available in the CERTInext portal under Organizations \u2192 Pre-vetted Organizations."
                 },
                 {
                     "name": "TechnicalContactName",
-                    "description": "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to the configured RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field."
+                    "description": "OPTIONAL: Name sent as the order's technical point of contact (V1 `technicalPointOfContact.tpcName`, V2 `technicalPointOfContact.name`). Defaults to the configured RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field."
                 },
                 {
                     "name": "TechnicalContactEmail",
-                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank."
+                    "description": "OPTIONAL: Email sent as the order's technical point of contact (V1 `tpcEmail`, V2 `email`). Defaults to the configured RequestorEmail when blank."
                 },
                 {
                     "name": "TechnicalContactIsdCode",
-                    "description": "OPTIONAL: International dialing code for the TPoC phone number. Defaults to the configured RequestorIsdCode when blank."
+                    "description": "OPTIONAL: International dialing code for the technical contact phone number. Defaults to the configured RequestorIsdCode when blank."
                 },
                 {
                     "name": "TechnicalContactMobileNumber",
-                    "description": "OPTIONAL: Mobile number for the TPoC (digits only). Defaults to the configured RequestorMobileNumber when blank."
+                    "description": "OPTIONAL: Mobile number for the technical contact (digits only). Defaults to the configured RequestorMobileNumber when blank."
                 },
                 {
                     "name": "AuthMode",
-                    "description": "REQUIRED: Authentication mode. 'AccessKey' (default) \u2014 uses authKey = SHA256(accessKey + ts + txn) in every request body. 'OAuth' \u2014 uses an OAuth2 bearer token (requires OAuthTokenUrl, OAuthClientId, OAuthClientSecret)."
+                    "description": "REQUIRED when UseV2Api is false: authentication mode. 'AccessKey' (default) \u2014 uses authKey = SHA256(accessKey + ts + txn) in every request body. 'OAuth' \u2014 uses an OAuth2 bearer token (requires OAuthTokenUrl, OAuthClientId, OAuthClientSecret). Ignored when UseV2Api is true; V2 always uses OAuth2 client credentials."
                 },
                 {
                     "name": "ApiKey",
-                    "description": "REQUIRED when AuthMode is 'AccessKey': the REST API Access Key generated in the CERTInext portal under Integrations \u2192 APIs. This value is used to compute authKey = SHA256(accessKey + ts + txn); it is never transmitted directly."
+                    "description": "REQUIRED when UseV2Api is false and AuthMode is 'AccessKey': the REST API Access Key generated in the CERTInext portal under Integrations \u2192 APIs. This value is used to compute authKey = SHA256(accessKey + ts + txn); it is never transmitted directly. Not used when UseV2Api is true."
                 },
                 {
                     "name": "OAuthTokenUrl",
-                    "description": "OAuth token endpoint URL. Required when AuthMode is 'OAuth'."
+                    "description": "OAuth token endpoint URL. Required when UseV2Api is false and AuthMode is 'OAuth'; must use https. Not used when UseV2Api is true \u2014 V2 requests its token from {ApiUrl}/oauth/token."
                 },
                 {
                     "name": "OAuthClientId",
-                    "description": "OAuth client ID. Required when AuthMode is 'OAuth' (V1). Also required, and reused, when UseV2Api is true — V2 authenticates with these same OAuthClientId/OAuthClientSecret fields via client_credentials against {ApiUrl}/oauth/token, rather than separate V2-only credentials."
+                    "description": "OAuth client ID. Required when AuthMode is 'OAuth' (V1). Also required, and reused, when UseV2Api is true \u2014 V2 authenticates with these same OAuthClientId/OAuthClientSecret fields via client_credentials against {ApiUrl}/oauth/token, rather than separate V2-only credentials. The key must be generated in OAuth mode in the CERTInext portal."
                 },
                 {
                     "name": "OAuthClientSecret",
@@ -103,19 +103,19 @@
                 },
                 {
                     "name": "SignerIp",
-                    "description": "IP address of the subscriber agreement signer. Required by CERTInext for all orders."
+                    "description": "IP address of the subscriber agreement signer. Sent in the order's agreement block; a template-level SignerIp enrollment parameter overrides it on V2."
                 },
                 {
                     "name": "DefaultProductCode",
-                    "description": "OPTIONAL: Default numeric product code used when not specified at template level. Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). Retrieve available codes from Integrations \u2192 APIs \u2192 GetProductDetails."
+                    "description": "OPTIONAL: Default numeric product code. V1: used for renewals when the template doesn't supply a product code (CERTInext's TrackOrder doesn't return the prior order's code). V2: disambiguates a ProductId-only template when the live catalog has more than one product at the same assurance level. Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). Retrieve available codes from Integrations \u2192 APIs \u2192 GetProductDetails."
                 },
                 {
                     "name": "AccountingModel",
-                    "description": "OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel`. \"2\" = credit-based (most accounts, default). \"1\" = cash model."
+                    "description": "OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel` on V1 orders. \"2\" = credit-based (most accounts, default). \"1\" = cash model. Not used by V2."
                 },
                 {
                     "name": "EmailNotifications",
-                    "description": "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. \"1\" = full notification set (V1 sends it as-is; V2 maps it to \"all\"). \"0\" = silent on both V1 and V2. Blank/unset stays silent on V1 (sent as \"0\") but is omitted on V2, so the CA's own default (\"all\", not silent) applies instead. Any other value fails V2 enrollment before any CA call. Default: \"0\" — V2 orders are silent by default, matching V1."
+                    "description": "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. \"1\" = full notification set (V1 sends it as-is; V2 maps it to \"all\"). \"0\" = silent on both V1 and V2. Blank/unset stays silent on V1 (sent as \"0\") but is omitted on V2, so the CA's own default (\"all\", not silent) applies instead. Any other value fails V2 enrollment before any CA call. Default: \"0\" \u2014 V2 orders are silent by default, matching V1."
                 },
                 {
                     "name": "SubscriptionValidityYears",
@@ -138,8 +138,12 @@
                     "description": "If true, expired certificates will be skipped during synchronization. Default: false."
                 },
                 {
+                    "name": "SubmitNonDnsSans",
+                    "description": "OPTIONAL: If true (default), V1 SANs that are not DNS names (IP address, email, URI) are submitted to CERTInext in additionalDomains along with the DNS names. CERTInext registers them verbatim as order domains and they cannot pass domain validation, so such an order will not issue until they are removed \u2014 but nothing the subscriber requested is dropped silently. Set to false to submit DNS names only: the order issues, but the certificate will not contain the non-DNS names. Not consulted on V2 (UCC `additionalDomains` takes DNS names only; Private PKI `additionalHosts` takes DNS names and IP addresses). Default: true."
+                },
+                {
                     "name": "PageSize",
-                    "description": "Number of orders to fetch per page during synchronization. Default: 100, max: 500."
+                    "description": "Number of orders to fetch per page during synchronization. Default: 100, max: 500 (V2 `/reports/orders` pages are capped at 100)."
                 },
                 {
                     "name": "Enabled",
@@ -147,11 +151,19 @@
                 },
                 {
                     "name": "LogSensitiveRequestData",
-                    "description": "OPTIONAL diagnostic escape hatch. When true, enabling it writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. Meant for temporary use while verifying a new deployment — confirming exactly what was sent to the CA and that the order succeeded — and should be turned back off once verification is complete. When false (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. 'j***@example.com') and the enrollment log line omits the requester name entirely. Email SAN values (rfc822Name) in log lines are masked the same way; DNS, IP and URI SANs are always logged in full. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: false."
+                    "description": "OPTIONAL diagnostic escape hatch. When true, enabling it writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. Meant for temporary use while verifying a new deployment \u2014 confirming exactly what was sent to the CA and that the order succeeded \u2014 and should be turned back off once verification is complete. When false (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. 'j***@example.com') and the enrollment log line omits the requester name entirely. Email SAN values (rfc822Name) in log lines are masked the same way; DNS, IP and URI SANs are always logged in full. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: false."
+                },
+                {
+                    "name": "PickupRetries",
+                    "description": "OPTIONAL: Number of times Enroll() polls CERTInext for the certificate after a successful order submission. If the certificate has not issued within this window it is picked up during the next synchronization instead. Set to 0 to disable the wait. Default: 5. OV/EV orders are issued asynchronously (organization verification, minutes to hours), so they typically exhaust the wait and are returned pending regardless of this value."
+                },
+                {
+                    "name": "PickupDelay",
+                    "description": "OPTIONAL: Number of seconds between certificate-pickup retries. A fixed 5-second initial delay plus PickupRetries times this value is the maximum time an enrollment call occupies a Command worker thread; the plugin caps the effective total at 180 seconds regardless of how PickupRetries/PickupDelay are set, reducing the retry count to fit. Target a total well under ~90s so the request does not time out. Default: 10 (a ~55s ceiling with the default retries)."
                 },
                 {
                     "name": "DcvEnabled",
-                    "description": "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: true."
+                    "description": "OPTIONAL: When true, the plugin performs DNS-based Domain Control Validation (DCV) during enrollment and synchronization for orders that require it, using the DNS provider plugin deployed on the gateway (e.g. azure-azuredns-dnsplugin). Without a DNS provider plugin, orders that need validation stay pending and the plugin logs why. Set to false to skip DCV. Default: true."
                 },
                 {
                     "name": "DcvTxtRecordTemplate",
@@ -163,15 +175,15 @@
                 },
                 {
                     "name": "DcvTimeoutMinutes",
-                    "description": "OPTIONAL: Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) before timing out the enrollment. Can also be set via the CERTINEXT_DCV_TIMEOUT_MINUTES environment variable; the env var takes precedence when both are set. Default: 10."
+                    "description": "OPTIONAL: Maximum minutes for the entire DCV flow (DNS publish + propagation + verify) for one order before it is abandoned and left pending. Can also be set via the CERTINEXT_DCV_TIMEOUT_MINUTES environment variable; the env var takes precedence when both are set. Default: 10."
                 },
                 {
                     "name": "DcvWaitForChallengeSeconds",
-                    "description": "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() for CERTInext to expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL before the slot appears. Without this wait, the plugin's initial TrackOrder check sees null and skips DCV \u2014 the order then has to wait for the next gateway sync cycle to be picked up. Setting to 0 disables the wait (single-check behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
+                    "description": "OPTIONAL (V1 only): How long (seconds) the plugin will wait inside Enroll() for CERTInext to expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL before the slot appears. Without this wait, the plugin's initial TrackOrder check sees null and skips DCV \u2014 the order then has to wait for the next gateway sync cycle to be picked up. Setting to 0 disables the wait (single-check behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
                 },
                 {
                     "name": "DcvWaitForIssuanceSeconds",
-                    "description": "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV verifies for CERTInext to finish generating the certificate. CERTInext issuance is async \u2014 DCV may be verified but the cert PEM isn't yet available for download. Without this wait, Enroll() returns a pending result and the issued cert is picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
+                    "description": "OPTIONAL (V1 only): How long (seconds) the plugin will wait inside Enroll() after DCV verifies for CERTInext to finish generating the certificate. CERTInext issuance is async \u2014 DCV may be verified but the cert PEM isn't yet available for download. Without this wait, Enroll() returns a pending result and the issued cert is picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
                 },
                 {
                     "name": "DcvSyncMaxOrderAgeHours",
@@ -183,7 +195,7 @@
                 },
                 {
                     "name": "UseV2Api",
-                    "description": "OPTIONAL: When true, the plugin routes Enroll / GetSingleRecord / Revoke / Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 /reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode) plus OAuthClientId and OAuthClientSecret. V1 credentials (ApiKey/AccountNumber/AuthMode) are not required when this is true. Default: false (V1 API)."
+                    "description": "OPTIONAL: When true, the plugin routes Ping / Enroll / GetSingleRecord / Revoke / Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 /reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode), OAuthClientId, OAuthClientSecret, and SignerPlace. V1 credentials (ApiKey/AccountNumber/AuthMode) are not required when this is true. Default: false (V1 API)."
                 },
                 {
                     "name": "V2SyncLookbackHours",
@@ -193,7 +205,7 @@
             "enrollment_config": [
                 {
                     "name": "ProductCode",
-                    "description": "OPTIONAL: Override the numeric CERTInext product code for this template. When omitted, the default production code for the selected product is used automatically (e.g. DV SSL \u2192 838). Set this explicitly when targeting sandbox or a non-standard code."
+                    "description": "OPTIONAL: Override the numeric CERTInext product code for this template. When omitted: on V1, the default production code for the selected product is used (e.g. DV SSL \u2192 838); on V2, the code is resolved from the live CERTInext product catalog by matching the selected product, so it stays correct even though V2 catalog numbering varies by account. Required for ProductFamily 'private-pki'. Set this explicitly when targeting sandbox or a non-standard code."
                 },
                 {
                     "name": "ProfileId",
@@ -205,11 +217,11 @@
                 },
                 {
                     "name": "ValidityDays",
-                    "description": "DEPRECATED: Use ValidityYears instead. If set, value is divided by 365 and rounded up to get the subscription year count."
+                    "description": "DEPRECATED: Use ValidityYears instead. V1 only: if set, value is divided by 365 and rounded up to get the subscription year count."
                 },
                 {
                     "name": "AutoApprove",
-                    "description": "OPTIONAL: If true, the gateway will attempt automatic approval of certificates that are returned in a pending-approval state. Default: false."
+                    "description": "Currently has no effect \u2014 reserved for future use. The plugin does not call any approval endpoint against CERTInext regardless of this setting. Default: false."
                 },
                 {
                     "name": "RequesterName",
@@ -221,11 +233,11 @@
                 },
                 {
                     "name": "RenewalWindowDays",
-                    "description": "OPTIONAL: Number of days before certificate expiration within which a renewal is triggered. Certificates expiring further than this window are reissued instead. Certificates that have already expired also fall back to reissue. Default: 90."
+                    "description": "OPTIONAL: V1 only. Number of days before certificate expiration within which a renewal is triggered. Certificates expiring further than this window are reissued instead. Certificates that have already expired also fall back to reissue. V2 places a new order for every renewal and reissue. Default: 90."
                 },
                 {
                     "name": "KeyType",
-                    "description": "OPTIONAL: Key algorithm to request (e.g. 'RSA2048', 'RSA4096', 'EC256', 'EC384'). If omitted, the profile default is used."
+                    "description": "OPTIONAL: Informational. The key algorithm is determined by the submitted CSR; CERTInext accepts RSA 2048/3072/4096 and ECC P-256/P-384 and rejects larger RSA, ECC P-521, and Ed25519/Ed448."
                 },
                 {
                     "name": "DomainName",
@@ -233,15 +245,23 @@
                 },
                 {
                     "name": "SignerName",
-                    "description": "OPTIONAL: Per-template subscriber agreement signer name. Falls back to the connector-level RequestorName if omitted."
+                    "description": "OPTIONAL: V2 only. Per-template subscriber agreement signer name. Falls back to the requestor name if omitted. V1 uses the connector-level RequestorName."
                 },
                 {
                     "name": "SignerPlace",
-                    "description": "OPTIONAL: Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted."
+                    "description": "OPTIONAL: V2 only. Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted. V1 uses the connector-level SignerPlace."
                 },
                 {
                     "name": "SignerIp",
-                    "description": "OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted."
+                    "description": "OPTIONAL: V2 only. Per-template signer IP address. Falls back to the connector-level SignerIp if omitted. V1 uses the connector-level SignerIp."
+                },
+                {
+                    "name": "ProductFamily",
+                    "description": "V2 ONLY: Product family for this template. Accepted values: 'ssl' (default) or 'private-pki'. 'private-pki' requires an explicit ProductCode and a Private PKI ProductVariant. 'signature' (Document Signer) is accepted by the parameter, but Document Signer enrollment is not supported."
+                },
+                {
+                    "name": "ProductVariant",
+                    "description": "V2 ONLY: Product variant sent in the V2 order body. ProductFamily 'ssl': 'dv', 'ov', or 'ev' \u2014 if omitted, derived from the selected product; an explicit value that contradicts the product fails enrollment. ProductFamily 'private-pki': 'intranet-ssl' or 'igtf-host' (required; no default)."
                 }
             ]
         }

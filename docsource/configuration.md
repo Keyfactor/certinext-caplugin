@@ -7,19 +7,22 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
     * Expired certificates can optionally be excluded from synchronization using the `IgnoreExpired` configuration flag.
 * Certificate Enrollment for profiles configured in CERTInext:
     * New certificate enrollment (new keys and certificate).
-    * Certificate renewal — submits a new `GenerateOrderSSL` order when the prior certificate is within the configured renewal window (CERTInext has no dedicated renewal endpoint; the renewal-window check governs how Command tracks old→new, not which API is called).
+    * Certificate renewal — on the V1 API, submits a new `GenerateOrderSSL` order when the prior certificate is within the configured renewal window (CERTInext has no dedicated renewal endpoint; the renewal-window check governs how Command tracks old→new, not which API is called). On the V2 API every renewal places a new order.
     * Certificate reissuance (new keys with the same or updated subject/SANs) when outside the renewal window or no prior certificate is found.
     * Synchronous certificate pickup — a fast-issuing order (DV, or already-approved) can return the certificate in the same enrollment call instead of always waiting for the next sync, via `PickupRetries`/`PickupDelay`.
+    * DNS-01 domain control validation (DCV) — the plugin publishes the validation TXT record through a DNS provider plugin deployed on the gateway and asks CERTInext to verify it, during enrollment and during synchronization (`DcvEnabled`, on by default).
 * Certificate Revocation:
     * Request revocation of a previously issued certificate using any RFC 5280 CRL reason code.
 * Supported authentication modes for calls to the CERTInext API:
-    * AccessKey (HMAC-based request signing) — the primary and recommended mode
-    * OAuth (bearer token via client credentials flow)
+    * AccessKey (HMAC-based request signing) — the primary and recommended mode for the V1 API
+    * OAuth (bearer token via client credentials flow) — optional for V1, and the only mode for the V2 API
+* Two CERTInext API generations, selected per connector with `UseV2Api`: the V1 API (default) and the order-centric V2 REST API, which adds Private PKI products. See [V2 API](#v2-api) and [Migrating from V1 to V2](#migrating-from-v1-to-v2).
 
 ## Requirements
 
-* Keyfactor Command 25.5.x or later
-* AnyCA Gateway REST framework version 25.5.0 or later
+* Keyfactor Command 26.2 or later
+* AnyCA Gateway REST framework version 26.2.0 or later
+* A DNS provider plugin deployed on the AnyCA Gateway if the connector validates domains with DNS-01 DCV (the default; see `DcvEnabled`)
 * A CERTInext account with API access enabled and at least one certificate product configured
 * Network connectivity from the AnyCA Gateway host to the CERTInext API endpoint for your region (see table below)
 * The AnyCA Gateway host must trust the TLS certificate presented by the CERTInext API endpoint
@@ -33,6 +36,8 @@ CERTInext operates three separate environments. Use the sandbox environment for 
 | Sandbox | https://sandbox-us.certinext.io/ | `https://sandbox-us-api.certinext.io/emSignHub-API/` |
 | Production — India (Global) | https://in.certinext.io/ | `https://api.certinext.io/emSignHub-API/` |
 | Production — US | https://us.certinext.io/ | `https://us-api.certinext.io/emSignHub-API/` |
+
+The V2 API (`UseV2Api` = `true`) is served from the bare host with no path segment, for example `https://sandbox-us-api.certinext.io` or `https://us-api.certinext.io`. See [V2 API](#v2-api).
 
 > Note: Product codes differ between sandbox and production. Always confirm product codes from the GetProductDetails API call against the environment you are targeting before going live.
 
@@ -68,7 +73,7 @@ Enter the copied value in the `ApiKey` field of the CA connector configuration. 
 
 ### OAuth — alternative auth mode
 
-If your CERTInext account has OAuth enabled, you can use OAuth client credentials as an alternative to AccessKey signing.
+If your CERTInext account has OAuth enabled, you can use OAuth client credentials as an alternative to AccessKey signing on the V1 API. The V2 API always authenticates with OAuth client credentials (see [V2 OAuth2 Setup](#v2-oauth2-setup)).
 
 1. Log in to the CERTInext portal.
 2. Navigate to **Integrations → APIs**.
@@ -88,47 +93,55 @@ Before enrolling certificates, the Keyfactor Command server must trust the CERTI
 1. Log in to the CERTInext portal and download the root CA certificate and any intermediate CA certificates in the chain as PEM or DER files.
 2. On the Keyfactor Command server, import those certificates into the appropriate Windows certificate store — **Trusted Root Certification Authorities** for the root CA and **Intermediate Certification Authorities** for any subordinate CAs.
 3. In the Keyfactor Command Management Portal, navigate to **CA Connectors** and add a new CA using the **CERTInext AnyCA REST Gateway Plugin**.
-4. Complete the CA connector configuration fields described in the next section, then save and test the connection. The gateway performs a live connectivity test against the CERTInext `ValidateCredentials` endpoint during validation.
+4. Complete the CA connector configuration fields described in the next section, then save and test the connection. The gateway performs a live connectivity test during validation: the V1 `ValidateCredentials` endpoint, or `GET /api/certinext/v2/auth/me` when `UseV2Api` is `true`.
 
 ## CA Configuration
 
 The following fields are presented in the Keyfactor Command Management Portal when creating or editing the CERTInext CA connector.
 
-> Note: the connector's own save-time validation only enforces `ApiUrl`, `AccountNumber`, and the credential fields for the selected `AuthMode`. Other fields marked **Required** below are required by CERTInext for a successful order — the connector will save without them, but enrollment will fail or the order will be parked pending until they're set.
+> Note: the connector's own save-time validation enforces `ApiUrl` (https, or http for a loopback host); for V1, `AccountNumber` and the credential fields for the selected `AuthMode`; for V2, `OAuthClientId`, `OAuthClientSecret`, and `SignerPlace`. Other fields marked **Required** below are required by CERTInext for a successful order — the connector will save without them, but enrollment will fail or the order will be parked pending until they're set.
 
 | Field | Required / Optional | Description | Where to find it | Example |
 |---|---|---|---|---|
-| `ApiUrl` | Required | CERTInext API base URL. In V1 mode (default), must include the `/emSignHub-API/` path segment. When `UseV2Api` is `true` (see [V2 API](#v2-api-preview) below), this is instead the bare V2 host with no trailing slash or path suffix — the two APIs are hosted differently, so this value changes when `UseV2Api` is toggled. Must use `https` — the OAuth client secret (V2) or API key (V1) is sent to this URL on every request, and `http` would transmit it in cleartext. `http` is rejected at connection-validation time except for a loopback host (`localhost`/`127.0.0.1`/`::1`), which is allowed for local test servers only. | See the environments table above. | `https://api.certinext.io/emSignHub-API/` |
-| `AccountNumber` | Required | Your CERTInext account number (numeric string). Included in the `meta` block of every API request. | Portal → click your name or avatar → **Account Settings** or **My Profile**. | `1234567890` |
-| `AuthMode` | Required | Authentication mode. `AccessKey` uses HMAC signing (recommended). `OAuth` uses a bearer token. | N/A — choose based on the credential type you created. | `AccessKey` |
-| `ApiKey` | Conditional | The REST API Access Key generated in the CERTInext portal. Used to compute `authKey = SHA256(accessKey + ts + txn)`. The raw key is never transmitted. Required when `AuthMode` is `AccessKey`. This field is masked in the UI. | Portal → **Integrations → APIs** → generate or view the credential row. | *(generated, masked in UI)* |
-| `OAuthTokenUrl` | Conditional | OAuth token endpoint URL. Required when `AuthMode` is `OAuth`. | Provided by eMudhra for your account. | `https://auth.certinext.io/oauth/token` |
+| `ApiUrl` | Required | CERTInext API base URL. In V1 mode (default), must include the `/emSignHub-API/` path segment. When `UseV2Api` is `true` (see [V2 API](#v2-api) below), this is instead the bare V2 host with no trailing slash or path suffix — the two APIs are hosted differently, so this value changes when `UseV2Api` is toggled. Must use `https` — the OAuth client secret (V2) or API key (V1) is sent to this URL on every request, and `http` would transmit it in cleartext. `http` is rejected at connection-validation time except for a loopback host (`localhost`/`127.0.0.1`/`::1`), which is allowed for local test servers only. | See the environments table above. | `https://api.certinext.io/emSignHub-API/` |
+| `AccountNumber` | Required (V1) | Your CERTInext account number (numeric string). Included in the `meta` block of every V1 API request. Not used when `UseV2Api` is `true`. | Portal → click your name or avatar → **Account Settings** or **My Profile**. | `1234567890` |
+| `AuthMode` | Required (V1) | Authentication mode. `AccessKey` uses HMAC signing (recommended). `OAuth` uses a bearer token. Ignored when `UseV2Api` is `true`. | N/A — choose based on the credential type you created. | `AccessKey` |
+| `ApiKey` | Conditional | The REST API Access Key generated in the CERTInext portal. Used to compute `authKey = SHA256(accessKey + ts + txn)`. The raw key is never transmitted. Required when `AuthMode` is `AccessKey` (V1). Not used when `UseV2Api` is `true`. This field is masked in the UI. | Portal → **Integrations → APIs** → generate or view the credential row. | *(generated, masked in UI)* |
+| `OAuthTokenUrl` | Conditional | OAuth token endpoint URL. Required when `AuthMode` is `OAuth` (V1); must use `https`. Not used when `UseV2Api` is `true` — V2 requests its token from `{ApiUrl}/oauth/token`. | Provided by eMudhra for your account. | `https://auth.certinext.io/oauth/token` |
 | `OAuthClientId` | Conditional | OAuth client ID. Required when `AuthMode` is `OAuth` (V1). Also required — and reused as-is — when `UseV2Api` is `true`; V2 does not have its own separate client ID field. | Portal → **Integrations → APIs** → the OAuth credential row. | `keyfactor-gateway` |
 | `OAuthClientSecret` | Conditional | OAuth client secret. Required when `AuthMode` is `OAuth` (V1). Also required — and reused as-is — when `UseV2Api` is `true`. This field is masked in the UI. | Generated at OAuth credential creation time. | *(generated, masked in UI)* |
 | `RequestorName` | Required | Default name of the person or service submitting certificate orders. Sent in the `requestorInformation` block of every order request. | Use the name of the team or automation account responsible for these certificates. | `PKI Automation` |
 | `RequestorEmail` | Required | Default email address for the requestor. Must be a valid email address associated with your CERTInext account. Sent in the `requestorInformation` block of every order request. | Use a monitored team inbox or the account holder's email. | `pki-admin@example.com` |
 | `RequestorIsdCode` | Optional | International dialing code for the requestor phone number (digits only, no `+` prefix). Default: `1` (United States). | N/A — use the country code for your requestor. | `1` |
 | `RequestorMobileNumber` | Optional | Requestor mobile number (digits only, no country code). Included in the `requestorInformation` block. | N/A | `5551234567` |
-| `RequestorDesignation` | Optional | Job title / role of the requestor (e.g. `IT Administrator`). Sent in the `requestorInformation` block (V1) and the `requestor.designation` field (V2 mode). Free text with no CA-side enum. Left blank by default, in which case the field is omitted from the order entirely rather than sent with a default value. | N/A | `IT Administrator` |
+| `RequestorDesignation` | Optional | Job title / role of the requestor (e.g. `IT Administrator`). Sent in the `requestorInformation` block (V1) and the `requestor.designation` field (V2). Free text with no CA-side enum. Left blank by default, in which case the field is omitted from the order entirely rather than sent with a default value. | N/A | `IT Administrator` |
 | `SignerPlace` | Required | City or location of the person accepting the subscriber agreement on behalf of your organization. Required by CERTInext for all orders. When `UseV2Api` is `true` the connector can't be saved with this blank, because the V2 Subscriber Agreement sent with every SSL order requires it (a template's `SignerPlace` enrollment parameter still overrides it). | Use the physical city where the signer is located. | `Austin` |
 | `SignerIp` | Required | Public IP address of the host accepting the subscriber agreement. Required by CERTInext for all orders. | Use the outbound IP of the AnyCA Gateway host, or the IP of the workstation from which the agreement was accepted. | `203.0.113.10` |
-| `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in the `productDetails.groupNumber` field of `GetProductDetails` requests *and* in `delegationInformation.groupNumber` on every SSL order. Some sandbox accounts return an empty product list from `GetProductDetails` unless this field is included. Available in the CERTInext portal under **Delegation → Groups**. | Portal → **Delegation → Groups**. | `2345678901` |
+| `GroupNumber` | Optional | CERTInext group (delegation) number. When set, it is passed in the `productDetails.groupNumber` field of `GetProductDetails` requests *and* in `delegationInformation.groupNumber` on every V1 SSL order. On V2 it is sent as `groupNumber` on order create and as a query parameter on the catalog and orders-report calls. Some sandbox accounts return an empty product list from `GetProductDetails` unless this field is included. Available in the CERTInext portal under **Delegation → Groups**. | Portal → **Delegation → Groups**. | `2345678901` |
 | `OrganizationNumber` | Optional, strongly recommended for OV/EV and faster DV | Numeric CERTInext organization number for a pre-vetted organization. When set, every SSL order is submitted with `organizationDetails.preVetting="1"` and this number, telling CERTInext to skip its manual organization-vetting queue. Without it, orders may sit in `Pending System RA` for extended manual review (potentially tens of hours). | Portal → **Organizations → Pre-vetted Organizations**. | `1234567` |
-| `TechnicalContactName` / `TechnicalContactEmail` / `TechnicalContactIsdCode` / `TechnicalContactMobileNumber` | Optional | Populate `technicalPointOfContact` on every SSL order. Each defaults to the corresponding `Requestor*` field when blank. Some product configurations require a technical point of contact to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field. | N/A | *(defaults to Requestor fields)* |
-| `AccountingModel` | Optional | CERTInext billing model sent in `orderDetails.accountingModel`. `2` = credit-based (most accounts). `1` = cash model. Default: `2`. | N/A | `2` |
+| `TechnicalContactName` / `TechnicalContactEmail` / `TechnicalContactIsdCode` / `TechnicalContactMobileNumber` | Optional | Populate `technicalPointOfContact` on every SSL order (V1 and V2). Each defaults to the corresponding `Requestor*` field when blank. Some product configurations require a technical point of contact to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field. | N/A | *(defaults to Requestor fields)* |
+| `AccountingModel` | Optional | CERTInext billing model sent in `orderDetails.accountingModel` on V1 orders. `2` = credit-based (most accounts). `1` = cash model. Not used by V2. Default: `2`. | N/A | `2` |
 | `EmailNotifications` | Optional | Whether CERTInext sends lifecycle-event emails to the requestor. `1` = full notification set (V1 sends it as-is; V2 maps it to `all`). `0` = silent on both V1 and V2. Blank/unset stays silent on V1 (sent as `0`) but is omitted on V2, so the CA's own default (`all`, not silent) applies instead. Any other value fails V2 enrollment before any CA call. Default: `0` — V2 orders are silent by default, matching V1. | N/A | `0` |
 | `SubscriptionValidityYears` | Optional | Connector-level default validity in years for SSL orders (`1`, `2`, or `3`). Overridden per template by the `ValidityYears` enrollment parameter. Default: `1`. | N/A | `1` |
 | `SubscriptionAutoRenew` | Optional | Whether CERTInext should auto-renew certificates issued through this connector. `0` = disabled (recommended — renewal is driven by Keyfactor Command), `1` = enabled. Default: `0`. | N/A | `0` |
 | `SubscriptionRenewCriteriaDays` | Optional | Days before expiry at which CERTInext auto-renews. Only honored when `SubscriptionAutoRenew` is `1`. Default: `30`. | N/A | `30` |
 | `AutoSecureWww` | Optional | If `1`, CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. Default: `0`. | N/A | `0` |
-| `SubmitNonDnsSans` | Optional | If `true` (default), SANs that aren't DNS names (IP address, email, URI) are submitted to CERTInext instead of silently dropped. CERTInext can't validate them, so such an order won't issue until they're removed. Set to `false` to submit DNS names only. Default: `true`. | N/A | `true` |
+| `SubmitNonDnsSans` | Optional | V1 only. If `true` (default), SANs that aren't DNS names (IP address, email, URI) are submitted to CERTInext instead of silently dropped. CERTInext can't validate them, so such an order won't issue until they're removed. Set to `false` to submit DNS names only. Not consulted on V2 (see [Migrating from V1 to V2](#step-2--update-the-ca-connector)). Default: `true`. | N/A | `true` |
 | `DefaultProductCode` | Optional, but effectively required if you use renewals (V1), or ProductId-only templates against an ambiguous V2 catalog | **V1 mode:** used for renewals only, and only when the template doesn't supply a product code (`ProductCode`/`ProfileId`) — CERTInext's `TrackOrder` doesn't return the prior order's product code. If neither is set, renewals go out with an empty product code. Has no effect on new V1 enrollments. **V2 mode:** also used to disambiguate a template that sets only `ProductId` (no explicit `ProductCode`) when the live V2 catalog has more than one product sharing the product's expected assurance level — if this value doesn't match one of the candidate codes, that enrollment (and template save-time validation) fails with an error listing them. | Call `GetProductDetails` against your account/environment (see product code table below). | `842` |
 | `IgnoreExpired` | Optional | If `true`, expired certificates are skipped during synchronization and are not imported into Keyfactor Command. Default: `false`. | N/A | `false` |
-| `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500`. Reduce this value if synchronization requests time out. | N/A | `100` |
+| `PageSize` | Optional | Number of orders to retrieve per page during synchronization. Default: `100`. Maximum: `500` (V2 `/reports/orders` pages are capped at `100`). Reduce this value if synchronization requests time out. | N/A | `100` |
 | `Enabled` | Optional | Enables or disables the CA connector. Setting this to `false` allows the connector record to be created before all credentials are available, without triggering a live connectivity test. Default: `true`. | N/A | `true` |
 | `LogSensitiveRequestData` | Optional | **Diagnostic escape hatch — off by default.** When `true`, this writes requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads to the gateway logs. It's meant for temporary use while verifying a new deployment (confirming exactly what was sent to the CA and that the order succeeded) — turn it back off once verification is complete. When `false` (default), personal-data fields are redacted (email is masked but keeps its domain, e.g. `j***@example.com`) and the enrollment log line omits the requester name entirely. Email SAN values (rfc822Name) in log lines are masked the same way; DNS, IP and URI SANs are always logged in full. Credentials (API keys, OAuth secrets, tokens) are always redacted regardless of this setting. Default: `false`. | N/A | `false` |
-| `PickupRetries` | Optional | Number of times `Enroll` polls CERTInext for the certificate after a successful order submission, before returning pending and leaving pickup to the next sync. Set to `0` to disable the wait entirely. OV/EV orders validate asynchronously (minutes to hours) and typically exhaust this wait regardless of the value. Default: `5`. | N/A | `5` |
-| `PickupDelay` | Optional | Seconds between certificate-pickup retries. The total pickup budget is a fixed 5-second initial delay + (`PickupRetries` × `PickupDelay`), hard-capped at 180 seconds regardless of how the two values are set. Aim for well under ~90s total so the call doesn't run long enough to trip Command's own enrollment timeout. Default: `10` (a ~55s ceiling with default `PickupRetries`). | N/A | `10` |
+| `PickupRetries` | Optional | Number of times `Enroll` polls CERTInext for the certificate after a successful order submission, before returning pending and leaving pickup to the next sync. Set to `0` to disable the wait entirely. Values above `30` are treated as `30`. OV/EV orders validate asynchronously (minutes to hours) and typically exhaust this wait regardless of the value. Default: `5`. | N/A | `5` |
+| `PickupDelay` | Optional | Seconds between certificate-pickup retries. The total pickup budget is a fixed 5-second initial delay + (`PickupRetries` × `PickupDelay`), hard-capped at 180 seconds regardless of how the two values are set. Aim for well under ~90s total so the call doesn't run long enough to trip Command's own enrollment timeout. Values above `60` are treated as `60`; a non-positive value falls back to `10`. Default: `10` (a ~55s ceiling with default `PickupRetries`). | N/A | `10` |
+| `DcvEnabled` | Optional | When `true`, the plugin performs DNS-based Domain Control Validation (DCV) during enrollment and synchronization for orders that require it. Requires a DNS provider plugin (e.g. `azure-azuredns-dnsplugin`) to be deployed on the gateway; without one, orders that need validation stay pending and the plugin logs why. Set to `false` if you validate domains another way. Default: `true`. | N/A | `true` |
+| `DcvTxtRecordTemplate` | Optional | Format string for the DNS TXT record hostname published during DCV. `{0}` is replaced with the domain being validated. Default: `_emsign-validation.{0}`. | N/A | `_emsign-validation.{0}` |
+| `DcvPropagationDelaySeconds` | Optional | Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. On V1, DCV driven during synchronization uses its own fixed 3-second delay; V2 uses this value everywhere. Default: `30`. | N/A | `30` |
+| `DcvTimeoutMinutes` | Optional | Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) before giving up on the order, which stays pending. Can also be set via the `CERTINEXT_DCV_TIMEOUT_MINUTES` environment variable; the environment variable takes precedence when both are set. Default: `10`. | N/A | `10` |
+| `DcvWaitForChallengeSeconds` | Optional | V1 only. How long `Enroll()` waits for CERTInext to expose the DCV challenge after order placement, before giving up and deferring to the next sync. Set to `0` to disable the wait. Can also be set via `CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS`. Default: `60`. | N/A | `60` |
+| `DcvWaitForIssuanceSeconds` | Optional | V1 only. How long `Enroll()` waits for CERTInext to finish generating the certificate after DCV verifies. Set to `0` to disable the wait. Can also be set via `CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS`. Default: `60`. | N/A | `60` |
+| `DcvSyncMaxOrderAgeHours` | Optional | During synchronization, only pending DV orders younger than this many hours are driven through DCV, so a large backlog of old/abandoned pending orders doesn't slow down every sync pass. Set to `0` to disable the age filter. Default: `24`. | N/A | `24` |
+| `DcvSyncMaxPerPass` | Optional | Maximum number of pending DV orders driven through DCV in a single sync pass. Set to `0` to disable the cap. Default: `50`. | N/A | `50` |
 
 > **Pickup timing detail:** after a successful order placement, the plugin waits a fixed 5-second initial delay before the first poll attempt, then polls CERTInext every `PickupDelay` seconds up to `PickupRetries` times. Each poll calls `GetCertificate` to check whether the certificate has been issued. The total time budget is: **5s + (PickupRetries × PickupDelay) + API round-trip time per poll (~1s each)**. With defaults this is approximately 5 + (5 × 10) + 5 = **~60 seconds**.
 >
@@ -138,18 +151,10 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 > |---------------|:---:|:---:|---|---|
 > | Default | `5` | `10` | ~55s | Every 10s |
 > | Faster polling | `10` | `5` | ~55s | Every 5s |
-> | Aggressive | `50` | `1` | ~55s | Every 1s |
+> | Aggressive | `30` | `2` | ~65s | Every 2s |
 > | Minimal wait | `0` | — | 0s | No polling; defers to sync |
 >
-> The 5-second initial delay before the first poll is not configurable. The 180-second hard ceiling applies regardless of configuration.
-| `DcvEnabled` | Optional | When `true`, the gateway performs DNS-based Domain Control Validation (DCV) during enrollment for orders that require it. Requires a DNS provider plugin (e.g. `azure-azuredns-dnsplugin`) to be deployed on the gateway. Default: `true`. | N/A | `true` |
-| `DcvTxtRecordTemplate` | Optional | Format string for the DNS TXT record hostname published during DCV. `{0}` is replaced with the domain being validated. Default: `_emsign-validation.{0}`. | N/A | `_emsign-validation.{0}` |
-| `DcvPropagationDelaySeconds` | Optional | Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Applies only to the `Enroll()`-time DCV path — DCV driven during sync uses its own fixed 3-second delay. Default: `30`. | N/A | `30` |
-| `DcvTimeoutMinutes` | Optional | Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) before cancelling the enrollment. Can also be set via the `CERTINEXT_DCV_TIMEOUT_MINUTES` environment variable; the environment variable takes precedence when both are set. Default: `10`. | N/A | `10` |
-| `DcvWaitForChallengeSeconds` | Optional | How long `Enroll()` waits for CERTInext to expose the DCV challenge after order placement, before giving up and deferring to the next sync. Set to `0` to disable the wait. Can also be set via `CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS`. Default: `60`. | N/A | `60` |
-| `DcvWaitForIssuanceSeconds` | Optional | How long `Enroll()` waits for CERTInext to finish generating the certificate after DCV verifies. Set to `0` to disable the wait. Can also be set via `CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS`. Default: `60`. | N/A | `60` |
-| `DcvSyncMaxOrderAgeHours` | Optional | During synchronization, only pending DV orders younger than this many hours are driven through DCV, so a large backlog of old/abandoned pending orders doesn't slow down every sync pass. Set to `0` to disable the age filter. Default: `24`. | N/A | `24` |
-| `DcvSyncMaxPerPass` | Optional | Maximum number of pending DV orders driven through DCV in a single sync pass. Set to `0` to disable the cap. Default: `50`. | N/A | `50` |
+> The 5-second initial delay before the first poll is not configurable. The 180-second hard ceiling applies regardless of configuration. Pickup applies to V1 and V2 enrollments. When the DCV flow ran for the order inside the same `Enroll` call, the pickup poll is skipped, because the DCV flow already waited for issuance.
 
 > Note: `AccountNumber` and group-level identifiers are distinct values. The `AccountNumber` is your top-level user account identifier. CERTInext groups (cost centers or departments) each have their own `groupNumber`, which is passed per-order and is separate from any organization number displayed on the Organizations page.
 
@@ -159,23 +164,27 @@ The following fields are presented in the Keyfactor Command Management Portal wh
 
 A Keyfactor Command certificate template maps an enrollment request to a specific CERTInext product. Create one template per CERTInext product that you want to make available to requesters.
 
+The AnyCA Gateway REST portal also needs one certificate profile per product before Command templates can be created against it. Create the profiles by hand in the gateway portal, or with the helper script this repository ships (`make register-profiles`; set `DRY_RUN=1` to preview). See [scripts/register/README.md](https://github.com/Keyfactor/certinext-caplugin/blob/main/scripts/register/README.md) for authentication and options.
+
 In the Keyfactor Command Management Portal, navigate to **Certificate Templates** and create a new template associated with the CERTInext CA connector. The following enrollment parameters are available:
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductCode` | Optional | String | Override the numeric CERTInext product code for this template. Product codes are provisioned per account by eMudhra — obtain the correct code from `GetProductDetails` for your account. If omitted, the built-in default code for the selected product name is used (see [Product Codes](#product-codes)). Set this explicitly when targeting the sandbox environment or a non-standard code. | DV SSL: `842` (sandbox) or `838` (production) |
+| `ProductCode` | Optional | String | Override the numeric CERTInext product code for this template. Product codes are provisioned per account by eMudhra — obtain the correct code from `GetProductDetails` for your account. If omitted: on V1, the built-in default code for the selected product name is used (see [Product Codes](#product-codes)); on V2, the code is resolved from the live product catalog (see [V2 Product Code Resolution](#v2-product-code-resolution)). Set this explicitly when targeting the sandbox environment or a non-standard code. Required for `ProductFamily=private-pki`. | DV SSL: `842` (sandbox) or `838` (production) |
 | `ProfileId` | Deprecated | String | Legacy alias for `ProductCode`. Accepted for backward compatibility — if `ProductCode` is not set, `ProfileId` is used in its place. New templates should use `ProductCode`. | `838` |
 | `ValidityYears` | Optional | Number | Subscription validity period in years: `1`, `2`, or `3`. Default: `1`. CERTInext certificates are issued within a subscription term at up to 390 days per certificate, with free renewals within the term. | `1` |
-| `ValidityDays` | Deprecated | Number | Legacy validity field. If set, the value is divided by 365 and rounded up to derive a year count. New templates should use `ValidityYears`. | `365` |
+| `ValidityDays` | Deprecated | Number | Legacy validity field, V1 only. If set, the value is divided by 365 and rounded up to derive a year count. New templates should use `ValidityYears`. | `365` |
 | `AutoApprove` | Optional | Boolean | **Currently has no effect** — reserved for future use. The plugin does not call any approval endpoint against CERTInext regardless of this setting. | `false` |
 | `RequesterName` | Optional | String | Per-template override for the requestor name. When set, overrides the connector-level `RequestorName` for orders using this template. | `Keyfactor Automation` |
 | `RequesterEmail` | Optional | String | Per-template override for the requestor email address. When set, overrides the connector-level `RequestorEmail` for orders using this template. | `pki-admin@example.com` |
-| `RenewalWindowDays` | Optional | Number | Number of days before certificate expiration within which a renewal is attempted instead of a reissue. Default: `90`. | `90` |
-| `KeyType` | Optional | String | Key algorithm to request at enrollment time. The key type is carried by the submitted CSR. CERTInext accepts **RSA 2048 / 3072 / 4096 and ECC P-256 / P-384** only — larger RSA, ECC P-521, and the Ed25519/Ed448 curves are rejected by the CA (`Invalid key size`). If omitted, the product default is used. | `RSA2048`, `RSA3072`, `RSA4096`, `EC256`, `EC384` |
-| `DomainName` | Optional | String | Primary domain name for SSL/TLS orders. If omitted, the gateway derives the domain from the CSR `CN` field. | `example.com` |
-| `SignerName` | Optional | String | Per-template override for the subscriber agreement signer name. When omitted, defaults to the connector-level `RequestorName`. | `Jane Smith` |
-| `SignerPlace` | Optional | String | Per-template override for the subscriber agreement signer location. When omitted, defaults to the connector-level `SignerPlace`. | `Austin` |
-| `SignerIp` | Optional | String | Per-template override for the subscriber agreement signer IP address. When omitted, defaults to the connector-level `SignerIp`. | `203.0.113.10` |
+| `RenewalWindowDays` | Optional | Number | V1 only. Number of days before certificate expiration within which a renewal is attempted instead of a reissue. V2 places a new order for every renewal and reissue. Default: `90`. | `90` |
+| `KeyType` | Optional | String | Informational. The key algorithm is determined by the submitted CSR, not by this parameter. CERTInext accepts **RSA 2048 / 3072 / 4096 and ECC P-256 / P-384** only — larger RSA, ECC P-521, and the Ed25519/Ed448 curves are rejected by the CA (`Invalid key size`). | `RSA2048`, `RSA3072`, `RSA4096`, `EC256`, `EC384` |
+| `DomainName` | Optional | String | V2 only: primary domain name for SSL/TLS orders (for Private PKI, the primary hostname). If omitted, the plugin uses the CSR subject `CN`. V1 always uses the CSR subject `CN`. | `example.com` |
+| `SignerName` | Optional | String | V2 only: per-template override for the subscriber agreement signer name. When omitted, defaults to the requestor name. V1 uses the connector-level `RequestorName`. | `Jane Smith` |
+| `SignerPlace` | Optional | String | V2 only: per-template override for the subscriber agreement signer location. When omitted, defaults to the connector-level `SignerPlace`. V1 uses the connector-level value. | `Austin` |
+| `SignerIp` | Optional | String | V2 only: per-template override for the subscriber agreement signer IP address. When omitted, defaults to the connector-level `SignerIp`. V1 uses the connector-level value. | `203.0.113.10` |
+
+The V2-only template parameters `ProductFamily` and `ProductVariant` are described under [V2 Certificate Template Fields](#v2-certificate-template-fields).
 
 ## Product Codes
 
@@ -253,36 +262,52 @@ To retrieve the full list of product codes available to your account, call the `
 
 ### Authentication
 
-Every CERTInext API call is an HTTP POST with a JSON body. There is no Authorization header. Instead, the body carries a `meta` block with an `authKey` field computed as:
+Every V1 API call is an HTTP POST with a JSON body. In `AccessKey` mode there is no Authorization header. Instead, the body carries a `meta` block with an `authKey` field computed as:
 
 ```
 authKey = SHA256(accessKey + requestTs + requestTxnId)
 ```
 
-Where `requestTs` is the ISO 8601 timestamp and `requestTxnId` is a unique transaction UUID generated per request. The raw access key is never transmitted — only the derived hash is sent. This computation happens automatically on every outbound call. When `AuthMode` is `OAuth`, the gateway obtains a bearer token via the configured client credentials flow and injects it into the `meta` block instead.
+Where `requestTs` is the ISO 8601 timestamp and `requestTxnId` is a random numeric transaction ID generated per request. The raw access key is never transmitted — only the derived hash is sent. This computation happens automatically on every outbound call. When `AuthMode` is `OAuth`, the plugin obtains a bearer token via the configured client credentials flow and sends it in an `Authorization: Bearer` header; `authKey` is left empty in the `meta` block, which still carries the version, timestamp, transaction ID, and account number.
 
-### HTTP Timeout
+V2 calls are plain REST requests that carry the bearer token in the `Authorization` header; see [V2 Token Caching](#v2-token-caching).
 
-Every CERTInext API call (enroll, sync, revoke) shares one HTTP client with a fixed 120-second
-request timeout. This is hardcoded and is not exposed as a connector setting or environment
+### HTTP Timeout and Retries
+
+Every CERTInext API call (enroll, sync, revoke) uses a fixed 120-second request timeout, on both
+V1 and V2. This is hardcoded and is not exposed as a connector setting or environment
 variable — it cannot be changed without modifying the plugin. If a call doesn't return within 120
-seconds, the plugin aborts it and the operation fails; a non-idempotent call (e.g. order placement)
-is not retried afterward, since CERTInext may have already created the order — see
-[Synchronization](#synchronization) to reconcile such orders on a later pass.
+seconds, the plugin aborts it and the operation fails.
+
+- **Order placement and CSR submission are never auto-retried after a timeout or server error**,
+  because CERTInext may have already created the order. If the CA did create it, the next
+  [synchronization](#synchronization) imports it. Do not resubmit immediately; check the CERTInext
+  portal first.
+- **Other V1 calls** (status checks, downloads, revoke, reports) are retried up to 3 attempts on a
+  5xx response or network failure. 4xx responses are not retried.
+- **V1 rate limit:** when order placement returns CERTInext's rate-limit response (the generic
+  `Inactive Account User.` error), the plugin retries it up to 5 attempts with exponential backoff
+  and jitter. See [Troubleshooting](https://github.com/Keyfactor/certinext-caplugin/blob/main/docsource/overview.md#troubleshooting).
+- **V2 calls are never auto-retried.** The only repeated V2 call is the one-time revoke-reason
+  fallback described under [V2 Revocation Reason Handling](#v2-revocation-reason-handling).
 
 ### Enrollment Decision Logic
 
-When the gateway calls `Enroll`, the plugin selects between three paths based on the enrollment type and the age of the prior certificate:
+**V1.** When the gateway calls `Enroll`, the plugin selects a path from the enrollment type and the age of the prior certificate:
 
-1. **New enrollment** — no prior certificate exists. A new `GenerateOrderSSL` request is submitted.
-2. **Renewal** — a prior certificate exists and its expiry is within the `RenewalWindowDays` threshold (default: 90 days). A new `GenerateOrderSSL` order is submitted within the configured renewal window (CERTInext has no dedicated renewal endpoint; the renewal-window check governs how Command tracks old→new, not which API is called).
-3. **Reissue** — a prior certificate exists but is outside the renewal window. A new `GenerateOrderSSL` order is placed with the updated CSR/subject, replacing the prior certificate under a new subscription.
+1. **New or Reissue** (`EnrollmentType.New` / `Reissue`) — a new `GenerateOrderSSL` request is submitted.
+2. **Renew or RenewOrReissue** — Command supplies the prior certificate's serial number (`PriorCertSN`). The plugin resolves the prior order from the Command database, then:
+    - no serial number, or no prior order found (including a failed lookup): a new order is submitted as for a new enrollment;
+    - the prior certificate's expiry is in the future and within `RenewalWindowDays` (default 90 days): a renewal order is submitted — CERTInext has no dedicated renewal endpoint, so this is also a new `GenerateOrderSSL` order; the prior order is looked up first and its details fill in anything the request doesn't supply;
+    - the prior certificate is outside the window, or already expired: a new order is submitted.
 
-The `RenewalWindowDays` template parameter controls the renewal/reissue boundary per certificate template.
+The prior order is never revoked automatically. The `RenewalWindowDays` template parameter sets the renewal/reissue boundary per certificate template.
+
+**V2.** All enrollment types (New, Reissue, Renew, RenewOrReissue) place a new V2 order; there is no renewal-window logic. See [V2 Order Lifecycle](#v2-order-lifecycle).
 
 ### Required Order Fields
 
-The `GenerateOrderSSL` API requires an `additionalInformation.remarks` field in every order request body. The gateway populates this field automatically with the text `"Issued via Keyfactor Command AnyCA REST Gateway."`. If you encounter error `EMS-918: Additional Information cannot be empty`, verify that the gateway version is current and that the field is being sent.
+The V1 `GenerateOrderSSL` API requires an `additionalInformation.remarks` field in every order request body. The gateway populates this field automatically with the text `"Issued via Keyfactor Command AnyCA REST Gateway."`. If you encounter error `EMS-918: Additional Information cannot be empty`, verify that the gateway version is current and that the field is being sent.
 
 ### Order Lifecycle and Pending Approval
 
@@ -291,15 +316,22 @@ CERTInext orders pass through several internal status stages before a certificat
 - **Issued** (status `7`, `9`, `12`, `15`, `20`, `23`) → certificate returned immediately (status `12`, expired, is retained in inventory as issued rather than treated as a failure).
 - **Pending approval** (status `1`, `2`, `4`, `6`, `16`, `17`, `24`) → enrollment returns a pending status to Command. `Enroll()` polls briefly for the certificate (see `PickupRetries`/`PickupDelay`) before falling back to pending.
 - **Revoked** (status `22`) → certificate marked revoked.
-- **Rejected / cancelled** (status `3`, `5`, `8`, `13`, `14`, `18`, `19`, `21`, or any unrecognized code) → enrollment fails with an error.
+- **Rejected / cancelled** (status `3`, `5`, `8`, `13`, `14`, `18`, `19`, `21`, or any unrecognized code) → enrollment returns a failed result.
 
-The gateway polls the `TrackOrder` endpoint during sync to pick up certificates that were approved after the initial enrollment call.
+Orders that are still pending when `Enroll()` returns are picked up by a later synchronization.
 
 ### Synchronization
 
-Synchronization uses the `GetOrderReport` endpoint with paginated results (controlled by `PageSize`, default 100, max 500). Each page is fetched sequentially until all orders are retrieved. The plugin maps each order's status to a Keyfactor certificate status and returns the result set to the gateway framework, which reconciles it against the Command inventory.
+On V1, synchronization uses the `GetOrderReport` endpoint with paginated results (controlled by `PageSize`, default 100, max 500). Each page is fetched sequentially until all orders are retrieved; a full sync requests every order, and an incremental sync requests orders placed since the last sync date. The plugin maps each order's status to a Keyfactor certificate status and returns the result set to the gateway framework, which reconciles it against the Command inventory.
+
+- The order report carries no certificate body, so the plugin refetches the certificate for issued and revoked orders.
+- Rejected and cancelled orders are skipped.
+- Pending orders are emitted as pending. When DCV is enabled and a DNS provider plugin is available, recently placed pending orders are first driven through DNS-01 validation, bounded by `DcvSyncMaxOrderAgeHours` and `DcvSyncMaxPerPass`.
+- If more than 25% of the records processed so far have failed (after at least 50 records), the sync aborts and is retried on the next cycle.
 
 Expired certificates are included by default. Set `IgnoreExpired: true` on the connector to skip them during sync.
+
+On V2, synchronization reads `/reports/orders` instead — see [V2 Order Lifecycle](#v2-order-lifecycle).
 
 ### Product Code Resolution
 
@@ -311,9 +343,9 @@ When an enrollment request arrives, the numeric CERTInext product code is resolv
 
 If none of these yield a code, enrollment fails with a validation error.
 
-## V2 API (Preview)
+## V2 API
 
-The plugin includes an opt-in CERTInext V2 REST API code path that uses modern OAuth2 `client_credentials` authentication and a new order-centric resource model. V2 is disabled by default; V1 remains the active path unless `UseV2Api` is explicitly set to `true`. When enabled, V2 is fully self-contained: Enroll, GetSingleRecord, Revoke, and Synchronize all route through the V2 API, and V1 credentials (`ApiKey`, `AccountNumber`, `AuthMode`) are not required.
+The plugin includes an opt-in CERTInext V2 REST API code path that uses OAuth2 `client_credentials` authentication and an order-centric resource model. V2 is disabled by default; V1 remains the active path unless `UseV2Api` is explicitly set to `true`. When enabled, V2 is fully self-contained: Ping, Enroll, GetSingleRecord, Revoke, and Synchronize all route through the V2 API, and V1 credentials (`ApiKey`, `AccountNumber`, `AuthMode`) are not required. Known limitations are listed under [Known Gaps](#known-gaps).
 
 ### V2 CA Connector Fields
 
@@ -321,7 +353,7 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 
 | Field | Required / Optional | Description | Example |
 |---|---|---|---|
-| `UseV2Api` | Optional | Enable the V2 API code path for enrollment, revocation, status checks, and synchronization. Default: `false`. | `false` |
+| `UseV2Api` | Optional | Enable the V2 API code path for connection tests, enrollment, revocation, status checks, and synchronization. Default: `false`. | `false` |
 | `V2SyncLookbackHours` | Optional | V2 mode only. During an incremental Synchronize, the plugin queries `from` = (last sync time minus this many hours) rather than the exact last-sync time, since the API's `from`/`to` filter may bracket either the order-placement date or the issuance date — a lookback window keeps an order created before last sync but issued afterward (e.g. a slow DCV order) from being missed. Default: `72`. | `72` |
 
 #### V2 OAuth2 Setup
@@ -343,7 +375,7 @@ When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductFamily` | Optional | String | CERTInext V2 product family. Supported for enrollment: `ssl` (SSL/TLS) and `private-pki` (Private PKI — see [V2 Private PKI Orders](#v2-private-pki-orders)). `signature` (Document Signer) is accepted by the parameter, but Document Signer enrollment is not yet supported: a `signature` enrollment fails before any order is placed. Default: `ssl`. | `ssl` |
+| `ProductFamily` | Optional | String | CERTInext V2 product family. Supported for enrollment: `ssl` (SSL/TLS) and `private-pki` (Private PKI — see [V2 Private PKI Orders](#v2-private-pki-orders)). `signature` (Document Signer) is accepted by the parameter, but Document Signer enrollment is not supported: a `signature` enrollment fails before any order is placed. An unrecognized value is treated as `ssl`. Default: `ssl`. | `ssl` |
 | `ProductVariant` | Optional | String | Product variant within the family. `ssl`: `dv`, `ov`, or `ev`. If omitted, the plugin derives it from the selected product (e.g. an OV product sends `ov`, an EV product sends `ev`) rather than always defaulting to `dv`; an explicit override that contradicts the product's derived variant fails enrollment with an actionable error instead of being sent as-is. `private-pki`: `intranet-ssl` or `igtf-host` — required, with no default. | `dv` |
 
 `ProductCode` continues to carry the numeric product code and is sent in the `X-Product-Code` header on V2 order placement.
@@ -373,7 +405,7 @@ With `ProductFamily=private-pki`, the plugin places the order against CERTInext'
 
 ### V2 Order Lifecycle
 
-V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
+A V2 enrollment places the order, submits the CSR, and then checks the order status; see [V2 enrollment flow](#v2-enrollment-flow) for the full sequence. V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
 
 V2 status strings map to Keyfactor enrollment statuses as follows:
 
@@ -390,12 +422,15 @@ V2 status strings map to Keyfactor enrollment statuses as follows:
 | `cancelled` | Failed | Order was cancelled; a new enrollment is required. |
 | `rejected` | Failed | Order was rejected by the CA/LRA; a new enrollment is required. |
 | `expired` | Issued | An expired-but-not-revoked order is reported as issued (GENERATED), matching V1's convention — it remains visible in Command's inventory rather than disappearing as a failure. |
+| `unknown` | Pending External Validation | CERTInext can't currently report where the order is; the order is kept pending and re-checked on the next status poll or sync, and the plugin logs a warning. |
 
-Any V2 status not in this table (e.g. a value CERTInext adds in the future) also maps to Failed, but the
+Any V2 status not in this table (e.g. a value CERTInext adds in the future) maps to Failed, and the
 plugin logs a warning distinguishing "unmapped status" from the statuses above that are deliberately
 mapped to Failed — see the gateway trace log if certificates unexpectedly show as failed.
 
-V2 has no *renew* endpoint. CERTInext does document a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious`/`revokeReason`), but the plugin does not use it by design — all three enrollment types (New, Reissue, RenewOrReissue) place a fresh V2 order, and the prior order/certificate is left issued rather than auto-revoked.
+**V2 synchronization.** Synchronize pages through `/reports/orders` (pages are capped at 100 rows; `PageSize` is clamped to that). The report carries display strings (for example `Order Fulfilled`, `Certificate Downloaded`) rather than the status enum above. The plugin maps the strings it recognizes and falls back to a live order-status call for any combination it doesn't, so a new CERTInext display value never silently misclassifies an order. Cancelled and rejected orders are skipped; issued orders have their certificate chain downloaded. CERTInext does not serve the certificate body of a revoked order, so a revoked order is propagated as revoked only when the gateway already holds that certificate (the revocation date and reason come from a live status call). Otherwise it is reported as Failed (the gateway has a record without a body) or skipped (the gateway has no record), so the gateway never stores a revoked record with no certificate.
+
+V2 has no *renew* endpoint. CERTInext does document a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious`/`revokeReason`), but the plugin does not use it — every enrollment type (New, Reissue, Renew, RenewOrReissue) places a fresh V2 order, and the prior order/certificate is left issued rather than auto-revoked.
 
 ### V2 Revocation Reason Handling
 
