@@ -141,7 +141,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// If a developer ever left one of the fixture's opt-in-only flags (e.g.
-        /// CERTINEXT_V2_GAP_PROBES, CERTINEXT_PRIVATE_PKI_LIVE) in ~/.env_certinext_v2, it must
+        /// CERTINEXT_V2_OPS_TESTS, CERTINEXT_PRIVATE_PKI_LIVE) in ~/.env_certinext_v2, it must
         /// NOT come back out of <see cref="V2EnvHelper.PromotableKeys"/> — otherwise the first
         /// test class constructed in a run reads the flag as unset, then promotes it into real
         /// process env, silently arming every later-constructed test class in the same run even

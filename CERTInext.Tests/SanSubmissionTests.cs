@@ -39,7 +39,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// by the DNS-only test when building <c>certificateInformation.additionalDomains</c>, and
     /// the order would reach CERTInext with no additional domains at all — yielding a
     /// certificate holding only the CN. Because CERTInext ignores the CSR's subjectAltName
-    /// extension entirely (see <c>SanSubmissionProbeTests</c>), SANs present on the CSR do not
+    /// extension entirely, SANs present on the CSR do not
     /// compensate.
     ///
     /// The end-to-end tests below drive a real <see cref="CERTInextClient"/> against WireMock

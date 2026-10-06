@@ -661,8 +661,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // V1 TrackOrder wire shape per the spec: domainVerification is keyed by domain name, with a
-        // block-level "status". SanSubmissionProbeTests (finding B) saw an email SAN come back as one
-        // of these keys.
+        // block-level "status". An email SAN submitted in additionalDomains comes back as one of
+        // these keys.
         private const string V1TrackOrderResponseWithEmailDomainKey =
             "{\"meta\":{\"status\":\"1\"},\"orderDetails\":{\"orderStatus\":\"Pending\"," +
             "\"domainVerification\":{" +

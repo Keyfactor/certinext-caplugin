@@ -712,7 +712,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// key except those the V1 side reads (<see cref="IntegrationTestFixture.V1EnvKeys"/>)
         /// and the fixture's opt-in-only flags (<see cref="IntegrationTestFixture._optInOnlyFlags"/>).
         /// Without the latter exclusion, a value left in ~/.env_certinext_v2 for
-        /// one of those flags (e.g. CERTINEXT_V2_GAP_PROBES, CERTINEXT_PRIVATE_PKI_LIVE) would be
+        /// one of those flags (e.g. CERTINEXT_V2_OPS_TESTS, CERTINEXT_PRIVATE_PKI_LIVE) would be
         /// read as unset by the first test class constructed in a run (before this method's
         /// promotion step runs), then promoted into real process env, silently arming every
         /// later-constructed test class in the same run even though no flag was ever exported in

@@ -37,18 +37,18 @@
 // requests the covering date range, then re-applies the caller's precise sub-day window
 // client-side against each row's own orderDate.
 //
-// Gating: reuses the CERTINEXT_V2_GAP_PROBES=1 opt-in (already present in
+// Gating: requires the CERTINEXT_V2_OPS_TESTS=1 opt-in (listed in
 // IntegrationTestFixture._optInOnlyFlags, read from the real process environment before
-// V2EnvHelper.LoadAndPromote() runs) rather than introducing a new flag — this sweep can cancel
-// real sandbox orders, so it needs the same explicit go/no-go as other order-cancelling tests.
+// V2EnvHelper.LoadAndPromote() runs) — this sweep can cancel real sandbox orders, so it needs an
+// explicit go/no-go, shared with the other opt-in V2 ops/diagnostic tests.
 //
 // Logging: every domain value is passed through CERTInextClient.ApplyLoggingRedaction (same
-// default-off PII posture as every other V2 probe in this repo) before being written via
+// default-off PII posture as every other V2 live test in this repo) before being written via
 // ITestOutputHelper.
 //
 // Run (list-only):
 //   set -a; . ~/.env_certinext; set +a
-//   export CERTINEXT_V2_GAP_PROBES=1
+//   export CERTINEXT_V2_OPS_TESTS=1
 //   export CERTINEXT_V2_SWEEP_FROM=2026-09-25T00:00:00Z
 //   export CERTINEXT_V2_SWEEP_TO=2026-10-01T00:00:00Z
 //   dotnet test CERTInext.IntegrationTests/CERTInext.IntegrationTests.csproj -c Release -p:DcvSupport=false \
@@ -71,7 +71,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
     public class V2OrderWindowSweepTests : IClassFixture<IntegrationTestFixture>
     {
-        private const string OptInFlag = "CERTINEXT_V2_GAP_PROBES";
+        private const string OptInFlag = "CERTINEXT_V2_OPS_TESTS";
 
         private readonly IntegrationTestFixture _fixture;
         private readonly ITestOutputHelper _output;
@@ -119,7 +119,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Redacts emails/other personal data before any row reaches ITestOutputHelper — same
-        /// default-off PII posture as every other V2 probe in this repo (see
+        /// default-off PII posture as every other V2 live test in this repo (see
         /// CERTInextClient.ApplyLoggingRedaction; reachable here via
         /// InternalsVisibleTo("CERTInext.IntegrationTests")). Domain names themselves are not
         /// touched by this redaction.

@@ -41,7 +41,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_RUN_BULK_TEST",
                 "CERTINEXT_V2_RUN_BULK_TEST",
                 "CERTINEXT_PRIVATE_PKI_LIVE",
-                "CERTINEXT_V2_GAP_PROBES",
+                "CERTINEXT_V2_OPS_TESTS",
                 // V2 full-lifecycle readiness suite (DV UCC / OV / OV UCC / EV / wildcard DV /
                 // renew+reissue / fresh-domain DCV) — each places real sandbox orders and must
                 // be armed individually in the real shell, never left in either env file.

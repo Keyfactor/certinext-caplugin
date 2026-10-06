@@ -5903,9 +5903,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// policy-derived set exists to defer to.
         ///
         /// The CSR still matters even though CERTInext ignores its subjectAltName extension
-        /// outright — measured on the US sandbox in <c>SanSubmissionProbeTests</c>: a CSR
-        /// carrying two DNS names, submitted with <c>additionalDomains</c> omitted, produced an
-        /// order with only the CN registered. Production behaves the same way: the customer
+        /// outright: a CSR carrying two DNS names, submitted with <c>additionalDomains</c>
+        /// omitted, produces an order with only the CN registered. Production behaves the same way: the customer
         /// report that prompted this fix was a production UCC order whose CSR carried the SANs
         /// and whose issued certificate held only the CN. So on whichever path populates the
         /// gateway dictionary — or, in the fallback case, the CSR — this method is the only way

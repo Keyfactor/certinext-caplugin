@@ -2520,9 +2520,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         ///
         /// <paramref name="domainName"/> is the value already going out as the order's primary
         /// domain, and Command normally includes the CN in the SAN set as well. On the US
-        /// sandbox CERTInext was measured to collapse that repetition itself
-        /// (SanSubmissionProbeTests: CN submitted twice came back registered once), but that is
-        /// undocumented and unverified against production — which is exactly why we exclude it
+        /// sandbox CERTInext collapses that repetition itself (a CN submitted twice is
+        /// registered once), but that is undocumented and not verified against production —
+        /// which is exactly why we exclude it
         /// here rather than relying on CA-side de-duplication. It also keeps the submitted body
         /// matching what we log.
         /// </summary>
@@ -2816,7 +2816,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         // Exact JSON keys whose value is an array of SAN strings. V1 additionalDomains carries every
-        // requested SAN regardless of type, emails included (see SanSubmissionProbeTests).
+        // requested SAN regardless of type, emails included.
         // V2 SSL additionalDomains and private-pki additionalHosts are filtered to DNS / IP before
         // submission, so they are covered only as defence in depth: a DNS name or IP literal never
         // contains '@', so masking there can only ever touch a mis-typed email.
@@ -2824,8 +2824,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         // Exact JSON keys whose value is an object keyed by SAN value. The V1 TrackOrder
         // domainVerification block is { "<Domain Name>": { ... }, "status": "..." }, and an email
-        // submitted in additionalDomains comes back as one of those keys (see
-        // SanSubmissionProbeTests: "san-probe@example.com" was returned as a domainVerification key).
+        // submitted in additionalDomains comes back as one of those keys.
         private static readonly string[] SanKeyedObjectFieldNames = { "domainVerification" };
 
         /// <summary>
