@@ -77,13 +77,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             }, certDataReader);
 
         /// <summary>
-        /// Issue 0049: a mock <see cref="ICertificateDataReader"/> whose
+        /// A mock <see cref="ICertificateDataReader"/> whose
         /// <see cref="ICertificateDataReader.GetExpirationDateByRequestId"/> returns a date,
         /// simulating a gateway row that already holds a certificate body. Tests that exercise
         /// revocation-detail/ProductId logic on a REVOKED-with-no-body record use this so the
-        /// bodyless-REVOKED guard (<see cref="CERTInextCAPlugin.DecideBodylessRevokedRecord"/>,
-        /// exercised directly in <c>Issue0049BodylessRevokedGuardTests</c>) lets the record
-        /// through unchanged, keeping these tests focused on their own concern.
+        /// bodyless-REVOKED guard (<see cref="CERTInextCAPlugin.DecideBodylessRevokedRecord"/>)
+        /// lets the record through unchanged, keeping these tests focused on their own concern.
         /// </summary>
         private static ICertificateDataReader GatewayHoldsBodyReader(DateTime? expiry = null)
         {
@@ -115,7 +114,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         /// <summary>
         /// Stubs <see cref="ICERTInextClient.GetProductDetailsV2Async"/> — every V2 enrollment now
         /// resolves the requested product's <c>productTypeID</c> from the live Catalog to decide
-        /// UCC-ness (issues/f3-v2-multi-san-limitation.md), so any Strict-mock enroll test must
+        /// UCC-ness, so any Strict-mock enroll test must
         /// stub this call regardless of whether the test cares about UCC behavior.
         /// </summary>
         private static void StubCatalog(Mock<ICERTInextClient> mock, string productCode, string productTypeId) =>
@@ -240,7 +239,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.Certificate.Should().StartWith("-----BEGIN CERTIFICATE-----");
         }
 
-        // By design (0021): V2 has no distinct renewal endpoint the plugin uses — CERTInext's
+        // By design: V2 has no distinct renewal endpoint the plugin uses — CERTInext's
         // `/reissue` endpoint exists but is intentionally not called. RenewOrReissue places a
         // brand-new order via the same PlaceOrderV2Async path as a fresh enrollment; the prior
         // order/certificate is left issued rather than revoked or reused.
@@ -282,25 +281,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // V2 product code resolution when no explicit ProductCode is configured (issue 0036).
+        // V2 product code resolution when no explicit ProductCode is configured.
         //
-        // Issue 0059 update: these two tests used to leave ProductVariant at its "dv" default
-        // even though ProductID selects OV/EV SSL, specifically to keep the OV/EV
-        // organization-block guard (issue 0028) out of scope. Post-0059, ProductVariant is no
-        // longer independent of ProductID — the plugin now derives/validates it from the product
-        // — so an OV/EV ProductID with no explicit ProductVariant now legitimately resolves to
-        // "ov"/"ev" and requires the organization block. These tests now configure
+        // ProductVariant is not independent of ProductID — the plugin derives/validates it from
+        // the product, so an OV/EV ProductID with no explicit ProductVariant legitimately
+        // resolves to "ov"/"ev" and requires the organization block. These tests configure
         // OrganizationNumber (so that guard is satisfied) and leave ProductVariant unset
-        // entirely, so the derived value continues to isolate product-code resolution as before.
+        // entirely, so the derived value isolates product-code resolution as the thing under test.
         // ---------------------------------------------------------------------------
 
         [Fact]
         public async Task Enroll_V2_NoExplicitProductCode_ResolvesLiveCodeFromCatalog_NotStaleV1Table()
         {
-            // ProductID "OV SSL" with NO ProductCode/ProfileId override. Pre-fix, this would have
-            // fallen back to Constants.Products.DefaultProductCodes["OV SSL"] = "842" and sent that
+            // ProductID "OV SSL" with NO ProductCode/ProfileId override. Falling back to
+            // Constants.Products.DefaultProductCodes["OV SSL"] = "842" would send that
             // on the wire — which the live catalog (per this stub) actually maps to DV SSL, not OV
-            // SSL (issue 0036's silent-misissuance scenario). Post-fix, the code must be resolved
+            // SSL (a silent-misissuance risk). The code must instead be resolved
             // from the catalog entry whose productTypeID matches OV SSL ("16") — "846" in this
             // stub — a different value than the stale table's "842".
             var mock = NewMock();
@@ -331,7 +327,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 ProductParameters = new Dictionary<string, string>
                 {
                     ["ProductFamily"]  = "ssl",
-                    // No explicit ProductVariant — issue 0059 derives "ov" from ProductID.
+                    // No explicit ProductVariant — derives "ov" from ProductID.
                     ["DomainName"]     = "example.com"
                 }
             };
@@ -374,7 +370,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 ProductParameters = new Dictionary<string, string>
                 {
                     ["ProductFamily"]  = "ssl",
-                    // No explicit ProductVariant — issue 0059 derives "ev" from ProductID.
+                    // No explicit ProductVariant — derives "ev" from ProductID.
                     ["DomainName"]     = "example.com"
                 }
             };
@@ -395,10 +391,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Product-selection ambiguity (sandbox-confirmed): the live catalog can carry MORE
+        // Product-selection ambiguity: the live catalog can carry MORE
         // THAN ONE entry with the same productTypeID — e.g. two type-13 DV SSL entries, "917
         // SSL DV 1 month" (listed first) and "842 DV SSL Certificate". Picking the first match
-        // (the old behavior) silently ordered "917" on sandbox, which PUT /csr then rejected
+        // would silently order "917", which PUT /csr then rejects with
         // 422 "PFX based certificate orders are not allowed" — failing every ProductId-only DV
         // SSL enrollment. No explicit ProductCode + multiple matches must only resolve via the
         // connector's DefaultProductCode, or reject naming the candidates.
@@ -590,7 +586,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // GetSingleRecord — RevocationDate/RevocationReason (issues/0034)
+        // GetSingleRecord — RevocationDate/RevocationReason
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -612,7 +608,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     }
                 }));
 
-            // Issue 0049: this record has no certificate body, so the bodyless-REVOKED guard
+            // This record has no certificate body, so the bodyless-REVOKED guard
             // would otherwise downgrade it to FAILED — a reader that reports the gateway
             // already holds a body keeps this test focused on revocation-detail population.
             var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
@@ -700,8 +696,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Reason code fallback (issues/0026): CERTInext rejects 4 of the 9 spec-documented
-        // reason values (422 "Invalid Revoke Reason ID"), confirmed live — unspecified (CRL
+        // Reason code fallback: CERTInext rejects 4 of the 9 spec-documented
+        // reason values (422 "Invalid Revoke Reason ID") — unspecified (CRL
         // 0), ca-compromise (CRL 2), certificate-hold (CRL 6), aa-compromise (CRL 10). The
         // plugin retries exactly once with an accepted fallback for each: cessation-of-
         // operation for unspecified/certificate-hold, key-compromise for the two
@@ -768,8 +764,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Status  = "issued"
                 }));
 
-            // CRL reason 4 (superseded) maps to "superseded", which issues/0026 confirms is
-            // actually accepted live — it is not in the known-rejected fallback set, so even
+            // CRL reason 4 (superseded) maps to "superseded", which is
+            // actually accepted — it is not in the known-rejected fallback set, so even
             // if the CA somehow rejected it with the same "Invalid Revoke Reason ID" message,
             // the plugin must surface the failure as-is rather than retry.
             mock.Setup(c => c.RevokeOrderV2Async(
@@ -788,7 +784,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Regression (issues/0019): revoke 404 after the family is already resolved
+        // A revoke 404 after the family is already resolved
         // must not be reported as a family miss.
         // ---------------------------------------------------------------------------
 
@@ -832,7 +828,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Synchronize (V2, issues/0022) — uses V2 /reports/orders, not V1 GetOrderReport.
+        // Synchronize (V2) — uses V2 /reports/orders, not V1 GetOrderReport.
         // ---------------------------------------------------------------------------
 
         private static OrderReportEntryV2 ReportRow(
@@ -909,8 +905,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Synchronize_V2Enabled_UnrecognizedStatus_FallsBackToLiveTrack()
         {
             var mock = new Mock<ICERTInextClient>();
-            // "Something New" is deliberately not in the known display-string vocabulary
-            // (issues/0022 — the vocabulary is not confirmed exhaustive).
+            // "Something New" is deliberately not in the known display-string vocabulary,
+            // which is not guaranteed exhaustive.
             var row = ReportRow("ord_v2sync_002", "Something New", "Also New");
 
             mock.Setup(c => c.ListOrdersV2Async(
@@ -955,7 +951,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .Returns(AsyncEnumerable(row));
 
-            // Issue 0049: this row has no certificate body, so the bodyless-REVOKED guard would
+            // This row has no certificate body, so the bodyless-REVOKED guard would
             // otherwise downgrade/skip it — a reader that reports the gateway already holds a
             // body keeps this test focused on "revoked rows never attempt a download".
             var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
@@ -973,7 +969,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Synchronize — RevocationDate/RevocationReason (issues/0034). OrderReportEntryV2
+        // Synchronize — RevocationDate/RevocationReason. OrderReportEntryV2
         // carries no revocation reason/date of its own — only a live TrackOrder response's
         // nested `revocation` object does, so these fields require a resolved
         // V2OrderStatusResponse regardless of which code path got there.
@@ -1005,7 +1001,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     }
                 }));
 
-            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // No certificate body on this row — a reader that reports the gateway
             // already holds a body keeps this test focused on revocation-detail population
             // rather than the bodyless-REVOKED guard (covered separately).
             var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
@@ -1050,7 +1046,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     }
                 }));
 
-            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // No certificate body on this row — a reader that reports the gateway
             // already holds a body keeps this test focused on revocation-detail population
             // rather than the bodyless-REVOKED guard (covered separately).
             var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
@@ -1103,7 +1099,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         // ---------------------------------------------------------------------------
         // Synchronize — ProductID preference: report row's ProductCode vs. a lazily-
-        // fetched trackedStatus.ProductVariant (issues/0035). No new live call is added
+        // fetched trackedStatus.ProductVariant. No new live call is added
         // by this preference — it only reads whatever trackedStatus already exists in
         // local scope from one of the three pre-existing lazy-fetch branches (unresolved-
         // status fallback, DCV attempt, revoked-row lookup).
@@ -1130,7 +1126,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     ProductVariant = "ov-ucc"
                 }));
 
-            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // No certificate body on this row — a reader that reports the gateway
             // already holds a body keeps this test focused on ProductID preference rather than
             // the bodyless-REVOKED guard (covered separately).
             var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
@@ -1166,7 +1162,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     ProductVariant = "ov-ucc"
                 }));
 
-            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // No certificate body on this row — a reader that reports the gateway
             // already holds a body keeps this test focused on ProductID preference rather than
             // the bodyless-REVOKED guard (covered separately).
             var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
@@ -1234,7 +1230,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     ProductVariant = null
                 }));
 
-            // Issue 0049: no certificate body on this row — a reader that reports the gateway
+            // No certificate body on this row — a reader that reports the gateway
             // already holds a body keeps this test focused on ProductID preference rather than
             // the bodyless-REVOKED guard (covered separately).
             var plugin = BuildV2Plugin(mock.Object, certDataReader: GatewayHoldsBodyReader());
@@ -1285,8 +1281,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             await plugin.Synchronize(buffer, lastSync, fullSync: false, CancellationToken.None);
 
             // Default lookback is 72h (Constants.ApiV2.DefaultSyncLookbackHours) — the requested
-            // 'from' must be lastSync minus that window, not lastSync itself (issues/0022: the
-            // from/to filter's order-date-vs-issue-date semantics were not confirmed live).
+            // 'from' must be lastSync minus that window, not lastSync itself (the
+            // from/to filter's order-date-vs-issue-date semantics are not documented).
             var expectedFrom = lastSync.AddHours(-Constants.ApiV2.DefaultSyncLookbackHours).ToString("yyyy-MM-dd");
             capturedFrom.Should().Be(expectedFrom);
         }
@@ -1311,10 +1307,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Synchronize — IgnoreExpired (issues/0027 item 3). V1's Synchronize skips expired
-        // certs when IgnoreExpired is configured; SynchronizeV2Async had no equivalent check
-        // even though the report row (OrderReportEntryV2.CertificateExpiryDate) carries the
-        // data needed. CertificateExpiryDate is a string whose format isn't confirmed live,
+        // Synchronize — IgnoreExpired. V1's Synchronize skips expired
+        // certs when IgnoreExpired is configured; SynchronizeV2Async must have an equivalent
+        // check using the report row (OrderReportEntryV2.CertificateExpiryDate). That field's
+        // format is not guaranteed,
         // so an unparseable/missing value must NOT be skipped.
         // ---------------------------------------------------------------------------
 
@@ -1569,11 +1565,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // ValidateCAConnectionInfo — consolidated config (issues/0022).
+        // ValidateCAConnectionInfo — consolidated config.
         //
         // V2 mode: a single ApiUrl (required in both modes) plus OAuthClientId/OAuthClientSecret.
         // V1-only fields (AccountNumber, AuthMode, ApiKey, ...) are NOT required when UseV2Api
-        // is true. ApiUrlV2/ClientId/ClientSecret no longer exist.
+        // is true.
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -1652,7 +1648,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task ValidateCAConnectionInfo_V2_DoesNotRequireV1Credentials()
         {
             // No AccountNumber, AuthMode, or ApiKey at all — V1 credentials must be optional
-            // when UseV2Api is true (issues/0022). Uses a real WireMock server so the live V2
+            // when UseV2Api is true. Uses a real WireMock server so the live V2
             // ping (the only other thing this method does) succeeds.
             using var server = WireMockServer.Start();
             server
@@ -1675,7 +1671,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 ["ApiUrl"] = server.Urls[0],
                 ["OAuthClientId"] = "my-client",
                 ["OAuthClientSecret"] = "my-secret",
-                ["SignerPlace"] = "New York" // required for V2 (issue 0039)
+                ["SignerPlace"] = "New York" // required for V2
                 // No AccountNumber / AuthMode / ApiKey at all.
             };
 
@@ -1729,7 +1725,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 ["ApiUrl"] = server.Urls[0],
                 ["OAuthClientId"] = "my-client",
                 ["OAuthClientSecret"] = "my-secret",
-                ["SignerPlace"] = "New York" // required for V2 (issue 0039)
+                ["SignerPlace"] = "New York" // required for V2
             };
 
             Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
@@ -1739,7 +1735,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // ValidateProductInfo — V2 (issue 0025). ValidateProductInfo builds its own
+        // ValidateProductInfo — V2. ValidateProductInfo builds its own
         // CERTInextClient from connectionInfo rather than using the Moq-injected client (like
         // ValidateCAConnectionInfo), so these tests use a real WireMock server as ApiUrl.
         // ---------------------------------------------------------------------------
@@ -1794,7 +1790,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().NotThrowAsync();
 
-            // Regression guard for issue 0025: in V2 mode this must go through the V2 catalog,
+            // In V2 mode this must go through the V2 catalog,
             // never the V1-only GetProductDetails endpoint.
             server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/GetProductDetails");
             server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/api/certinext/v2/catalog/products");
@@ -1869,10 +1865,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // productTypeID correctness check (issue 0036) — catches a code that exists in the
+        // productTypeID correctness check — catches a code that exists in the
         // catalog but means a different product than the one selected, for both the
-        // explicit-override case and the no-override/fallback case. Pre-fix, ValidateProductInfo
-        // only checked catalog-existence and would have passed all of these.
+        // explicit-override case and the no-override/fallback case. ValidateProductInfo
+        // must reject these, not just check catalog-existence.
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -1962,7 +1958,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Product-selection ambiguity (sandbox-confirmed: two type-13 DV SSL entries,
+        // Product-selection ambiguity (e.g. two type-13 DV SSL entries,
         // "917 SSL DV 1 month" listed before "842 DV SSL Certificate"). No explicit
         // ProductCode + multiple catalog entries sharing the expected productTypeID must not
         // silently pick the first match — only resolve via the connector's DefaultProductCode,
@@ -2056,8 +2052,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task ValidateProductInfo_V2_Succeeds_WhenExactlyOneCatalogEntryMatchesProductTypeId()
         {
-            // Single match for the productTypeID — must resolve automatically, same as before
-            // ambiguity handling was added (regression guard for the single-match case).
+            // Single match for the productTypeID — must resolve automatically.
             using var server = WireMockServer.Start();
             StubV2TokenAndAuthMe(server);
             server
@@ -2081,24 +2076,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Issue 0049 — bodyless-REVOKED guard. A V2 REVOKED record with no certificate
+        // Bodyless-REVOKED guard. A V2 REVOKED record with no certificate
         // body must never reach the gateway buffer / be returned as-is unless
         // ICertificateDataReader.GetExpirationDateByRequestId confirms the gateway
         // already holds a body for that CARequestID (DecideBodylessRevokedRecord).
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task Synchronize_Issue0049_RevokedNoBody_GatewayHoldsBody_EmitsBodylessRevoked()
+        public async Task Synchronize_RevokedNoBody_GatewayHoldsBody_EmitsBodylessRevoked()
         {
             var mock = new Mock<ICERTInextClient>();
-            var row = ReportRow("ord_0049_a", "Revoked", "Certificate Revoked");
+            var row = ReportRow("ord_bodyless_a", "Revoked", "Certificate Revoked");
 
             mock.Setup(c => c.ListOrdersV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .Returns(AsyncEnumerable(row));
 
             var readerMock = new Mock<ICertificateDataReader>();
-            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_a"))
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_bodyless_a"))
                 .Returns(DateTime.UtcNow.AddDays(45));
 
             var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
@@ -2113,21 +2108,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .Which.Status.Should().Be((int)EndEntityStatus.REVOKED);
             records[0].Certificate.Should().BeNullOrEmpty();
 
-            readerMock.Verify(r => r.GetExpirationDateByRequestId("ord_0049_a"), Times.Once);
+            readerMock.Verify(r => r.GetExpirationDateByRequestId("ord_bodyless_a"), Times.Once);
         }
 
         [Fact]
-        public async Task Synchronize_Issue0049_RevokedNoBody_GatewayRowHasNoBody_EmitsFailedNotRevoked()
+        public async Task Synchronize_RevokedNoBody_GatewayRowHasNoBody_EmitsFailedNotRevoked()
         {
             var mock = new Mock<ICERTInextClient>();
-            var row = ReportRow("ord_0049_b", "Revoked", "Certificate Revoked");
+            var row = ReportRow("ord_bodyless_b", "Revoked", "Certificate Revoked");
 
             mock.Setup(c => c.ListOrdersV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .Returns(AsyncEnumerable(row));
 
             var readerMock = new Mock<ICertificateDataReader>();
-            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_b"))
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_bodyless_b"))
                 .Returns((DateTime?)null); // row exists, but the gateway holds no body
 
             var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
@@ -2146,17 +2141,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Synchronize_Issue0049_RevokedNoBody_NoGatewayRow_SkipsRecordEntirely()
+        public async Task Synchronize_RevokedNoBody_NoGatewayRow_SkipsRecordEntirely()
         {
             var mock = new Mock<ICERTInextClient>();
-            var row = ReportRow("ord_0049_c", "Revoked", "Certificate Revoked");
+            var row = ReportRow("ord_bodyless_c", "Revoked", "Certificate Revoked");
 
             mock.Setup(c => c.ListOrdersV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .Returns(AsyncEnumerable(row));
 
             var readerMock = new Mock<ICertificateDataReader>();
-            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_c"))
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_bodyless_c"))
                 .Throws(new ArgumentException("No certificate/CA request exists for the specified request ID."));
 
             var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
@@ -2170,17 +2165,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Synchronize_Issue0049_RevokedNoBody_ReaderThrowsUnexpectedException_SkipsRecord()
+        public async Task Synchronize_RevokedNoBody_ReaderThrowsUnexpectedException_SkipsRecord()
         {
             var mock = new Mock<ICERTInextClient>();
-            var row = ReportRow("ord_0049_d", "Revoked", "Certificate Revoked");
+            var row = ReportRow("ord_bodyless_d", "Revoked", "Certificate Revoked");
 
             mock.Setup(c => c.ListOrdersV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .Returns(AsyncEnumerable(row));
 
             var readerMock = new Mock<ICertificateDataReader>();
-            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_d"))
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_bodyless_d"))
                 .Throws(new InvalidOperationException("gateway database unavailable"));
 
             var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
@@ -2194,10 +2189,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Synchronize_Issue0049_RevokedNoBody_NoCertificateDataReaderInjected_SkipsRecord()
+        public async Task Synchronize_RevokedNoBody_NoCertificateDataReaderInjected_SkipsRecord()
         {
             var mock = new Mock<ICERTInextClient>();
-            var row = ReportRow("ord_0049_e", "Revoked", "Certificate Revoked");
+            var row = ReportRow("ord_bodyless_e", "Revoked", "Certificate Revoked");
 
             mock.Setup(c => c.ListOrdersV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
@@ -2215,23 +2210,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Synchronize_Issue0049_GeneratedRow_NeverConsultsReader()
+        public async Task Synchronize_BodylessRevokedGuard_GeneratedRow_NeverConsultsReader()
         {
             var mock = new Mock<ICERTInextClient>();
-            var row = ReportRow("ord_0049_f", "Order Fulfilled", "Certificate Downloaded");
+            var row = ReportRow("ord_bodyless_f", "Order Fulfilled", "Certificate Downloaded");
 
             mock.Setup(c => c.ListOrdersV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .Returns(AsyncEnumerable(row));
-            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_0049_f", It.IsAny<CancellationToken>()))
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_bodyless_f", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2CertificateDownloadResponse
                 {
-                    OrderId        = "ord_0049_f",
+                    OrderId        = "ord_bodyless_f",
                     CertificatePem = MockCertificateData.FakePemCertificate
                 });
 
-            // Strict with no setups — any call at all fails the test. Confirms the issue-0049
-            // guard is scoped to REVOKED-with-no-body and never touches the GENERATED path.
+            // Strict with no setups — any call at all fails the test. Confirms the bodyless-
+            // REVOKED guard is scoped to REVOKED-with-no-body and never touches the GENERATED path.
             var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
             var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
@@ -2247,23 +2242,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Synchronize_Issue0049_MixedBatch_NeverEmitsBodylessRevokedWithoutReaderConfirmation()
+        public async Task Synchronize_BodylessRevokedGuard_MixedBatch_NeverEmitsBodylessRevokedWithoutReaderConfirmation()
         {
             var mock = new Mock<ICERTInextClient>();
-            var rowHoldsBody = ReportRow("ord_0049_mix_holds", "Revoked", "Certificate Revoked");
-            var rowNoBody    = ReportRow("ord_0049_mix_nobody", "Revoked", "Certificate Revoked");
-            var rowNoRow     = ReportRow("ord_0049_mix_norow", "Revoked", "Certificate Revoked");
+            var rowHoldsBody = ReportRow("ord_mix_holds", "Revoked", "Certificate Revoked");
+            var rowNoBody    = ReportRow("ord_mix_nobody", "Revoked", "Certificate Revoked");
+            var rowNoRow     = ReportRow("ord_mix_norow", "Revoked", "Certificate Revoked");
 
             mock.Setup(c => c.ListOrdersV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .Returns(AsyncEnumerable(rowHoldsBody, rowNoBody, rowNoRow));
 
             var readerMock = new Mock<ICertificateDataReader>();
-            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_mix_holds"))
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_mix_holds"))
                 .Returns(DateTime.UtcNow.AddDays(60));
-            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_mix_nobody"))
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_mix_nobody"))
                 .Returns((DateTime?)null);
-            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_0049_mix_norow"))
+            readerMock.Setup(r => r.GetExpirationDateByRequestId("ord_mix_norow"))
                 .Throws(new ArgumentException("no such request id"));
 
             var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
@@ -2273,22 +2268,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var records = buffer.ToArray();
 
-            // Core invariant (issue 0049): no record with Status=REVOKED and no certificate
+            // Core invariant: no record with Status=REVOKED and no certificate
             // body may reach the gateway buffer unless the reader confirmed the gateway
             // already holds a body for that specific CARequestID.
             records.Should().NotContain(r =>
                 r.Status == (int)EndEntityStatus.REVOKED && string.IsNullOrEmpty(r.Certificate)
-                && r.CARequestID != "ord_0049_mix_holds");
+                && r.CARequestID != "ord_mix_holds");
 
-            records.Should().ContainSingle(r => r.CARequestID == "ord_0049_mix_holds")
+            records.Should().ContainSingle(r => r.CARequestID == "ord_mix_holds")
                 .Which.Status.Should().Be((int)EndEntityStatus.REVOKED);
-            records.Should().ContainSingle(r => r.CARequestID == "ord_0049_mix_nobody")
+            records.Should().ContainSingle(r => r.CARequestID == "ord_mix_nobody")
                 .Which.Status.Should().Be((int)EndEntityStatus.FAILED);
-            records.Should().NotContain(r => r.CARequestID == "ord_0049_mix_norow");
+            records.Should().NotContain(r => r.CARequestID == "ord_mix_norow");
         }
 
         [Fact]
-        public async Task GetSingleRecord_Issue0049_RevokedNoBody_GatewayHoldsBody_ReturnsRevoked()
+        public async Task GetSingleRecord_RevokedNoBody_GatewayHoldsBody_ReturnsRevoked()
         {
             var mock = NewMock();
             mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
@@ -2312,7 +2307,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task GetSingleRecord_Issue0049_RevokedNoBody_GatewayRowHasNoBody_ReturnsFailed()
+        public async Task GetSingleRecord_RevokedNoBody_GatewayRowHasNoBody_ReturnsFailed()
         {
             var mock = NewMock();
             mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
@@ -2344,7 +2339,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task GetSingleRecord_Issue0049_RevokedNoBody_NoGatewayRow_ReturnsFailed()
+        public async Task GetSingleRecord_RevokedNoBody_NoGatewayRow_ReturnsFailed()
         {
             var mock = NewMock();
             mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
@@ -2371,7 +2366,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task GetSingleRecord_Issue0049_RevokedNoBody_NoCertificateDataReaderInjected_ReturnsFailed()
+        public async Task GetSingleRecord_RevokedNoBody_NoCertificateDataReaderInjected_ReturnsFailed()
         {
             var mock = NewMock();
             mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
@@ -2390,7 +2385,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task GetSingleRecord_Issue0049_GeneratedRecord_NeverConsultsReader()
+        public async Task GetSingleRecord_BodylessRevokedGuard_GeneratedRecord_NeverConsultsReader()
         {
             var mock = NewMock();
             mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
@@ -2409,7 +2404,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     CertificatePem = MockCertificateData.FakePemCertificate
                 });
 
-            // Strict with no setups — confirms the issue-0049 guard never touches GENERATED.
+            // Strict with no setups — confirms the bodyless-revoked guard never touches GENERATED.
             var readerMock = new Mock<ICertificateDataReader>(MockBehavior.Strict);
             var plugin = BuildV2Plugin(mock.Object, certDataReader: readerMock.Object);
 

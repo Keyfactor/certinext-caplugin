@@ -661,8 +661,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
 
         /// <summary>
         /// Numeric product type ID from the wire (<see cref="ProductCategoryEntry.ProductTypeId"/>),
-        /// e.g. "13" for DV SSL. UCC (multi-SAN) family values are 15/18/20/21/22 — see
-        /// issues/f3-v2-multi-san-limitation.md. Not populated by every parse path (only set
+        /// e.g. "13" for DV SSL. UCC (multi-SAN) family values are 15/18/20/21/22.
+        /// Not populated by every parse path (only set
         /// where the source shape actually carries a <c>productTypeID</c> field).
         /// </summary>
         [JsonPropertyName("productTypeID")]

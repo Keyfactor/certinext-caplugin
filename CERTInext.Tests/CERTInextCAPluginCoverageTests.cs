@@ -262,7 +262,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
         // A1d-2: renewal within window carries the template's product code onto the
         // RenewCertificateRequest, not just the connector-level DefaultProductCode.
-        // Regression for issue #26 / local issues/0012.
         // ---------------------------------------------------------------------------
 
         [Fact]

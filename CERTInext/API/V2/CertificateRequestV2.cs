@@ -21,11 +21,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     // V2 REST API — Request DTOs
     //
     // Auth: POST {ApiUrl}/oauth/token (form-encoded client_credentials; ApiUrl is the V2 base
-    // URL when UseV2Api=true — issues/0022 config consolidation)
+    // URL when UseV2Api=true)
     // Product code: X-Product-Code header (not in body)
     // Idempotency: Idempotency-Key header sent on order-create/revoke, but the spec doesn't
     // document it for those endpoints and only says "parsed today, enforced in a future release"
-    // for the endpoints (Verify DCV, Domains) it does document it on — see issue 0032.
+    // for the endpoints (Verify DCV, Domains) it does document it on.
     // ---------------------------------------------------------------------------
 
     /// <summary>
@@ -63,7 +63,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         /// (wildcards allowed only for the Wildcard UCC variants). Per the V2 spec's Submit CSR
         /// guidance, these SANs come from the order, not the CSR — the CSR must carry only the
         /// primary domain in CN for UCC orders. Omitted from the wire body for non-UCC products
-        /// (single-domain orders are unaffected). See issues/f3-v2-multi-san-limitation.md.
+        /// (single-domain orders are unaffected).
         /// </summary>
         [JsonPropertyName("additionalDomains")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -73,8 +73,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// <summary>
     /// Organization block for V2 SSL orders. Per the V2 spec's field table (SSL/TLS
     /// Certificates folder description), this block is "Conditional — Mandatory for OV / EV"
-    /// and every OV/EV create example in the spec sends exactly these three fields. Live-
-    /// confirmed (issue 0028): submitting an OV order with no <c>organization</c> block gets
+    /// and every OV/EV create example in the spec sends exactly these three fields. Submitting
+    /// an OV order with no <c>organization</c> block gets
     /// HTTP 422 <c>[EMS-1180] Organization Name cannot be empty</c> — CERTInext resolves the
     /// certificate's organization name server-side from <c>organizationNumber</c>, so an
     /// absent/empty block leaves it with nothing to resolve. There is no separate
@@ -108,7 +108,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// omitting this block entirely defaults auto-renew to ON (1-year, 30-day window) at the CA,
     /// so <c>EnrollV2Async</c> always sends it, driving <see cref="AutoRenew"/>/
     /// <see cref="RenewBeforeDays"/> from the connector's SubscriptionAutoRenew/
-    /// SubscriptionRenewCriteriaDays config (issue 0027 item 2a/2b).
+    /// SubscriptionRenewCriteriaDays config.
     /// </summary>
     public class V2SubscriptionParams
     {
@@ -131,9 +131,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
     /// <summary>
     /// Technical point-of-contact block for V2 orders. Per the V2 spec's field table (SSL/TLS
-    /// Certificates folder description — confirmed identical for the Document Signer and
+    /// Certificates folder description — identical for the Document Signer and
     /// Private PKI folders; <see cref="V2CreatePrivatePkiOrderRequest"/> and
-    /// <see cref="V2CreateSignatureOrderRequest"/> reuse this type, see issue 0033), all four
+    /// <see cref="V2CreateSignatureOrderRequest"/> reuse this type), all four
     /// subfields are documented Optional. Unlike
     /// V1's <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.API.TechnicalPointOfContact"/>,
     /// which sends ISD code and mobile number as two separate fields
@@ -142,7 +142,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin.ComposeV2Phone"/>.
     /// Despite being spec-Optional, <c>EnrollV2Async</c> always populates this block (never omits
     /// it), mirroring V1's fallback-to-Requestor* defaulting so a blank connector config never
-    /// results in a silently-blank contact. See issues/0030-v2-technical-contact-not-sent.md.
+    /// results in a silently-blank contact.
     /// </summary>
     public class V2TechnicalPointOfContact
     {
@@ -193,7 +193,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         /// <summary>
         /// "all" = full notification set, "0" = silent, null = omitted (CA defaults to "all").
         /// See <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin.EnrollV2Async"/>
-        /// for the connector config mapping (issue 0027 item 1a). No default here — relies solely
+        /// for the connector config mapping. No default here — relies solely
         /// on the client's global <c>DefaultIgnoreCondition = WhenWritingNull</c> serializer option
         /// to omit the key when null, the same pattern <see cref="V2SubscriptionParams.RenewBeforeDays"/>
         /// uses.
@@ -245,7 +245,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// Request body for POST /api/certinext/v2/private-pki-certificates (issue 0033). Modelled
+    /// Request body for POST /api/certinext/v2/private-pki-certificates. Modelled
     /// from the V2 spec's "Private PKI Certificates" folder field table ("Field requirements (in
     /// body order)"): <c>variant</c>, <c>requestor.name</c>, <c>requestor.email</c> and
     /// <c>hostname</c> are strictly mandatory ("400 if missing"); everything else is Optional.
@@ -317,7 +317,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// <c>subject</c> block of a V2 Document Signer (signature) order (issue 0033). Modelled from
+    /// <c>subject</c> block of a V2 Document Signer (signature) order. Modelled from
     /// the V2 spec's "Document Signer Certificates" folder field table. Only <see cref="Email"/>
     /// is strictly mandatory ("400 if missing"); the rest are Optional or Conditional on
     /// <c>subjectType</c>:
@@ -403,7 +403,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// Request body for POST /api/certinext/v2/signature-certificates (issue 0033). Modelled from
+    /// Request body for POST /api/certinext/v2/signature-certificates. Modelled from
     /// the V2 spec's "Document Signer Certificates" folder field table. Strictly mandatory ("400
     /// if missing"): <c>subjectType</c>, <c>requestor.name</c>, <c>requestor.email</c>,
     /// <c>subject.email</c>; "The <c>subject.*</c> fields beyond email vary by <c>subjectType</c> -
@@ -412,7 +412,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// <b>Not yet wired into <c>EnrollV2Async</c>.</b> The body shape is fully determined by the
     /// spec, but several of its mandatory/conditional values (<c>subjectType</c>,
     /// <c>subject.email</c>, the per-type <c>subject</c> name/organization fields) have no settled
-    /// source in the Command enrollment inputs yet — see issue 0033. Until that is decided,
+    /// source in the Command enrollment inputs yet. Until that is decided,
     /// <c>EnrollV2Async</c> fails a <c>ProductFamily=signature</c> enrollment fast instead of
     /// sending any body. The DTO and its client overload exist so that wiring is a pure
     /// source-mapping change.
@@ -470,7 +470,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// <summary>
     /// Request body for PUT /api/certinext/v2/{family}-certificates/{orderId}/csr. The spec
     /// documents the identical <c>{ "csr", "attested" }</c> body for the SSL/TLS, Private PKI
-    /// and Document Signer families (issue 0033), so one shape serves all three.
+    /// and Document Signer families, so one shape serves all three.
     /// </summary>
     public class V2SubmitCsrRequest
     {
@@ -491,7 +491,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         /// key-compromise, ca-compromise, affiliation-changed, superseded,
         /// cessation-of-operation, certificate-hold, privilege-withdrawn (plus
         /// aa-compromise on the signature-certificates / private-pki-certificates
-        /// endpoints). Sending camelCase gets HTTP 400 — see issues/0019.
+        /// endpoints). Sending camelCase gets HTTP 400.
         /// </summary>
         [JsonPropertyName("reason")]
         public string Reason { get; set; } = "unspecified";
@@ -503,7 +503,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// <summary>
     /// Request body for POST /api/certinext/v2/{family}-certificates/{orderId}/cancel
     /// ("Cancel Order"). The SSL spec entry marks <c>reason</c> as "required free-text.
-    /// Persisted in the audit log"; an empty reason is rejected with EMS-984 (issue 0039).
+    /// Persisted in the audit log"; an empty reason is rejected with EMS-984.
     /// </summary>
     public class V2CancelOrderRequest
     {
@@ -512,7 +512,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// Outcome of a V2 Cancel Order call that did not throw (issue 0039).
+    /// Outcome of a V2 Cancel Order call that did not throw.
     /// </summary>
     public enum V2CancelOrderOutcome
     {

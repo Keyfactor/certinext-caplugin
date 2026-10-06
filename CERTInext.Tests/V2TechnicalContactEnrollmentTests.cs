@@ -33,9 +33,8 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issues/0030-v2-technical-contact-not-sent.md: the V2 SSL order body
-    /// never carried a <c>technicalPointOfContact</c> block, while V1's equivalent
-    /// (<c>TechnicalPointOfContact</c>) has always populated one from the connector's
+    /// Tests that the V2 SSL order body carries a <c>technicalPointOfContact</c> block, as V1's
+    /// equivalent (<c>TechnicalPointOfContact</c>) does, populated from the connector's
     /// <c>TechnicalContact*</c> config fields (falling back to the corresponding
     /// <c>Requestor*</c> value when blank). These tests exercise <c>EnrollV2Async</c> end-to-end
     /// (through <see cref="CERTInextCAPlugin.Enroll"/>) against a Strict
@@ -203,10 +202,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Requestor.Phone — ISD-code + mobile-number composition (issues/0027 item 5b).
-        // Before the fix, Requestor.Phone sent the raw RequestorMobileNumber only, with
-        // RequestorIsdCode never combined in — unlike TechnicalPointOfContact.Phone above,
-        // which already used ComposeV2Phone. Requestor.Phone must compose the same way.
+        // Requestor.Phone — ISD-code + mobile-number composition.
+        // Requestor.Phone combines RequestorIsdCode with RequestorMobileNumber rather than sending
+        // the raw mobile number only, the same way TechnicalPointOfContact.Phone (above) uses
+        // ComposeV2Phone.
         // ---------------------------------------------------------------------------
 
         [Fact]

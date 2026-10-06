@@ -24,11 +24,11 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0044: a V1 call that gets a non-2xx response whose body is not a CERTInext envelope
+    /// A V1 call that gets a non-2xx response whose body is not a CERTInext envelope
     /// must surface the HTTP status in the exception, not just "unrecognised error body".
     ///
-    /// The body below is the exact one captured live on 2026-09-29 when the V1 GetOrderReport
-    /// call was sent to the V2 base URL (ApiUrl without /emSignHub-API/): the host's default
+    /// The body below is the one returned when the V1 GetOrderReport
+    /// call is sent to the V2 base URL (ApiUrl without /emSignHub-API/): the host's default
     /// Spring Boot 404 body, with no <c>meta</c> and no <c>message</c>.
     /// </summary>
     public class V1NonSuccessResponseTests : IDisposable

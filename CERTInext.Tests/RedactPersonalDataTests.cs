@@ -24,7 +24,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0040: requestor personal data (name, email, phone, org contact fields) must not
+    /// Requestor personal data (name, email, phone, org contact fields) must not
     /// appear in gateway logs unless the connector's <c>LogSensitiveRequestData</c> setting is
     /// explicitly turned on. These tests pin <see cref="CERTInextClient.RedactPersonalData"/> and
     /// <see cref="CERTInextClient.ApplyLoggingRedaction"/> against realistic V1 and V2 order
@@ -253,7 +253,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         // V2 place-order response echoes the agreement as subscriberAgreement with the key
         // "signedPlace" (not the request's "signerPlace"), plus an orderedBy contact. Shape taken
-        // from a live sandbox response (2026-09-29); values here are fictitious.
+        // from a sandbox response; values here are fictitious.
         private const string V2OrderResponseJson =
             "{\"orderId\":\"4898663698\",\"status\":\"pending-approval\",\"productVariant\":\"dv\"," +
             "\"domain\":\"example.com\",\"resolvedProductCode\":\"842\"," +
@@ -387,7 +387,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Issue 0033: V2 Private PKI and Document Signer (signature) order bodies. Built from the
+        // V2 Private PKI and Document Signer (signature) order bodies. Built from the
         // real DTOs so a JSON property rename that would silently defeat the redactor fails here.
         // ---------------------------------------------------------------------------
 
@@ -433,7 +433,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                          "1600 Pennsylvania Avenue NW", "Apt 7", "\"Washington\"", "20500", "Washington, DC"
                      })
             {
-                output.Should().NotContain(raw, $"'{raw}' is subject/requestor personal data (issue 0033)");
+                output.Should().NotContain(raw, $"'{raw}' is subject/requestor personal data");
             }
 
             // subject.email and requestor.email are masked to their domain, not dropped.
@@ -536,7 +536,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Issue 0040 follow-up: email SANs inside SAN arrays (V1 additionalDomains carries every
+        // Email SANs inside SAN arrays (V1 additionalDomains carries every
         // SAN type) and V1 TrackOrder domainVerification keys, which the key/value regex can't reach.
         // ---------------------------------------------------------------------------
 

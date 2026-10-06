@@ -33,11 +33,10 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issues/0029-v2-groupnumber-not-sent.md: the V2 order body never
-    /// carried the connector's configured <c>GroupNumber</c> (V1's <c>DelegationInformation
-    /// .GroupNumber</c> equivalent), so V2 orders always billed to the account's default group
-    /// regardless of the connector setting. These tests exercise <c>EnrollV2Async</c> end-to-end
-    /// (through <see cref="CERTInextCAPlugin.Enroll"/>) against a Strict
+    /// Tests that the V2 order body carries the connector's configured <c>GroupNumber</c>
+    /// (V1's <c>DelegationInformation.GroupNumber</c> equivalent), so V2 orders bill to the
+    /// configured group rather than always the account's default group. These tests exercise
+    /// <c>EnrollV2Async</c> end-to-end (through <see cref="CERTInextCAPlugin.Enroll"/>) against a Strict
     /// <see cref="ICERTInextClient"/> mock, plus direct DTO serialization checks for the new
     /// <see cref="V2CreateSslOrderRequest.GroupNumber"/> property.
     /// </summary>

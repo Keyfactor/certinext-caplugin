@@ -37,10 +37,10 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issue 0046: the V2 SSL UCC path reused <c>BuildSanList</c>, whose
-    /// V1-worded warning claimed non-DNS SANs "are submitted rather than dropped on purpose" even
-    /// though <c>EnrollV2Async</c> always strips them from <c>additionalDomains</c>. The V2 path
-    /// must now log its own "excluded from V2 additionalDomains" message (SAN types only, no
+    /// Tests for non-DNS SAN logging on the V2 SSL UCC path: <c>BuildSanList</c>'s V1-worded
+    /// warning claims non-DNS SANs "are submitted rather than dropped on purpose", which is not
+    /// true for V2 because <c>EnrollV2Async</c> always strips them from <c>additionalDomains</c>.
+    /// The V2 path must log its own "excluded from V2 additionalDomains" message (SAN types only, no
     /// values), V1 must keep its original wording and wire behaviour, and private-pki must be
     /// unaffected.
     ///
@@ -147,12 +147,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_0046", Status = "pending-dcv" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_ucc_nondns", Status = "pending-dcv" });
             mock.Setup(c => c.SubmitCsrV2Async(
-                    It.IsAny<string>(), "ord_0046", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                    It.IsAny<string>(), "ord_ucc_nondns", It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
-            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_0046", It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_0046", Status = "pending-dcv" });
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_ucc_nondns", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_ucc_nondns", Status = "pending-dcv" });
 
             var config = new CERTInextConfig
             {
@@ -200,7 +200,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             // Scoped to the SAN-resolution log sites this path owns. The Enroll-wide "Enrollment
             // attempt started" audit line (shared with V1) logs the raw SAN dictionary and is
-            // out of scope for issue 0046.
+            // out of scope here.
             v2[0].Should().NotContain(EmailSan,
                 "an email SAN value is personal data; the V2 exclusion message logs SAN types only");
             messages.Where(m => m.StartsWith("Resolved ")).Should().ContainSingle()
@@ -224,7 +224,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .Callback<EnrollCertificateRequest, CancellationToken>((req, _) => captured = req)
                 .ReturnsAsync(new EnrollCertificateResponse
                 {
-                    Id = "ORD-0046", Status = "issued", Certificate = MockCertificateData.FakePemCertificate
+                    Id = "ORD-UCC-NONDNS", Status = "issued", Certificate = MockCertificateData.FakePemCertificate
                 });
 
             var productInfo = new EnrollmentProductInfo
@@ -264,12 +264,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<V2CreatePrivatePkiOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, V2CreatePrivatePkiOrderRequest, CancellationToken>((_, req, __) => captured = req)
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_pki_0046", Status = "pending-csr" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_pki_nondns", Status = "pending-csr" });
             mock.Setup(c => c.SubmitCsrV2Async(
-                    Constants.ApiV2.FamilyPrivatePki, "ord_pki_0046", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                    Constants.ApiV2.FamilyPrivatePki, "ord_pki_nondns", It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
-            mock.Setup(c => c.TrackOrderV2Async(Constants.ApiV2.FamilyPrivatePki, "ord_pki_0046", It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_pki_0046", Status = "pending-approval" });
+            mock.Setup(c => c.TrackOrderV2Async(Constants.ApiV2.FamilyPrivatePki, "ord_pki_nondns", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_pki_nondns", Status = "pending-approval" });
 
             var config = new CERTInextConfig
             {

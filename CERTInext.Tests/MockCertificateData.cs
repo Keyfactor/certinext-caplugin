@@ -233,8 +233,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             $@"{{""meta"":{SuccessMetaJson()},""productDetails"":[]}}";
 
         // GET /api/certinext/v2/catalog/products — nested category envelope, the shape
-        // confirmed live against the sandbox account 2026-09-24 (issue 0025 step 0 / issue
-        // 0016). Same structure as the V1 GetProductDetails category envelope, just under a
+        // returned by the sandbox account. Same structure as the V1 GetProductDetails
+        // category envelope, just under a
         // top-level "products" key instead of "productDetails".
         public static string GetCatalogProductsV2NestedJson() =>
             $@"{{
@@ -251,7 +251,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
   ]
 }}";
 
-        // Flat shape documented in the Postman "List Products" saved 200 example — kept as a
+        // Flat shape from the spec's "List Products" example response — kept as a
         // fallback branch in the parser even though the live account returns the nested shape.
         public static string GetCatalogProductsV2FlatJson() =>
             $@"{{
@@ -336,7 +336,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // Reproduces the CERTInext "auto-approved" race: TrackOrder reports a
         // certificateStatusId the client legacy-maps to "issued", but the immediate
         // GetCertificate download failed (cert bytes not generated yet), so no PEM
-        // ever arrived. See issue 0009.
+        // ever arrived.
         public static EnrollCertificateResponse AutoApprovedNoBodyEnrollResponse(string id = null) =>
             new EnrollCertificateResponse
             {
@@ -560,9 +560,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             $@"{{""orderId"":""{orderId}"",""requestId"":""req_xyz001"",""status"":""issued"",""productVariant"":""dv"",""domain"":""example.com"",""_links"":{{""certificate"":{{""href"":""/api/certinext/v2/ssl-certificates/{orderId}/certificate""}}}}}}";
 
         /// <summary>
-        /// V2 track order response — revoked. Nested <c>revocation</c> object shape confirmed
-        /// live against a real revoked order (issues/0034, 2026-09-25) — NOT the flat
-        /// <c>revocationReason</c>/<c>revocationDate</c> shape this fixture previously encoded.
+        /// V2 track order response — revoked. Nested <c>revocation</c> object shape, as seen
+        /// against a real revoked order — NOT the flat
+        /// <c>revocationReason</c>/<c>revocationDate</c> shape.
         /// </summary>
         public static string V2TrackOrderRevokedJson(
             string orderId = "ord_abc001",
@@ -583,8 +583,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             $@"{{""type"":""{type}"",""title"":""{title}"",""status"":{status},""detail"":""{detail}"",""instance"":null}}";
 
         /// <summary>
-        /// V2 DCV challenge response. Matches the confirmed live shape (issues/0037, live
-        /// probe 2026-09-25): exactly <c>token</c> and <c>tokenExpiryDate</c> — no
+        /// V2 DCV challenge response. Matches the real wire shape: exactly <c>token</c> and
+        /// <c>tokenExpiryDate</c> — no
         /// <c>orderNumber</c>/<c>domainName</c>/<c>dcvMethod</c>/<c>fileNameContent</c>.
         /// </summary>
         public static string V2DcvChallengeJson(string token = "emudhra-dcv-abc123", string tokenExpiryDate = "2026-12-31 23:59:59") =>
@@ -606,10 +606,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             "-----BEGIN CERTIFICATE-----\nMIIBfakeBASE64INTERMEDIATE==\n-----END CERTIFICATE-----";
 
         /// <summary>
-        /// V2 <c>/reports/orders</c> page envelope (issues/0022). Rows default to a
+        /// V2 <c>/reports/orders</c> page envelope. Rows default to a
         /// pending-DCV-shaped display-string pair ("Order Accepted" / "Pending for Approver") —
         /// override <paramref name="orderStatus"/>/<paramref name="certificateStatus"/> for other
-        /// scenarios. Field names match the live field table confirmed in issues/0022 Phase 0.
+        /// scenarios. Field names match the live field table.
         /// </summary>
         public static string V2OrdersReportJson(
             int page, int totalPages, string[] orderNumbers,

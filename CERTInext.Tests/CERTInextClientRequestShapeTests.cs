@@ -290,7 +290,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // -----------------------------------------------------------------------
-        // RenewCertificateAsync — productCode resolution (issue #26 / local issues/0012)
+        // RenewCertificateAsync — productCode resolution
         // Renewals go out as a fresh GenerateOrderSSL order; the product code must
         // come from the template (RenewCertificateRequest.ProfileId) when supplied,
         // falling back to the connector's DefaultProductCode only when it is not.

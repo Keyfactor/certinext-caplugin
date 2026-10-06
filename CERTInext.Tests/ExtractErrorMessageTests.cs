@@ -19,7 +19,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0044: parser-level coverage for <c>CERTInextClient.ExtractErrorMessage</c>, which
+    /// Parser-level coverage for <c>CERTInextClient.ExtractErrorMessage</c>, which
     /// builds the V1 non-success exception message.
     /// </summary>
     public class ExtractErrorMessageTests

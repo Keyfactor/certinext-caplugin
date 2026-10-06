@@ -70,7 +70,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // still inside CleanupDelay) at the same time. This is the direct, wall-clock-independent
         // proof that cleanup ran concurrently rather than sequentially — see
         // Dcv_CleanupOfMultipleDomains_RunsConcurrently_NotSequentially, which asserts on this
-        // instead of total elapsed time (0023: elapsed time also includes fixed overhead from the
+        // instead of total elapsed time (elapsed time also includes fixed overhead from the
         // surrounding DCV flow — propagation delay + verification poll interval — unrelated to
         // cleanup concurrency, which made a wall-clock threshold an unreliable proxy).
         private int _inFlightCleanups;

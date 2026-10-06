@@ -223,11 +223,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. " +
                                "\"1\" = full notification set (V1 sends it as-is; V2 maps it to \"all\"). " +
-                               "\"0\" = silent on both V1 and V2 (V2 confirmed live 2026-09-28). Blank/unset " +
+                               "\"0\" = silent on both V1 and V2. Blank/unset " +
                                "stays silent on V1 (sent as \"0\") but is omitted on V2, so the CA's own " +
                                "default (\"all\", not silent) applies instead. Any other value fails V2 " +
-                               "enrollment before any CA call. Default: \"0\" — V2 orders are now silent by " +
-                               "default, matching V1 (previously V2 always sent \"all\").",
+                               "enrollment before any CA call. Default: \"0\" — V2 orders are silent by " +
+                               "default, matching V1.",
                     Hidden = false,
                     DefaultValue = "0",
                     Type = "String"
@@ -453,8 +453,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "OPTIONAL (V2 mode only): during an incremental Synchronize, the plugin queries V2 " +
                                "/reports/orders with a 'from' date of (lastSync minus this many hours) rather than " +
-                               "exactly lastSync. Live probing could not confirm whether the API's from/to filter " +
-                               "brackets order-placement date or issuance date (issues/0022); a lookback window " +
+                               "exactly lastSync. Whether the API's from/to filter " +
+                               "brackets order-placement date or issuance date is not documented; a lookback window " +
                                "ensures an order created before lastSync but issued afterward (e.g. a slow DCV order) " +
                                $"still surfaces on the next incremental pass. Ignored when UseV2Api is false. Default: {Constants.ApiV2.DefaultSyncLookbackHours}.",
                     Hidden = false,
@@ -727,8 +727,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// Default requestor job title / role. Blank by default; when blank, the V2 order's
-        /// <c>requestor.designation</c> field is omitted rather than sent with any default value
-        /// (see issues/0027-v2-request-builder-drops-config-fields.md item 5e).
+        /// <c>requestor.designation</c> field is omitted rather than sent with any default value.
         /// </summary>
         [JsonPropertyName("RequestorDesignation")]
         public string RequestorDesignation { get; set; } = string.Empty;
@@ -780,9 +779,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// "1" = full notification set (V1 sends it as-is; V2 maps to "all"). "0" = silent on
-        /// both V1 and V2 (default; V2 confirmed live 2026-09-28). Blank stays silent on V1 (sent
+        /// both V1 and V2 (default). Blank stays silent on V1 (sent
         /// as "0") but is omitted on V2, letting the CA's own default ("all") apply instead. Any
-        /// other value fails V2 enrollment before any CA call. See issue 0027 item 1a.
+        /// other value fails V2 enrollment before any CA call.
         /// </summary>
         [JsonPropertyName("EmailNotifications")]
         public string EmailNotifications { get; set; } = "0";
@@ -959,8 +958,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// V2 mode only: during an incremental Synchronize, query V2 /reports/orders with a
         /// 'from' date of (lastSync minus this many hours) rather than exactly lastSync — see
-        /// <see cref="Constants.ApiV2.DefaultSyncLookbackHours"/> and issues/0022 for why (the
-        /// from/to filter's order-date-vs-issue-date semantics could not be confirmed live).
+        /// <see cref="Constants.ApiV2.DefaultSyncLookbackHours"/> (the
+        /// from/to filter's order-date-vs-issue-date semantics are not documented).
         /// Ignored when <see cref="UseV2Api"/> is false. Default: 72.
         /// </summary>
         [JsonPropertyName("V2SyncLookbackHours")]

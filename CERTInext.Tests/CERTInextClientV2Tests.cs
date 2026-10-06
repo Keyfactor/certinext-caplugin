@@ -53,7 +53,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private CERTInextClient BuildV2Client(string groupNumber = null) =>
             new CERTInextClient(new CERTInextConfig
             {
-                // A single ApiUrl now serves both V1 and V2 (issues/0022 config consolidation).
+                // A single ApiUrl serves both V1 and V2.
                 ApiUrl        = _baseUrl,
                 AuthMode      = "AccessKey",
                 ApiKey        = "test-v1-key",
@@ -65,7 +65,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 RequestorEmail = "test@example.com",
                 PageSize       = 100,
                 // Unset by default (matches CERTInextConfig.GroupNumber's own default of
-                // string.Empty) — issues/0029 test cases override this explicitly.
+                // string.Empty) — individual test cases override this explicitly.
                 GroupNumber    = groupNumber ?? string.Empty
             });
 
@@ -213,7 +213,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Issue 0054 item #4: a null/blank product code must omit X-Product-Code
+        // A null/blank product code must omit X-Product-Code
         // entirely (spec: "Optional override" on SSL create — an empty override value
         // is not itself valid) rather than sending the header empty.
         // ---------------------------------------------------------------------------
@@ -327,7 +327,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // V2CertificateParams.AdditionalDomains wire serialization (issues/f3-v2-multi-san-limitation.md)
+        // V2CertificateParams.AdditionalDomains wire serialization
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -390,11 +390,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             string requestBody = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates")
                 .RequestMessage.Body;
             requestBody.Should().NotContain("additionalDomains",
-                "single-domain orders must not send additionalDomains at all — preserves the pre-fix wire shape");
+                "single-domain orders must not send additionalDomains at all");
         }
 
         // ---------------------------------------------------------------------------
-        // Issue 0033: family-specific PlaceOrderV2Async overloads
+        // Family-specific PlaceOrderV2Async overloads
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -476,8 +476,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(Constants.ApiV2.FamilySignature)]
         public async Task PlaceOrderV2Async_SslBody_ToNonSslFamily_Throws_AndSendsNothing(string family)
         {
-            // Regression (issue 0033): the SSL overload used to substitute any slug into the URL,
-            // which is how a private-pki/signature template sent the SSL body to the wrong family.
+            // The SSL overload must not substitute any slug into the URL unchecked,
+            // which would let a private-pki/signature template send the SSL body to the wrong family.
             StubV2Token();
 
             using var client = BuildV2Client();
@@ -534,7 +534,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // TrackOrderV2Async — nested `revocation` object (issues/0034)
+        // TrackOrderV2Async — nested `revocation` object
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -557,7 +557,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var result = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
 
             result.Status.Should().Be("revoked");
-            // issues/0034: `revocation` is a nested object — not flat top-level
+            // `revocation` is a nested object — not flat top-level
             // revocationReason/revocationDate properties.
             result.Revocation.Should().NotBeNull();
             result.Revocation!.Status.Should().Be("Certificate Revoked");
@@ -582,7 +582,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             using var client = BuildV2Client();
             var result = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
 
-            // issues/0034: the `revocation` key is absent entirely (not present-but-null) on
+            // The `revocation` key is absent entirely (not present-but-null) on
             // an order that has never been revoked.
             result.Revocation.Should().BeNull();
         }
@@ -656,7 +656,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Regression (issues/0019): 422 message reflects the CA's actual detail
+        // The 422 message must reflect the CA's actual detail
         // rather than presuming "order not in issued state" for every 422.
         // ---------------------------------------------------------------------------
 
@@ -671,7 +671,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .RespondWith(Response.Create()
                     .WithStatusCode(422)
                     .WithHeader("Content-Type", "application/problem+json")
-                    // Observed live sandbox behavior for a revoke attempted while the
+                    // Sandbox behavior for a revoke attempted while the
                     // order is still internally finalizing — no EMS code in this detail.
                     .WithBody(MockCertificateData.V2ProblemDetailsJson(
                         422, "Unprocessable Entity", "Certificate Request still being processed")));
@@ -745,7 +745,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task ResolveAndTrackOrderV2Async_FindsOrderInSslFamily()
         {
             StubV2Token();
-            // SSL family returns 404 → should try private-pki... wait, we want to find it in SSL
+            // SSL family finds the order
             _server
                 .Given(Request.Create()
                     .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
@@ -831,15 +831,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
-        /// Regression (issues/0037): the live GetDcv response on a fresh-domain order came
+        /// The live GetDcv response on a fresh-domain order comes
         /// back as exactly <c>{"tokenExpiryDate":"...","token":"..."}</c> — a shape that
         /// matches neither the spec's worked example (<c>orderNumber</c>/<c>domainName</c>/
-        /// <c>dcvMethod</c>/<c>fileNameContent</c>, the shape the DTO originally modeled) nor
-        /// the spec's prose (<c>method</c>/<c>txtToken</c>). Before the fix, deserializing this
-        /// body left <c>FileNameContent</c> null (unmapped JSON properties are silently
-        /// ignored), which drove the plugin's null-token guard and stranded the order at
+        /// <c>dcvMethod</c>/<c>fileNameContent</c>) nor
+        /// the spec's prose (<c>method</c>/<c>txtToken</c>). Deserializing against the wrong
+        /// shape leaves <c>FileNameContent</c> null (unmapped JSON properties are silently
+        /// ignored), which drives the plugin's null-token guard and strands the order at
         /// EXTERNALVALIDATION forever. This pins the real field name (<c>token</c>) against
-        /// the exact live body captured in issues/0037, verbatim.
+        /// the exact live body, verbatim.
         /// </summary>
         [Fact]
         public async Task GetDcvV2Async_LiveShape_DeserializesTokenField_NotFileNameContent()
@@ -860,7 +860,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.Should().NotBeNull();
             result.Token.Should().Be("D6026954B9EB7D31E3FE8B2194F07087",
-                "the live wire field is 'token', not 'fileNameContent' (issues/0037)");
+                "the live wire field is 'token', not 'fileNameContent'");
             result.TokenExpiryDate.Should().Be("2026-09-27 15:27:00");
         }
 
@@ -1214,7 +1214,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // ListOrdersV2Async (issues/0022) — V2 /reports/orders page enumeration
+        // ListOrdersV2Async — V2 /reports/orders page enumeration
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -1297,7 +1297,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // ListOrdersV2Async — GroupNumber query param (issues/0029)
+        // ListOrdersV2Async — GroupNumber query param
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -1397,7 +1397,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // GetProductDetailsV2Async / ParseProductDetailsV2Response (issue 0025 / 0016)
+        // GetProductDetailsV2Async / ParseProductDetailsV2Response
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -1424,7 +1424,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // GetProductDetailsV2Async — GroupNumber query param (issues/0029)
+        // GetProductDetailsV2Async — GroupNumber query param
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -1476,7 +1476,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // ProductTypeId flattening (issues/f3-v2-multi-san-limitation.md): productTypeID
+        // ProductTypeId flattening: productTypeID
         // must survive every catalog response shape so EnrollV2Async can detect UCC products.
         // ---------------------------------------------------------------------------
 

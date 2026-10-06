@@ -35,16 +35,14 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issues/0027-v2-request-builder-drops-config-fields.md item 1a: the V2
-    /// order body's <c>emailNotifications</c> field was hardcoded <c>"all"</c>, ignoring the
-    /// connector's <c>EmailNotifications</c> config entirely. These tests exercise
+    /// Tests that the V2 order body's <c>emailNotifications</c> field honors the connector's
+    /// <c>EmailNotifications</c> config rather than a hardcoded <c>"all"</c>. These tests exercise
     /// <c>EnrollV2Async</c> end-to-end (through <see cref="CERTInextCAPlugin.Enroll"/>) against a
     /// Strict <see cref="ICERTInextClient"/> mock, plus a direct DTO serialization check for
     /// <see cref="V2CreateSslOrderRequest.EmailNotifications"/>, following the pattern established
     /// by <c>V2SubscriptionEnrollmentTests.cs</c>.
     ///
-    /// Mapping under test (user-decided, see issue 0027's 2026-09-28 real-inbox probe and "Fix
-    /// pass (2026-09-28) — EmailNotifications" section): "1" -&gt; "all", "0" -&gt; "0",
+    /// Mapping under test: "1" -&gt; "all", "0" -&gt; "0",
     /// blank/whitespace/unset -&gt; null (omitted; CA defaults to "all"), any other value
     /// (including the literal "all") fails the enrollment before any CA call.
     /// </summary>
@@ -172,8 +170,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.CARequestID.Should().Be("ord_email_002");
             captured!.EmailNotifications.Should().Be("0",
-                "EmailNotifications=\"0\" must be forwarded as the literal \"0\" — confirmed live " +
-                "(2026-09-28) to suppress order-creation emails on V2, the same as V1");
+                "EmailNotifications=\"0\" must be forwarded as the literal \"0\", which " +
+                "suppresses order-creation emails on V2, the same as V1");
         }
 
         [Fact]

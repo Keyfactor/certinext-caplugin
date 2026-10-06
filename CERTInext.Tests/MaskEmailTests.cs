@@ -19,7 +19,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0040: <see cref="LogSanitizer.MaskEmail"/> is the shared email-masking helper used
+    /// <see cref="LogSanitizer.MaskEmail"/> is the shared email-masking helper used
     /// by both <c>CERTInextCAPlugin</c> (the enrollment-attempt Information log line) and
     /// <c>Client.CERTInextClient</c> (<c>RedactPersonalData</c>) when <c>LogSensitiveRequestData</c>
     /// is off.

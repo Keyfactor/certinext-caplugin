@@ -189,8 +189,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// The product code is sent as the X-Product-Code header.
         /// An Idempotency-Key is generated automatically.
         /// <paramref name="productFamilySlug"/> must be <c>ssl-certificates</c>: this body is the
-        /// SSL/TLS shape, and sending it to another family's endpoint is exactly issue 0033 —
-        /// any other slug throws <see cref="ArgumentException"/> before a request is made. Use
+        /// SSL/TLS shape, and sending it to another family's endpoint would send the wrong body
+        /// shape to that family's create endpoint — any other slug throws
+        /// <see cref="ArgumentException"/> before a request is made. Use
         /// the <see cref="V2CreatePrivatePkiOrderRequest"/> / <see cref="V2CreateSignatureOrderRequest"/>
         /// overloads for the other families.
         /// </summary>
@@ -201,8 +202,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             CancellationToken ct = default);
 
         /// <summary>
-        /// Places a new Private PKI order via POST /api/certinext/v2/private-pki-certificates
-        /// (issue 0033). Same X-Product-Code / Idempotency-Key handling as the SSL overload.
+        /// Places a new Private PKI order via POST /api/certinext/v2/private-pki-certificates.
+        /// Same X-Product-Code / Idempotency-Key handling as the SSL overload.
         ///
         /// A distinct overload rather than a shared base type on the SSL overload's request
         /// parameter, deliberately: every existing Moq Setup/Callback is typed to
@@ -216,8 +217,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             CancellationToken ct = default);
 
         /// <summary>
-        /// Places a new Document Signer order via POST /api/certinext/v2/signature-certificates
-        /// (issue 0033). Same X-Product-Code / Idempotency-Key handling as the SSL overload. Not
+        /// Places a new Document Signer order via POST /api/certinext/v2/signature-certificates.
+        /// Same X-Product-Code / Idempotency-Key handling as the SSL overload. Not
         /// yet called by <c>EnrollV2Async</c> — see <see cref="V2CreateSignatureOrderRequest"/>.
         /// </summary>
         Task<V2CreateOrderResponse> PlaceOrderV2Async(
@@ -264,7 +265,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         /// <summary>
         /// Cancels a not-yet-issued V2 order via POST /api/certinext/v2/{family}/{orderId}/cancel
-        /// with body <c>{ "reason": ... }</c> (issue 0039). An Idempotency-Key is generated
+        /// with body <c>{ "reason": ... }</c>. An Idempotency-Key is generated
         /// automatically. Returns <see cref="V2CancelOrderOutcome.Cancelled"/> on 2xx (spec: 204)
         /// and <see cref="V2CancelOrderOutcome.AlreadyTerminal"/> on 422 (spec: "order already in
         /// a terminal state"); throws on any other failure. Never retries.
@@ -307,7 +308,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, string familySlug, CancellationToken ct = default);
 
         /// <summary>
-        /// Returns the DCV challenge details for one specific domain on a V2 order (issue 0042).
+        /// Returns the DCV challenge details for one specific domain on a V2 order.
         /// GET /api/certinext/v2/{familySlug}/{orderId}/dcv?domain={domain}
         ///
         /// A distinct overload rather than an optional parameter on <see cref="GetDcvV2Async(string,string,CancellationToken)"/>
@@ -315,8 +316,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// argument on a mocked call — every existing 3-argument Setup/Verify for the no-domain
         /// overload would otherwise fail to compile. Parameter order mirrors
         /// <see cref="VerifyDcvV2Async"/>'s established <c>(orderId, domain, familySlug, ct)</c>
-        /// convention. Confirmed live to return a distinct token per SAN on a UCC order
-        /// (v2-api-support-questions.md Finding 9).
+        /// convention. Returns a distinct token per SAN on a UCC order.
         /// </summary>
         Task<V2DcvChallengeResponse> GetDcvV2Async(string orderId, string domain, string familySlug, CancellationToken ct = default);
 
@@ -347,7 +347,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         /// <summary>
         /// Pages through all orders via GET /api/certinext/v2/reports/orders. Used for V2-mode
-        /// Synchronize (issues/0022). Paging is 1-based; <paramref name="pageSize"/> is clamped
+        /// Synchronize. Paging is 1-based; <paramref name="pageSize"/> is clamped
         /// to <see cref="Constants.ApiV2.OrdersReportMaxPageSize"/> (100) server-side.
         /// </summary>
         /// <param name="from">Optional inclusive start date filter (YYYY-MM-DD).</param>

@@ -34,9 +34,8 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for issues/0028-v2-organizationnumber-not-sent.md: the V2
-    /// <c>organization</c> block was never populated for any product variant, and CERTInext
-    /// hard-rejects an OV/EV order that omits it (live-confirmed HTTP 422
+    /// Tests that the V2 <c>organization</c> block is populated for OV/EV product variants;
+    /// CERTInext hard-rejects an OV/EV order that omits it (HTTP 422
     /// <c>[EMS-1180] Organization Name cannot be empty</c>). These tests exercise
     /// <c>EnrollV2Async</c> end-to-end (through <see cref="CERTInextCAPlugin.Enroll"/>) against a
     /// Strict <see cref="ICERTInextClient"/> mock, plus direct DTO serialization checks for the
@@ -62,7 +61,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 PickupRetries     = 0
             });
 
-        // Issue 0059: ProductVariant must agree with ProductId (the plugin now derives/validates
+        // ProductVariant must agree with ProductId (the plugin derives/validates
         // one from the other), so callers pass both explicitly rather than this helper hardcoding
         // a single ProductID ("OV SSL") for every variant under test.
         private static EnrollmentProductInfo MakeV2ProductInfo(string productId, string productCode, string productVariant) =>

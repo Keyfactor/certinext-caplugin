@@ -29,12 +29,11 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0033 regression guard: branching <c>EnrollV2Async</c> on product family must not
+    /// Golden-body guard: branching <c>EnrollV2Async</c> on product family must not
     /// change a single byte of the SSL/TLS create-order body. Each test drives a full V2 SSL
     /// enrollment against a Strict mock, captures the <see cref="V2CreateSslOrderRequest"/> handed
     /// to the client, serializes it with the client's own serializer options, and compares the
-    /// result to a golden JSON string. The golden strings were confirmed to match the output of
-    /// the pre-0033 code (commit 6c12174) — this file compiles and passes unchanged against it.
+    /// result to a golden JSON string.
     /// </summary>
     public class V2SslOrderBodyGoldenTests
     {
@@ -94,7 +93,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task SslOvUccOrder_AllOptionalConfigSet_WireBodyIsByteIdenticalToPre0033()
+        public async Task SslOvUccOrder_AllOptionalConfigSet_WireBodyMatchesGolden()
         {
             var config = new CERTInextConfig
             {
@@ -153,7 +152,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task SslDvOrder_DefaultConfig_WireBodyIsByteIdenticalToPre0033()
+        public async Task SslDvOrder_DefaultConfig_WireBodyMatchesGolden()
         {
             var config = new CERTInextConfig
             {
@@ -163,9 +162,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 OAuthClientSecret = "my-secret",
                 RequestorName     = "Test User",
                 RequestorEmail    = "test@example.com",
-                // Issue 0039: SignerPlace is now required for V2 SSL orders (spec: agreement.signerPlace
+                // SignerPlace is required for V2 SSL orders (spec: agreement.signerPlace
                 // "Conditional - required if `agreement` sent"), so the "default config" fixture sets it
-                // and the expected agreement block below now carries signerPlace.
+                // and the expected agreement block below carries signerPlace.
                 SignerPlace       = "Austin",
                 PickupRetries     = 0
             };

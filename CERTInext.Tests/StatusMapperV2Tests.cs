@@ -30,7 +30,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // ---------------------------------------------------------------------------
 
         // All 11 status values documented by the V2 spec's `/reports/orders` `status`
-        // filter (issues/0031) — every one must map explicitly, not fall through the
+        // filter — every one must map explicitly, not fall through the
         // "unmapped" default arm, even where the resulting disposition (FAILED) is the
         // same as the default's. `unknown-future`/empty/null exercise the true default
         // arm below. `expired` is a deliberate GENERATED mapping (see test below), not a
@@ -50,7 +50,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // Expired-but-not-revoked certs remain issued inventory — mirrors V1's
         // ToRequestDisposition convention and the sync/report path's own "expired" case.
         [InlineData("expired",                               (int)EndEntityStatus.GENERATED)]
-        // Issue 0039: the spec-documented `unknown` means "may still be live" — pending, not FAILED.
+        // The spec-documented `unknown` means "may still be live" — pending, not FAILED.
         [InlineData("unknown",                               (int)EndEntityStatus.EXTERNALVALIDATION)]
         [InlineData("UNKNOWN",                               (int)EndEntityStatus.EXTERNALVALIDATION)]  // case-insensitive
         [InlineData("Unknown",                               (int)EndEntityStatus.EXTERNALVALIDATION)]
@@ -60,7 +60,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Regression (issues/0031): a status string that is NOT one of the 11 spec
+        // A status string that is NOT one of the 11 spec
         // values must still degrade gracefully to FAILED via the default arm, rather
         // than throwing or being silently treated as "still pending". This is the
         // "truly unrecognized" case, distinct from the deliberate FAILED mappings
@@ -69,7 +69,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         [Theory]
         [InlineData("unknown-future")]
-        [InlineData("not-a-real-status")]  // issue 0039: garbage still defaults to FAILED, unlike `unknown`
+        [InlineData("not-a-real-status")]  // garbage still defaults to FAILED, unlike `unknown`
         [InlineData("")]
         [InlineData(null)]
         public void V2StatusToRequestDisposition_UnrecognizedStatus_DefaultsToFailed(string v2Status)
@@ -110,10 +110,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // Regression (issues/0019): every CRL reason code Keyfactor Command can send
+        // Every CRL reason code Keyfactor Command can send
         // to IAnyCAPlugin.Revoke must map to a value in the V2 spec's kebab-case
-        // `reason` enum (docs/reference/specs/CERTInext API v2.postman_collection.json,
-        // "Revoke Certificate"), never to a camelCase string that would get HTTP 400.
+        // `reason` enum ("Revoke Certificate" in the V2 spec), never to a camelCase string that would get HTTP 400.
         // ---------------------------------------------------------------------------
 
         /// <summary>
@@ -156,11 +155,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             SpecRevocationReasonEnum.Should().Contain(v2Reason,
                 $"CRL reason code {crlReason} mapped to '{v2Reason}', which is not one of the V2 spec's " +
-                "kebab-case reason values — sending it would get HTTP 400 (issues/0019).");
+                "kebab-case reason values — sending it would get HTTP 400.");
         }
 
         // ---------------------------------------------------------------------------
-        // V2RevocationReasonToCrlCode (issues/0034) — the inverse of ToV2RevocationReason,
+        // V2RevocationReasonToCrlCode — the inverse of ToV2RevocationReason,
         // used to populate AnyCAPluginCertificate.RevocationReason from a Track Order
         // response's nested revocation.reason string.
         // ---------------------------------------------------------------------------

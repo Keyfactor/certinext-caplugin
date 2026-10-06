@@ -645,8 +645,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         public string ProfileId { get; set; }
 
         /// <summary>
-        /// SANs to carry onto the renewal order. Renewals previously submitted none, so a
-        /// renewed UCC certificate came back holding only its primary domain.
+        /// SANs to carry onto the renewal order; without them a renewed UCC certificate
+        /// would hold only its primary domain.
         /// </summary>
         [JsonPropertyName("sans")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

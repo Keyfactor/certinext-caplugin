@@ -133,13 +133,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         /// intermediate chain PEM -> the leaf's serial"), built the same way V2 enroll/sync
         /// assemble it (<c>AssembleV2CertChain</c>: leaf PEM, then each intermediate PEM
         /// appended after a newline, each block keeping its own BEGIN/END markers and base64
-        /// padding). Whether this specific 2-block combination reproduces the pre-fix
-        /// "(parse-error)" bug depends on the leaf's DER byte length modulo 3 (whether its
-        /// base64 body needs '=' padding) — see
+        /// padding). Whether a specific 2-block combination exercises the base64
+        /// padding path depends on the leaf's DER byte length modulo 3 (whether its base64
+        /// body needs '=' padding) — see
         /// <see cref="ExtractSerialFromPem_LeafPlusTwoIntermediatesChainPem_ReturnsLeafSerial"/>
-        /// for the deterministic reproduction of issue 0050 (matches the live gateway log's
-        /// ChainPemCount=2 evidence). Both must return the leaf's serial, never the
-        /// intermediate's.
+        /// for the three-block (ChainPemCount=2) chain. Both must return the leaf's serial,
+        /// never the intermediate's.
         /// </summary>
         [Fact]
         public void ExtractSerialFromPem_LeafPlusIntermediateChainPem_ReturnsLeafSerial()
@@ -162,13 +161,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         /// <summary>
-        /// Regression for issue 0050: leaf + two intermediates (three PEM blocks total),
-        /// matching the live gateway log evidence (ChainPemCount=2, both V2 reissue
-        /// enrollments logged "SerialNumber=(parse-error)"). Deterministically reproduces
-        /// the pre-fix bug — verified by reverting <c>ExtractSerialFromPem</c> to its
-        /// pre-fix body and confirming this test fails with "(parse-error)" while the other
-        /// tests in this class still pass, across repeated runs (ruling out flakiness from
-        /// the fresh RSA key generated per run).
+        /// Leaf + two intermediates (three PEM blocks total, ChainPemCount=2): the leaf's
+        /// serial must be extracted rather than "(parse-error)", and never an intermediate's.
         /// </summary>
         [Fact]
         public void ExtractSerialFromPem_LeafPlusTwoIntermediatesChainPem_ReturnsLeafSerial()

@@ -28,7 +28,7 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Regression tests for the non-UCC V2 single-domain SAN guard's wildcard-apex exemption:
+    /// Tests for the non-UCC V2 single-domain SAN guard's wildcard-apex exemption:
     /// a wildcard product's CSR/SAN dictionary routinely also carries the bare apex alongside
     /// the wildcard domain itself (e.g. "example.com" alongside "*.example.com"), and the guard
     /// must not reject that apex as an "extra SAN" the way it would for any other non-UCC
@@ -37,7 +37,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     ///
     /// NOTE: these tests only confirm the guard's accept/reject decision. What is actually sent
     /// to the CA for the apex (whether additionalDomains needs it, or CERTInext handles it
-    /// automatically for a wildcard product) is unverified live and unchanged by this fix — see
+    /// automatically for a wildcard product) has not been confirmed against the live API — see
     /// the comment in EnrollV2Async above the guard.
     /// </summary>
     public class V2WildcardEnrollmentTests
@@ -69,7 +69,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 {
                     ["ProductCode"]    = productCode,
                     ["ProductFamily"]  = "ssl",
-                    // No explicit ProductVariant — issue 0059 derives it from ProductID
+                    // No explicit ProductVariant — it is derived from ProductID
                     // ("dv"/"ov"), avoiding a mismatch reject for the OV wildcard test.
                     ["DomainName"]     = domainName
                 }
@@ -133,7 +133,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             StubCatalog(mock, "843", "17"); // OV SSL Wildcard
             StubHappyOrderPlacement(mock);
 
-            // OV requires an organization block (issue 0028).
+            // OV requires an organization block.
             var plugin = BuildV2Plugin(mock.Object, organizationNumber: "ORG-TEST-001");
 
             var result = await plugin.Enroll(
