@@ -19,6 +19,29 @@ The project is split into several focused test classes:
 | `RateLimitRetryTests` | Rate-limit back-off helpers | Pure unit (no I/O) |
 | `ExtractSerialFromPemTests` | PEM serial-number extraction | Pure unit (no I/O) |
 | `RedactCredentialsTests` | Log credential-redaction helper | Pure unit (no I/O) |
+| `SanSubmissionTests` | UCC SAN submission (`dnsname` key, CSR fallback, non-DNS SANs, `SubmitNonDnsSans`) | WireMock + real client |
+| `BlankRequestorWireTests` | Wire body when `RequestorName`/`TechnicalContactName` are blank, enroll and renewal | WireMock + real plugin and client |
+| `SignerFallbackWarningTests` | Warning logged when `SignerName`/`SignerPlace` use the placeholders | WireMock + captured logger |
+| `SignerIpWarningTests` | Warning logged for a non-IP `SignerIp` (value still sent unchanged) | WireMock + captured logger |
+| `PostPlacementTrackOrderFailureTests` | `TrackOrder` failure after order placement returns pending, not an error | WireMock |
+| `PostPlacementDcvFailureTests` | DCV or issuance-wait failure after order placement returns pending (DCV build only) | Moq + fake validator |
+| `RenewalPickupDcvTests` | Renewal pickup is skipped only when DNS-01 DCV is pending; DCV-state check failures never throw | Moq + fake validator (DCV paths DCV build only) |
+| `V1NonSuccessResponseTests` | Non-2xx unrecognised V1 body surfaces the HTTP status in the exception | WireMock |
+| `V1NonSuccessLogRedactionTests` | Unrecognised V1 error body is logged only after redaction | WireMock + captured logger |
+| `ExtractErrorMessageTests` | V1 error-message parsing | Pure unit |
+| `CaErrorTextMaskingTests` | Email addresses in CA error text are masked unless `LogSensitiveRequestData` is on | WireMock + captured logger |
+| `RedactPersonalDataTests` | `RedactPersonalData` / `ApplyLoggingRedaction` against realistic order payloads | Pure unit |
+| `MaskEmailTests` | `LogSanitizer.MaskEmail` | Pure unit |
+| `SanLogMaskingTests` (`LogSanitizerFormatSansTests`, `SanLogMaskingPluginTests`) | Email/URI SAN masking in log lines | Pure unit + captured plugin logger |
+| `ClientPayloadLogRedactionTests` | Redaction at the `PlaceOrder`/`TrackOrder`/`LogApiFailure` log call sites | WireMock + captured logger |
+| `TracePayloadGuardTests` | Trace payload dumps are not built when Trace is disabled | WireMock + captured logger |
+| `CERTInextCAPluginAuditLoggingTests` | "Enrollment attempt started" line with `LogSensitiveRequestData` on and off | Captured logger |
+| `SensitiveRequestDataConfigTests` | `LogSensitiveRequestData` config default and annotation | Pure unit |
+
+The test classes added for 1.0.1 (everything from `SanSubmissionTests` down in the table above) were
+introduced after `release-1.0`. The ones that swap the process-global logger (`CERTInextClient.OverrideLoggerForTests`
+or `LogHandler.Factory`) share the non-parallel `LoggingStateCollection` so they never run alongside each other
+or alongside other tests.
 
 If a test fails in `CERTInextClientTests` or `CERTInextClientRequestShapeTests`, the bug is in
 HTTP transport or request serialisation. If it fails in `CERTInextCAPluginTests` or
@@ -193,7 +216,7 @@ blocks depending on connector configuration.
 | `AutoSecureWww_Blank_SendsZero` | Blank `AutoSecureWww` still sends `orderDetails.autoSecureWWW="0"` |
 | `ValidityDays_OnRequest_OverridesConnectorDefault` | `ValidityDays` template parameter overrides the connector `SubscriptionValidityYears` |
 | `RenewCertificateAsync_ProfileIdSet_UsesTemplateProductCode` | Renewal uses the template product code over the connector default |
-| `RenewCertificateAsync_ProfileIdBlank_FallsBackToConnectorDefault` | Blank renewal `ProfileId` falls back to `DefaultProductCode` |
+| `RenewCertificateAsync_ProfileIdBlank_FallsBackToConnectorDefault` | Blank `ProfileId` on a direct client call falls back to `DefaultProductCode` (`Enroll` itself never passes a blank code) |
 | `RenewCertificateAsync_SendsFullOrderDetails_FromConnectorConfig` | Renewal body carries every field a new order does (groupNumber, autoSecureWWW, organizationDetails, requestor, subscription, SANs, `poc*`, CSR, agreement, remarks) |
 | `RenewCertificateAsync_NoValidityOnRequest_UsesConnectorValidity` | Renewal validity comes from `SubscriptionValidityYears`, not a hard-coded `1` |
 | `RenewCertificateAsync_ValidityDays_ConvertsToYears` | Renewal `ValidityDays` is rounded up to whole years |
