@@ -74,7 +74,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                "`technicalPointOfContact.pocFirstName` / `pocLastName` on every SSL order " +
                                "(new and renewal). The name is split on the first whitespace: the first word " +
                                "is the first name and the rest is the last name; a single-word name is sent " +
-                               "in both. Defaults to the configured RequestorName when blank.",
+                               "in both. Defaults to the configured RequestorName when blank. If no contact name or " +
+                               "no email resolves (including from RequestorName/RequestorEmail), the whole " +
+                               "technicalPointOfContact block is omitted from the order and a Warning is logged, " +
+                               "since CERTInext requires both inside the block.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -82,7 +85,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.Config.TechnicalContactEmail] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Email sent in the `technicalPointOfContact.pocEmail` field of every " +
-                               "SSL order. Defaults to the configured RequestorEmail when blank.",
+                               "SSL order. Defaults to the configured RequestorEmail when blank. If no contact " +
+                               "name or no email resolves (including from RequestorName/RequestorEmail), the whole " +
+                               "technicalPointOfContact block is omitted from the order and a Warning is logged, " +
+                               "since CERTInext requires both inside the block.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -177,22 +183,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.SignerPlace] = new PropertyConfigInfo
                 {
-                    Comments = "City or location of the subscriber agreement signer. Required by CERTInext for all orders.",
+                    Comments = "City or location of the subscriber agreement signer. Required by CERTInext for all orders. " +
+                               "A template SignerPlace overrides it. If neither is set, the placeholder \"Gateway\" is " +
+                               "sent and a Warning is logged; set it so the agreement audit record is accurate.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.SignerIp] = new PropertyConfigInfo
                 {
-                    Comments = "IP address of the subscriber agreement signer. Required by CERTInext for all orders.",
+                    Comments = "IP address of the subscriber agreement signer. Required by CERTInext for all orders. " +
+                               "A template SignerIp overrides it. If neither is set, the placeholder 127.0.0.1 is sent " +
+                               "and a Warning is logged. A value that is not an IP address is still sent unchanged, " +
+                               "with a Warning.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 ["DefaultProductCode"] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Default numeric product code used when not specified at template level. " +
-                               "Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). " +
+                    Comments = "OPTIONAL, legacy: connector-level fallback product code. Enroll and renewal do not " +
+                               "use it: the template must resolve a product code (ProductCode, ProfileId, or the " +
+                               "built-in code for the selected product name), otherwise enrollment is rejected with " +
+                               "\"Template parameter 'ProfileId' is required.\" Set ProductCode on the template instead. " +
+                               "Product codes are provided by eMudhra. " +
                                "Retrieve available codes from Integrations → APIs → GetProductDetails.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -218,7 +232,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.Config.SubscriptionValidityYears] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Default validity in years for SSL orders. \"1\", \"2\", or \"3\". " +
-                               "Override per template via the ValidityYears product parameter. Default: \"1\".",
+                               "Used when the template sets neither ValidityYears nor ValidityDays; a template " +
+                               "value overrides it. Default: \"1\".",
                     Hidden = false,
                     DefaultValue = "1",
                     Type = "String"
@@ -280,8 +295,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.Enabled] = new PropertyConfigInfo
                 {
-                    Comments = "Flag to Enable or Disable gateway functionality. Disabling is primarily used to allow " +
-                               "creation of the CA connector prior to configuration information being available.",
+                    Comments = "Enables or disables the CA connector. Set to false to create the connector record " +
+                               "before credentials are available. Default: true.",
                     Hidden = false,
                     DefaultValue = true,
                     Type = "Boolean"
@@ -292,15 +307,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                "phone, and other organization contact details) and full CA request/response payloads " +
                                "are written to the gateway logs: the Trace-level order request/response bodies and the " +
                                "API-failure response bodies are left unredacted (beyond the credential scrubbing that " +
-                               "always applies), and the Information-level enrollment-attempt log line includes the " +
-                               "requestor's name and email in full. This is meant for temporary use while verifying a " +
-                               "new deployment — confirming exactly what was sent to the CA and that the order " +
-                               "succeeded — and should be turned back off once verification is complete. When false " +
-                               "(default), personal data fields are redacted to '***REDACTED***' (email is masked but " +
-                               "keeps its domain, e.g. 'j***@example.com'), email SAN values in log lines are masked " +
-                               "the same way, and the enrollment log line omits the requester name entirely. " +
-                               "Credentials (access keys, authKey digests, OAuth secrets, tokens) are always redacted " +
-                               "regardless of this setting. Default: false.",
+                               "always applies), SAN values and CA error text are logged unmasked, and the " +
+                               "Information-level enrollment-attempt log line includes the requestor's name and email " +
+                               "in full. A startup Warning is logged whenever it is on. This is meant for temporary " +
+                               "use while verifying a new deployment — confirming exactly what was sent to the CA and " +
+                               "that the order succeeded — and should be turned back off once verification is " +
+                               "complete. When false (default), personal data fields are redacted to '***REDACTED***' " +
+                               "(email is masked but keeps its domain, e.g. 'j***@example.com'), email SAN values and " +
+                               "email addresses in CA error text are masked the same way, mailto:/sip:-style URI SANs " +
+                               "are masked and 'user:pw@' userinfo in URI SANs is replaced with '***', and the " +
+                               "enrollment log line omits the requester name entirely. DNS and IP SANs are always " +
+                               "logged in full. Credentials (the values of the authKey, client_secret, apiKey, " +
+                               "accessKey and password fields, and Authorization header lines) are always redacted " +
+                               "from logged request/response bodies regardless of this setting. Default: false.",
                     Hidden = false,
                     DefaultValue = false,
                     Type = "Boolean"
@@ -309,10 +328,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "OPTIONAL: Number of times Enroll() will poll CERTInext to download the certificate after a " +
                                "successful order submission. If the certificate has not issued within this window it is " +
-                               "picked up during the next synchronization instead. Set to 0 to disable the wait. " +
+                               "picked up during the next synchronization instead. Set to 0 to disable the wait; values " +
+                               $"are clamped to 0-{Constants.Pickup.MaxRetries}. " +
                                $"Default: {Constants.Pickup.DefaultRetries}. NOTE: CERTInext issues OV/EV certificates " +
                                "asynchronously (organization verification, minutes to hours), so those typically exhaust " +
-                               "the wait and are returned pending regardless of this value.",
+                               "the wait and are returned pending regardless of this value. On the DCV build, an order that " +
+                               "DNS-01 DCV engages for uses the DCV waits (DcvWaitForIssuanceSeconds) instead of this pickup.",
                     Hidden = false,
                     DefaultValue = Constants.Pickup.DefaultRetries,
                     Type = "Number"
@@ -324,7 +345,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                "worker thread. If the duration is too long the request may time out, so target a total well " +
                                $"under ~90s. As a safety backstop the plugin additionally caps the effective total at " +
                                $"{Constants.Pickup.MaxTotalWaitSeconds}s regardless of how PickupRetries/PickupDelay are set, " +
-                               $"reducing the retry count to fit. Default: {Constants.Pickup.DefaultDelaySeconds} " +
+                               $"reducing the retry count to fit. Values are clamped to 1-{Constants.Pickup.MaxDelaySeconds}; " +
+                               $"a non-positive value uses the default. Default: {Constants.Pickup.DefaultDelaySeconds} " +
                                $"(with default retries this yields a ~{Constants.Pickup.InitialDelaySeconds + Constants.Pickup.DefaultRetries * Constants.Pickup.DefaultDelaySeconds}s ceiling).",
                     Hidden = false,
                     DefaultValue = Constants.Pickup.DefaultDelaySeconds,
@@ -332,17 +354,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.DcvEnabled] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) " +
+                    Comments = "OPTIONAL (DCV build only): When true, the gateway will perform DNS-based Domain Control Validation (DCV) " +
                                "during enrollment for orders that require it, using the configured DNS provider plugin. " +
                                "Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. " +
-                               "Default: false.",
+                               "On the default (non-DCV) build there is no DNS validation support, so setting this " +
+                               "only logs a startup Warning. Default: false.",
                     Hidden = false,
                     DefaultValue = false,
                     Type = "Boolean"
                 },
                 [Constants.Config.DcvTxtRecordTemplate] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Format string for the DNS TXT record hostname used during DCV. " +
+                    Comments = "OPTIONAL (DCV build only): Format string for the DNS TXT record hostname used during DCV. " +
                                "{0} is replaced with the domain name being validated. " +
                                $"Default: {Constants.Dcv.DefaultTxtRecordTemplate}",
                     Hidden = false,
@@ -351,7 +374,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.DcvPropagationDelaySeconds] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext " +
+                    Comments = "OPTIONAL (DCV build only): Seconds to wait after publishing the DNS TXT record before asking CERTInext " +
                                "to verify it. Increase for zones with slow propagation. Default: 30.",
                     Hidden = false,
                     DefaultValue = 30,
@@ -359,7 +382,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.DcvTimeoutMinutes] = new PropertyConfigInfo
                 {
-                    Comments = $"OPTIONAL: Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) " +
+                    Comments = $"OPTIONAL (DCV build only): Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) " +
                                $"before timing out the enrollment. Can also be set via the {Constants.Config.DcvTimeoutMinutesEnvVar} " +
                                $"environment variable; the env var takes precedence when both are set. Default: 10.",
                     Hidden = false,
@@ -368,7 +391,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.DcvWaitForChallengeSeconds] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() for CERTInext to " +
+                    Comments = "OPTIONAL (DCV build only): How long (seconds) the plugin will wait inside Enroll() for CERTInext to " +
                                "expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under " +
                                "concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL " +
                                "before the slot appears. Without this wait, the plugin's initial TrackOrder check " +
@@ -382,7 +405,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.DcvWaitForIssuanceSeconds] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV " +
+                    Comments = "OPTIONAL (DCV build only): How long (seconds) the plugin will wait inside Enroll() after DCV " +
                                "verifies for CERTInext to finish generating the certificate. CERTInext issuance " +
                                "is async — DCV may be verified but the cert PEM isn't yet available for download. " +
                                "Without this wait, Enroll() returns a pending result and the issued cert is " +
@@ -396,7 +419,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.DcvSyncMaxOrderAgeHours] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: During synchronization, only pending DV orders younger than this many hours " +
+                    Comments = "OPTIONAL (DCV build only): During synchronization, only pending DV orders younger than this many hours " +
                                "are eligible to be driven through DCV. This keeps a sync pass fast when there is a " +
                                "large backlog of old, never-completing pending orders (e.g. abandoned orders or domains " +
                                "outside the configured DNS provider's zone): they age out and are simply reported as " +
@@ -409,7 +432,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.DcvSyncMaxPerPass] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV " +
+                    Comments = "OPTIONAL (DCV build only): Maximum number of pending DV orders the plugin will attempt to drive through DCV " +
                                "in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; " +
                                "remaining pending orders are reported as-is and picked up on a later pass (the per-minute " +
                                $"incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: {Constants.Dcv.DefaultSyncMaxPerPass}.",
@@ -447,7 +470,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.ValidityYears] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Subscription validity in years: 1, 2, or 3. Default: 1. " +
+                    Comments = "OPTIONAL: Subscription validity in years: 1, 2, or 3. A value on the template " +
+                               "overrides the connector's SubscriptionValidityYears; precedence is ValidityYears, then the " +
+                               "deprecated ValidityDays (rounded up to whole years), then SubscriptionValidityYears. " +
+                               "The default of 1 applies if the template is saved with it, so set ValidityYears " +
+                               "explicitly on templates that need a different term. Default: 1. " +
                                "Note: CERTInext validates per 390-day certificate within the subscription; " +
                                "the 'validity' field in the order is the subscription term, not certificate lifetime.",
                     Hidden = false,
@@ -457,7 +484,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.EnrollmentParam.ValidityDays] = new PropertyConfigInfo
                 {
                     Comments = "DEPRECATED: Use ValidityYears instead. " +
-                               "If set, value is divided by 365 and rounded up to get the subscription year count.",
+                               "Used only when ValidityYears is not set: the value is divided by 365 and rounded up " +
+                               "to get the subscription year count.",
                     Hidden = false,
                     DefaultValue = 365,
                     Type = "Number"
@@ -472,16 +500,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.RequesterName] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Default requester name to include in the enrollment request. " +
-                               "Used when no requester name can be derived from the subject.",
+                    Comments = "OPTIONAL: Per-template override for the requestor name; " +
+                               "when blank, the connector's RequestorName is used.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.RequesterEmail] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Default requester email address. " +
-                               "Used when no email can be derived from the subject.",
+                    Comments = "OPTIONAL: Per-template override for the requestor email; " +
+                               "when blank, the connector's RequestorEmail is used.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -514,7 +542,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.EnrollmentParam.SignerName] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Per-template subscriber agreement signer name. " +
-                               "Falls back to the connector-level RequestorName if omitted.",
+                               "Falls back to the connector-level RequestorName if omitted, then to the placeholder " +
+                               "\"Keyfactor Gateway\" (Warning logged).",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -522,7 +551,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.EnrollmentParam.SignerPlace] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Per-template signer city/location. " +
-                               "Falls back to the connector-level SignerPlace if omitted.",
+                               "Falls back to the connector-level SignerPlace if omitted, then to the placeholder " +
+                               "\"Gateway\" (Warning logged).",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -530,7 +560,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.EnrollmentParam.SignerIp] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Per-template signer IP address. " +
-                               "Falls back to the connector-level SignerIp if omitted.",
+                               "Falls back to the connector-level SignerIp if omitted, then to the placeholder " +
+                               "127.0.0.1 (Warning logged). A value that is not an IP address is sent unchanged, " +
+                               "with a Warning.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -656,8 +688,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public string SignerIp { get; set; } = string.Empty;
 
         /// <summary>
-        /// Default product code used when the template-level ProductCode is not specified.
-        /// Product codes are numeric strings provided by eMudhra (e.g. "844" for DV SSL 1-year).
+        /// Legacy connector-level fallback product code. <c>Enroll</c> and renewal never reach it:
+        /// <see cref="Models.EnrollmentParams.ProductCode"/> resolves ProductCode, then ProfileId, then the
+        /// built-in code for the selected product name, and <c>Enroll</c> rejects the request when that is blank.
+        /// It is consulted only by direct client calls that supply no product code. Product codes are numeric
+        /// strings provided by eMudhra (e.g. "838" for DV SSL on production, "842" on the US sandbox).
         /// </summary>
         [JsonPropertyName("DefaultProductCode")]
         public string DefaultProductCode { get; set; } = string.Empty;
@@ -744,16 +779,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// OPTIONAL diagnostic escape hatch. When true, full CA request/response payloads are
-        /// logged at Trace (beyond the credential scrubbing that always applies), and the
-        /// enrollment-attempt Information log line includes the requestor's name and email in
-        /// full. This writes personal data belonging to whoever placed the order — name, email,
-        /// phone, and other organization contact fields — into the gateway's log files. Intended
-        /// only for temporary use while verifying a new deployment; turn it back off once
-        /// verification is complete. When false (default), personal-data fields are replaced with
-        /// "***REDACTED***" (email values are masked but keep their domain, e.g.
-        /// "j***@example.com"), email SAN values in log lines are masked the same way, and the
-        /// enrollment log line omits the requester name entirely. Credentials (access keys,
-        /// authKey digests, OAuth secrets, tokens) are always redacted regardless of this setting.
+        /// logged at Trace (beyond the credential scrubbing that always applies), SAN values and CA
+        /// error text are logged unmasked, and the enrollment-attempt Information log line includes
+        /// the requestor's name and email in full. This writes personal data belonging to whoever
+        /// placed the order — name, email, phone, and other organization contact fields — into the
+        /// gateway's log files, so a startup Warning is logged whenever it is on. Intended only for
+        /// temporary use while verifying a new deployment; turn it back off once verification is
+        /// complete. When false (default), personal-data fields are replaced with "***REDACTED***"
+        /// (email values are masked but keep their domain, e.g. "j***@example.com"), email SAN values
+        /// and email addresses in CA error text are masked the same way, mailto:/sip:-style URI SANs
+        /// are masked and "user:pw@" URI userinfo is replaced with "***", and the enrollment log line
+        /// omits the requester name entirely. DNS and IP SANs are always logged in full. Credentials
+        /// (the values of the authKey, client_secret, apiKey, accessKey and password fields, and
+        /// Authorization header lines) are always redacted from logged bodies regardless of this setting.
         /// Default: false.
         /// </summary>
         [JsonPropertyName("LogSensitiveRequestData")]
