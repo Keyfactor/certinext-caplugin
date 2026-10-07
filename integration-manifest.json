@@ -35,27 +35,27 @@
                 },
                 {
                     "name": "GroupNumber",
-                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `delegationInformation.groupNumber` field of every SSL order so the order is routed to the correct account group. Some accounts will queue orders for additional review when this field is omitted. Available in the CERTInext portal under Delegation \u2192 Groups."
+                    "description": "OPTIONAL: CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `orderDetails.groupNumber` field of every SSL order (new and renewal) so the order is routed to the configured account group. When blank, CERTInext uses the account's default group. Available in the CERTInext portal under Delegation \u2192 Groups."
                 },
                 {
                     "name": "OrganizationNumber",
-                    "description": "STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric CERTInext organization number for a pre-vetted organization (e.g. your company's pre-vetted entry). When set, every SSL order is submitted with `organizationDetails.preVetting=\"1\"` and the configured `organizationNumber`, telling CERTInext to skip the manual organization-vetting queue. Without this value, orders are placed without any organizationDetails block and CERTInext may park them in `Pending System RA` for extended manual review (observed: tens of hours). Available in the CERTInext portal under Organizations \u2192 Pre-vetted Organizations."
+                    "description": "OPTIONAL, strongly recommended for OV/EV: numeric CERTInext organization number for a pre-vetted organization. When set, every SSL order is submitted with `organizationDetails.preVetting=\"1\"` and this `organizationNumber`, so CERTInext can reuse that organization's pre-verified domains without fresh DCV. Leave blank to omit `organizationDetails`. Available in the CERTInext portal under Organizations → Pre-vetted Organizations."
                 },
                 {
                     "name": "TechnicalContactName",
-                    "description": "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every SSL order. Defaults to the configured RequestorName when blank. Some product configurations require a TPoC to be present; omitting it can cause CERTInext to park orders awaiting manual completion of the field."
+                    "description": "OPTIONAL: Technical point of contact name, sent as `technicalPointOfContact.pocFirstName` / `pocLastName` on every SSL order (new and renewal). The name is split on the first whitespace: the first word is the first name and the rest is the last name; a single-word name is sent in both. Defaults to the configured RequestorName when blank. If no contact name or no email resolves (including from RequestorName/RequestorEmail), the whole technicalPointOfContact block is omitted from the order and a Warning is logged, since CERTInext requires both inside the block."
                 },
                 {
                     "name": "TechnicalContactEmail",
-                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank."
+                    "description": "OPTIONAL: Email sent in the `technicalPointOfContact.pocEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank. If no contact name or no email resolves (including from RequestorName/RequestorEmail), the whole technicalPointOfContact block is omitted from the order and a Warning is logged, since CERTInext requires both inside the block."
                 },
                 {
                     "name": "TechnicalContactIsdCode",
-                    "description": "OPTIONAL: International dialing code for the TPoC phone number. Defaults to the configured RequestorIsdCode when blank."
+                    "description": "OPTIONAL: International dialing code for the technical contact phone number, sent as `technicalPointOfContact.pocIsdCode`. Defaults to the configured RequestorIsdCode when blank."
                 },
                 {
                     "name": "TechnicalContactMobileNumber",
-                    "description": "OPTIONAL: Mobile number for the TPoC (digits only). Defaults to the configured RequestorMobileNumber when blank."
+                    "description": "OPTIONAL: Mobile number for the technical contact (digits only), sent as `technicalPointOfContact.pocMobileNumber`. Defaults to the configured RequestorMobileNumber when blank."
                 },
                 {
                     "name": "AuthMode",
@@ -95,15 +95,15 @@
                 },
                 {
                     "name": "SignerPlace",
-                    "description": "City or location of the subscriber agreement signer. Required by CERTInext for all orders."
+                    "description": "City or location of the subscriber agreement signer. Required by CERTInext for all orders. A template SignerPlace overrides it. If neither is set, the placeholder \"Gateway\" is sent and a Warning is logged; set it so the agreement audit record is accurate."
                 },
                 {
                     "name": "SignerIp",
-                    "description": "IP address of the subscriber agreement signer. Required by CERTInext for all orders."
+                    "description": "IP address of the subscriber agreement signer. Required by CERTInext for all orders. A template SignerIp overrides it. If neither is set, the placeholder 127.0.0.1 is sent and a Warning is logged. A value that is not an IP address is still sent unchanged, with a Warning."
                 },
                 {
                     "name": "DefaultProductCode",
-                    "description": "OPTIONAL: Default numeric product code used when not specified at template level. Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). Retrieve available codes from Integrations \u2192 APIs \u2192 GetProductDetails."
+                    "description": "OPTIONAL, legacy: connector-level fallback product code. Enroll and renewal do not use it: the template must resolve a product code (ProductCode, ProfileId, or the built-in code for the selected product name), otherwise enrollment is rejected with \"Template parameter 'ProfileId' is required.\" Set ProductCode on the template instead. Product codes are provided by eMudhra. Retrieve available codes from Integrations → APIs → GetProductDetails."
                 },
                 {
                     "name": "AccountingModel",
@@ -115,7 +115,7 @@
                 },
                 {
                     "name": "SubscriptionValidityYears",
-                    "description": "OPTIONAL: Default validity in years for SSL orders. \"1\", \"2\", or \"3\". Override per template via the ValidityYears product parameter. Default: \"1\"."
+                    "description": "OPTIONAL: Default validity in years for SSL orders. \"1\", \"2\", or \"3\". Used when the template sets neither ValidityYears nor ValidityDays; a template value overrides it. Default: \"1\"."
                 },
                 {
                     "name": "SubscriptionAutoRenew",
@@ -127,11 +127,15 @@
                 },
                 {
                     "name": "AutoSecureWww",
-                    "description": "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\"."
+                    "description": "OPTIONAL: Sent as `orderDetails.autoSecureWWW` on every SSL order (new and renewal). If \"1\", CERTInext automatically adds the `www.` variant of the primary domain as an additional SAN, which must also pass domain validation. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\"."
                 },
                 {
                     "name": "IgnoreExpired",
                     "description": "If true, expired certificates will be skipped during synchronization. Default: false."
+                },
+                {
+                    "name": "SubmitNonDnsSans",
+                    "description": "If true (default), SANs that are not DNS names (IP address, email, URI) are submitted to CERTInext in additionalDomains along with the DNS names. CERTInext registers them verbatim as order domains and they cannot pass domain validation, so such an order will not issue until they are removed — but nothing the subscriber requested is dropped silently. Set to false to submit DNS names only, which restores the pre-1.0.1 behaviour: the order issues, but the certificate will not contain the non-DNS names. Default: true."
                 },
                 {
                     "name": "PageSize",
@@ -142,36 +146,48 @@
                     "description": "Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true."
                 },
                 {
+                    "name": "LogSensitiveRequestData",
+                    "description": "OPTIONAL diagnostic escape hatch. When true, requestor personal data (name, email, phone, and other organization contact details) and full CA request/response payloads are written to the gateway logs: the Trace-level order request/response bodies and the API-failure response bodies are left unredacted (beyond the credential scrubbing that always applies), SAN values and CA error text are logged unmasked, and the Information-level enrollment-attempt log line includes the requestor's name and email in full. A startup Warning is logged whenever it is on. This is meant for temporary use while verifying a new deployment — confirming exactly what was sent to the CA and that the order succeeded — and should be turned back off once verification is complete. When false (default), personal data fields are redacted to '***REDACTED***' (email is masked but keeps its domain, e.g. 'j***@example.com'), email SAN values and email addresses in CA error text are masked the same way, mailto:/sip:-style URI SANs are masked and 'user:pw@' userinfo in URI SANs is replaced with '***', and the enrollment log line omits the requester name entirely. DNS and IP SANs are always logged in full. Credentials (the values of the authKey, client_secret, apiKey, accessKey and password fields, and Authorization header lines) are always redacted from logged request/response bodies regardless of this setting. Default: false."
+                },
+                {
+                    "name": "PickupRetries",
+                    "description": "OPTIONAL: Number of times Enroll() will poll CERTInext to download the certificate after a successful order submission. If the certificate has not issued within this window it is picked up during the next synchronization instead. Set to 0 to disable the wait; values are clamped to 0-30. Default: 5. NOTE: CERTInext issues OV/EV certificates asynchronously (organization verification, minutes to hours), so those typically exhaust the wait and are returned pending regardless of this value. On the DCV build, an order that DNS-01 DCV engages for uses the DCV waits (DcvWaitForIssuanceSeconds) instead of this pickup."
+                },
+                {
+                    "name": "PickupDelay",
+                    "description": "OPTIONAL: Number of seconds between certificate-pickup retries. PickupRetries times this delay (plus a short initial delay) is the maximum time an enrollment call occupies a Command worker thread. If the duration is too long the request may time out, so target a total well under ~90s. As a safety backstop the plugin additionally caps the effective total at 180s regardless of how PickupRetries/PickupDelay are set, reducing the retry count to fit. Values are clamped to 1-60; a non-positive value uses the default. Default: 10 (with default retries this yields a ~55s ceiling)."
+                },
+                {
                     "name": "DcvEnabled",
-                    "description": "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. Default: false."
+                    "description": "OPTIONAL (DCV build only): When true, the gateway will perform DNS-based Domain Control Validation (DCV) during enrollment for orders that require it, using the configured DNS provider plugin. Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. On the default (non-DCV) build there is no DNS validation support, so setting this only logs a startup Warning. Default: false."
                 },
                 {
                     "name": "DcvTxtRecordTemplate",
-                    "description": "OPTIONAL: Format string for the DNS TXT record hostname used during DCV. {0} is replaced with the domain name being validated. Default: _emsign-validation.{0}"
+                    "description": "OPTIONAL (DCV build only): Format string for the DNS TXT record hostname used during DCV. {0} is replaced with the domain name being validated. Default: _emsign-validation.{0}"
                 },
                 {
                     "name": "DcvPropagationDelaySeconds",
-                    "description": "OPTIONAL: Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: 30."
+                    "description": "OPTIONAL (DCV build only): Seconds to wait after publishing the DNS TXT record before asking CERTInext to verify it. Increase for zones with slow propagation. Default: 30."
                 },
                 {
                     "name": "DcvTimeoutMinutes",
-                    "description": "OPTIONAL: Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) before timing out the enrollment. Can also be set via the CERTINEXT_DCV_TIMEOUT_MINUTES environment variable; the env var takes precedence when both are set. Default: 10."
+                    "description": "OPTIONAL (DCV build only): Maximum minutes to wait for the entire DCV flow (DNS publish + propagation + verify) before timing out the enrollment. Can also be set via the CERTINEXT_DCV_TIMEOUT_MINUTES environment variable; the env var takes precedence when both are set. Default: 10."
                 },
                 {
                     "name": "DcvWaitForChallengeSeconds",
-                    "description": "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() for CERTInext to expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL before the slot appears. Without this wait, the plugin's initial TrackOrder check sees null and skips DCV \u2014 the order then has to wait for the next gateway sync cycle to be picked up. Setting to 0 disables the wait (single-check behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
+                    "description": "OPTIONAL (DCV build only): How long (seconds) the plugin will wait inside Enroll() for CERTInext to expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL before the slot appears. Without this wait, the plugin's initial TrackOrder check sees null and skips DCV — the order then has to wait for the next gateway sync cycle to be picked up. Setting to 0 disables the wait (single-check behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
                 },
                 {
                     "name": "DcvWaitForIssuanceSeconds",
-                    "description": "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV verifies for CERTInext to finish generating the certificate. CERTInext issuance is async \u2014 DCV may be verified but the cert PEM isn't yet available for download. Without this wait, Enroll() returns a pending result and the issued cert is picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
+                    "description": "OPTIONAL (DCV build only): How long (seconds) the plugin will wait inside Enroll() after DCV verifies for CERTInext to finish generating the certificate. CERTInext issuance is async — DCV may be verified but the cert PEM isn't yet available for download. Without this wait, Enroll() returns a pending result and the issued cert is picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch behaviour). Can also be set via the CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS environment variable; the env var takes precedence when both are set. Default: 60."
                 },
                 {
                     "name": "DcvSyncMaxOrderAgeHours",
-                    "description": "OPTIONAL: During synchronization, only pending DV orders younger than this many hours are eligible to be driven through DCV. This keeps a sync pass fast when there is a large backlog of old, never-completing pending orders (e.g. abandoned orders or domains outside the configured DNS provider's zone): they age out and are simply reported as pending rather than retried every pass. Recently-placed orders (the ones that legitimately deferred DCV) are always within the window and complete via the normal scan cadence. Set to 0 to disable the age filter (attempt DCV for all pending). Default: 24."
+                    "description": "OPTIONAL (DCV build only): During synchronization, only pending DV orders younger than this many hours are eligible to be driven through DCV. This keeps a sync pass fast when there is a large backlog of old, never-completing pending orders (e.g. abandoned orders or domains outside the configured DNS provider's zone): they age out and are simply reported as pending rather than retried every pass. Recently-placed orders (the ones that legitimately deferred DCV) are always within the window and complete via the normal scan cadence. Set to 0 to disable the age filter (attempt DCV for all pending). Default: 24."
                 },
                 {
                     "name": "DcvSyncMaxPerPass",
-                    "description": "OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; remaining pending orders are reported as-is and picked up on a later pass (the per-minute incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: 50."
+                    "description": "OPTIONAL (DCV build only): Maximum number of pending DV orders the plugin will attempt to drive through DCV in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; remaining pending orders are reported as-is and picked up on a later pass (the per-minute incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: 50."
                 }
             ],
             "enrollment_config": [
@@ -185,23 +201,23 @@
                 },
                 {
                     "name": "ValidityYears",
-                    "description": "OPTIONAL: Subscription validity in years: 1, 2, or 3. Default: 1. Note: CERTInext validates per 390-day certificate within the subscription; the 'validity' field in the order is the subscription term, not certificate lifetime."
+                    "description": "OPTIONAL: Subscription validity in years: 1, 2, or 3. A value on the template overrides the connector's SubscriptionValidityYears; precedence is ValidityYears, then the deprecated ValidityDays (rounded up to whole years), then SubscriptionValidityYears. The default of 1 applies if the template is saved with it, so set ValidityYears explicitly on templates that need a different term. Default: 1. Note: CERTInext validates per 390-day certificate within the subscription; the 'validity' field in the order is the subscription term, not certificate lifetime."
                 },
                 {
                     "name": "ValidityDays",
-                    "description": "DEPRECATED: Use ValidityYears instead. If set, value is divided by 365 and rounded up to get the subscription year count."
+                    "description": "DEPRECATED: Use ValidityYears instead. Used only when ValidityYears is not set: the value is divided by 365 and rounded up to get the subscription year count."
                 },
                 {
                     "name": "AutoApprove",
-                    "description": "OPTIONAL: If true, the gateway will attempt automatic approval of certificates that are returned in a pending-approval state. Default: false."
+                    "description": "Currently has no effect — reserved for future use. The plugin does not call any approval endpoint against CERTInext regardless of this setting."
                 },
                 {
                     "name": "RequesterName",
-                    "description": "OPTIONAL: Default requester name to include in the enrollment request. Used when no requester name can be derived from the subject."
+                    "description": "OPTIONAL: Per-template override for the requestor name; when blank, the connector's RequestorName is used."
                 },
                 {
                     "name": "RequesterEmail",
-                    "description": "OPTIONAL: Default requester email address. Used when no email can be derived from the subject."
+                    "description": "OPTIONAL: Per-template override for the requestor email; when blank, the connector's RequestorEmail is used."
                 },
                 {
                     "name": "RenewalWindowDays",
@@ -217,15 +233,15 @@
                 },
                 {
                     "name": "SignerName",
-                    "description": "OPTIONAL: Per-template subscriber agreement signer name. Falls back to the connector-level RequestorName if omitted."
+                    "description": "OPTIONAL: Per-template subscriber agreement signer name. Falls back to the connector-level RequestorName if omitted, then to the placeholder \"Keyfactor Gateway\" (Warning logged)."
                 },
                 {
                     "name": "SignerPlace",
-                    "description": "OPTIONAL: Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted."
+                    "description": "OPTIONAL: Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted, then to the placeholder \"Gateway\" (Warning logged)."
                 },
                 {
                     "name": "SignerIp",
-                    "description": "OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted."
+                    "description": "OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted, then to the placeholder 127.0.0.1 (Warning logged). A value that is not an IP address is sent unchanged, with a Warning."
                 }
             ]
         }

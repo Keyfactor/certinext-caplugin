@@ -790,6 +790,42 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .WithMessage("*GetDcv failed*");
         }
 
+        /// <summary>
+        /// Regression: this client is built with ThrowOnAnyError=false, so RestSharp catches a
+        /// cancelled HttpClient.SendAsync internally and returns a non-throwing, unsuccessful
+        /// RestResponse instead of propagating OperationCanceledException. Before this fix,
+        /// ExecuteWithRetryAsync passed that response straight to DeserializeOrThrow, which wrapped
+        /// it in a plain Exception — indistinguishable from a genuine API failure. A caller such as
+        /// PerformDcvIfNeededAsync's per-domain "catch (OperationCanceledException) { throw; }" guard
+        /// (added specifically to stop a DCV timeout from being mislabeled as an ordinary per-domain
+        /// failure) could never actually see the real cancellation, because it never arrived as
+        /// OperationCanceledException in the first place — a gap a Moq-level test of the plugin alone
+        /// cannot expose, since a mock can be told to throw whatever type is asked for. This test
+        /// exercises the real client against a real (if local) HTTP call, which is the only way to
+        /// pin the actual failure mode.
+        /// </summary>
+        [Fact]
+        public async Task GetDcvAsync_ThrowsOperationCanceled_WhenCancellationTokenIsCancelled()
+        {
+            _server
+                .Given(Request.Create().WithPath("/GetDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetDcvSuccessJson()));
+
+            var client = BuildClient();
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            Func<Task> act = () => client.GetDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt, cts.Token);
+
+            await act.Should().ThrowAsync<OperationCanceledException>(
+                "a cancelled token must surface as a genuine cancellation, not get wrapped into a " +
+                "plain Exception that a caller's cancellation-specific catch clause cannot recognize");
+        }
+
         [Fact]
         public async Task GetDcvAsync_Throws_WhenServerReturns401()
         {

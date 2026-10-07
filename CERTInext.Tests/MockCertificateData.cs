@@ -294,6 +294,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Message = "Awaiting approval."
             };
 
+        // Reproduces the CERTInext "auto-approved" race: TrackOrder reports a
+        // certificateStatusId the client legacy-maps to "issued", but the immediate
+        // GetCertificate download failed (cert bytes not generated yet), so no PEM
+        // ever arrived. See issue 0009.
+        public static EnrollCertificateResponse AutoApprovedNoBodyEnrollResponse(string id = null) =>
+            new EnrollCertificateResponse
+            {
+                Id = id ?? CertId1,
+                Status = "issued",
+                Certificate = null,
+                ProfileId = ProfileIdTls,
+                Message = "Order auto-approved."
+            };
+
         // -----------------------------------------------------------------------
         // GetCertificate response (object helpers — used by Moq-based plugin tests)
         // These use the legacy inferred type (LegacyGetCertificateResponse).
