@@ -1,194 +1,120 @@
-# CERTInext Integration Tests
+# CERTInext Integration Tests — Test Catalog
 
-This project contains xUnit integration tests that exercise the CERTInext plugin against
-the live CERTInext REST API.  All tests skip automatically when credentials are absent,
-so the project is safe to include in CI pipelines that do not have API access.
+This page lists the tests in `CERTInext.IntegrationTests`, what each one checks, and what to expect
+for a given account state. For credentials, opt-in flags, and run commands, see
+[INTEGRATION_TESTING.md](INTEGRATION_TESTING.md).
+
+Every live test skips (is reported as Skipped, not Failed) when its credentials or opt-in flag are
+absent. Tests marked **opt-in** place real orders, publish DNS records, or cancel orders, and run
+only when their flag is exported in the shell.
 
 ---
 
 ## Product Codes Are Per-Account
 
-**CERTInext product codes are provisioned per account by eMudhra.** The codes available
-to your account are established when the account is created and may differ from any
-documentation examples or from codes used by other accounts.
+CERTInext product codes are provisioned per account by eMudhra. The codes your account can order
+are set when the account is created and can differ from documentation examples and from other
+accounts. Notes that apply when choosing `CERTINEXT_PRODUCT_CODE`:
 
-Key findings verified against sandbox account `9374221333` in April 2026:
+- `GetProductDetails` returns an empty list on some sandbox accounts unless the request carries
+  `groupNumber`. The plugin sends it automatically when `GroupNumber` is configured.
+- Private PKI codes (for example `100`, or `149` for the sandbox "emSign Intranet SSL") need a
+  separate entitlement. On an account without it, placing an order returns `EMS-1162: Invalid
+  Product Code` even when the code appears in the catalog.
+- EV SSL needs a registered and approved `organizationNumber`; an unregistered one returns
+  `EMS-1073: Invalid Organization Number`.
+- The V1 `GenerateOrderSSL` call requires `additionalInformation.remarks`; the plugin always sends it.
 
-- `GetProductDetails` returns an empty list when called without `groupNumber` in the
-  `productDetails` block on some sandbox accounts.  The plugin now passes `groupNumber`
-  automatically when `GroupNumber` is set in the connector config.
-- The SSL/TLS product codes on this sandbox account are `842–851` (not `838–847` as on
-  the prior dev account).  DV SSL is `842` on this account.
-- Product code `100` (Private PKI / emSign Intranet SSL) is not provisioned on this
-  account — `GenerateOrderSSL` returns `EMS-1162: Invalid Product Code`.
-- Product code `149` (Sandbox emSign Intranet SSL) appears in `GetProductDetails` for
-  this account but also returns `EMS-1162` when ordering — it is not usable for orders.
-- EV SSL (codes `850`, `851`) requires an `organizationNumber` that is registered and
-  approved in CERTInext; using an unregistered org returns `EMS-1073: Invalid Organization Number`.
-- The `GenerateOrderSSL` API requires `additionalInformation.remarks` in the request body.
-  Omitting it returns `EMS-918: Additional Information cannot be empty`.
-
-To discover the valid product codes for a new account, use:
+To discover the codes your account accepts:
 
 ```sh
 make probe-products
 ```
 
-This places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports
-which ones return a `requestNumber` (valid) vs. an error (invalid or not provisioned).
-
----
-
-## Prerequisites
-
-- .NET 8 or .NET 10 SDK
-- Access to a CERTInext sandbox or production account
-- An API Access Key generated in the CERTInext portal under **Integrations → APIs**
-
----
-
-## Credential Setup
-
-Create the file `~/.env_certinext` with the following content:
-
-```sh
-# CERTInext API credentials
-CERTINEXT_API_URL=https://sandbox-us-api.certinext.io/emSignHub-API
-CERTINEXT_ACCESS_KEY=your-access-key-here
-CERTINEXT_ACCOUNT_NUMBER=your-account-number
-CERTINEXT_GROUP_NUMBER=your-group-number
-CERTINEXT_ORG_NUMBER=your-org-number
-CERTINEXT_PRODUCT_CODE=842
-CERTINEXT_REQUESTOR_EMAIL=you@example.com
-CERTINEXT_REQUESTOR_NAME=Your Name
-CERTINEXT_REQUESTOR_MOBILE=0000000000
-```
-
-### Field reference
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `CERTINEXT_API_URL` | Yes | Base URL of the CERTInext API (no trailing slash) |
-| `CERTINEXT_ACCESS_KEY` | Yes | REST API Access Key from the CERTInext portal (Integrations → APIs) |
-| `CERTINEXT_ACCOUNT_NUMBER` | Yes | Your CERTInext account number (numeric string) |
-| `CERTINEXT_GROUP_NUMBER` | No | Group number for order placement, filtering, and `GetProductDetails`. Required on some sandbox accounts for `GetProductDetails` to return a non-empty list. |
-| `CERTINEXT_ORG_NUMBER` | No | Organization number for OV/EV order placement |
-| `CERTINEXT_PRODUCT_CODE` | Yes | Numeric product code for the target account. **This is per-account** — obtain the correct code for your account by calling `GetProductDetails` (or `make probe-products`). Default shown is for sandbox account `9374221333`. |
-| `CERTINEXT_REQUESTOR_EMAIL` | Yes | Email submitted with test orders — must be registered in the account |
-| `CERTINEXT_REQUESTOR_NAME` | Yes | Name submitted with test orders |
-| `CERTINEXT_REQUESTOR_MOBILE` | No | Mobile number submitted with test orders |
-
-### API URL reference
-
-| Environment | URL |
-|-------------|-----|
-| Sandbox (US) | `https://sandbox-us-api.certinext.io/emSignHub-API` |
-| Production (US) | `https://us-api.certinext.io/emSignHub-API` |
-| Production (Global/India) | `https://api.certinext.io/emSignHub-API` |
-
-### Credential file format
-
-The file is parsed line by line:
-- Lines starting with `#` are treated as comments and ignored.
-- Blank lines are ignored.
-- Each line must be in `KEY=VALUE` format.
-- Values are not quoted — do not surround values with `"` or `'`.
-- Real environment variables override file values (useful for CI injection).
-
----
-
-## Running the Tests
-
-### Build only
-
-```sh
-dotnet build CERTInext.IntegrationTests/CERTInext.IntegrationTests.csproj --configuration Release
-```
-
-### Run all integration tests
-
-```sh
-dotnet test CERTInext.IntegrationTests/CERTInext.IntegrationTests.csproj --configuration Release -v normal
-```
-
-### Run a single test class
-
-```sh
-dotnet test CERTInext.IntegrationTests/ --filter "FullyQualifiedName~LifecycleTests" -v normal
-```
-
-### From the solution root (all tests including unit tests)
-
-```sh
-dotnet test certinext-caplugin.sln --verbosity normal
-```
-
----
-
-## Skip Behaviour
-
-Each test calls `IntegrationSkip.IfNotConfigured(fixture)` at the top of the test method.
-When `~/.env_certinext` is absent or either `CERTINEXT_API_URL` or `CERTINEXT_ACCESS_KEY`
-is empty, every test is reported as **Skipped** rather than Failed.
-
-Some tests additionally skip when the account has no orders yet (e.g. on a fresh sandbox
-account).  These tests display a skip reason explaining that the account state does not
-satisfy the test's pre-condition.
+This places `saveAndHold=1` draft orders for the known SSL/TLS product codes and reports which return
+a `requestNumber` (valid) and which return an error (invalid or not provisioned).
 
 ---
 
 ## Test Classes
 
-### `ConnectivityTests`
+### V1 — read-only and basic
 
-Verifies basic API reachability and credential validity.
+| Class | Test | What it checks |
+|---|---|---|
+| `ConnectivityTests` | `Ping_ReturnsSuccess` | `ValidateCredentials` succeeds |
+| `ProductTests` | `GetProductDetails_ReturnsProducts` | `GetProductDetails` succeeds; when products come back, the configured product code is among them. An empty list is accepted, because some accounts return one |
+| | `ValidateProductInfo_V1_AcceptsConfiguredProductCode` | `CERTInextCAPlugin.ValidateProductInfo` in V1 mode accepts `CERTINEXT_PRODUCT_CODE`; skips if it is unset |
+| `OrderReportTests` | `GetOrderReport_ReturnsOrders` | Page 1 of `GetOrderReport` is non-empty; skips when the account has no orders |
+| | `GetOrderReport_AllOrders_HaveRequiredFields` | Every order on page 1 has `requestNumber`, `productCode`, and `orderDate`; skips when the account has no orders |
+| `PluginSmokeTests` | `Ping_ThroughPlugin_Succeeds` | `IAnyCAPlugin.Ping()` through a live client |
+| | `GetProductIds_ReturnsAtLeastOneProduct` | `IAnyCAPlugin.GetProductIds()` returns a non-null list |
+| | `Synchronize_ReturnsAtLeastOneRecord` | A full sync produces at least one record; skips when the account has none |
+| `SmokeTests` | `Ping_Succeeds`, `GetProductDetails_ReturnsProducts`, `ListOrders_ReturnsFirstPage` | Client-level checks of the same endpoints |
+| | `TrackOrder_ReturnsDetails`, `GetSingleRecord_ReturnsRecord` | Look up the order in `CERTINEXT_ORDER_ID`; skip when it is unset |
+| | `GetSingleRecord_ForAllOrders_AllSucceed`, `Synchronize_DumpsAllRecords` | Read every order and write the results to the test output |
 
-| Test | What it checks |
-|------|---------------|
-| `Ping_ReturnsSuccess` | Calls `ValidateCredentials`; asserts no exception is thrown |
+### V1 — order lifecycle
 
-### `ProductTests`
+| Class | Test | What it checks |
+|---|---|---|
+| `LifecycleTests` | `Enroll_Synchronize_Revoke_FullLifecycle` | Generates an RSA-2048 CSR, enrolls it and asserts a `CARequestID`, runs a full sync and finds the new order, then attempts revocation. Skips gracefully if the order isn't issued yet |
+| `AlgorithmMatrixTests` | `Csr_RoundTripsKeyAlgorithm` | Offline: each key algorithm in the matrix generates a CSR whose signature verifies and whose public key parses back to the same type and size |
+| | `Enroll_AcceptsKeyAlgorithm` | **Opt-in** (`CERTINEXT_ALGO_MATRIX`). Submits one order per key algorithm and records whether CERTInext accepts it. CERTInext accepts RSA 2048/3072/4096 and ECC P-256/P-384, and rejects larger RSA, ECC P-521, and Ed25519/Ed448 |
 
-Verifies product discovery.
+### V1 — DNS-01 DCV (need Cloudflare credentials unless noted)
 
-| Test | What it checks |
-|------|---------------|
-| `GetProductDetails_ReturnsProducts` | Calls `GetProductDetails`; asserts the call succeeds without throwing; when products are returned, asserts the expected product code from `CERTINEXT_PRODUCT_CODE` is among them |
+| Class | Test | What it checks |
+|---|---|---|
+| `DcvLifecycleTests` | `DcvEnroll_CompletesWithoutThrowing` | An enrollment with DCV enabled completes |
+| | `EnrollWithoutDcv_DoesNotInvokeDnsProvider` | With DCV disabled, the DNS provider is never called |
+| | `EnrollWithDcvOff_OrderAppearsInSync_PluginDidNotInvokeDcv` | An order placed with DCV off still appears in a full sync, and the plugin didn't run DCV |
+| | `EnrollWithDcvOn_OrderIssuedEndToEnd_AndAppearsInSync` | Enroll with DCV on, issue the certificate, and find it in a sync |
+| | `EnrollWithDcvOn_IssuesPerKeyAlgorithm` | **Opt-in** (`CERTINEXT_ALGO_MATRIX_DCV`). DCV issuance for each key algorithm |
+| | `GetSingleRecord_DrivesDcvForPendingOrder` | Needs `CERTINEXT_PENDING_ORDER_ID`. A single-record refresh drives a pending order through DCV |
+| | `BulkDvEnrollment_AllOrdersIssue_AndPaginationWorks` | **Opt-in** (`CERTINEXT_RUN_BULK_TEST`). Many concurrent DV enrollments all issue, and sync pagination returns them |
+| | `CompleteAllPendingDvOrders` | **Opt-in** (`CERTINEXT_COMPLETE_PENDING`). Repeated full syncs until no DV order remains pending |
+| | `FullSync_AllIssuedCerts_CarryParseableCertificateBody` | Every issued record from a full sync carries a parseable certificate |
+| `PendingDvDiagnosticsTests` | `PendingDvDiagnostics_DumpDcvState` | Diagnostic. Needs `CERTINEXT_DIAG_ORDER_IDS`. Read-only dump of each listed order's DCV state |
 
-Note: some CERTInext accounts return an empty list from `GetProductDetails` even though
-orders using those product codes are visible in `GetOrderReport`.  An empty list is
-treated as acceptable — only the absence of an exception is mandatory.
+### V2 — API and lifecycle
 
-### `OrderReportTests`
+The V2 tests skip unless the V2 credentials are present (see [INTEGRATION_TESTING.md](INTEGRATION_TESTING.md#skip-behaviour)).
 
-Exercises the `ListOrdersAsync` path used by `Synchronize`.  Tests skip gracefully
-when the account has no orders rather than failing.
+| Class | Test | What it checks |
+|---|---|---|
+| `V2ApiTests` | `Connectivity_V2_Ping` | `GET /auth/me` succeeds with an OAuth token |
+| | `Lifecycle_V2_EnrollTrackRevoke` | Enroll, track, and revoke through the V2 API |
+| | `Sync_UsesV2_WithZeroV1Credentials` | Synchronize works with no V1 credentials configured |
+| | `GetProductDetails_V2_ReturnsProducts` | The V2 catalog returns products |
+| | `ValidateProductInfo_V2_AcceptsConfiguredProductCode`, `ValidateProductInfo_V2_RejectsUnknownProductCode` | Template validation against the V2 catalog |
+| | `GetSingleRecord_V2_ReturnsOrderDetails`, `Revoke_V2_IssuedOrder`, `ChainPem_V2_IsAssembled` | Single-record lookup, revocation, and chain assembly for an issued order (`CERTINEXT_V2_ISSUED_ORDER_ID`, or a fresh order) |
+| | `DcvFlow_V2_PublishesAndVerifies` | Needs Cloudflare. The V2 DCV flow publishes the TXT record and CERTInext verifies it |
+| `V2LifecycleTests` | `Enroll_V2_ReturnsCARequestID`, `Enroll_Synchronize_Revoke_V2_FullLifecycle` | V2 enrollment returns an ID; a full enroll, sync, revoke cycle |
+| | `Revoke_V2_ExplicitOrder_Superseded`, `Revoke_V2_IssuedOrder_ReturnsRevoked` | Revocation with an explicit reason, and of an issued order (`CERTINEXT_REVOKE_ORDER_ID`) |
+| | `GetSingleRecord_V2_Plugin_ReturnsDetails`, `GetSingleRecord_V2_IssuedOrder_HasParseableCertBody`, `GetSingleRecord_V2_AllSyncedOrders_DoNotThrow` | Single-record lookup through the plugin |
+| | `Sync_V2_UsesV2ReportsOrders_ReturnsRecords`, `Sync_V2_WithZeroV1Credentials_Succeeds`, `Sync_V2_SmallPageSize_PaginatesAcrossMultiplePages` | V2 synchronization, with no V1 credentials and across several small pages |
+| | `Sync_V2_FullSync_PaginatesEntireHistory` | Set `CERTINEXT_V2_FULL_SYNC_TEST` to run it; can be slow on a shared account |
+| `V2DcvLifecycleTests` | `DcvEnroll_V2_CompletesWithoutThrowing`, `EnrollWithoutDcv_V2_DoesNotInvokeDnsProvider`, `GetSingleRecord_V2_DrivesDcvForPendingOrder`, `EnrollWithDcvOn_V2_OrderIssuedEndToEnd_AndAppearsInSync` | The V2 counterparts of the V1 DCV tests (`CERTINEXT_V2_PENDING_ORDER_ID` for the single-record one) |
+| | `EnrollWithDcvOn_V2_IssuesPerKeyAlgorithm` | **Opt-in** (`CERTINEXT_V2_ALGO_MATRIX`) |
+| | `BulkV2Enrollment_AllOrdersIssue_AndPaginationWorks` | **Opt-in** (`CERTINEXT_V2_RUN_BULK_TEST`) |
+| `V2FreshDomainDcvLifecycleTests` | `EnrollWithDcvOn_V2_FreshUnverifiedSubdomain_StagesAndCleansUpTxt`, `EnrollWithDcvOn_V2_WildcardFreshSubdomain_RecordsTxtHostnameAndCleansUp` | **Opt-in** (`CERTINEXT_V2_LIFECYCLE_FRESH_DCV`). DCV against a never-validated subdomain, and against a wildcard on one: the TXT record is staged at the expected hostname and removed afterward |
+| `V2FullLifecycleTests` | `Enroll_V2_DvUcc_WithMultipleSans_FullLifecycle`, `Enroll_V2_Ov_FullLifecycle`, `Enroll_V2_OvUcc_WithMultipleSans_FullLifecycle`, `Enroll_V2_Ev_FullLifecycle`, `Enroll_V2_WildcardDv_WildcardOnly_FullLifecycle`, `Enroll_V2_WildcardDv_WildcardPlusApexSan_RecordsActualBehavior`, `EnrollRenewReissue_V2_IssuedDvOrder_RecordsActualBehavior` | **Opt-in** (one `CERTINEXT_V2_LIFECYCLE_*` flag per product, see [INTEGRATION_TESTING.md](INTEGRATION_TESTING.md#opt-in-flags)). Each enrolls, waits, synchronizes, and cleans up its order |
+| `PrivatePkiV2LiveTests` | `PrivatePki_V2_EnrollIntranetSsl_ThenRevoke_Live` | **Opt-in** (`CERTINEXT_PRIVATE_PKI_LIVE`). Enrolls a Private PKI Intranet SSL order with DNS and IP SANs, checks the issued SANs, and revokes it. Needs a Private PKI entitlement |
+| | `PrivatePki_V2_RecordingProxy_BuildsOffline` | Offline sanity check of the test's recording proxy |
+| `V2OrderWindowSweepTests` | `Sweep_ListRecentOrders_ByWindow_DryRun_ThenCancelExplicitIds` | **Opt-in** (`CERTINEXT_V2_OPS_TESTS`). Operations tool: lists V2 orders in a date window and optionally cancels listed IDs |
 
-| Test | What it checks |
-|------|---------------|
-| `GetOrderReport_ReturnsOrders` | Fetches page 1; skips when account has no orders; otherwise asserts the list is non-empty |
-| `GetOrderReport_AllOrders_HaveRequiredFields` | For each order on page 1: `requestNumber`, `productCode`, and `orderDate` are non-empty; skips when account has no orders |
+### Offline tests and utilities
 
-### `PluginSmokeTests`
+| Class | What it covers |
+|---|---|
+| `IntegrationTestFixtureTests` | Parsing of `KEY=VALUE` env-file values: quote handling and null input |
+| `V1FixtureApiUrlGuardTests` | The V1 fixture rejects a V2 `CERTINEXT_API_URL`; the V2 file loader never promotes V1 keys or opt-in flags into the process environment |
+| `KfclabCsrEmitterTests` | Utility, not an API test. With `CERTINEXT_EMIT_CSR_DIR` and `CERTINEXT_EMIT_CSR_SPEC` set, writes CSR files for use by external tooling. Makes no CA calls |
 
-End-to-end tests exercising `CERTInextCAPlugin` via the `IAnyCAPlugin` interface with
-a live `CERTInextClient` injected through the `(ICERTInextClient, CERTInextConfig)`
-test constructor.
-
-| Test | What it checks |
-|------|---------------|
-| `Ping_ThroughPlugin_Succeeds` | Calls `IAnyCAPlugin.Ping()`; asserts no exception |
-| `GetProductIds_ReturnsAtLeastOneProduct` | Calls `IAnyCAPlugin.GetProductIds()`; asserts a non-null list is returned without throwing |
-| `Synchronize_ReturnsAtLeastOneRecord` | Runs a full sync; skips when account has no records; otherwise asserts at least one `AnyCAPluginCertificate` is produced |
-
-### `LifecycleTests`
-
-Full end-to-end lifecycle tests that create real orders against the configured CERTInext
-account.  These tests do not require any pre-existing account state.
-
-| Test | What it checks |
-|------|---------------|
-| `Enroll_Synchronize_Revoke_FullLifecycle` | (1) Generates a fresh RSA-2048 CSR; (2) calls `Enroll` and asserts a non-empty `CARequestID` is returned; (3) runs a full sync and asserts the new order appears by `CARequestID`; (4) attempts revocation — skips gracefully if the order is not yet in an issued/approved state |
+Shared helpers (not tests): `IntegrationTestFixture`, `IntegrationSkip`, `KeyAlgorithms`,
+`V2EnvHelper`, `V2DomainStatusHelper`, `V2RawHttpHelpers`, and the DNS validators
+`CloudflareDomainValidator`, `RecordingDomainValidator`, and `StubDomainValidator`.
 
 ---
 
@@ -199,104 +125,29 @@ account.  These tests do not require any pre-existing account state.
 | Test class | Expected result |
 |-----------|----------------|
 | `ConnectivityTests` | Pass — credentials only |
-| `ProductTests` | Pass — product list may be empty if `CERTINEXT_GROUP_NUMBER` is not set and the account requires it; test tolerates an empty list |
+| `ProductTests` | Pass — the product list may be empty if `CERTINEXT_GROUP_NUMBER` is unset and the account needs it; the test tolerates an empty list |
 | `OrderReportTests` | Skip — "account has no orders yet" |
 | `PluginSmokeTests.Synchronize_ReturnsAtLeastOneRecord` | Skip — "account has no certificate records yet" |
-| `LifecycleTests.Enroll_Synchronize_Revoke_FullLifecycle` | Skip with "Invalid Product Code" if `CERTINEXT_PRODUCT_CODE` is not provisioned for this account; otherwise the enroll and sync steps pass, and the revoke step skips because the DV SSL sandbox order requires domain control verification and RA approval before it reaches an issued/revocable state |
+| `LifecycleTests.Enroll_Synchronize_Revoke_FullLifecycle` | Skip with "Invalid Product Code" if `CERTINEXT_PRODUCT_CODE` isn't provisioned for the account; otherwise enroll and sync pass, and revoke skips because a sandbox DV order needs domain validation before it is issued |
 
-### Account with history (orders previously placed)
+### Account with history
 
 | Test class | Expected result |
 |-----------|----------------|
-| `ConnectivityTests` | Pass |
-| `ProductTests` | Pass |
-| `OrderReportTests` | Pass |
-| `PluginSmokeTests` | Pass |
-| `LifecycleTests` | Pass (all three steps) |
+| `ConnectivityTests`, `ProductTests`, `OrderReportTests`, `PluginSmokeTests` | Pass |
+| `LifecycleTests` | Pass for enroll and sync; revoke runs only if the new order is issued |
 
----
+The DCV tests complete a DV order end to end only when Cloudflare credentials are configured and the
+domain in `CERTINEXT_DCV_DOMAIN` is in that zone. Without them, the revoke step of `LifecycleTests`
+skips, because DV orders on the sandbox can't be issued without domain validation.
 
-## Removed Tests
+### Fresh account setup
 
-The following test files were present in earlier versions but have been removed because
-they relied on pre-existing account state that is not portable across accounts or
-sandbox environments:
-
-- **`DraftOrderTests.cs`** — contained five tests that asserted specific `requestNumber`
-  values (e.g. `4572531551`, `9149755266`) hardcoded from a different developer account.
-  On any other account these request numbers do not exist so all five tests failed.
-
-- **`TrackOrderTests.cs`** — contained one test that located a known draft order by
-  `requestNumber` and asserted its `orderNumber` was null (draft/on-hold semantic).
-  Same problem: the hardcoded `requestNumber` does not exist on other accounts.
-
-The intent of those tests (verifying draft-order and track-order semantics) is now
-covered indirectly by `LifecycleTests`, which creates its own order and verifies the
-resulting state without relying on account-specific identifiers.
-
----
-
-## Authentication
-
-The CERTInext API uses HMAC-SHA256 authentication computed for every request:
-
-```
-authKey = SHA256(accessKey + ts + txn)   (lowercase hex)
-```
-
-Where:
-- `accessKey` is the raw API Access Key from `CERTINEXT_ACCESS_KEY`
-- `ts` is the current timestamp in ISO 8601 format
-- `txn` is a random numeric transaction ID
-
-The `CERTInextClient` handles this computation automatically.  The raw access key is
-never transmitted over the wire — only the derived `authKey` hash is sent.
-
----
-
-## Fresh Account Setup for Integration Tests
-
-When setting up a brand-new CERTInext sandbox account to run integration tests:
-
-1. **Discover valid product codes** — run `make probe-products` from the repo root.  This places
-   `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which ones your
-   account accepts.  Use the first DV SSL code that returns a `requestNumber` as your
-   `CERTINEXT_PRODUCT_CODE`.
-
-2. **Set `CERTINEXT_GROUP_NUMBER`** — if `make probe-products` or `GetProductDetails` returns no
-   products, find your group number in the CERTInext portal under **Delegation → Groups** and add
-   it to `~/.env_certinext`.  The `GetProductDetails` API requires it on some accounts.
-
-3. **Run connectivity tests first** — `make integration-test` or
-   `dotnet test CERTInext.IntegrationTests/ -v normal`.  The `ConnectivityTests` class verifies
-   credentials.  The `LifecycleTests` class places real orders — it can be run even before any
-   orders exist.
-
-4. **Expect the revoke step to skip** — DV SSL orders on the sandbox require domain control
-   verification (DCV) and RA approval before they are issued.  The `LifecycleTests` enroll step
-   will succeed and sync will find the order, but revoke will skip because the order is in a
-   pending state.  This is the expected behavior for a public DV SSL order in sandbox.  To test
-   revocation, either use a private PKI product that auto-approves, or log in to the CERTInext
-   portal and manually approve the pending order after `LifecycleTests` runs.
-
-5. **Account-specific product codes** — update `CERTINEXT_PRODUCT_CODE` in `~/.env_certinext`
-   with the code discovered in step 1.  Do not use `100` (private PKI, not provisioned on
-   standard accounts) or codes from documentation examples — they may not be provisioned for your
-   account.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| All tests skipped | Missing or empty `~/.env_certinext` | Create the file with `CERTINEXT_API_URL` and `CERTINEXT_ACCESS_KEY` |
-| `Ping` fails with 401/403 | Wrong `CERTINEXT_ACCESS_KEY` | Regenerate the key in the CERTInext portal under Integrations → APIs |
-| `Ping` fails with timeout or 404 | Wrong `CERTINEXT_API_URL` | Verify the URL matches your account region (see API URL table above) |
-| `Enroll` fails with "Invalid Product Code" (EMS-1162) | Wrong `CERTINEXT_PRODUCT_CODE` | Run `make probe-products` to discover the codes provisioned for your account |
-| `GetProductDetails` returns empty list | `CERTINEXT_GROUP_NUMBER` not set | Add your group number to `~/.env_certinext`; some accounts require it for `GetProductDetails` to return results |
-| `Enroll` fails with "Additional Information cannot be empty" (EMS-918) | Old plugin version missing `additionalInformation.remarks` | Rebuild and redeploy the plugin — the `remarks` field is now populated automatically |
-| `Enroll` fails with "Invalid Organization Number" (EMS-1073) | OV/EV product code selected with an unregistered org | Use a DV SSL product code for automated tests, or register and approve your org in CERTInext first |
-| Revoke step skips with "not GENERATED" | Sandbox DV SSL order requires domain validation and RA approval | Expected behavior for public DV SSL in sandbox — log in to the CERTInext portal and approve the pending order, then re-run; or use a private PKI product that auto-approves |
-| `OrderReportTests` all skip | Fresh account with no orders | Run `LifecycleTests` first to place at least one order |
-| `ProductTests` asserts configured product code is not found | `CERTINEXT_PRODUCT_CODE` set to a code not provisioned for the account | Run `make probe-products` and update `CERTINEXT_PRODUCT_CODE` with a valid code |
+1. **Discover valid product codes** with `make probe-products`. Use the first DV SSL code that
+   returns a `requestNumber` as `CERTINEXT_PRODUCT_CODE`.
+2. **Set `CERTINEXT_GROUP_NUMBER`** if `make probe-products` or `GetProductDetails` returns no
+   products. Find it in the portal under **Delegation → Groups**.
+3. **Run `ConnectivityTests` first**, then `LifecycleTests`, which places a real order and can run
+   before any orders exist.
+4. **Expect the revoke step to skip** without DCV. To exercise revocation, configure Cloudflare so a
+   DV order can issue, or use a product that issues without domain validation.

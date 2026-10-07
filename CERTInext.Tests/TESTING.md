@@ -6,19 +6,28 @@ The `CERTInext.Tests` project contains unit and contract tests for the CERTInext
 REST plugin. No external services are required — all HTTP I/O is handled in-process by WireMock.Net
 or replaced by Moq strict mocks.
 
-The project is split into several focused test classes:
+The project is split into focused test classes:
 
 | Class | Layer under test | Isolation technique |
 |---|---|---|
-| `CERTInextClientTests` | `CERTInextClient` HTTP transport | WireMock.Net (real loopback HTTP) |
-| `CERTInextClientRequestShapeTests` | `CERTInextClient` request body construction | WireMock.Net |
-| `CERTInextCAPluginTests` | `CERTInextCAPlugin` IAnyCAPlugin logic | Moq strict mock of `ICERTInextClient` |
-| `CERTInextCAPluginCoverageTests` | Additional plugin logic paths | Moq strict mock |
-| `CERTInextCAPluginPublicSurfaceTests` | Binary-compat / no-DCV surface contract | Reflection only |
-| `BoundedDcvSyncTests` | DCV sync age/cap filter logic | Pure unit (no I/O) |
-| `RateLimitRetryTests` | Rate-limit back-off helpers | Pure unit (no I/O) |
-| `ExtractSerialFromPemTests` | PEM serial-number extraction | Pure unit (no I/O) |
-| `RedactCredentialsTests` | Log credential-redaction helper | Pure unit (no I/O) |
+| `CERTInextClientTests`, `CERTInextClientCoverageTests` | `CERTInextClient` V1 HTTP transport, auth, and error branches | WireMock.Net (real loopback HTTP) |
+| `CERTInextClientRequestShapeTests` | V1 `GenerateOrderSSL` request body construction | WireMock.Net |
+| `CERTInextClientV2Tests` | `CERTInextClient` V2 transport: token caching, order create/track/CSR/revoke/cancel, DCV, catalog, orders report | WireMock.Net |
+| `CERTInextCAPluginTests`, `CERTInextCAPluginCoverageTests` | `CERTInextCAPlugin` V1 logic: enroll, renew, revoke, sync, validation | Moq strict mock of `ICERTInextClient` |
+| `CERTInextCAPluginV2Tests` | V2 dispatch in the plugin: ping, enroll, revoke, single record, sync, validation | Moq strict mock |
+| `CERTInextCAPluginDcvTests`, `CERTInextCAPluginV2DcvTests` | V1 and V2 DNS-01 DCV orchestration | Moq strict mock + `FakeDomainValidator` |
+| `CERTInextCAPluginV2PickupTests`, `CERTInextCAPluginV2EnrollRevokedTests` | V2 synchronous pickup poll; a revoked order observed during enrollment | Moq strict mock |
+| `V2UccEnrollmentTests`, `V2WildcardEnrollmentTests`, `V2UccNonDnsSanLoggingTests` | V2 multi-domain and wildcard handling, SAN guard, non-DNS SAN logging | Moq strict mock |
+| `V2PrivatePkiEnrollmentTests`, `V2FamilyOrderRequestSerializationTests` | V2 Private PKI enrollment and the Private PKI / Document Signer request bodies | Moq strict mock; DTO serialization |
+| `V2ProductVariantDerivationTests`, `V2SignerPlaceRequiredTests`, `V2OrganizationEnrollmentTests`, `V2GroupNumberEnrollmentTests`, `V2SubscriptionEnrollmentTests`, `V2TechnicalContactEnrollmentTests`, `EmailNotificationsEnrollmentTests`, `RequestorDesignationEnrollmentTests` | How each connector and template setting reaches the V2 order body, and the checks that run before an order is placed | Moq strict mock; DTO serialization |
+| `V2SslOrderBodyGoldenTests` | The V2 SSL create-order body is byte-for-byte stable | Moq strict mock; golden JSON |
+| `V2CsrTransportFailureTests`, `V2OrphanedOrderCancelTests` | What happens when CSR submission fails: cancel the orphaned order, or track it first after a transport error | Moq strict mock |
+| `V2UnknownStatusTests`, `StatusMapperV2Tests`, `V2OrderStatusResponseTests` | V2 status mapping, the `unknown` status, revocation reason mapping, status-response parsing | Pure unit |
+| `CERTInextCAPluginPublicSurfaceTests` | The plugin's gateway-visible public surface | Reflection only |
+| `CERTInextCAPluginAuditLoggingTests`, `CERTInextCAPluginRevokeV2AuditLoggingTests` | Audit log lines for enrollment and V2 revocation | Captured logger |
+| `RedactPersonalDataTests`, `RedactCredentialsTests`, `MaskEmailTests`, `SanLogMaskingTests`, `SensitiveRequestDataConfigTests` | Log redaction and `LogSensitiveRequestData` | Pure unit |
+| `SanSubmissionTests` | UCC SAN submission: gateway SAN keys, CSR fallback, non-DNS SANs | WireMock.Net and pure unit |
+| `EnrollmentParamsTests`, `ExtractErrorMessageTests`, `V1NonSuccessResponseTests`, `ExtractSerialFromPemTests`, `BoundedDcvSyncTests`, `RateLimitRetryTests` | Template parameter parsing, error-message extraction, PEM serial extraction, DCV sync bounds, rate-limit back-off | Pure unit (no I/O) |
 
 If a test fails in `CERTInextClientTests` or `CERTInextClientRequestShapeTests`, the bug is in
 HTTP transport or request serialisation. If it fails in `CERTInextCAPluginTests` or
@@ -29,7 +38,7 @@ HTTP transport or request serialisation. If it fails in `CERTInextCAPluginTests`
 ## Running the Tests
 
 **Prerequisites:**
-- .NET 8 or .NET 10 SDK
+- .NET 10 SDK (the test project targets `net8.0` and references the plugin, which also builds `net10.0`)
 - NuGet packages restored (`dotnet restore`)
 - No external services required
 
@@ -56,19 +65,22 @@ stops it in `Dispose()`, so tests are isolated and can run in parallel without p
 
 ## Authentication model
 
-The real CERTInext API uses HTTP POST for **all** endpoints. There is no Authorization header
+The CERTInext V1 API uses HTTP POST for **all** endpoints. There is no Authorization header
 for AccessKey mode. Instead, every request body includes a `meta` block containing:
 
 - `authKey` — `SHA256(accessKey + requestTs + requestTxnId)` (lowercase hex)
 - `ts` — ISO 8601 timestamp
-- `txn` — unique transaction UUID
+- `txn` — random numeric transaction ID
 
 The raw access key is never transmitted — only the derived hash is sent.
 
 `AuthMode` accepted values:
-- `AccessKey` (primary) — HMAC signed body
-- `OAuth` (alternative) — bearer token via client credentials flow
-- `ApiKey`, `AccessKeyLegacy`, `OAuthLegacy` — legacy aliases accepted for backward compatibility
+- `AccessKey` (primary) — `authKey` in the request body
+- `OAuth` (alternative) — bearer token via client credentials flow, sent in an `Authorization` header with an empty `authKey`
+- `ApiKey` and `OAuth2` — legacy aliases accepted for backward compatibility
+
+The V2 API (`CERTInextClientV2Tests`) authenticates with an OAuth2 `client_credentials` bearer token
+requested from `{ApiUrl}/oauth/token`.
 
 ---
 
@@ -157,6 +169,34 @@ CERTInext has no dedicated renewal endpoint. `RenewCertificateAsync` submits a n
 |------|------|-----------|
 | `GetProfilesAsync_ReturnsProfiles_WhenServerResponds` | `POST /GetProductDetails` → two products in nested category envelope | Result has 2 items; `ProfileIdTls` and `ProfileIdClient` present; all `Active == true` |
 | `GetProfilesAsync_ReturnsEmptyList_WhenNoProductsReturned` | `POST /GetProductDetails` → empty `productDetails` array | Result is empty |
+
+### GetProductDetailsV2Async — GET /api/certinext/v2/catalog/products (`CERTInextClientV2Tests`)
+
+The V2 catalog returns the same nested category envelope as V1's `GetProductDetails`, under a
+top-level `"products"` key. `ParseProductDetailsV2Response` flattens each shape into
+`ProductDetail`; the flat `productId` and bare-array shapes are kept as fallback branches for other
+accounts and API versions.
+
+| Test | Stub | Assertion |
+|------|------|-----------|
+| `GetProductDetailsV2Async_NestedCategoryEnvelope_FlattensProducts` | `GET catalog/products` → nested category envelope | 2 products; `ProductCode`/`ProductName`/`ProductType` populated, `Active == true` |
+| `GetProductDetailsV2Async_FlatProductIdRows_MapsToProductCode` | `GET catalog/products` → flat `productId` rows | `productId` mapped to `ProductCode` |
+| `GetProductDetailsV2Async_BareArray_Parses` | `GET catalog/products` → bare JSON array | Parses without a wrapper object |
+| `GetProductDetailsV2Async_EmptyCatalog_ReturnsEmptyList` | `GET catalog/products` → `{"products":[]}` | Returns an empty list (no throw) |
+
+### ValidateProductInfo — `CERTInextCAPluginTests` (V1) / `CERTInextCAPluginV2Tests` (V2)
+
+`ValidateProductInfo` builds its own `CERTInextClient` from `connectionInfo` (ignoring the
+Moq-injected client), so these tests use a real WireMock server as `ApiUrl`.
+
+| Test | Mode | Stub | Assertion |
+|------|------|------|-----------|
+| `ValidateProductInfo_V1_Succeeds_WhenProductCodePresent` | V1 | `POST /GetProductDetails` → nested envelope containing the code | Does not throw |
+| `ValidateProductInfo_V1_Throws_WhenProductCodeAbsent` | V1 | Same stub, unknown code | Throws `AnyCAValidationException` `*not found*` |
+| `ValidateProductInfo_V2_Succeeds_WhenProductCodeInCatalog` | V2 | `GET catalog/products` → nested envelope containing the code | Does not throw; no request ever hits `/GetProductDetails` |
+| `ValidateProductInfo_V2_Throws_WhenProductCodeNotInCatalog` | V2 | Same stub, unknown code | Throws `AnyCAValidationException` `*not found*` |
+| `ValidateProductInfo_V2_Throws_WhenCatalogEmpty` | V2 | `GET catalog/products` → `{"products":[]}` | Throws `*not found*` — no soft-accept, matches V1 |
+| `ValidateProductInfo_V2_Throws_WhenCatalogReturnsError` | V2 | `GET catalog/products` → HTTP 500 | Throws `*Unable to validate*`; message excludes the response body |
 
 ### DCV endpoints
 
@@ -277,9 +317,10 @@ already called it throws `InvalidOperationException`.
 
 ## CERTInextCAPluginPublicSurfaceTests
 
-Reflection-based contract tests that verify the no-DCV build does not expose any public types,
-fields, methods, or constructors that reference `IDomainValidatorFactory` or other IAnyCAPlugin
-3.3-only types. These tests ensure the default build loads cleanly on AnyCA Gateway 25.5.x hosts.
+Reflection-based contract tests that pin the plugin's gateway-visible public surface: no public
+constructor, field, method, or nested type references `IDomainValidatorFactory` or another
+IAnyCAPlugin 3.3-only type, so the plugin class loads even when the host doesn't supply the factory
+type, and DCV is then simply inactive.
 
 | Test | What it checks |
 |------|---------------|
@@ -359,6 +400,10 @@ block with `status: "1"` (success) or `status: "0"` (failure).
 | `OrderReportEmptyJson()` | `POST /GetOrderReport` | Empty `ordersArray`, `noOfPages=0` |
 | `GetProductDetailsJson()` | `POST /GetProductDetails` | Nested category envelope with two products |
 | `GetProductDetailsEmptyJson()` | `POST /GetProductDetails` | Empty `productDetails` array |
+| `GetCatalogProductsV2NestedJson()` | `GET catalog/products` | Nested category envelope (the live sandbox shape) |
+| `GetCatalogProductsV2FlatJson()` | `GET catalog/products` | Flat `productId` rows (alternate shape, fallback branch) |
+| `GetCatalogProductsV2BareArrayJson()` | `GET catalog/products` | Bare JSON array, no wrapper object |
+| `GetCatalogProductsV2EmptyJson()` | `GET catalog/products` | `{"products":[]}` |
 | `ApiFailureJson(code, msg)` | Any endpoint | Generic `meta.status="0"` failure |
 | `GetDcvSuccessJson(token)` | `POST /GetDcv` | `dcvDetails.token` |
 | `GetDcvFailureJson(code, msg)` | `POST /GetDcv` | Failure meta |

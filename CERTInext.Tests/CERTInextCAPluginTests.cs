@@ -17,6 +17,9 @@ using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.PKI.Enums.EJBCA;
 using Moq;
+using WireMock.RequestBuilders;
+using WireMock.ResponseBuilders;
+using WireMock.Server;
 using Xunit;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
@@ -31,8 +34,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // Helpers
         // ---------------------------------------------------------------------------
 
+        // Pickup is disabled by default in the broad fixture (PickupRetries=0) — mirroring how
+        // DcvConfig defaults its wait budgets to 0 — so tests that don't care about the
+        // synchronous pickup don't pay its real Task.Delay-based poll. Tests that DO exercise
+        // pickup opt in via BuildPluginWithPickup.
         private static CERTInextCAPlugin BuildPlugin(ICERTInextClient client) =>
-            new CERTInextCAPlugin(client);
+            new CERTInextCAPlugin(client, new CERTInextConfig { PickupRetries = 0 });
+
+        // Pickup-enabled fixture for the synchronous-pickup tests. PickupDelay is clamped to a
+        // 1s floor and the loop adds a fixed 5s initial delay, so these tests are intentionally
+        // a few seconds each.
+        private static CERTInextCAPlugin BuildPluginWithPickup(
+            ICERTInextClient client, int retries, int delaySeconds = 1) =>
+            new CERTInextCAPlugin(client,
+                new CERTInextConfig { PickupRetries = retries, PickupDelayInSeconds = delaySeconds });
 
         private static Mock<ICERTInextClient> NewMock() => new Mock<ICERTInextClient>(MockBehavior.Strict);
 
@@ -165,6 +180,53 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenApiUrlIsHttp_NonLoopback()
+        {
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = "http://ca.example.com",
+                ["AuthMode"] = "ApiKey",
+                ["ApiKey"] = "some-key"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*ApiUrl*https*");
+        }
+
+        [Theory]
+        [InlineData("http://localhost:8080")]
+        [InlineData("http://127.0.0.1:8080")]
+        [InlineData("http://[::1]:8080")]
+        public async Task ValidateCAConnectionInfo_AllowsHttp_ForLoopbackHosts(string apiUrl)
+        {
+            // Loopback http is allowed (e.g. a local WireMock/mock server in tests); this test
+            // only confirms the scheme check doesn't reject it — ApiKey mode fails on the next
+            // field it's missing (ApiKey), which still proves the ApiUrl check itself passed.
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = apiUrl,
+                ["AuthMode"] = "ApiKey",
+                ["ApiKey"] = "some-key"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            // No exception about ApiUrl specifically — any failure must come from the live
+            // connectivity check (NewMock's PingAsync is unstubbed under MockBehavior.Strict),
+            // not from the https scheme guard.
+            var ex = await act.Should().ThrowAsync<Exception>();
+            ex.Which.Message.Should().NotContain("ApiUrl");
+        }
+
+        [Fact]
         public async Task ValidateCAConnectionInfo_Throws_WhenApiKeyMissingForApiKeyMode()
         {
             var mock = NewMock();
@@ -221,6 +283,92 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().ThrowAsync<AnyCAValidationException>()
                 .WithMessage("*OAuthTokenUrl*required*");
+        }
+
+        // M2 compliance fix: OAuthTokenUrl receives the OAuth client secret on every token
+        // refresh (CERTInextClient.GetOrRefreshTokenAsync POSTs it there) — it must be held to
+        // the same https-or-loopback rule as ApiUrl, not just a non-empty check.
+        [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenOAuthTokenUrlIsHttp_NonLoopback()
+        {
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = "https://ca.example.com",
+                ["AccountNumber"] = "12345",
+                ["AuthMode"] = "OAuth",
+                ["OAuthTokenUrl"] = "http://token.example.com",
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            var ex = await act.Should().ThrowAsync<AnyCAValidationException>();
+            ex.Which.Message.Should().Contain("OAuthTokenUrl").And.Contain("https");
+            mock.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_Throws_WhenOAuthTokenUrlIsNotUri()
+        {
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = "https://ca.example.com",
+                ["AccountNumber"] = "12345",
+                ["AuthMode"] = "OAuth",
+                ["OAuthTokenUrl"] = "not-a-url",
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            var ex = await act.Should().ThrowAsync<AnyCAValidationException>();
+            ex.Which.Message.Should().Contain("OAuthTokenUrl").And.Contain("valid absolute URI");
+        }
+
+        [Fact]
+        public async Task ValidateCAConnectionInfo_AllowsHttp_ForLoopbackOAuthTokenUrl()
+        {
+            // Full round trip through a loopback WireMock server standing in for both the
+            // OAuth token endpoint (OAuthTokenUrl is used as-is, no path appended — see
+            // CERTInextClient.GetOrRefreshTokenAsync) and the V1 ValidateCredentials ping —
+            // proves http-loopback is accepted end to end, not just by the synchronous guard.
+            using var server = WireMockServer.Start();
+            server
+                .Given(Request.Create().WithPath("/").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"access_token\":\"test-token\",\"expires_in\":3600}"));
+            server
+                .Given(Request.Create().WithPath("/ValidateCredentials").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"meta\":{\"status\":\"1\"}}"));
+
+            var plugin = BuildPlugin(NewMock().Object);
+
+            var info = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = server.Urls[0] + "/",
+                ["AccountNumber"] = "12345",
+                ["AuthMode"] = "OAuth",
+                ["OAuthTokenUrl"] = server.Urls[0],
+                ["OAuthClientId"] = "my-client",
+                ["OAuthClientSecret"] = "my-secret"
+            };
+
+            Func<Task> act = () => plugin.ValidateCAConnectionInfo(info);
+
+            await act.Should().NotThrowAsync();
         }
 
         [Fact]
@@ -289,6 +437,71 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .WithMessage("*ProfileId*required*");
         }
 
+        // ValidateProductInfo builds its own CERTInextClient from connectionInfo (like
+        // ValidateCAConnectionInfo) rather than using the Moq-injected client, so these tests
+        // need a real WireMock server as ApiUrl.
+
+        [Fact]
+        public async Task ValidateProductInfo_V1_Succeeds_WhenProductCodePresent()
+        {
+            using var server = WireMockServer.Start();
+            server
+                .Given(Request.Create().WithPath("/GetProductDetails").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetProductDetailsJson()));
+
+            var plugin = BuildPlugin(NewMock().Object);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = "ssl",
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = MockCertificateData.ProfileIdTls }
+            };
+            var connInfo = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = server.Urls[0],
+                ["AuthMode"] = "AccessKey",
+                ["ApiKey"] = "key",
+                ["AccountNumber"] = "12345"
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().NotThrowAsync();
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V1_Throws_WhenProductCodeAbsent()
+        {
+            using var server = WireMockServer.Start();
+            server
+                .Given(Request.Create().WithPath("/GetProductDetails").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetProductDetailsJson()));
+
+            var plugin = BuildPlugin(NewMock().Object);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = "ssl",
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = "999999" }
+            };
+            var connInfo = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = server.Urls[0],
+                ["AuthMode"] = "AccessKey",
+                ["ApiKey"] = "key",
+                ["AccountNumber"] = "12345"
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().ThrowAsync<AnyCAValidationException>()
+                .WithMessage("*not found*");
+        }
+
         // ---------------------------------------------------------------------------
         // Enroll — New
         // ---------------------------------------------------------------------------
@@ -343,6 +556,127 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 enrollmentType: EnrollmentType.New);
 
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+        }
+
+        [Fact]
+        public async Task Enroll_New_ReturnsPendingStatus_WhenCaReportsIssuedButBodyMissing()
+        {
+            // CERTInext can report an "issued"/auto-approved certificateStatusId before the
+            // certificate bytes actually exist — the immediate GetCertificate download fails
+            // and the legacy client returns Status="issued" with Certificate=null. Reporting
+            // GENERATED with no PEM crashes the gateway framework's PEM parser downstream, so
+            // the plugin must demote this to pending rather than trust the raw status string.
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.AutoApprovedNoBodyEnrollResponse());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 0);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem,
+                subject: "CN=test.example.com",
+                san: null,
+                productInfo: MakeProductInfo(),
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            result.Certificate.Should().BeNullOrEmpty();
+        }
+
+        // ---------------------------------------------------------------------------
+        // Synchronous certificate pickup (Sectigo parity)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task Pickup_Disabled_WhenPickupRetriesZero_ReturnsPendingWithoutPolling()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 0);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Never, "PickupRetries=0 must disable the synchronous pickup poll");
+        }
+
+        [Fact]
+        public async Task Pickup_ReturnsIssuedCert_WhenOrderIssuesDuringPoll()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+            // The order finishes issuing by the time we poll: GetCertificate reports issued + PEM.
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedCertRecord());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 2);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            result.Certificate.Should().NotBeNullOrEmpty("a synchronously-picked-up cert must carry its PEM");
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.AtLeastOnce);
+        }
+
+        [Fact]
+        public async Task Pickup_SurfacesTerminalStatus_WhenOrderRevokedDuringPoll()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.RevokedCertRecord());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 3);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.REVOKED,
+                "a terminal status observed during pickup is surfaced immediately, not polled to exhaustion");
+        }
+
+        [Fact]
+        public async Task Pickup_ReturnsPending_WhenOrderNeverIssuesWithinBudget()
+        {
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+            // Every poll still reports pending — the budget is exhausted and Enroll returns the
+            // pending result for a later sync to complete.
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingCertRecord());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: 1);
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.AtLeastOnce, "an enabled pickup must actually poll before giving up");
         }
 
         [Fact]
