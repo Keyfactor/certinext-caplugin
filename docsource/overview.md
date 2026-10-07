@@ -1,6 +1,11 @@
 ## Overview
 
-The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabilities of the CERTInext platform (by eMudhra) to Keyfactor Command via the Keyfactor AnyCA Gateway REST. See [configuration.md](configuration.md) for full installation and configuration details, [architecture.md](architecture.md) for design notes, [migration-v1-to-v2.md](migration-v1-to-v2.md) for moving a connector to the V2 API, and [development.md](development.md) for local development.
+The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabilities of the CERTInext platform (by eMudhra) to Keyfactor Command via the Keyfactor AnyCA Gateway REST. Related documents:
+
+- [configuration.md](configuration.md): installation and configuration details.
+- [architecture.md](architecture.md): design notes.
+- [migration-v1-to-v2.md](migration-v1-to-v2.md): moving a connector to the V2 API.
+- [development.md](development.md): local development.
 
 ## CERTInext CA Certificates
 
@@ -12,9 +17,26 @@ Before the gateway can register a CA backed by this plugin, the Keyfactor Comman
 | Production — India (Global) | https://in.certinext.io/ |
 | Production — US | https://us.certinext.io/ |
 
-After signing in, navigate to the certificate-authority / chain download page in the portal, export each CA in the chain as PEM or DER, and import them into the appropriate Windows certificate stores on the gateway host (Trusted Root for the root CA, Intermediate Certification Authorities for any subordinates). See [configuration.md](configuration.md#gateway-registration) and the [README](../README.md#configuration) for the full Gateway Registration walkthrough.
+To import the chain:
+
+1. Sign in to the CERTInext portal for your environment.
+2. Open the certificate-authority / chain download page.
+3. Export each CA in the chain as PEM or DER.
+4. On the gateway host, import the root CA into the **Trusted Root Certification Authorities** store.
+5. Import any subordinate CAs into the **Intermediate Certification Authorities** store.
+
+See [configuration.md](configuration.md#gateway-registration) for the full Gateway Registration walkthrough.
 
 ## Troubleshooting
+
+| Symptom | Section |
+|---|---|
+| V1 enrollments fail with `Inactive Account User.` | [`"Inactive Account User."` from `GenerateOrderSSL`](#inactive-account-user-returned-from-generateorderssl-v1) |
+| Enrollment returns pending (`Status=90`, `EXTERNALVALIDATION`) | [Enrollment returns immediately with `Status=90`](#enrollment-returns-immediately-with-status90-externalvalidation) |
+| `EMS-956 "Invalid Request for this API"` from `GetDcv` | [`EMS-956` from `GetDcv`](#ems-956-invalid-request-for-this-api-from-getdcv-v1) |
+| HTTP 500 and a `TypeLoadException` in the gateway log | [Plugin fails to load](#plugin-fails-to-load-with-could-not-load-type-keyfactoranygatewayextensionsidomainvalidatorfactory) |
+| Connector fails to start with an `https` error | [`ApiUrl` must use https](#connector-fails-to-start-apiurl--must-use-https) |
+| V2 enrollment lists several product codes | [Multiple catalog products match](#v2-multiple-certinext-catalog-products-match-productid-) |
 
 ### `"Inactive Account User."` returned from `GenerateOrderSSL` (V1)
 
@@ -30,13 +52,15 @@ The same access key / account works before and after the failing window — a `P
 
 **Root cause**
 
-The CERTInext sandbox at `https://sandbox-us-api.certinext.io/emSignHub-API` applies a **burst rate limit** on order placement and reports the rejection with the **generic** error string `"Inactive Account User."` — the same string the API uses for genuinely inactive accounts. The response carries no distinguishing `errorCode`, `Retry-After` header, or structured field that tells the two conditions apart.
-
-The limit applies at roughly **16 or more enrollments submitted within 10 seconds** on the US sandbox. Submission velocity well below that runs cleanly.
+- **Cause:** the CERTInext sandbox at `https://sandbox-us-api.certinext.io/emSignHub-API` applies a **burst rate limit** on order placement.
+- **Generic error:** the rejection uses the string `"Inactive Account User."`, the same string the API uses for genuinely inactive accounts.
+- **No distinguishing field:** the response has no `errorCode`, `Retry-After` header, or structured field that tells the two conditions apart.
+- **Trigger:** roughly **16 or more enrollments submitted within 10 seconds** on the US sandbox.
+- **Below the threshold:** lower submission velocity runs cleanly.
 
 **Confirmation steps**
 
-1. Run a single `Ping` against the same `ApiUrl` / `AccessKey`. If it succeeds, the account is active; the failure was almost certainly a rate-limit hit.
+1. Run a single `Ping` against the same `ApiUrl` / `ApiKey`. If it succeeds, the account is active; the failure was almost certainly a rate-limit hit.
 2. Check the gateway warning log for the API-failure line the plugin writes just before it throws. It includes the full raw response body, so any distinguishing code or message CERTInext returns appears there.
 3. Wait 30–60 seconds, then retry the failed enrollment. A successful retry confirms it was a rate limit.
 
@@ -54,11 +78,13 @@ Enrollment completes but the certificate is not yet issued — Command shows the
 
 **Root cause**
 
-This is the expected result when:
+This is the expected result in any of these cases:
 
-1. The order is OV or EV. CERTInext issues these after organization verification (minutes to hours), longer than the enrollment call waits.
-2. DCV is enabled but cannot run: no DNS provider plugin is deployed on the gateway, or none resolves the order's domain. The plugin logs why, and the order completes only after the domain is validated some other way.
-3. The plugin's bounded `Enroll()` budget elapsed before CERTInext finished issuing: `PickupRetries` × `PickupDelay` for the certificate pickup poll, and on V1 `DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds` (default 60s each) around DCV.
+- **OV or EV order:** CERTInext issues these after organization verification (minutes to hours), longer than the enrollment call waits.
+- **DCV enabled but unable to run:** no DNS provider plugin is deployed on the gateway, or none resolves the order's domain. The plugin logs why. The order completes only after the domain is validated some other way.
+- **`Enroll()` budget elapsed:** the plugin's bounded wait ended before CERTInext finished issuing. The budget is:
+    - `PickupRetries` × `PickupDelay` for the certificate pickup poll;
+    - on V1, `DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds` (default 60 s each) around DCV.
 
 **Mitigation**
 
@@ -82,7 +108,7 @@ No action needed. The order is picked up on a subsequent sync cycle once CERTIne
 
 **Symptom**
 
-The gateway returns HTTP 500 on CA registration or first enrollment with the body `{"ErrorCode":"0x80131509"}`, and the gateway log shows a `TypeLoadException` for `Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory`.
+The gateway returns HTTP 500 on CA registration or first enrollment (the response body is only a generic `ErrorCode`), and the gateway log shows a `TypeLoadException` for `Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory`.
 
 **Root cause**
 
@@ -96,15 +122,15 @@ Upgrade the AnyCA Gateway REST to 26.2.0 or later.
 
 **Symptom**
 
-After upgrading, a connector fails initialization with an error naming `ApiUrl` (or `OAuthTokenUrl`) and `https`.
+After upgrading, a connector fails initialization with an error naming `ApiUrl` and `https`.
 
 **Root cause**
 
-The API key (V1) or OAuth client secret (V1 OAuth and V2) is sent to these URLs on every request, so the plugin rejects `http` URLs on save and at startup. A loopback host (`localhost`, `127.0.0.1`, `::1`) is the only exception, for local test servers.
+The API key (V1) or OAuth client secret (V2) is sent to `ApiUrl` on every request, so the plugin rejects `http` URLs on save and at startup. A loopback host (`localhost`, `127.0.0.1`, `::1`) is the only exception, for local test servers.
 
 **Mitigation**
 
-Change the connector's `ApiUrl` (and, for V1 OAuth, `OAuthTokenUrl`) to an `https` URL.
+Change the connector's `ApiUrl` to an `https` URL.
 
 ### V2: `Multiple CERTInext catalog products match ProductID ...`
 
