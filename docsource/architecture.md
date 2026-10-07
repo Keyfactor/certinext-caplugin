@@ -135,38 +135,44 @@ sequenceDiagram
 
     Plugin->>API: Place certificate order\n(CSR, domain, organization details,\nsubscriber agreement, requestor info)
     API-->>Plugin: Order accepted — order number assigned
-
-    opt DNS-01 DCV build, DCV enabled, and this order requires it
-        Plugin->>Plugin: Publish DNS TXT challenge\nvia the configured DNS provider plugin
-        Plugin->>API: Ask CERTInext to verify the record
-        API-->>Plugin: Domain validated (or still pending —\nfalls through to the pending path below)
-    end
-
     Plugin->>API: Check order status
     API-->>Plugin: Order status and certificate details
 
-    alt Certificate issued immediately
-        Plugin-->>CMD: Certificate ready — PEM returned
-    else Certificate pending or not yet downloadable
+    alt DNS-01 DCV engaged (DCV build, DCV enabled, DNS provider available)
+        opt Order has domains pending DNS-01 validation
+            Plugin->>Plugin: Publish DNS TXT challenge\nvia the configured DNS provider plugin
+            Plugin->>API: Ask CERTInext to verify the record
+            API-->>Plugin: Domain validated (or skipped / still pending)
+        end
+        opt Every pending domain validated
+            loop DCV issuance wait\n(bounded by DcvWaitForIssuanceSeconds, 60s by default)
+                Plugin->>API: Poll for the certificate
+                API-->>Plugin: Status and certificate, if ready
+            end
+        end
+    else DCV not engaged and order still pending
         loop Certificate-pickup retries\n(bounded, ~55s by default — PickupRetries/PickupDelay)
             Plugin->>API: Poll for the certificate
             API-->>Plugin: Status and certificate, if ready
         end
-        alt Certificate became available during pickup
-            Plugin-->>CMD: Certificate ready — PEM returned
-        else Still not available
-            Plugin-->>CMD: Pending — Command will pick it up\nduring the next synchronization
-        end
+    end
+
+    alt Certificate available (immediately, or during the DCV or pickup wait)
+        Plugin-->>CMD: Certificate ready — PEM returned
     else Order rejected by CERTInext
         Plugin-->>CMD: Enrollment failed — see gateway logs
+    else Certificate still not available
+        Plugin-->>CMD: Pending — Command will pick it up\nduring the next synchronization
     end
 
     Plugin->>Plugin: Record enrollment outcome in audit log\n(order number, serial number, status)
 ```
 
-**DCV:** on a DCV-enabled build, DNS-01 validation runs inline for DV orders that require it, bounded by `DcvTimeoutMinutes`. When DCV isn't enabled, isn't built into this host, or the order doesn't require it, this step is skipped entirely and the order proceeds straight to the pending/pickup path like any other asynchronously-issued order.
+**DCV:** on a DCV-enabled build, DNS-01 validation runs inline for DV orders that require it, bounded by `DcvTimeoutMinutes`. DCV is "engaged" whenever the build supports it, `DcvEnabled` is set, and a DNS provider is available, whether or not this particular order ends up needing a challenge. When DCV isn't enabled, isn't built into this host, or the order doesn't require it, the DCV step is skipped and the order follows the synchronous pickup path below like any other asynchronously-issued order.
 
-**Synchronous certificate pickup:** if the certificate isn't available immediately (a fresh order, or DCV that just validated but hasn't finished generating the PEM), `Enroll()` polls CERTInext a bounded number of times (`PickupRetries` × `PickupDelay`, capped at a 180s ceiling) before giving up and returning pending. This lets a fast-issuing certificate (DV, or an already-approved order) come back in the same enrollment call instead of always waiting for the next sync. OV/EV orders validate asynchronously over minutes to hours and typically exhaust this window regardless.
+**Waiting for issuance — DCV and pickup are alternatives, not stacked:** when DCV engages for an order, DCV owns the in-call wait and the pickup loop does not run. After DCV verifies, `Enroll()` polls for the certificate for up to `DcvWaitForIssuanceSeconds` (default 60s), but only if every pending domain was validated. If any domain was skipped or rejected (for example an IP or email SAN with no DNS provider), a DCV step failed, or CERTInext never exposed the challenge within `DcvWaitForChallengeSeconds`, there is no further in-call wait: `Enroll()` returns pending carrying the order number and the next sync finishes the order.
+
+**Synchronous certificate pickup:** when DCV did not engage (the default build, `DcvEnabled` off, or no DNS provider) and the order is still pending, `Enroll()` polls CERTInext a bounded number of times (`PickupRetries` × `PickupDelay`, each clamped and the total capped at a 180s ceiling) before giving up and returning pending. This lets a fast-issuing certificate (DV, or an already-approved order) come back in the same enrollment call instead of always waiting for the next sync. OV/EV orders validate asynchronously over minutes to hours and typically exhaust this window regardless.
 
 ### Renewal
 
@@ -190,6 +196,8 @@ flowchart TD
     H --> I([Certificate issued or pending])
     C --> I
 ```
+
+**Pickup on renewal:** a renewal order goes through the same synchronous pickup as a new enrollment, so a fast-issuing renewal returns the certificate in the same call. The renew path never runs DCV in the call, so on a DCV build with `DcvEnabled` a renewal that is still waiting on DNS-01 validation can't issue inside the pickup window: it skips the wait and returns pending at once, and the next sync completes DCV and imports the certificate. Renewals that aren't waiting on DNS-01 validation (validation reused, DCV disabled, or the DCV-state check fails) keep the normal pickup.
 
 ---
 
