@@ -1,39 +1,41 @@
 # 1.0.1
 
 ## Features
-- **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly and returns the certificate in the same request when it issues fast, instead of always waiting for the next sync. Configurable via `PickupRetries` (default 5, `0` disables) and `PickupDelay` (default 10s). Orders that don't issue in time (e.g. OV/EV) return pending and are picked up by the next sync, as before.
+- **Faster enrollment for quickly-issued certificates.** Enrollment now waits briefly and returns the certificate in the same call when it issues fast, otherwise returning pending as before (`PickupRetries` default 5, `0` disables; `PickupDelay` default 10s).
 
 ## Bug Fixes
-- **UCC certificates no longer come back with only the common name.** The gateway sends SANs under the key `dnsname`, which the plugin didn't recognize, so orders went out with an empty domain list. SANs are now read from every key the gateway sends, and from the CSR when the gateway sends no SAN data.
-- **Renewals no longer lose their SANs.** Renewals were submitted with no additional domains and the wrong primary domain; both now come from the certificate being renewed.
-- **Enrollment no longer fails on an order CERTInext auto-approves before it finishes issuing.** The plugin used to report these as issued with no certificate attached, which the gateway rejected. It now returns pending and picks up the certificate once CERTInext finishes issuing it.
-- **Renewals now use the certificate template's product code.** Renewals previously always used the connector's `DefaultProductCode`, which could send an empty product code if that setting was never configured. Renewals now use the template's code, falling back to `DefaultProductCode` only when the template doesn't have one.
-- **New enrollments now use the connector defaults when the template or connector value is blank.** A blank template product code now falls back to `DefaultProductCode`, and a blank `RequestorName`/`SignerPlace` now sends "Keyfactor Gateway"/"Gateway" as the agreement signer instead of an empty value.
+- **UCC certificates no longer come back with only the common name.** SANs are now read from every key the gateway sends (including `dnsname`), and from the CSR when it sends none.
+- **Renewals no longer lose their SANs.** The primary domain and SANs now come from the renewal request (subject CN, request SANs or CSR), not the prior order.
+- **Enrollment no longer fails on an order CERTInext auto-approves before it finishes issuing.** It now returns pending and the next sync picks up the certificate.
+- **Renewals now use the template's product code** instead of always using `DefaultProductCode`.
+- **A blank `RequestorName` or `SignerPlace` no longer sends an empty agreement signer.** The placeholders `Keyfactor Gateway` and `Gateway` are sent instead.
 - **The `SignerName`, `SignerPlace`, and `SignerIp` template parameters now take effect.** They were accepted but ignored; they now override the connector values for the subscriber agreement on both new orders and renewals.
 - **A `SignerIp` that isn't an IP address now logs a Warning** naming whether it came from the template or the connector; the value is still sent unchanged and enrollment is never blocked.
-- **A Warning is now logged when `SignerName` or `SignerPlace` fall back to the "Keyfactor Gateway"/"Gateway" placeholders**, naming the template parameter or connector field to set; the values sent are unchanged.
+- **A Warning is now logged when `SignerName` or `SignerPlace` fall back to their placeholders**, naming what to set (`SignerIp` already warned on its `127.0.0.1` fallback).
 - **`GroupNumber`, `AutoSecureWww`, and the technical contact now reach CERTInext**; they were previously sent in fields CERTInext doesn't read.
 - **Renewals now send the full order details** (group, `AutoSecureWww`, technical contact, organization, remarks), the same as a new enrollment.
-- **Unexpected CERTInext error responses are now diagnosable from the logs.** Non-2xx responses with an unrecognised body now include the HTTP status in the error and log the redacted body (`authKey` always redacted, personal data per `LogSensitiveRequestData`).
+- **Unexpected CERTInext error responses are now diagnosable from the logs.** Non-2xx responses with an unrecognised body include the HTTP status and log the redacted body.
 - **Gateway logs no longer contain the `authKey` or requestor personal data by default**; set `LogSensitiveRequestData` to log PII temporarily (credentials stay redacted).
 - **Log redaction no longer leaks the rest of a value after an escaped quote** (e.g. `"authKey":"ab\"cd"`, `"requestorName":"Jane \"JD\" Doe"`).
 - **CERTInext error text in logs and error messages now has email addresses masked** unless `LogSensitiveRequestData` is set.
 - **URI SANs in enrollment logs no longer leak personal data by default.** `mailto:` addresses are masked and `user:pw@` userinfo is replaced with `***` unless `LogSensitiveRequestData` is set.
 - **Enrollment and renewal no longer fail after the order is placed.** A failed status check or DCV step now returns pending with the order number, so sync finishes the order and a retry can't place a duplicate.
-- **Enrollment no longer waits for issuance on a DV order that cannot issue** (e.g. an IP or email SAN with no DNS provider). Valid domains are still validated; it returns pending and sync finishes the order.
-- **With DCV enabled, a renewal waiting on DNS-01 validation no longer holds a gateway worker for the pickup wait.** It returns pending at once and the next sync completes it; other renewals still wait for fast issuance.
+- **Enrollment no longer waits for issuance on a DV order that cannot issue** (e.g. an IP or email SAN with no DNS provider); it returns pending and sync finishes the order.
+- **With DCV enabled, a renewal waiting on DNS-01 validation now returns pending at once** instead of holding a gateway worker for the pickup wait.
 - **Connector and template validation no longer leaks an HTTP client per check.**
 
 ## Chores
-- **`OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are now visible in the startup log.** Whether each is set is now logged alongside the other connector settings, making a misconfigured connector easier to diagnose from logs alone.
+- **The startup log now shows whether `OrganizationNumber`, `DefaultProductCode`, and `GroupNumber` are set, plus `SubmitNonDnsSans` and `LogSensitiveRequestData`**, and logs a Warning when `LogSensitiveRequestData` is on.
+- **Configuration docs and field descriptions now match the code**, including `DefaultProductCode`, `ValidityYears`, the signer fallbacks, `LogSensitiveRequestData`, and the pickup clamps.
 - **Corrected the `AutoApprove` template setting's description.** It previously implied the plugin would attempt automatic approval of pending certificates; it does not currently do this.
 
 ## Upgrade Notes
-- **Non-DNS SANs (IP, email, URI) are now submitted instead of silently dropped.** CERTInext can't validate them, so such an order won't issue until the SAN is removed. Set `SubmitNonDnsSans` to `false` to restore the old drop-silently behavior.
-- **No more duplicate or orphaned orders after a network timeout.** Order/CSR submissions no longer auto-retry after a timeout, since the CA may have already created the order. If it was created, the next sync imports it.
+- **Non-DNS SANs (IP, email, URI) are now submitted instead of silently dropped**, so such an order won't issue until they are removed; set `SubmitNonDnsSans` to `false` to restore the old behavior.
+- **Order/CSR submissions no longer auto-retry after a timeout**, so a timeout can't create a duplicate order; if the CA did create one, the next sync imports it.
 - **`www.` is no longer added to orders by default**, because `AutoSecureWww` (default `0`) is now honored; set it to `1` to keep the old behavior.
 - **Orders now route to the configured `GroupNumber`**, which previously was not applied to orders.
 - **Renewals follow the connector's `SubscriptionAutoRenew`, `EmailNotifications`, and validity settings** instead of fixed 1-year validity with auto-renew and notifications on.
+- **The `ValidityYears` template parameter now takes effect and wins over `ValidityDays`**, so templates with `ValidityYears` 2 or 3 now order multi-year subscriptions, and a template value overrides `SubscriptionValidityYears`.
 - **The technical contact is omitted, with a Warning, when no contact name or email resolves**, since CERTInext requires both once the block is sent.
 - **The V1 API error log line now reads `CERTInext API non-success. Operation=...`** instead of `CERTInext API error during ...`; update any log alerts keyed on the old text.
 
