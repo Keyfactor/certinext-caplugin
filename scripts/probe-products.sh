@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Optional env var: PROBE_DOMAIN (default test-integration.example.com)
 # Depends on /tmp/certinext-test.csr being present (run generate-test-csr first).
+# Body shape mirrors the plugin's GenerateOrderSSL request (see generate-order.sh):
+# orderDetails.groupNumber / orderDetails.autoSecureWWW, technicalPointOfContact.poc*.
 set -euo pipefail
 . ~/.env_certinext
 . "$(dirname "$0")/lib/certinext-auth.sh"
@@ -12,6 +14,8 @@ if [ -z "$signerIp" ]; then signerIp=$(curl -s https://api.ipify.org); fi
 
 name="${CERTINEXT_REQUESTOR_NAME:-Keyfactor Gateway Test}"
 mobile="${CERTINEXT_REQUESTOR_MOBILE:-0000000000}"
+read -r pocFirst pocLast <<< "$name"
+if [ -z "${pocLast:-}" ]; then pocLast="$pocFirst"; fi
 
 echo ""
 echo "=== probe-products: testing SSL/TLS product codes for account $CERTINEXT_ACCOUNT_NUMBER ==="
@@ -30,6 +34,8 @@ for code in 842 843 844 845 846 847 848 849 850 851 149; do
         --arg name "$name" \
         --arg mobile "$mobile" \
         --arg signerIp "$signerIp" \
+        --arg pocFirst "$pocFirst" \
+        --arg pocLast "$pocLast" \
         --rawfile csr /tmp/certinext-test.csr \
         '{meta:{ver:$ver,ts:$ts,txn:$txn,accountNumber:$acct,authKey:$auth},
           orderDetails:{
@@ -37,15 +43,16 @@ for code in 842 843 844 845 846 847 848 849 850 851 149; do
             accountingModel:"2",
             saveAndHold:"1",
             emailNotifications:"0",
-            delegationInformation:{groupNumber:$grp},
+            groupNumber:$grp,
+            autoSecureWWW:"0",
             organizationDetails:{preVetting:"1",organizationNumber:$org},
             requestorInformation:{requestorName:$name,
               requestorIsdCode:"1",requestorMobileNumber:$mobile,
               requestorEmail:$email},
             subscriptionDetails:{validity:"1",autoRenew:"0",renewCriteria:"30"},
-            certificateInformation:{domainName:$domain,autoSecureWWW:"1"},
-            technicalPointOfContact:{tpcName:$name,tpcEmail:$email,
-              tpcIsdCode:"1",tpcMobileNumber:$mobile},
+            certificateInformation:{domainName:$domain},
+            technicalPointOfContact:{pocFirstName:$pocFirst,pocLastName:$pocLast,
+              pocEmail:$email,pocIsdCode:"1",pocMobileNumber:$mobile},
             csr:$csr,
             agreementDetails:{acceptAgreement:"1",signerName:$name,
               signerPlace:"Gateway",signerIP:$signerIp},

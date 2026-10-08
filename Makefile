@@ -453,7 +453,7 @@ get-field-details:
 FILTER ?=
 
 show-postman-bodies:
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/extract_postman_bodies.py \
+	@python3 $(CURDIR)/scripts/extract_postman_bodies.py \
 	  --filter "$(FILTER)"
 
 # ---------------------------------------------------------------------------
@@ -465,13 +465,13 @@ show-postman-bodies:
 # ---------------------------------------------------------------------------
 
 show-postman-variables:
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/extract_postman_variables.py
+	@python3 $(CURDIR)/scripts/extract_postman_variables.py
 
 # ---------------------------------------------------------------------------
 # probe-private-pki-payloads — Try three payload variants for
 # GenerateOrderPrivatePKI with product 149.
 #
-# Tests Postman-minimal, +agreementDetails, and +delegationInformation
+# Tests Postman-minimal, +agreementDetails, and +orderDetails.groupNumber
 # to isolate which payload structure the server accepts without EMS-939.
 #
 # Optional: DOMAIN=...  PRODUCT_CODE=149  SAVE_AND_HOLD=0
@@ -479,7 +479,7 @@ show-postman-variables:
 # ---------------------------------------------------------------------------
 
 probe-private-pki-payloads: generate-test-csr
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/order_private_pki_minimal.py \
+	@python3 $(CURDIR)/scripts/order_private_pki_minimal.py \
 	  --csr /tmp/certinext-test.csr \
 	  --domain "$(IGTF_DOMAIN)" \
 	  --product "$(PRIVATE_PKI_CODE)" \

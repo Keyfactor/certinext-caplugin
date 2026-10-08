@@ -98,7 +98,10 @@ def build_private_pki_payload(
             "accountingModel": "2",
             "saveAndHold": save_and_hold,
             "emailNotifications": "0",
-            "delegationInformation": {"groupNumber": group_number},
+            # orderDetails.groupNumber is CERTInext's GenerateOrderSSL placement
+            # (delegationInformation.groupNumber is not read); assumed, not yet
+            # confirmed live, for GenerateOrderPrivatePKI.
+            "groupNumber": group_number,
             "requestorInformation": {
                 "requestorName": requestor_name,
                 "requestorIsdCode": "1",
