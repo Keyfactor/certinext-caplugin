@@ -19,6 +19,29 @@ The project is split into several focused test classes:
 | `RateLimitRetryTests` | Rate-limit back-off helpers | Pure unit (no I/O) |
 | `ExtractSerialFromPemTests` | PEM serial-number extraction | Pure unit (no I/O) |
 | `RedactCredentialsTests` | Log credential-redaction helper | Pure unit (no I/O) |
+| `SanSubmissionTests` | UCC SAN submission (`dnsname` key, CSR fallback, non-DNS SANs, `SubmitNonDnsSans`) | WireMock + real client |
+| `BlankRequestorWireTests` | Wire body when `RequestorName`/`TechnicalContactName` are blank, enroll and renewal | WireMock + real plugin and client |
+| `SignerFallbackWarningTests` | Warning logged when `SignerName`/`SignerPlace` use the placeholders | WireMock + captured logger |
+| `SignerIpWarningTests` | Warning logged for a non-IP `SignerIp` (value still sent unchanged) | WireMock + captured logger |
+| `PostPlacementTrackOrderFailureTests` | `TrackOrder` failure after order placement returns pending, not an error | WireMock |
+| `PostPlacementDcvFailureTests` | DCV or issuance-wait failure after order placement returns pending (DCV build only) | Moq + fake validator |
+| `RenewalPickupDcvTests` | Renewal pickup is skipped only when DNS-01 DCV is pending; DCV-state check failures never throw | Moq + fake validator (DCV paths DCV build only) |
+| `V1NonSuccessResponseTests` | Non-2xx unrecognised V1 body surfaces the HTTP status in the exception | WireMock |
+| `V1NonSuccessLogRedactionTests` | Unrecognised V1 error body is logged only after redaction | WireMock + captured logger |
+| `ExtractErrorMessageTests` | V1 error-message parsing | Pure unit |
+| `CaErrorTextMaskingTests` | Email addresses in CA error text are masked unless `LogSensitiveRequestData` is on | WireMock + captured logger |
+| `RedactPersonalDataTests` | `RedactPersonalData` / `ApplyLoggingRedaction` against realistic order payloads | Pure unit |
+| `MaskEmailTests` | `LogSanitizer.MaskEmail` | Pure unit |
+| `SanLogMaskingTests` (`LogSanitizerFormatSansTests`, `SanLogMaskingPluginTests`) | Email/URI SAN masking in log lines | Pure unit + captured plugin logger |
+| `ClientPayloadLogRedactionTests` | Redaction at the `PlaceOrder`/`TrackOrder`/`LogApiFailure` log call sites | WireMock + captured logger |
+| `TracePayloadGuardTests` | Trace payload dumps are not built when Trace is disabled | WireMock + captured logger |
+| `CERTInextCAPluginAuditLoggingTests` | "Enrollment attempt started" line with `LogSensitiveRequestData` on and off | Captured logger |
+| `SensitiveRequestDataConfigTests` | `LogSensitiveRequestData` config default and annotation | Pure unit |
+
+The test classes added for 1.0.1 (everything from `SanSubmissionTests` down in the table above) were
+introduced after `release-1.0`. The ones that swap the process-global logger (`CERTInextClient.OverrideLoggerForTests`
+or `LogHandler.Factory`) share the non-parallel `LoggingStateCollection` so they never run alongside each other
+or alongside other tests.
 
 If a test fails in `CERTInextClientTests` or `CERTInextClientRequestShapeTests`, the bug is in
 HTTP transport or request serialisation. If it fails in `CERTInextCAPluginTests` or
@@ -181,13 +204,26 @@ blocks depending on connector configuration.
 |------|-----------|
 | `OrganizationNumber_Set_EmitsPreVettedOrganizationDetails` | Body includes `organizationDetails.preVetting="1"` and the configured `organizationNumber` |
 | `OrganizationNumber_Blank_OmitsOrganizationDetailsBlock` | Body omits `organizationDetails` entirely |
-| `GroupNumber_Set_EmitsDelegationInformation` | Body includes `delegationInformation.groupNumber` |
-| `GroupNumber_Blank_OmitsDelegationInformation` | Body omits `delegationInformation` |
-| `TechnicalContact_AllSet_EmitsExplicitValues` | Body includes `technicalPointOfContact` with the configured values |
-| `TechnicalContact_AllBlank_FallsBackToRequestorDefaults` | Body includes `technicalPointOfContact` fields derived from `RequestorName`/`RequestorEmail` |
-| `SslBodyDefaults_AreEmitted_FromCustomConnectorValues` | Custom connector-level defaults appear in the order body |
-| `SslBodyDefaults_AreSafeFallbacks_WhenConfigUntouched` | Default values are emitted without throwing when optional config fields are omitted |
+| `GroupNumber_Set_EmitsOrderDetailsGroupNumber` | Body includes `orderDetails.groupNumber`; no `delegationInformation` |
+| `GroupNumber_Blank_OmitsGroupNumber` | Body omits `orderDetails.groupNumber` (null/empty/whitespace) |
+| `TechnicalContact_AllSet_EmitsPocFields` | `technicalPointOfContact` carries `pocFirstName`/`pocLastName` (split from `TechnicalContactName`), `pocEmail`, `pocIsdCode`, `pocMobileNumber`; no `tpc*` fields |
+| `TechnicalContact_AllBlank_FallsBackToRequestorDefaults` | Each `poc*` field falls back to the matching `Requestor*` value |
+| `TechnicalContact_SingleTokenName_FillsFirstAndLast` | A single-token name goes into both `pocFirstName` and `pocLastName` |
+| `TechnicalContact_PerFieldFallback_MixesOverridesAndRequestorValues` | Fallback is per field, not all-or-nothing |
+| `TechnicalContact_NoEmailResolved_OmitsBlock` | `technicalPointOfContact` is omitted (with a Warning) when no email resolves |
+| `SslBodyDefaults_AreEmitted_FromCustomConnectorValues` | Custom connector-level defaults appear in the order body, incl. `orderDetails.autoSecureWWW` |
+| `SslBodyDefaults_AreSafeFallbacks_WhenConfigUntouched` | Default values are emitted when optional config fields are untouched; `orderDetails.autoSecureWWW="0"` is sent |
+| `AutoSecureWww_Blank_SendsZero` | Blank `AutoSecureWww` still sends `orderDetails.autoSecureWWW="0"` |
 | `ValidityDays_OnRequest_OverridesConnectorDefault` | `ValidityDays` template parameter overrides the connector `SubscriptionValidityYears` |
+| `RenewCertificateAsync_ProfileIdSet_UsesTemplateProductCode` | Renewal uses the template product code over the connector default |
+| `RenewCertificateAsync_ProfileIdBlank_FallsBackToConnectorDefault` | Blank `ProfileId` on a direct client call falls back to `DefaultProductCode` (`Enroll` itself never passes a blank code) |
+| `RenewCertificateAsync_SendsFullOrderDetails_FromConnectorConfig` | Renewal body carries every field a new order does (groupNumber, autoSecureWWW, organizationDetails, requestor, subscription, SANs, `poc*`, CSR, agreement, remarks) |
+| `RenewCertificateAsync_NoValidityOnRequest_UsesConnectorValidity` | Renewal validity comes from `SubscriptionValidityYears`, not a hard-coded `1` |
+| `RenewCertificateAsync_ValidityDays_ConvertsToYears` | Renewal `ValidityDays` is rounded up to whole years |
+| `RenewCertificateAsync_ConfigUntouched_UsesConnectorDefaultsNotDtoDefaults` | Renewal uses connector defaults (`autoRenew="0"`, `emailNotifications="0"`), not DTO defaults |
+| `SplitContactName_SplitsOnFirstWhitespaceRun` | Name split: trim, first whitespace run separates first/last; single token fills both; blank → empty |
+
+Every enroll and renewal shape test also asserts the legacy (ignored-by-CERTInext) placements are absent: no `delegationInformation`, no `certificateInformation.autoSecureWWW`, no `tpc*` property anywhere in `orderDetails`.
 
 ---
 
