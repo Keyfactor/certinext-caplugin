@@ -36,4 +36,14 @@ terraform/terraform.tfvars
 
 # Analysis / scratch — never commit
 analysis/
+logs/*
 
+# AI
+handoffs/
+planning/
+plans/
+plan/
+.claude*
+CLAUDE.md
+.codex*
+AGENTS.md
