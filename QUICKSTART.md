@@ -23,9 +23,11 @@ so set them once and reuse them.
    `AnyCA_<ProductID>` templates Command can enroll against
 6. **Enroll a test certificate** end-to-end
 
-The CERTInext sandbox returns orders in `EXTERNAL_VALIDATION` status
-(pending DCV or manual review), so the final enrollment test reports a
-pending result by design — that's success.
+The CERTInext sandbox usually returns orders in `EXTERNAL_VALIDATION` status
+(pending DCV or manual review), so the final enrollment test normally
+reports a pending result — that's success. If the order issues quickly, the
+call can instead return the issued certificate after waiting up to ~55s
+(`PickupRetries` x `PickupDelay`) — that's success too.
 
 ### Data model & dependency order
 
@@ -687,11 +689,15 @@ $AllTemplates `
 
 ## Step 6 — Verify with a test enrollment
 
-End-to-end check. The CERTInext sandbox returns orders in
+End-to-end check. The CERTInext sandbox usually returns orders in
 `EXTERNAL_VALIDATION` status (DCV or manual review pending), so a
-**successful** verification returns **HTTP 200 with a null
+**successful** verification typically returns **HTTP 200 with a null
 `Pkcs12Blob`** and a `RequestDisposition` of `EXTERNAL_VALIDATION` —
-that's the expected outcome, not a failure.
+that's the expected outcome, not a failure. Enrollment waits up to ~55s
+for a quickly-issued order (`PickupRetries` x `PickupDelay`), so the call
+can instead return the issued certificate in the same request
+(an issued `RequestDisposition` with a populated `Pkcs12Blob`). Either
+result means the connector, template, and enrollment path work.
 
 ### Bash (PFX)
 
@@ -764,8 +770,9 @@ $Response = Invoke-RestMethod -Method Post `
 } | Format-List
 ```
 
-You should see `RequestDisposition = EXTERNAL_VALIDATION`. The
-gateway's `Certificates` table will have a new row at status `90`
+You should see `RequestDisposition = EXTERNAL_VALIDATION` (or an issued
+disposition if the order issued within the ~55s pickup wait). For a pending result,
+the gateway's `Certificates` table will have a new row at status `90`
 (pending external validation); once CERTInext completes DCV / manual
 review, the status flips to `40` (issued) and Command's next inventory
 sync pulls down the actual certificate.
