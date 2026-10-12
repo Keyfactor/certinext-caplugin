@@ -36,49 +36,49 @@
                     "name": "AccountNumber",
                     "description": "Your CERTInext account number (numeric string). Available in the CERTInext portal.",
                     "required": "Required",
-                    "example": "",
+                    "example": "1234567890",
                     "default": ""
                 },
                 {
                     "name": "GroupNumber",
                     "description": "CERTInext group (delegation) number. When set, it is included in GetProductDetails requests AND in the `orderDetails.groupNumber` field of every SSL order (new and renewal) so the order is routed to the configured account group. When blank, CERTInext uses the account's default group. Available in the CERTInext portal under Delegation → Groups.",
                     "required": "Optional",
-                    "example": "",
+                    "example": "2345678901",
                     "default": ""
                 },
                 {
                     "name": "OrganizationNumber",
                     "description": "Numeric CERTInext organization number for a pre-vetted organization. When set, every SSL order is submitted with `organizationDetails.preVetting=\"1\"` and this `organizationNumber`, so CERTInext can reuse that organization's pre-verified domains without fresh DCV. Leave blank to omit `organizationDetails`. Available in the CERTInext portal under Organizations → Pre-vetted Organizations.",
                     "required": "Optional",
-                    "example": "",
+                    "example": "1234567",
                     "default": ""
                 },
                 {
                     "name": "TechnicalContactName",
                     "description": "Technical point of contact name, sent as `technicalPointOfContact.pocFirstName` / `pocLastName` on every SSL order (new and renewal). The name is split on the first whitespace: the first word is the first name and the rest is the last name; a single-word name is sent in both. Defaults to the configured RequestorName when blank. If no contact name or no email resolves (including from RequestorName/RequestorEmail), the whole technicalPointOfContact block is omitted from the order and a Warning is logged, since CERTInext requires both inside the block.",
                     "required": "Optional",
-                    "example": "",
+                    "example": "Jane Smith",
                     "default": ""
                 },
                 {
                     "name": "TechnicalContactEmail",
                     "description": "Email sent in the `technicalPointOfContact.pocEmail` field of every SSL order. Defaults to the configured RequestorEmail when blank. If no contact name or no email resolves (including from RequestorName/RequestorEmail), the whole technicalPointOfContact block is omitted from the order and a Warning is logged, since CERTInext requires both inside the block.",
                     "required": "Optional",
-                    "example": "",
+                    "example": "pki-admin@example.com",
                     "default": ""
                 },
                 {
                     "name": "TechnicalContactIsdCode",
                     "description": "International dialing code for the technical contact phone number, sent as `technicalPointOfContact.pocIsdCode`. Defaults to the configured RequestorIsdCode when blank.",
                     "required": "Optional",
-                    "example": "",
+                    "example": "1",
                     "default": ""
                 },
                 {
                     "name": "TechnicalContactMobileNumber",
                     "description": "Mobile number for the technical contact (digits only), sent as `technicalPointOfContact.pocMobileNumber`. Defaults to the configured RequestorMobileNumber when blank.",
                     "required": "Optional",
-                    "example": "",
+                    "example": "5551234567",
                     "default": ""
                 },
                 {
@@ -99,14 +99,14 @@
                     "name": "OAuthTokenUrl",
                     "description": "OAuth token endpoint URL. Required when AuthMode is 'OAuth'.",
                     "required": "Conditional",
-                    "example": "",
+                    "example": "https://auth.certinext.io/oauth/token",
                     "default": ""
                 },
                 {
                     "name": "OAuthClientId",
                     "description": "OAuth client ID. Required when AuthMode is 'OAuth'.",
                     "required": "Conditional",
-                    "example": "",
+                    "example": "keyfactor-gateway",
                     "default": ""
                 },
                 {
@@ -120,14 +120,14 @@
                     "name": "RequestorName",
                     "description": "Default requestor name submitted with all certificate orders. This is the name of the person/service responsible for the certificates.",
                     "required": "Required",
-                    "example": "",
+                    "example": "PKI Automation",
                     "default": ""
                 },
                 {
                     "name": "RequestorEmail",
                     "description": "Default requestor email submitted with all certificate orders. Must be a valid email address registered in your CERTInext account.",
                     "required": "Required",
-                    "example": "",
+                    "example": "pki-admin@example.com",
                     "default": ""
                 },
                 {
@@ -141,14 +141,14 @@
                     "name": "RequestorMobileNumber",
                     "description": "Requestor mobile number (digits only, no country code).",
                     "required": "Optional",
-                    "example": "",
+                    "example": "5551234567",
                     "default": ""
                 },
                 {
                     "name": "SignerPlace",
                     "description": "City or location of the subscriber agreement signer. Required by CERTInext for all orders. A template SignerPlace overrides it. If neither is set, the placeholder \"Gateway\" is sent and a Warning is logged; set it so the agreement audit record is accurate.",
                     "required": "Optional",
-                    "example": "",
+                    "example": "Austin",
                     "default": ""
                 },
                 {
@@ -162,7 +162,7 @@
                     "name": "DefaultProductCode",
                     "description": "Connector-level fallback product code. Enroll and renewal do not use it: the template must resolve a product code (ProductCode, ProfileId, or the built-in code for the selected product name), otherwise enrollment is rejected with \"Template parameter 'ProfileId' is required.\" Set ProductCode on the template instead. Product codes are provided by eMudhra. Retrieve available codes from Integrations → APIs → GetProductDetails.",
                     "required": "Optional",
-                    "example": "",
+                    "example": "842",
                     "default": ""
                 },
                 {
