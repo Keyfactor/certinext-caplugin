@@ -94,6 +94,9 @@ The file is parsed line by line:
 - Each line must be in `KEY=VALUE` format.
 - Values are not quoted — do not surround values with `"` or `'`.
 - Real environment variables override file values (useful for CI injection).
+- Opt-in flags that place real orders (`CERTINEXT_COMPLETE_PENDING`, `CERTINEXT_RUN_BULK_TEST`,
+  `CERTINEXT_ALGO_MATRIX`, `CERTINEXT_ALGO_MATRIX_DCV`, `CERTINEXT_SAN_PROBE`) are **ignored** in this file;
+  they must be exported in the shell (see `IntegrationTestFixture.OptInOnlyFlags`).
 
 ---
 

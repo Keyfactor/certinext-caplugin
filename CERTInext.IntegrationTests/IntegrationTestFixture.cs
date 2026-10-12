@@ -21,6 +21,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     public sealed class IntegrationTestFixture : IDisposable
     {
         // ---------------------------------------------------------------------------
+        // Opt-in guard
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Env-var keys that must be set explicitly in the shell and must NOT be
+        /// auto-promoted from the env file.  These gate tests that place real orders or
+        /// drive mutating flows, so a developer cannot accidentally arm them by leaving
+        /// a flag in ~/.env_certinext.  Exposed <c>internal</c> for unit-testing.
+        /// </summary>
+        internal static readonly HashSet<string> OptInOnlyFlags =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "CERTINEXT_COMPLETE_PENDING",
+                "CERTINEXT_RUN_BULK_TEST",
+                "CERTINEXT_ALGO_MATRIX",
+                "CERTINEXT_ALGO_MATRIX_DCV",
+                "CERTINEXT_SAN_PROBE",
+            };
+
+        // ---------------------------------------------------------------------------
         // Credential properties
         // ---------------------------------------------------------------------------
 
@@ -83,11 +103,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             var env = LoadEnvFile(envPath);
 
-            // Promote env-file values into the process environment so that any code
-            // calling System.Environment.GetEnvironmentVariable() picks them up.
-            foreach (var kv in env)
-                if (System.Environment.GetEnvironmentVariable(kv.Key) == null)
-                    System.Environment.SetEnvironmentVariable(kv.Key, kv.Value);
+            PromoteToProcessEnvironment(env);
 
             ApiUrl        = GetEnvValue(env, "CERTINEXT_API_URL");
             AccessKey     = GetEnvValue(env, "CERTINEXT_ACCESS_KEY");
@@ -137,6 +153,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // ---------------------------------------------------------------------------
         // Private helpers
         // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Promotes env-file values into the process environment so that any code
+        /// calling <see cref="Environment.GetEnvironmentVariable(string)"/> picks them up.
+        /// Variables already set in the process are left untouched.  Keys in
+        /// <see cref="OptInOnlyFlags"/> are deliberately excluded: they must be set
+        /// explicitly in the shell so a flag left in the file does not arm
+        /// order-placing tests on every bare <c>dotnet test</c>.
+        /// Exposed <c>internal</c> for direct unit-testing.
+        /// </summary>
+        internal static void PromoteToProcessEnvironment(IReadOnlyDictionary<string, string> values)
+        {
+            foreach (var kv in values)
+                if (Environment.GetEnvironmentVariable(kv.Key) == null
+                    && !OptInOnlyFlags.Contains(kv.Key))
+                    Environment.SetEnvironmentVariable(kv.Key, kv.Value);
+        }
 
         /// <summary>
         /// Reads a KEY=VALUE file, stripping blank lines and lines starting with '#'.
