@@ -35,6 +35,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
     {
         private readonly ILogger _logger = LogHandler.GetClassLogger<CERTInextCAPlugin>();
 
+        // 1 once the "Private PKI ignores V2InlineCsr" notice has been logged (once per plugin instance).
+        private int _loggedPrivatePkiIgnoresInlineCsr;
+
         private CERTInextConfig _config;
         private ICERTInextClient _client;
         private ICertificateDataReader _certificateDataReader;
@@ -427,6 +430,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
         }
 
+        /// <summary>True for a bool or a JSON true/false element (a string would fail config deserialization).</summary>
+        internal static bool IsBooleanSettingValue(object value)
+        {
+            if (value is bool) return true;
+            if (value is System.Text.Json.JsonElement je)
+                return je.ValueKind == System.Text.Json.JsonValueKind.True || je.ValueKind == System.Text.Json.JsonValueKind.False;
+            return false;
+        }
+
         /// <inheritdoc/>
         public async Task ValidateCAConnectionInfo(Dictionary<string, object> connectionInfo)
         {
@@ -544,6 +556,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         errors.Add($"'{Constants.Config.AuthMode}' must be one of: AccessKey, OAuth. Got: '{authMode}'.");
                         break;
                 }
+            }
+
+            // V2InlineCsr is a Boolean setting (V2 only): reject a value that is not true/false instead of
+            // letting it fail later at configuration load.
+            if (connectionInfo.TryGetValue(Constants.Config.V2InlineCsr, out object inlineCsrObj) && inlineCsrObj != null
+                && !IsBooleanSettingValue(inlineCsrObj))
+            {
+                errors.Add($"'{Constants.Config.V2InlineCsr}' must be true or false. Got: '{inlineCsrObj}'.");
+            }
+            else if (!useV2 && inlineCsrObj is bool inlineOn && inlineOn)
+            {
+                _logger.LogWarning(
+                    "'{Setting}' is true but UseV2Api is false: the setting only applies to the V2 API and is ignored.",
+                    Constants.Config.V2InlineCsr);
             }
 
             if (errors.Any())
@@ -1633,9 +1659,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 };
             }
 
-            // The CSR travels inline on the create call, and nothing re-sends it afterwards (there is
-            // no Submit CSR step). A blank CSR would create an order stuck at pending-csr with no way
-            // to supply one, so reject it before any CA call.
+            // SSL/TLS sends the CSR inline on the create call and nothing re-sends it afterwards; Private
+            // PKI submits it right after create. Either way a blank CSR would leave an order stuck at
+            // pending-csr with no way to supply one, so reject it before any CA call.
             if (string.IsNullOrWhiteSpace(csr))
             {
                 _logger.LogWarning(
@@ -1647,8 +1673,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     CARequestID   = string.Empty,
                     Certificate   = null,
                     Status        = (int)EndEntityStatus.FAILED,
-                    StatusMessage = "V2 enrollment rejected: the enrollment request carried no CSR, and the V2 order " +
-                                    "create sends the CSR inline. No order was placed."
+                    StatusMessage = "V2 enrollment rejected: the enrollment request carried no CSR, which every V2 " +
+                                    "order needs (inline on create for SSL/TLS, submitted after create for Private PKI). No order was placed."
                 };
             }
 
@@ -2250,6 +2276,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 };
             }
 
+            // CSR delivery mode. Default (V2InlineCsr=false): the two-call flow, create without `csr` and
+            // then PUT .../csr. V2InlineCsr=true opts SSL/TLS into the single-call flow (CSR inline on
+            // create, no PUT). Private PKI always stays two-call: the live sandbox rejects an inline `csr`
+            // on the Private PKI create with HTTP 422.
+            bool inlineCsr = _config.V2InlineCsr && !isPrivatePki;
+            if (isPrivatePki && _config.V2InlineCsr
+                && System.Threading.Interlocked.Exchange(ref _loggedPrivatePkiIgnoresInlineCsr, 1) == 0)
+            {
+                _logger.LogWarning(
+                    "V2InlineCsr is enabled, but Private PKI orders ignore it and keep the two-call flow " +
+                    "(create, then Submit CSR): the CA rejects an inline csr on the Private PKI create. " +
+                    "SSL/TLS orders still use the single-call flow. This message is logged once per connector.");
+            }
+
             V2CreateOrderResponse createResp;
             if (isPrivatePki)
             {
@@ -2264,7 +2304,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Requestor               = requestor,
                     Hostname                = domain,
                     AdditionalHosts         = additionalHosts,
-                    Csr                     = csr,
                     Subscription            = subscription,
                     Remarks                 = remarks,
                     TechnicalPointOfContact = technicalPointOfContact
@@ -2278,7 +2317,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     ProductVariant     = sslProductVariant,
                     EmailNotifications = emailNotifications,
                     Requestor          = requestor,
-                    Csr                = csr,
+                    Csr                = inlineCsr ? csr : null,
                     Organization       = organization,
                     Certificate = new V2CertificateParams
                     {
@@ -2305,53 +2344,137 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation(
                 "V2 order placed. OrderId={OrderId}, Status={Status}, EnrollmentType={EnrollmentType}",
                 orderId, createResp.Status, enrollmentType);
-            _logger.LogInformation(
-                "V2 CSR sent inline on order create (no separate Submit CSR call). OrderId={OrderId}, Family={Family}",
-                orderId, ep.ProductFamilySlug);
-
-            // The CSR went inline on the create call, so the order is already past 'pending-csr':
-            // the create call itself usually holds until the CA has issued (or parked the order
-            // at pending-approval / pending-dcv). Track once to read the authoritative status (and,
-            // for DV, the per-domain verification block the DCV step below needs). Guard: if
-            // TrackOrderV2Async fails transiently the order already exists and carries its CSR;
-            // return pending with the known orderId so Command has a CARequestID and the next
-            // sync can resolve the status.
-            V2OrderStatusResponse postCreateStatus;
-            int disposition;
+            // Status bookkeeping shared by both flows below.
+            V2OrderStatusResponse postCreateStatus = null;
+            int disposition = 0;
             // Raw CA status string behind the current `disposition` value — kept in step with it
             // (reassigned everywhere `disposition` is recomputed from a fresh TrackOrderV2Async
             // call) purely so a terminal REVOKED result can be logged/reported with the CA's own
             // status text, not just Command's mapped disposition.
-            string lastKnownCaStatus;
-            try
+            string lastKnownCaStatus = null;
+            bool statusResolved = false;
+
+            if (!inlineCsr)
             {
-                postCreateStatus = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
-                disposition = StatusMapper.V2StatusToRequestDisposition(postCreateStatus.Status);
-                lastKnownCaStatus = postCreateStatus.Status;
-            }
-            catch (Exception trackEx)
-            {
-                _logger.LogWarning(trackEx,
-                    "V2 TrackOrderV2Async failed after order create for order {OrderId}; " +
-                    "returning pending so sync can pick it up.", orderId);
-                _logger.MethodExit(LogLevel.Debug);
-                return new EnrollmentResult
+                // Two-call flow (the default for SSL/TLS, and always for Private PKI): the order is
+                // created without a csr and the CSR is then submitted with PUT .../csr.
+                // If Submit CSR throws, the order already exists at pending-csr and Command would
+                // otherwise never learn its ID. A *definitive* CA rejection (a real HTTP 4xx response
+                // body) cancels the orphaned order once and returns FAILED. A transport-level failure
+                // or timeout tells us nothing about whether CERTInext recorded the CSR, so track the
+                // order first and only cancel if it is still pending-csr; if tracking itself fails,
+                // don't cancel — return pending so sync resolves it later.
+                try
                 {
-                    CARequestID   = orderId,
-                    Certificate   = null,
-                    Status        = (int)EndEntityStatus.EXTERNALVALIDATION,
-                    StatusMessage = "V2 order placed with the CSR; status check failed transiently — sync will resolve."
-                };
+                    await _client.SubmitCsrV2Async(ep.ProductFamilySlug, orderId, csr);
+                }
+                catch (Exception csrEx)
+                {
+                    if (!IsTransportLevelCsrFailure(csrEx))
+                    {
+                        var orphanResult = await CancelOrphanedV2OrderAfterCsrFailureAsync(
+                            ep.ProductFamilySlug, orderId, csrEx);
+                        _logger.MethodExit(LogLevel.Debug);
+                        return orphanResult;
+                    }
+
+                    _logger.LogWarning(csrEx,
+                        "V2 SubmitCsrV2Async failed with a transport-level or timeout error for order " +
+                        "{OrderId}; tracking the order before deciding whether to cancel it (CERTInext " +
+                        "may have already accepted the CSR).", orderId);
+
+                    V2OrderStatusResponse trackedAfterCsrFailure;
+                    try
+                    {
+                        trackedAfterCsrFailure = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+                    }
+                    catch (Exception trackEx)
+                    {
+                        _logger.LogWarning(trackEx,
+                            "V2 TrackOrderV2Async also failed while resolving an ambiguous CSR-submit " +
+                            "failure for order {OrderId}; returning pending without cancelling.", orderId);
+                        _logger.MethodExit(LogLevel.Debug);
+                        return new EnrollmentResult
+                        {
+                            CARequestID   = orderId,
+                            Certificate   = null,
+                            Status        = (int)EndEntityStatus.EXTERNALVALIDATION,
+                            StatusMessage = $"V2 order {orderId} placed; CSR submission result is unknown " +
+                                            "after a transport error and the follow-up status check also " +
+                                            "failed — sync will resolve."
+                        };
+                    }
+
+                    if (string.Equals(trackedAfterCsrFailure.Status, Constants.ApiV2.StatusPendingCsr,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Confirmed: the CSR never landed. Cancel the orphaned order.
+                        var orphanResult = await CancelOrphanedV2OrderAfterCsrFailureAsync(
+                            ep.ProductFamilySlug, orderId, csrEx);
+                        _logger.MethodExit(LogLevel.Debug);
+                        return orphanResult;
+                    }
+
+                    _logger.LogInformation(
+                        "V2 CSR submission actually succeeded despite a transport-level error — order " +
+                        "{OrderId} progressed to status {Status}. Continuing normal post-CSR flow.",
+                        orderId, trackedAfterCsrFailure.Status);
+                    postCreateStatus = trackedAfterCsrFailure;
+                    disposition = StatusMapper.V2StatusToRequestDisposition(trackedAfterCsrFailure.Status);
+                    lastKnownCaStatus = trackedAfterCsrFailure.Status;
+                    statusResolved = true;
+                }
+
+                if (!statusResolved)
+                    _logger.LogInformation("V2 CSR submitted. OrderId={OrderId}", orderId);
+            }
+            else
+            {
+                // SSL/TLS: the CSR went inline on the create call, so the order is
+                // already past 'pending-csr' and there is no Submit CSR step. The create call itself usually holds
+                // until the CA has issued (or parked the order at pending-approval / pending-dcv).
+                _logger.LogInformation(
+                    "V2 CSR sent inline on order create (no separate Submit CSR call). OrderId={OrderId}, Family={Family}",
+                    orderId, ep.ProductFamilySlug);
             }
 
-            if (string.Equals(postCreateStatus.Status, Constants.ApiV2.StatusPendingCsr, StringComparison.OrdinalIgnoreCase))
+            // Track once to read the authoritative status (and, for DV, the per-domain verification
+            // block the DCV step below needs). Guard: if TrackOrderV2Async fails transiently the order
+            // already exists and carries its CSR; return pending with the known orderId so Command has
+            // a CARequestID and the next sync can resolve the status.
+            if (!statusResolved)
+            {
+                try
+                {
+                    postCreateStatus = await _client.TrackOrderV2Async(ep.ProductFamilySlug, orderId);
+                    disposition = StatusMapper.V2StatusToRequestDisposition(postCreateStatus.Status);
+                    lastKnownCaStatus = postCreateStatus.Status;
+                }
+                catch (Exception trackEx)
+                {
+                    _logger.LogWarning(trackEx,
+                        "V2 TrackOrderV2Async failed after order create for order {OrderId}; " +
+                        "returning pending so sync can pick it up.", orderId);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
+                    {
+                        CARequestID   = orderId,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.EXTERNALVALIDATION,
+                        StatusMessage = "V2 order placed with the CSR; status check failed transiently — sync will resolve."
+                    };
+                }
+            }
+
+            if (inlineCsr
+                && string.Equals(postCreateStatus?.Status, Constants.ApiV2.StatusPendingCsr, StringComparison.OrdinalIgnoreCase))
             {
                 // Not observed on SSL (every inline create left pending-csr immediately), but a
                 // family that silently ignores the inline csr would park here forever.
                 _logger.LogWarning(
                     "V2 order {OrderId} is still '{Status}' right after a create that carried the CSR inline — " +
                     "the CA may not have consumed the CSR. Family={Family}",
-                    orderId, postCreateStatus.Status, ep.ProductFamilySlug);
+                    orderId, postCreateStatus?.Status, ep.ProductFamilySlug);
             }
 
             // Whether the inline DCV block below took ownership of the in-call issuance wait for
@@ -2460,6 +2583,102 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             _logger.MethodExit(LogLevel.Debug);
             return finalResult;
+        }
+
+        /// <summary>
+        /// Two-call flow only (V2InlineCsr=false, and always for Private PKI).
+        /// True when <paramref name="ex"/> (thrown by <c>SubmitCsrV2Async</c>)
+        /// represents a transport-level failure, timeout, or cancellation — i.e. whether CERTInext
+        /// actually received and recorded the CSR is unknown — rather than a definitive CA-side
+        /// rejection (a real HTTP 4xx response CERTInext returned after processing the request).
+        /// <c>CERTInextClient</c> is built with <c>ThrowOnAnyError=false</c>, so a connection
+        /// failure/timeout never received a response and instead renders through
+        /// <c>ThrowOnV2Failure</c>'s generic fallback as <c>"... HTTP 0. ..."</c> — <c>0</c> is the
+        /// RestSharp default <see cref="System.Net.HttpStatusCode"/> when no response arrived.
+        /// A 5xx or any message shape this cannot parse is treated the same conservative way (not
+        /// a confirmed rejection): a CA server error or an unrecognized failure does not confirm
+        /// the CSR was rejected, so the safer default is to track the order rather than assume.
+        /// Only a parsed 4xx status is treated as definitive.
+        /// </summary>
+        internal static bool IsTransportLevelCsrFailure(Exception ex)
+        {
+            if (ex == null) return true;
+            if (ex is OperationCanceledException) return true;
+            if (ex is System.Net.Http.HttpRequestException) return true;
+            if (ex is TimeoutException) return true;
+
+            var m = System.Text.RegularExpressions.Regex.Match(ex.Message ?? string.Empty, @"HTTP (\d+)\.");
+            if (!m.Success) return true;
+            int status = int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            return status < 400 || status >= 500;
+        }
+
+        /// <summary>
+        /// Cancel reason sent to CERTInext when Submit CSR fails after the order was created.
+        /// Deliberately fixed text: the CSR exception may carry CA response detail,
+        /// and the reason is persisted in the CA's audit log.
+        /// </summary>
+        internal const string OrphanedOrderCancelReason =
+            "Keyfactor gateway: CSR submission failed; cancelling orphaned order.";
+
+        /// <summary>
+        /// <see cref="EnrollV2Async"/> calls this when <c>SubmitCsrV2Async</c> throws
+        /// after the order was placed. Makes exactly one best-effort <c>CancelOrderV2Async</c>
+        /// call (never retried, never rethrown) and returns a FAILED result that carries the
+        /// orderId and says whether the orphaned order was cancelled.
+        /// </summary>
+        private async Task<EnrollmentResult> CancelOrphanedV2OrderAfterCsrFailureAsync(
+            string familySlug, string orderId, Exception csrEx)
+        {
+            _logger.MethodEntry(LogLevel.Trace);
+            // The CSR exception message can carry CA response detail (problem+json "detail"),
+            // so it is redacted like any other CA body and capped at 500 characters.
+            string csrFailure = RedactAndCapForLog(csrEx.Message);
+
+            string cancelOutcome;
+            string cancelMessage;
+            try
+            {
+                var outcome = await _client.CancelOrderV2Async(familySlug, orderId, OrphanedOrderCancelReason);
+                if (outcome == V2CancelOrderOutcome.Cancelled)
+                {
+                    cancelOutcome = "cancelled";
+                    cancelMessage = "The orphaned order was cancelled.";
+                }
+                else
+                {
+                    cancelOutcome = "not cancelled (HTTP 422: order already in a terminal state)";
+                    cancelMessage = "The orphaned order was NOT cancelled: the CA reported it is already in a " +
+                                    "terminal state (HTTP 422). Check the order in the CERTInext portal.";
+                }
+            }
+            catch (Exception cancelEx)
+            {
+                cancelOutcome = $"not cancelled (cancel failed: {cancelEx.GetType().Name}: " +
+                                $"{RedactAndCapForLog(cancelEx.Message)})";
+                cancelMessage = "The orphaned order was NOT cancelled: the cancel request failed. " +
+                                "Cancel it manually in the CERTInext portal. See gateway logs for details.";
+            }
+
+            _logger.LogWarning(
+                "V2 CSR submission failed after the order was placed. OrderId={OrderId}, Family={Family}, " +
+                "CsrFailure={CsrFailure}, CancelOutcome={CancelOutcome}",
+                orderId, familySlug, csrFailure, cancelOutcome);
+
+            _logger.MethodExit(LogLevel.Trace);
+            return new EnrollmentResult
+            {
+                CARequestID   = orderId,
+                Certificate   = null,
+                Status        = (int)EndEntityStatus.FAILED,
+                StatusMessage = $"V2 CSR submission failed for order {orderId}: {csrFailure} {cancelMessage}"
+            };
+        }
+
+        private string RedactAndCapForLog(string message)
+        {
+            string redacted = CERTInextClient.ApplyLoggingRedaction(message ?? string.Empty, _config?.LogSensitiveRequestData ?? false);
+            return redacted.Length <= 500 ? redacted : redacted.Substring(0, 500) + "…";
         }
 
         /// <summary>

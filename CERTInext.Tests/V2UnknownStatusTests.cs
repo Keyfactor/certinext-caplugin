@@ -60,7 +60,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 });
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = OrderId, Status = "pending-approval" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = OrderId, Status = "pending-csr" });
+            mock.Setup(c => c.SubmitCsrV2Async(It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "unknown" });
 

@@ -296,8 +296,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Variant      = "intranet-ssl",
                 Hostname     = "intranet.example.com",
                 Requestor    = new V2Requestor { Name = "DevOps", Email = "devops@example.com" },
-                Subscription = new V2SubscriptionParams { ValidityYears = 1 },
-                Csr          = MockCertificateData.FakeCsrPem
+                Subscription = new V2SubscriptionParams { ValidityYears = 1 }
             });
 
             await act.Should().ThrowAsync<ArgumentException>().WithMessage("*pinned to a product*");

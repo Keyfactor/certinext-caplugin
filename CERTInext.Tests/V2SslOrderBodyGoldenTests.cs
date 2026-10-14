@@ -33,7 +33,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// change a single byte of the SSL/TLS create-order body. Each test drives a full V2 SSL
     /// enrollment against a Strict mock, captures the <see cref="V2CreateSslOrderRequest"/> handed
     /// to the client, serializes it with the client's own serializer options, and compares the
-    /// result to a golden JSON string. The body includes the inline <c>csr</c> (single-call create).
+    /// result to a golden JSON string.
     /// </summary>
     public class V2SslOrderBodyGoldenTests
     {
@@ -44,9 +44,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             PropertyNameCaseInsensitive = true,
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
         };
-
-        // The create body carries the CSR inline, exactly as Enroll received it (PEM, unchanged).
-        private static readonly string CsrJson = JsonSerializer.Serialize(MockCertificateData.FakeCsrPem);
 
         private static async Task<(string Json, string FamilySlug, string ProductCode)> CaptureSslBodyAsync(
             CERTInextConfig config,
@@ -77,6 +74,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     captured = req;
                 })
                 .ReturnsAsync(new V2CreateOrderResponse { OrderId = orderId, Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(It.IsAny<string>(), orderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), orderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = orderId, Status = "pending-dcv" });
 
@@ -149,7 +148,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 "\"subscription\":{\"validityYears\":2,\"autoRenew\":true,\"renewBeforeDays\":15}," +
                 "\"agreement\":{\"signerName\":\"Test User\",\"signerIp\":\"1.2.3.4\",\"signerPlace\":\"New York\",\"accepted\":true}," +
                 "\"technicalPointOfContact\":{\"name\":\"Tech Person\",\"email\":\"tech@example.com\",\"phone\":\"\\u002B447700900000\",\"designation\":\"Technical Contact\"}," +
-                "\"csr\":" + CsrJson + "," +
                 "\"remarks\":\"Issued via Keyfactor Command AnyCA REST Gateway.\",\"groupNumber\":\"GRP-9\"}");
         }
 
@@ -195,7 +193,49 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 "\"subscription\":{\"validityYears\":1,\"autoRenew\":false,\"renewBeforeDays\":30}," +
                 "\"agreement\":{\"signerName\":\"Test User\",\"signerPlace\":\"Austin\",\"accepted\":true}," +
                 "\"technicalPointOfContact\":{\"name\":\"Test User\",\"email\":\"test@example.com\",\"phone\":\"\",\"designation\":\"Technical Contact\"}," +
-                "\"csr\":" + CsrJson + "," +
+                "\"remarks\":\"Issued via Keyfactor Command AnyCA REST Gateway.\"}");
+        }
+
+        [Fact]
+        public async Task SslDvOrder_V2InlineCsrOn_WireBodyCarriesCsrBetweenContactAndRemarks()
+        {
+            var config = new CERTInextConfig
+            {
+                UseV2Api          = true,
+                ApiUrl            = "https://v2.certinext.io",
+                OAuthClientId     = "my-client",
+                OAuthClientSecret = "my-secret",
+                RequestorName     = "Test User",
+                RequestorEmail    = "test@example.com",
+                SignerPlace       = "Austin",
+                PickupRetries     = 0,
+                V2InlineCsr       = true
+            };
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.DvSsl,
+                ProductParameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["ProductCode"] = "842"
+                }
+            };
+
+            var (json, slug, code) = await CaptureSslBodyAsync(
+                config, productInfo, "842", "13",
+                new Dictionary<string, string[]> { ["dnsname"] = new[] { "example.com" } },
+                "CN=example.com");
+
+            slug.Should().Be(Constants.ApiV2.FamilySsl);
+            code.Should().Be("842");
+            // Same body as the default golden above, plus the CSR exactly as Enroll received it (PEM).
+            json.Should().Be(
+                "{\"productVariant\":\"dv\",\"emailNotifications\":\"0\"," +
+                "\"requestor\":{\"name\":\"Test User\",\"email\":\"test@example.com\",\"phone\":\"\"}," +
+                "\"certificate\":{\"domain\":\"example.com\",\"autoSecureWww\":false}," +
+                "\"subscription\":{\"validityYears\":1,\"autoRenew\":false,\"renewBeforeDays\":30}," +
+                "\"agreement\":{\"signerName\":\"Test User\",\"signerPlace\":\"Austin\",\"accepted\":true}," +
+                "\"technicalPointOfContact\":{\"name\":\"Test User\",\"email\":\"test@example.com\",\"phone\":\"\",\"designation\":\"Technical Contact\"}," +
+                "\"csr\":" + System.Text.Json.JsonSerializer.Serialize(MockCertificateData.FakeCsrPem) + "," +
                 "\"remarks\":\"Issued via Keyfactor Command AnyCA REST Gateway.\"}");
         }
     }

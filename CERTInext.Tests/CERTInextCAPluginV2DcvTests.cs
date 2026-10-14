@@ -127,8 +127,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
-            // 1st call: post-create check (pending-dcv). 2nd+: the PerformDcvV2IfNeededAsync poll
+            // 1st call: post-CSR check (pending-dcv). 2nd+: the PerformDcvV2IfNeededAsync poll
             // loop and EnrollV2Async's post-DCV re-check both see "issued" immediately.
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PendingDcvStatus())
@@ -179,6 +182,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PendingDcvStatus())
@@ -248,6 +254,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PendingDcvStatus())
@@ -311,6 +320,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PendingDcvStatus())
@@ -355,6 +367,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PendingDcvStatus())
@@ -403,8 +418,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
-            // 1st call: post-create check (pending-dcv). 2nd: PerformDcvV2IfNeededAsync's own
+            // 1st call: post-CSR check (pending-dcv). 2nd: PerformDcvV2IfNeededAsync's own
             // tracking poll (step 4) — moves to a *different* pending state so that inner loop
             // breaks (DCV steps completed) without the order having actually issued. 3rd:
             // EnrollV2Async's post-DCV re-check, observing the same still-pending state. If the
@@ -458,8 +476,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
-            // 1st call: post-create check (pending-dcv), triggers the inline DCV block. 2nd:
+            // 1st call: post-CSR check (pending-dcv), triggers the inline DCV block. 2nd:
             // PerformDcvV2SingleDomainAsync's own internal step-4 poll (it calls
             // TrackOrderV2Async itself to wait out "pending-dcv" — see its doc comment) observes
             // "revoked", which is != "pending-dcv" so that poll loop breaks and DCV reports done.
@@ -645,8 +666,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
-            // 1st TrackOrder call (post-create check): primary already VERIFIED, both SANs PENDING.
+            // 1st TrackOrder call (post-CSR check): primary already VERIFIED, both SANs PENDING.
             // Every call after that (the WaitForDomainsVerifiedV2Async poll, and EnrollV2Async's
             // own post-DCV re-check) sees the order fully issued with every domain VERIFIED.
             int trackCalls = 0;
@@ -710,8 +734,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
-            // 1st call: post-create, both SANs pending. Every later call (the poll for the one SAN
+            // 1st call: post-CSR, both SANs pending. Every later call (the poll for the one SAN
             // that DID verify, and EnrollV2Async's post-DCV re-check): SanA verified, SanB still
             // pending — the order legitimately cannot advance further this pass.
             int trackCalls = 0;
@@ -870,6 +897,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             // No Verifications block anywhere in this sequence — the single-domain shape.
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
@@ -914,6 +944,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             int trackCalls = 0;
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
@@ -1038,7 +1071,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var mock = NewMock();
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<V2CreatePrivatePkiOrderRequest>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = pkiOrderId, Status = "pending-approval" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = pkiOrderId, Status = "pending-csr" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    Constants.ApiV2.FamilyPrivatePki, pkiOrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             // Even a (spec-impossible) pending-dcv status, with a domain block, must not trigger DCV.
             mock.Setup(c => c.TrackOrderV2Async(Constants.ApiV2.FamilyPrivatePki, pkiOrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(StatusWithDomains("pending-dcv", DomainEntry("intranet.acme.local", "PENDING")));
@@ -1152,6 +1188,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "pending-dcv", Domain = wildcard })
@@ -1220,8 +1259,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
-            // 1st call (post-create check): both the apex and its wildcard are pending. Every later
+            // 1st call (post-CSR check): both the apex and its wildcard are pending. Every later
             // call (WaitForDomainsVerifiedV2Async's poll, and EnrollV2Async's post-DCV re-check)
             // sees the order fully issued with both VERIFIED.
             int trackCalls = 0;
@@ -1291,6 +1333,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(PlaceOrderResponse());
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             int trackCalls = 0;
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))

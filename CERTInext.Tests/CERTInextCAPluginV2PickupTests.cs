@@ -101,7 +101,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 requestFormat:  RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
-        private static void StubPlace(Mock<ICERTInextClient> mock, string initialStatus) =>
+        private static void StubPlaceAndSubmit(Mock<ICERTInextClient> mock, string initialStatus) =>
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
@@ -116,9 +116,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock);
-            StubPlace(mock, "pending-approval");
+            StubPlaceAndSubmit(mock, "pending-csr");
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
-            // 1st call: post-create check (still pending). 2nd: 1st poll attempt (still pending).
+            // 1st call: post-CSR check (still pending). 2nd: 1st poll attempt (still pending).
             // 3rd: 2nd poll attempt — the order has now issued.
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "pending-dcv" })
@@ -155,7 +158,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock);
-            StubPlace(mock, "pending-approval");
+            StubPlaceAndSubmit(mock, "pending-csr");
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             // Post-CSR check is still pending, so EnrollV2Async's own immediate-download branch
             // is never reached — both "issued" observations below come from the pickup poll.
@@ -192,9 +198,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock);
-            StubPlace(mock, "pending-approval");
+            StubPlaceAndSubmit(mock, "pending-csr");
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
-            // Every poll (including the post-create check) still reports pending.
+            // Every poll (including the post-CSR check) still reports pending.
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "pending-dcv" });
 
@@ -219,7 +228,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock);
-            StubPlace(mock, "pending-approval");
+            StubPlaceAndSubmit(mock, "pending-csr");
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "pending-dcv" });
 
@@ -229,7 +241,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
             result.CARequestID.Should().Be(OrderId);
-            // Only the single post-create status check should have run — no pickup polling at all.
+            // Only the single post-CSR status check should have run — no pickup polling at all.
             mock.Verify(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()),
                 Times.Once, "PickupRetries=0 must disable the V2 synchronous pickup poll");
             mock.Verify(c => c.DownloadCertificateV2Async(
@@ -245,7 +257,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock);
-            StubPlace(mock, "pending-approval");
+            StubPlaceAndSubmit(mock, "pending-csr");
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             // Post-CSR check is pending; the first (and only) poll attempt observes a terminal
             // "rejected" status, which StatusMapper.V2StatusToRequestDisposition maps to FAILED.

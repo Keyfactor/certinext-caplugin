@@ -31,7 +31,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// <summary>
     /// End-to-end (real <see cref="CERTInextClient"/> against WireMock) guards for the V2
     /// single-call enrollment: the CSR goes inline on <c>POST /{family}</c>, the product is pinned
-    /// with <c>X-Product-Code</c>, and the plugin never sends <c>PUT .../csr</c>.
+    /// with <c>X-Product-Code</c>, and SSL/TLS never sends <c>PUT .../csr</c> when <c>V2InlineCsr=true</c>
+    /// (Private PKI ignores the flag and keeps create + Submit CSR; the default is the two-call flow).
     /// </summary>
     public class V2SingleCallCreateTests : IDisposable
     {
@@ -53,7 +54,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             RequestorEmail    = "test@example.com",
             SignerIp          = "1.2.3.4",
             SignerPlace       = "New York",
-            PickupRetries     = 0
+            PickupRetries     = 0,
+            // Every test in this class exercises the opt-in single-call flow unless it says otherwise.
+            V2InlineCsr       = true
         };
 
         private CERTInextCAPlugin BuildPlugin(CERTInextConfig config = null)
@@ -195,11 +198,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task PrivatePki_CreateCarriesCsrInline_ProductPinned_NoPut()
+        public async Task PrivatePki_FlagOn_IgnoresIt_TwoCall_CreateWithoutCsr_ThenExactlyOnePutCsr_ProductPinned()
         {
+            // Private PKI keeps create + Submit CSR (the sandbox rejects an inline csr there with 422);
+            // this is the ONLY path in the plugin that sends PUT .../csr.
             StubToken();
             StubCreate(PkiPath, 201,
-                $"{{\"orderId\":\"{OrderId}\",\"requestId\":\"r1\",\"status\":\"pending-approval\",\"variant\":\"intranet-ssl\"}}");
+                $"{{\"orderId\":\"{OrderId}\",\"requestId\":\"r1\",\"status\":\"pending-csr\",\"variant\":\"intranet-ssl\"}}");
+            _server.Given(Request.Create().WithPath($"{PkiPath}/{OrderId}/csr").UsingPut())
+                .RespondWith(Response.Create().WithStatusCode(204));
             StubTrack(PkiPath,
                 $"{{\"orderId\":\"{OrderId}\",\"requestId\":\"r1\",\"status\":\"pending-approval\",\"variant\":\"intranet-ssl\"}}");
 
@@ -210,8 +217,65 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             creates.Should().HaveCount(1);
             creates[0].RequestMessage.Headers.Should().ContainKey("X-Product-Code").WhoseValue.Should().Contain("149");
             using var body = JsonDocument.Parse(creates[0].RequestMessage.Body ?? string.Empty);
-            body.RootElement.GetProperty("csr").GetString().Should().Be(MockCertificateData.FakeCsrPem);
-            AssertNoPutAndNoCsrPath();
+            body.RootElement.TryGetProperty("csr", out _).Should().BeFalse("Private PKI create carries no inline csr");
+
+            var puts = Requests("PUT");
+            puts.Should().HaveCount(1, "Private PKI submits the CSR exactly once, never retried");
+            puts[0].RequestMessage.Path.Should().Be($"{PkiPath}/{OrderId}/csr");
+            using var putBody = JsonDocument.Parse(puts[0].RequestMessage.Body ?? string.Empty);
+            putBody.RootElement.GetProperty("csr").GetString().Should().Be(MockCertificateData.FakeCsrPem);
+        }
+
+        [Fact]
+        public async Task Ssl_DefaultConfig_TwoCall_CreateWithoutCsr_ThenExactlyOnePutCsr()
+        {
+            // V2InlineCsr defaults to false: SSL/TLS behaves as before — create without csr, then PUT .../csr.
+            StubToken();
+            StubCatalog();
+            StubCreate(SslPath, 201,
+                $"{{\"orderId\":\"{OrderId}\",\"requestId\":\"r1\",\"status\":\"pending-csr\"}}");
+            _server.Given(Request.Create().WithPath($"{SslPath}/{OrderId}/csr").UsingPut())
+                .RespondWith(Response.Create().WithStatusCode(204));
+            StubTrack(SslPath,
+                $"{{\"orderId\":\"{OrderId}\",\"requestId\":\"r1\",\"status\":\"pending-approval\",\"productVariant\":\"dv\",\"domain\":\"example.com\"}}");
+            var config = Config();
+            config.V2InlineCsr = false;
+
+            var result = await Enroll(BuildPlugin(config), SslProductInfo());
+
+            result.CARequestID.Should().Be(OrderId);
+            var creates = Requests("POST").Where(e => e.RequestMessage.Path == SslPath).ToList();
+            creates.Should().HaveCount(1);
+            creates[0].RequestMessage.Headers.Should().ContainKey("X-Product-Code").WhoseValue.Should().Contain("842");
+            using var body = JsonDocument.Parse(creates[0].RequestMessage.Body ?? string.Empty);
+            body.RootElement.TryGetProperty("csr", out _).Should().BeFalse("the default create carries no inline csr");
+            var puts = Requests("PUT");
+            puts.Should().HaveCount(1);
+            puts[0].RequestMessage.Path.Should().Be($"{SslPath}/{OrderId}/csr");
+        }
+
+        [Fact]
+        public async Task Ssl_DefaultConfig_CsrRejected_CancelsOrphanedOrderOnce()
+        {
+            StubToken();
+            StubCatalog();
+            StubCreate(SslPath, 201,
+                $"{{\"orderId\":\"{OrderId}\",\"requestId\":\"r1\",\"status\":\"pending-csr\"}}");
+            _server.Given(Request.Create().WithPath($"{SslPath}/{OrderId}/csr").UsingPut())
+                .RespondWith(Response.Create().WithStatusCode(400)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody("{\"title\":\"Bad Request\",\"status\":400,\"detail\":\"bad csr\"}"));
+            _server.Given(Request.Create().WithPath($"{SslPath}/{OrderId}/cancel").UsingPost())
+                .RespondWith(Response.Create().WithStatusCode(204));
+            var config = Config();
+            config.V2InlineCsr = false;
+
+            var result = await Enroll(BuildPlugin(config), SslProductInfo());
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.CARequestID.Should().Be(OrderId);
+            Requests("PUT").Should().HaveCount(1, "Submit CSR is never retried");
+            Requests("POST").Count(e => e.RequestMessage.Path == $"{SslPath}/{OrderId}/cancel").Should().Be(1);
         }
 
         [Fact]

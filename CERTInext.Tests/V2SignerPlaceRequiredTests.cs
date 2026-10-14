@@ -215,7 +215,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(), It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_sp_001", Status = "pending-approval" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_sp_001", Status = "pending-csr" });
+            mock.Setup(c => c.SubmitCsrV2Async(It.IsAny<string>(), "ord_sp_001", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_sp_001", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_sp_001", Status = "pending-approval" });
 
@@ -237,7 +239,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var mock = NewMock();
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<V2CreatePrivatePkiOrderRequest>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_pki_sp", Status = "pending-approval" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_pki_sp", Status = "pending-csr" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    Constants.ApiV2.FamilyPrivatePki, "ord_pki_sp", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(Constants.ApiV2.FamilyPrivatePki, "ord_pki_sp", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_pki_sp", Status = "pending-approval" });
 

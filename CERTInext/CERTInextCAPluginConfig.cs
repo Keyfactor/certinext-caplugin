@@ -460,6 +460,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = Constants.ApiV2.DefaultSyncLookbackHours,
                     Type = "Number"
+                },
+                [Constants.Config.V2InlineCsr] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL (V2 mode only): when true, SSL/TLS enrollment sends the CSR inline in the " +
+                               "order create call (a single POST /ssl-certificates) instead of the default two-call " +
+                               "flow (create the order, then PUT .../csr). This matches a direct single-call API " +
+                               "integration and is about 4-5 seconds faster, but the create call then often holds " +
+                               "about 20 seconds until the certificate is issued, and a create that times out or " +
+                               "returns a 5xx can leave an order that still issues; it is not cancelled and the next " +
+                               "synchronization imports it, so do not resubmit. Private PKI orders ignore this " +
+                               "setting and always use the two-call flow (the CA rejects an inline CSR on Private " +
+                               "PKI create). Ignored when UseV2Api is false. Default: false (two-call).",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
                 }
             };
         }
@@ -964,6 +979,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         [JsonPropertyName("V2SyncLookbackHours")]
         public int V2SyncLookbackHours { get; set; } = Constants.ApiV2.DefaultSyncLookbackHours;
+
+        /// <summary>
+        /// OPTIONAL (V2 mode only), default false. When true, SSL/TLS orders carry the CSR inline in the
+        /// create call (single call, no <c>PUT .../csr</c>). When false, the plugin creates the order
+        /// without a CSR and then submits it. Private PKI ignores this and always uses the two-call
+        /// flow. Ignored when <see cref="UseV2Api"/> is false.
+        /// </summary>
+        [JsonPropertyName("V2InlineCsr")]
+        public bool V2InlineCsr { get; set; } = false;
 
         /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the

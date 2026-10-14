@@ -1380,9 +1380,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             Logger.MethodEntry(LogLevel.Trace);
             EnsureV2Client();
-            // Pin the product on SSL and Private PKI creates: with the CSR inline there is no later
-            // step to catch a wrong product, and an unpinned SSL create auto-resolves to a PFX
-            // product (live: 917) that never issues. Fail before any HTTP call.
+            // Pin the product on SSL and Private PKI creates: an unpinned SSL create auto-resolves to a
+            // PFX product (live: 917) that never issues (and with V2InlineCsr there is no later step to
+            // catch it). Fail before any HTTP call.
             if (string.IsNullOrWhiteSpace(productCode)
                 && (string.Equals(path, Constants.ApiV2.SslCertificatesPath, StringComparison.Ordinal)
                     || string.Equals(path, Constants.ApiV2.PrivatePkiCertificatesPath, StringComparison.Ordinal)))
@@ -1410,7 +1410,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
 
             // Transient/network failure (5xx or no HTTP status) on a non-idempotent create: the
-            // order may exist at the CA, and because the CSR now travels inline it may even issue.
+            // order may exist at the CA (with V2InlineCsr it carries the CSR and may even issue).
             // Never retried (a replay could duplicate the order). Same wording as V1's
             // PlaceOrderAsync so operators see one message for "created but we never heard back".
             // 401/403 and 4xx keep their dedicated handling in ThrowOnV2Failure below.
@@ -1420,8 +1420,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 LogV2ApiFailure("V2 place order", resp, LogLevel.Warning);
                 Logger.LogWarning(
                     "V2 place order received no usable response (Path={Path}, HttpStatus={Status}, LatencyMs={Latency}). " +
-                    "Not retrying to avoid a duplicate order. If CERTInext created the order (it carries the inline " +
-                    "CSR and may issue) it will be imported by the next synchronization.",
+                    "Not retrying to avoid a duplicate order. If CERTInext created the order it will be imported by " +
+                    "the next synchronization.",
                     path, createStatus, sw.ElapsedMilliseconds);
                 throw new Exception(
                     "CERTInext did not return a usable response to the V2 order create " +
@@ -1438,7 +1438,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             catch (Exception deserEx)
             {
                 // A 2xx whose body is empty/unparseable: the CA accepted the create but we cannot read
-                // the order id, so the order exists (with its inline CSR) and the next sync imports it.
+                // the order id, so the order exists and the next sync imports it.
                 Logger.LogWarning(deserEx,
                     "V2 place order returned HTTP {Status} but the body could not be read; the order may exist. " +
                     "Not retrying to avoid a duplicate order.", (int)resp.StatusCode);
@@ -1449,6 +1449,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
             Logger.MethodExit(LogLevel.Trace);
             return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task SubmitCsrV2Async(
+            string productFamilySlug,
+            string orderId,
+            string csrPem,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/csr";
+            var req = await BuildV2RequestAsync(path, Method.Put, ct);
+            var body = new V2SubmitCsrRequest { Csr = csrPem };
+            req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            ThrowOnV2Failure(resp, "V2 submit CSR");
+            Logger.MethodExit(LogLevel.Trace);
         }
 
         /// <inheritdoc/>
@@ -2804,7 +2822,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signedPlace", "signerip", "phone", "designation",
             "firstName", "lastName", "subjectDisplayName", "identityDocumentType", "identificationNumber",
             "streetAddress1", "streetAddress2", "locality", "postalCode",
-            // V2 create bodies carry the PKCS#10 CSR inline ("csr"); its subject is requester data.
+            // The V2 SSL create body carries the PKCS#10 CSR inline ("csr") when V2InlineCsr is on; its
+            // subject is requester data.
             "csr"
         };
 

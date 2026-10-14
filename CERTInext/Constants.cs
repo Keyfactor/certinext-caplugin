@@ -88,6 +88,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // V2 mode only: incremental-sync lookback window for /reports/orders.
             public const string V2SyncLookbackHours = "V2SyncLookbackHours";
+            public const string V2InlineCsr = "V2InlineCsr"; // opt-in: SSL/TLS sends the CSR inline on create (V2 only)
 
             // Environment variable that overrides DcvTimeoutMinutes when set.
             public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";

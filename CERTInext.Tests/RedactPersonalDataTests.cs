@@ -365,9 +365,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public void ApplyLoggingRedaction_V2CreateBodies_InlineCsr_RedactedWhenFlagOff_KeptWhenFlagOn()
+        public void ApplyLoggingRedaction_V2SslCreateBody_InlineCsr_RedactedWhenFlagOff_KeptWhenFlagOn()
         {
-            // The V2 create bodies carry the PKCS#10 CSR inline ("csr"); its subject is requester data.
+            // The V2 SSL create body carries the PKCS#10 CSR inline ("csr"); its subject is requester data.
             string csrBody = MockCertificateData.FakeCsrPem.Split('\n')[1];
             var ssl = new V2CreateSslOrderRequest
             {
@@ -375,15 +375,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Certificate = new V2CertificateParams { Domain = "example.com" },
                 Csr = MockCertificateData.FakeCsrPem
             };
-            var pki = new V2CreatePrivatePkiOrderRequest
-            {
-                Variant = "intranet-ssl",
-                Hostname = "intranet.example.com",
-                Requestor = new V2Requestor { Name = "Jane Doe", Email = "jane.doe@example.com" },
-                Csr = MockCertificateData.FakeCsrPem
-            };
 
-            foreach (object body in new object[] { ssl, pki })
+            foreach (object body in new object[] { ssl })
             {
                 string json = JsonSerializer.Serialize(body, body.GetType(), ClientEquivalentJsonOptions());
                 json.Should().Contain(csrBody, "precondition: the serialized create body carries the CSR");

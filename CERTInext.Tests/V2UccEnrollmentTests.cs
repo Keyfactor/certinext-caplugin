@@ -87,6 +87,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2CreateOrderResponse { OrderId = orderId, Status = "pending-dcv" });
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), orderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
 
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), orderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = orderId, Status = "pending-dcv" });
@@ -207,7 +210,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Enroll_V2_NonUccProduct_SanDictionaryHasOnlyPrimary_ButCsrCarriesExtraSan_StillFailsFastWithNoPlaceOrderCall()
         {
             // A non-null SAN dictionary that carries only the primary domain must not make the
-            // guard defer to the dictionary and skip the CSR. The create call sends the CSR to
+            // guard defer to the dictionary and skip the CSR. SubmitCsrV2Async sends the CSR to
             // CERTInext verbatim regardless of what the SAN dictionary contains, so a
             // CSR-embedded extra domain still reaches the CA even when the dictionary is
             // single-domain — the guard must reject this exactly like the CSR-only case
@@ -250,6 +253,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
                 .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_nonucc_002", Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_nonucc_002", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_nonucc_002", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_nonucc_002", Status = "pending-dcv" });
 
@@ -287,6 +293,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
                 .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_nonucc_003", Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_nonucc_003", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_nonucc_003", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_nonucc_003", Status = "pending-dcv" });
 
@@ -330,6 +339,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
                 .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_ucc_002", Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_ucc_002", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_ucc_002", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_ucc_002", Status = "pending-dcv" });
 
@@ -403,6 +415,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
                 .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_fallback_001", Status = "pending-dcv" });
 
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_fallback_001", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_fallback_001", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_fallback_001", Status = "pending-dcv" });
 
