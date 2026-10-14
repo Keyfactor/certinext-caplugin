@@ -355,6 +355,112 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             AssertNoPutAndNoCsrPath();
         }
 
+        [Fact]
+        public async Task Ssl_DefaultConfig_Create5xx_DoesNotUseDoNotResubmitMessage_NoRetry_NoPut()
+        {
+            // Two-call mode: an order created behind a lost response has no CSR and never issues, so the
+            // inline-only "do not resubmit; the next sync imports it" message would be wrong (af036ae behaviour).
+            StubToken();
+            StubCatalog();
+            StubCreate(SslPath, 500, "{\"title\":\"Internal Server Error\",\"status\":500}");
+            var config = Config();
+            config.V2InlineCsr = false;
+
+            Func<Task> act = () => Enroll(BuildPlugin(config), SslProductInfo());
+
+            var ex = await act.Should().ThrowAsync<Exception>();
+            ex.Which.Message.Should().NotContain("do not resubmit").And.NotContain("next synchronization");
+            Requests("POST").Count(e => e.RequestMessage.Path == SslPath).Should().Be(1, "create is non-idempotent: never retried");
+            Requests("PUT").Should().BeEmpty("no order id came back, so there is no CSR to submit");
+        }
+
+        [Fact]
+        public async Task Ssl_DefaultConfig_Create2xxUnreadableBody_DoesNotUseDoNotResubmitMessage()
+        {
+            StubToken();
+            StubCatalog();
+            StubCreate(SslPath, 201, "this is not json");
+            var config = Config();
+            config.V2InlineCsr = false;
+
+            Func<Task> act = () => Enroll(BuildPlugin(config), SslProductInfo());
+
+            var ex = await act.Should().ThrowAsync<Exception>();
+            ex.Which.Message.Should().NotContain("do not resubmit").And.NotContain("next synchronization");
+            Requests("POST").Count(e => e.RequestMessage.Path == SslPath).Should().Be(1);
+            Requests("PUT").Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task Ssl_InlineMode_Create2xxUnreadableBody_ThrowsDoNotResubmitMessage()
+        {
+            StubToken();
+            StubCatalog();
+            StubCreate(SslPath, 201, "this is not json");
+
+            Func<Task> act = () => Enroll(BuildPlugin(), SslProductInfo());
+
+            (await act.Should().ThrowAsync<Exception>())
+                .WithMessage("*most likely created*next synchronization*do not resubmit*");
+            Requests("POST").Count(e => e.RequestMessage.Path == SslPath).Should().Be(1);
+            AssertNoPutAndNoCsrPath();
+        }
+
+        [Fact]
+        public async Task PrivatePki_FlagOn_Create5xx_DoesNotUseDoNotResubmitMessage()
+        {
+            // The flag is ignored for Private PKI (always two-call), so the inline-only wording must not appear.
+            StubToken();
+            StubCreate(PkiPath, 500, "{\"title\":\"Internal Server Error\",\"status\":500}");
+
+            Func<Task> act = () => Enroll(BuildPlugin(), PkiProductInfo(), subject: "CN=intranet.example.com");
+
+            var ex = await act.Should().ThrowAsync<Exception>();
+            ex.Which.Message.Should().NotContain("do not resubmit").And.NotContain("next synchronization");
+            Requests("POST").Count(e => e.RequestMessage.Path == PkiPath).Should().Be(1, "create is never retried");
+            Requests("PUT").Should().BeEmpty("no order id came back, so there is no CSR to submit");
+        }
+
+        [Fact]
+        public async Task PrivatePki_FlagOn_Create2xxUnreadableBody_DoesNotUseDoNotResubmitMessage()
+        {
+            StubToken();
+            StubCreate(PkiPath, 201, "this is not json");
+
+            Func<Task> act = () => Enroll(BuildPlugin(), PkiProductInfo(), subject: "CN=intranet.example.com");
+
+            var ex = await act.Should().ThrowAsync<Exception>();
+            ex.Which.Message.Should().NotContain("do not resubmit").And.NotContain("next synchronization");
+            Requests("PUT").Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task Client_DefaultConfig_CreateWithNoHttpStatus_DoesNotUseDoNotResubmitMessage()
+        {
+            // Same transport failure as Client_CreateWithNoHttpStatus_TransportFailure_..., but in two-call mode.
+            StubToken();
+            _server.Given(Request.Create().WithPath("/api/certinext/v2/auth/me").UsingGet())
+                .RespondWith(Response.Create().WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json").WithBody(MockCertificateData.V2AuthMeJson()));
+            var config = Config();
+            config.V2InlineCsr = false;
+            using var client = new CERTInextClient(config);
+            await client.GetAuthMeV2Async();
+            _server.Stop();
+
+            Func<Task> act = () => client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, "842",
+                new API.V2.V2CreateSslOrderRequest
+                {
+                    Requestor    = new API.V2.V2Requestor { Name = "T", Email = "t@t.com" },
+                    Certificate  = new API.V2.V2CertificateParams { Domain = "example.com" },
+                    Subscription = new API.V2.V2SubscriptionParams()
+                });
+
+            var ex = await act.Should().ThrowAsync<Exception>();
+            ex.Which.Message.Should().NotContain("do not resubmit").And.NotContain("next synchronization");
+        }
+
         [Theory]
         [InlineData(null)]
         [InlineData("")]
