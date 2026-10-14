@@ -84,7 +84,7 @@ The V2 tests skip unless the V2 credentials are present (see [INTEGRATION_TESTIN
 | Class | Test | What it checks |
 |---|---|---|
 | `V2ApiTests` | `Connectivity_V2_Ping` | `GET /auth/me` succeeds with an OAuth token |
-| | `Lifecycle_V2_EnrollTrackRevoke` | Place an order with the CSR inline (single create call), track it, then revoke or cancel it in the class cleanup. Every raw-client order in `V2ApiTests` is cleaned up the same way |
+| | `Lifecycle_V2_EnrollTrackRevoke` | Place an order with the CSR inline (a raw single create call), track it, then revoke or cancel it in the class cleanup. Every raw-client order in `V2ApiTests` is cleaned up the same way |
 | | `Sync_UsesV2_WithZeroV1Credentials` | Synchronize works with no V1 credentials configured |
 | | `GetProductDetails_V2_ReturnsProducts` | The V2 catalog returns products |
 | | `ValidateProductInfo_V2_AcceptsConfiguredProductCode`, `ValidateProductInfo_V2_RejectsUnknownProductCode` | Template validation against the V2 catalog |
@@ -100,7 +100,7 @@ The V2 tests skip unless the V2 credentials are present (see [INTEGRATION_TESTIN
 | | `BulkV2Enrollment_AllOrdersIssue_AndPaginationWorks` | **Opt-in** (`CERTINEXT_V2_RUN_BULK_TEST`) |
 | `V2FreshDomainDcvLifecycleTests` | `EnrollWithDcvOn_V2_FreshUnverifiedSubdomain_StagesAndCleansUpTxt`, `EnrollWithDcvOn_V2_WildcardFreshSubdomain_RecordsTxtHostnameAndCleansUp` | **Opt-in** (`CERTINEXT_V2_LIFECYCLE_FRESH_DCV`). DCV against a never-validated subdomain, and against a wildcard on one: the TXT record is staged at the expected hostname and removed afterward |
 | `V2FullLifecycleTests` | `Enroll_V2_DvUcc_WithMultipleSans_FullLifecycle`, `Enroll_V2_Ov_FullLifecycle`, `Enroll_V2_OvUcc_WithMultipleSans_FullLifecycle`, `Enroll_V2_Ev_FullLifecycle`, `Enroll_V2_WildcardDv_WildcardOnly_FullLifecycle`, `Enroll_V2_WildcardDv_WildcardPlusApexSan_RecordsActualBehavior`, `EnrollRenewReissue_V2_IssuedDvOrder_RecordsActualBehavior` | **Opt-in** (one `CERTINEXT_V2_LIFECYCLE_*` flag per product, see [INTEGRATION_TESTING.md](INTEGRATION_TESTING.md#opt-in-flags)). Each enrolls, waits, synchronizes, and cleans up its order |
-| `PrivatePkiV2LiveTests` | `PrivatePki_V2_EnrollIntranetSsl_ThenRevoke_Live` | **Opt-in** (`CERTINEXT_PRIVATE_PKI_LIVE`). Enrolls a Private PKI Intranet SSL order (CSR inline on create) with DNS and IP SANs, checks the issued SANs, and revokes it. Needs a Private PKI entitlement. On 2026-10-14 the sandbox answered the inline-CSR create with HTTP 422 `Unprocessable Entity: Something went Wrong.`, so this test currently fails there |
+| `PrivatePkiV2LiveTests` | `PrivatePki_V2_EnrollIntranetSsl_ThenRevoke_Live` | **Opt-in** (`CERTINEXT_PRIVATE_PKI_LIVE`). Enrolls a Private PKI Intranet SSL order with DNS and IP SANs, checks the issued SANs, and revokes it. Needs a Private PKI entitlement. Always two-call (create, then `PUT .../csr`): the sandbox rejects an inline CSR on Private PKI create with HTTP 422. The order parks at `pending-approval` and is cancelled, so the test reports it as inconclusive on this sandbox |
 | | `PrivatePki_V2_RecordingProxy_BuildsOffline` | Offline sanity check of the test's recording proxy |
 | `V2OrderWindowSweepTests` | `Sweep_ListRecentOrders_ByWindow_DryRun_ThenCancelExplicitIds` | **Opt-in** (`CERTINEXT_V2_OPS_TESTS`). Operations tool: lists V2 orders in a date window and optionally cancels listed IDs |
 

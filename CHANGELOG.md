@@ -3,6 +3,7 @@
 ## Features
 - feat(v2): Opt-in CERTInext V2 REST API via `UseV2Api` (default `false`; V1 is unchanged), authenticating with OAuth2 `client_credentials` through the existing `ApiUrl`/`OAuthClientId`/`OAuthClientSecret` settings. V1 credentials are not needed in V2 mode.
 - feat(v2): Enroll, renew, reissue, revoke, and synchronize SSL/TLS and Private PKI products under V2, selected with the `ProductFamily` and `ProductVariant` template parameters; a template's `ProductCode` is validated against the V2 catalog when saved.
+- feat(v2): New opt-in `V2InlineCsr` setting (default `false`) sends the CSR inline in one create call for SSL/TLS instead of create + Submit CSR; Private PKI always stays two-call.
 - feat(v2): Multi-domain (UCC) and wildcard SSL/TLS enrollment under V2, with additional SANs sent as `additionalDomains`.
 - feat(dcv): DNS-01 domain validation for V2 SSL/TLS orders, including every SAN on a UCC order.
 - feat(dcv): DCV is on by default (`DcvEnabled` defaults to `true`); it needs a DNS provider plugin deployed on the gateway.

@@ -355,6 +355,7 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 |---|---|---|---|
 | `UseV2Api` | Optional | Enable the V2 API code path for connection tests, enrollment, revocation, status checks, and synchronization. Default: `false`. | `false` |
 | `V2SyncLookbackHours` | Optional | V2 mode only. During an incremental Synchronize, the plugin queries `from` = (last sync time minus this many hours) rather than the exact last-sync time, since the API's `from`/`to` filter may bracket either the order-placement date or the issuance date — a lookback window keeps an order created before last sync but issued afterward (e.g. a slow DCV order) from being missed. Default: `72`. | `72` |
+| `V2InlineCsr` | Optional | V2 mode only. Default `false`: SSL/TLS enrollment creates the order without a CSR and then submits it (`PUT .../csr`). When `true`, SSL/TLS enrollment sends the CSR inline in the create call (a single `POST /ssl-certificates`, no separate Submit CSR). Turn it on to match a direct single-call API integration; it is about 4-5 seconds faster. The trade-offs: the create call then often holds about 20 seconds until the certificate is issued (the order ID is known only when it returns), and a create that times out or returns a 5xx can leave an order that still issues. The plugin never retries the create and doesn't cancel the order, and the next [synchronization](#synchronization) imports it, so don't resubmit. Private PKI orders ignore this setting and always use the two-call flow, because CERTInext rejects an inline CSR on the Private PKI create. Default: `false`. | `true` |
 
 #### V2 OAuth2 Setup
 
@@ -402,10 +403,11 @@ With `ProductFamily=private-pki`, the plugin places the order against CERTInext'
 - **SANs, including IP addresses.** Additional SANs are sent in the order's `additionalHosts` field, which accepts DNS names and IPv4/IPv6 addresses. SANs come from the gateway's SAN list; the plugin falls back to the SANs in the CSR only when the gateway supplies none. Email and URI SANs can't be expressed in `additionalHosts`, so they're left off the order and a warning is written to the gateway log. `SubmitNonDnsSans` isn't consulted for Private PKI orders.
 - **No DCV, organization, or subscriber agreement.** Private PKI orders have none of these steps, so DCV is never attempted for them, and `OrganizationNumber`, `AutoSecureWww`, `SignerName`, `SignerPlace`, and `SignerIp` aren't used.
 - **Shared fields.** The requestor, technical contact, subscription, email-notification, and group settings are sent exactly as they are for SSL/TLS orders.
+- **Two-call CSR delivery.** The plugin creates the order without a CSR and then submits it, always. CERTInext rejects an inline CSR on the Private PKI create (HTTP 422), so the SSL/TLS-only `V2InlineCsr` setting doesn't apply; when it's on, the plugin logs a one-time notice that Private PKI ignores it.
 
 ### V2 Order Lifecycle
 
-A V2 enrollment places the order, submits the CSR, and then checks the order status; see [V2 enrollment flow](#v2-enrollment-flow) for the full sequence. V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
+A V2 enrollment places the order, submits the CSR (or, with `V2InlineCsr` on for SSL/TLS, sends it inline in the create call), and then checks the order status; see [V2 enrollment flow](#v2-enrollment-flow) for the full sequence. V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
 
 V2 status strings map to Keyfactor enrollment statuses as follows:
 

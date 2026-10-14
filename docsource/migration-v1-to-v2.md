@@ -192,6 +192,13 @@ pointing a production template at the V2 connector. At minimum, confirm:
   the order once and returns a failed result carrying the order ID. After a timeout, the plugin
   checks the order before deciding: it cancels the order only if the CSR never arrived.
 
+- **CSR delivery.** By default V2 enrollment creates the order and then submits the CSR, as above. The
+  optional `V2InlineCsr` connector setting (SSL/TLS only, default `false`) sends the CSR inline in the
+  create call instead: about 4-5 seconds faster and the same call shape as a direct single-call API
+  integration, but the create call can hold about 20 seconds until issuance, and a create that times
+  out or returns a 5xx can leave an order that issues and is imported by the next sync rather than
+  cancelled. Private PKI always uses the two-call flow.
+
 ### Renewals and Reissuance
 
 CERTInext V2 has no *renew* endpoint, but it does document a `/reissue` endpoint (`mode:

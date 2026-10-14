@@ -130,6 +130,7 @@ matching flag in your shell. These flags are deliberately **not** read from `~/.
 | `CERTINEXT_V2_RUN_BULK_TEST=1` | `V2DcvLifecycleTests.BulkV2Enrollment_AllOrdersIssue_AndPaginationWorks` (also needs Cloudflare); tune with `CERTINEXT_V2_BULK_TEST_COUNT` and `CERTINEXT_V2_BULK_TEST_PARALLEL` |
 | `CERTINEXT_V2_LIFECYCLE_DV_UCC=1`, `_OV=1`, `_OV_UCC=1`, `_EV=1`, `_WILDCARD_DV=1`, `_RENEW_REISSUE=1` | The matching `V2FullLifecycleTests` method; the OV and OV UCC tests also need `CERTINEXT_ORG_NUMBER`, and the EV test needs its own pre-vetted `CERTINEXT_EV_ORG_NUMBER` |
 | `CERTINEXT_V2_LIFECYCLE_FRESH_DCV=1` | `V2FreshDomainDcvLifecycleTests` (also needs Cloudflare and `CERTINEXT_V2_FRESH_DCV_PARENT`, the parent domain that fresh subdomains are created under) |
+| `CERTINEXT_V2_INLINE_CSR=1` | Not a test gate: runs the V2 enrollment tests (`V2LifecycleTests`, `V2FullLifecycleTests`, `V2DcvLifecycleTests`, `V2FreshDomainDcvLifecycleTests`, `PrivatePkiV2LiveTests`) with the `V2InlineCsr` connector setting on (SSL/TLS single-call create). Unset runs the default two-call flow; run the suite once in each mode. Private PKI stays two-call either way |
 | `CERTINEXT_PRIVATE_PKI_LIVE=1` | `PrivatePkiV2LiveTests.PrivatePki_V2_EnrollIntranetSsl_ThenRevoke_Live`; override the product code and CN with `CERTINEXT_PRIVATE_PKI_PRODUCT_CODE` and `CERTINEXT_PRIVATE_PKI_CN` |
 | `CERTINEXT_V2_OPS_TESTS=1` | `V2OrderWindowSweepTests` — see below |
 
