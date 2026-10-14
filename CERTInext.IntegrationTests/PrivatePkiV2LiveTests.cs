@@ -198,7 +198,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var realClient = new CERTInextClient(config);
             // Pass-through proxy around the real client: records the order id the moment
             // PlaceOrderV2Async returns, so cleanup still knows the order if a later step inside
-            // Enroll (CSR submit, track, download) throws before an EnrollmentResult exists.
+            // Enroll (track, download) throws before an EnrollmentResult exists. The CSR goes inline on the create call.
             var recorder = OrderIdRecordingClientProxy.Wrap(realClient, out ICERTInextClient proxiedClient);
             var plugin = new CERTInextCAPlugin(proxiedClient, config);
 
@@ -316,8 +316,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <c>plugin.Revoke</c> (CRL reason 4, superseded); any other order is cancelled via
         /// <see cref="ICERTInextClient.CancelOrderV2Async"/> on the private-pki family
         /// (<c>plugin.Revoke</c> refuses non-issued orders). Manual-cleanup instructions are printed
-        /// only when that action fails. If Enroll's own Submit CSR failure path already cancelled the
-        /// order, this cancel reports the CA's 422 "already terminal" answer. Finishes with one
+        /// only when that action fails. Finishes with one
         /// read-only GET on the private-pki order.
         /// </summary>
         private async Task CleanupAsync(CERTInextCAPlugin plugin, CERTInextClient client, string orderId, string cn, bool issued)

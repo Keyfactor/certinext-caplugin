@@ -190,6 +190,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             ex is TaskCanceledException
             || ex is OperationCanceledException
             || (ex.Message?.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0)
+            // PlaceOrderV2CoreAsync maps a create that got no usable response (no HTTP status / 5xx) to this
+            // "created but we never heard back" message (single-call create: the order may exist AND issue).
+            || (ex.Message?.IndexOf("did not return a usable response to the V2 order create", StringComparison.OrdinalIgnoreCase) >= 0)
             || (ex.Message != null
                 && ex.Message.IndexOf("HTTP 0", StringComparison.OrdinalIgnoreCase) >= 0
                 && ex.Message.IndexOf("returned no body", StringComparison.OrdinalIgnoreCase) >= 0);

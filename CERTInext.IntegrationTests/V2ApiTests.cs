@@ -24,6 +24,11 @@ using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.PKI.Enums.EJBCA;
+using Org.BouncyCastle.Asn1.X509;
+using Org.BouncyCastle.Crypto.Generators;
+using Org.BouncyCastle.Crypto;
+using Org.BouncyCastle.Pkcs;
+using Org.BouncyCastle.Security;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -57,7 +62,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     /// for V2-mode tests — Synchronize uses V2 <c>/reports/orders</c> when UseV2Api is true,
     /// and V1 credentials are optional in that mode.
     /// </summary>
-    public class V2ApiTests : IClassFixture<IntegrationTestFixture>
+    public class V2ApiTests : IClassFixture<IntegrationTestFixture>, IAsyncLifetime
     {
         private readonly IntegrationTestFixture _fixture;
         private readonly ITestOutputHelper _output;
@@ -142,8 +147,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             // Place order
             var orderReq   = BuildStandardOrderRequest();
-            var createResp = await client.PlaceOrderV2Async(
-                Constants.ApiV2.FamilySsl, _v2ProductCode, orderReq);
+            var createResp = await PlaceOrderTrackedAsync(client, orderReq);
 
             createResp.Should().NotBeNull();
             createResp.OrderId.Should().NotBeNullOrEmpty(
@@ -343,7 +347,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <summary>
         /// Places a fresh DV SSL order then calls ResolveAndTrackOrderV2Async on the
         /// returned orderId.  Asserts that the order can be found and has a non-empty
-        /// status.  The order will typically be pending-csr or pending-dcv; that is fine.
+        /// status.  The order will typically be issued, pending-approval or pending-dcv (the CSR is inline on create); that is fine.
         /// Skips when CERTINEXT_USE_V2_API is not set.
         /// </summary>
         [SkippableFact]
@@ -354,8 +358,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             using var client = BuildV2Client();
 
             var orderReq = BuildStandardOrderRequest();
-            var createResp = await client.PlaceOrderV2Async(
-                Constants.ApiV2.FamilySsl, _v2ProductCode, orderReq);
+            var createResp = await PlaceOrderTrackedAsync(client, orderReq);
 
             createResp.Should().NotBeNull();
             string orderId = createResp.OrderId;
@@ -460,8 +463,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 // 1. Place a DV SSL order — it lands in pending-dcv
                 var orderReq   = BuildStandardOrderRequest();
-                var createResp = await client.PlaceOrderV2Async(
-                    Constants.ApiV2.FamilySsl, _v2ProductCode, orderReq);
+                var createResp = await PlaceOrderTrackedAsync(client, orderReq);
                 orderId = createResp.OrderId;
                 orderId.Should().NotBeNullOrEmpty();
 
@@ -636,8 +638,90 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     SignerPlace = "Gateway Lab",
                     Accepted    = true
                 },
-                Remarks = "Keyfactor V2 integration test — safe to revoke immediately."
+                Remarks = "Keyfactor V2 integration test — safe to revoke immediately.",
+                // Single-call create: the CSR goes inline on POST (a later PUT .../csr is rejected 422),
+                // so these raw-client orders issue exactly as a plugin Enroll would.
+                Csr = GenerateCsrPem(_v2Domain)
             };
+
+        // ---------------------------------------------------------------------------
+        // Single-call create helpers + cleanup of every order this class places
+        // ---------------------------------------------------------------------------
+
+        private readonly List<string> _placedOrderIds = new List<string>();
+
+        public Task InitializeAsync() => Task.CompletedTask;
+
+        /// <summary>
+        /// Revokes (if issued) or cancels (if not yet terminal) every order placed through
+        /// <see cref="PlaceOrderTrackedAsync"/>. One attempt each (one retry for the sandbox's
+        /// "still being processed" revoke rejection); failures are logged, never thrown, so cleanup can
+        /// not mask the test's own result — revoke/cancel by hand in the portal if one is reported.
+        /// </summary>
+        public async Task DisposeAsync()
+        {
+            if (_placedOrderIds.Count == 0) return;
+            using var client = BuildV2Client();
+            foreach (string orderId in _placedOrderIds)
+            {
+                try
+                {
+                    var (family, status) = await ResolveOrderFamilyAsync(client, orderId);
+                    string st = status.Status ?? string.Empty;
+                    if (st == Constants.ApiV2.StatusRevoked || st == Constants.ApiV2.StatusCancelled
+                        || st == Constants.ApiV2.StatusRejected)
+                    {
+                        _output.WriteLine($"Cleanup: order {orderId} already terminal ({st}).");
+                        continue;
+                    }
+
+                    if (st == Constants.ApiV2.StatusIssued)
+                    {
+                        var revokeReq = new V2RevokeRequest { Reason = "superseded", Note = "V2 integration test cleanup" };
+                        try { await client.RevokeOrderV2Async(family, orderId, revokeReq); }
+                        catch (InvalidOperationException ex) when (ex.Message.Contains("still being processed"))
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(15));
+                            await client.RevokeOrderV2Async(family, orderId, revokeReq);
+                        }
+                        var after = await client.ResolveAndTrackOrderV2Async(orderId);
+                        _output.WriteLine($"Cleanup: revoked issued order {orderId}; re-tracked status={after.Status}.");
+                    }
+                    else
+                    {
+                        var outcome = await client.CancelOrderV2Async(family, orderId, "V2 integration test cleanup");
+                        var after = await client.ResolveAndTrackOrderV2Async(orderId);
+                        _output.WriteLine($"Cleanup: cancel of {orderId} (was {st}) -> {outcome}; re-tracked status={after.Status}.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _output.WriteLine($"Cleanup FAILED for order {orderId}: {ex.GetType().Name}: {ex.Message}. " +
+                                      "Revoke/cancel it by hand in the CERTInext portal.");
+                }
+            }
+        }
+
+        private async Task<V2CreateOrderResponse> PlaceOrderTrackedAsync(CERTInextClient client, V2CreateSslOrderRequest req)
+        {
+            var resp = await client.PlaceOrderV2Async(Constants.ApiV2.FamilySsl, _v2ProductCode, req);
+            if (!string.IsNullOrWhiteSpace(resp?.OrderId))
+                _placedOrderIds.Add(resp.OrderId);
+            return resp;
+        }
+
+        // BouncyCastle only (project crypto policy).
+        private static string GenerateCsrPem(string commonName)
+        {
+            var keyGen = new RsaKeyPairGenerator();
+            keyGen.Init(new KeyGenerationParameters(new SecureRandom(), 2048));
+            var keyPair = keyGen.GenerateKeyPair();
+            var csr = new Pkcs10CertificationRequest(
+                "SHA256withRSA", new X509Name($"CN={commonName}"), keyPair.Public, null, keyPair.Private);
+            return "-----BEGIN CERTIFICATE REQUEST-----\n"
+                + Convert.ToBase64String(csr.GetEncoded(), Base64FormattingOptions.InsertLineBreaks)
+                + "\n-----END CERTIFICATE REQUEST-----";
+        }
 
         private CERTInextClient BuildV2Client()
         {
@@ -676,7 +760,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
 
             var orderReq   = BuildStandardOrderRequest();
-            var createResp = await client.PlaceOrderV2Async(Constants.ApiV2.FamilySsl, _v2ProductCode, orderReq);
+            var createResp = await PlaceOrderTrackedAsync(client, orderReq);
             createResp.Should().NotBeNull();
             string orderId = createResp.OrderId;
             orderId.Should().NotBeNullOrEmpty("PlaceOrderV2Async must return a non-empty orderId");
