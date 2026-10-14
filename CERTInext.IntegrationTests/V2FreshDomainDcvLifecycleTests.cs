@@ -145,6 +145,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 ApiUrl            = _v2ApiUrl,
                 UseV2Api          = true,
+                V2InlineCsr       = V2EnvHelper.InlineCsrFromEnv, // CERTINEXT_V2_INLINE_CSR=1 selects the single-call mode
                 DefaultProductCode = Environment.GetEnvironmentVariable("CERTINEXT_PRODUCT_CODE") ?? "842",
                 OAuthClientId     = _v2ClientId,
                 OAuthClientSecret = _v2ClientSecret,
@@ -167,8 +168,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         /// <summary>
-        /// Same revoke-if-issued / cancel-otherwise cleanup as V2FullLifecycleTests.
-        /// CleanupOrderAsync — single attempt only, never retries a cancel, logs rather than
+        /// Revoke-if-issued / cancel-otherwise cleanup keyed on the order's V2 status (V2OrderCleanup) —
+        /// single attempt only, never retries a cancel, logs rather than
         /// throws so a cleanup problem never masks the test's own assertion result. Returns
         /// whether cleanup completed without throwing (true = revoked or cancelled successfully,
         /// or nothing to do), so a caller that wants to assert "nothing leaks" — e.g. the
@@ -176,33 +177,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// </summary>
         private async System.Threading.Tasks.Task<bool> CleanupOrderAsync(CERTInextCAPlugin plugin, string orderId)
         {
-            if (string.IsNullOrWhiteSpace(orderId))
-                return true;
-
-            try
-            {
-                var current = await plugin.GetSingleRecord(orderId);
-                if (current?.Status == (int)EndEntityStatus.GENERATED)
-                {
-                    int revokeResult = await plugin.Revoke(orderId, hexSerialNumber: string.Empty, revocationReason: 4 /* superseded */);
-                    _output.WriteLine($"Cleanup: revoked issued order {orderId} -> {revokeResult}.");
-                }
-                else
-                {
-                    await V2RawHttpHelpers.CancelSslOrderRawAsync(
-                        _v2ApiUrl, _v2ClientId, _v2ClientSecret, orderId,
-                        "V2 fresh-domain DCV test cleanup — order not issued, cancelling.");
-                    _output.WriteLine($"Cleanup: cancelled non-issued order {orderId} (status={current?.Status}).");
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _output.WriteLine(
-                    $"Cleanup FAILED for order {orderId}: {ex.GetType().Name}: {ex.Message}. " +
-                    "Revoke/cancel it by hand in the CERTInext portal if it should not remain pending.");
-                return false;
-            }
+            // Keyed on the order's V2 status (see V2OrderCleanup): GetSingleRecord can still report an
+            // already-issued order as pending, and cancelling it leaks an issued certificate.
+            using var client = new CERTInextClient(BuildV2Config());
+            return await V2OrderCleanup.RevokeOrCancelAsync(
+                client, orderId, "V2 fresh-domain DCV test cleanup.", _output.WriteLine);
         }
 
         // ---------------------------------------------------------------------------

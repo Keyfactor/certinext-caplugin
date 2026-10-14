@@ -188,10 +188,9 @@ pointing a production template at the V2 connector. At minimum, confirm:
   revoked order is imported as revoked only when the gateway already holds its certificate. Otherwise
   it is reported as failed or skipped, so the gateway never stores a revoked record with no
   certificate.
-- **Single-call create.** V2 enrollment sends the CSR inline in the create call, so there is no separate
-  Submit CSR step and no orphaned-order cancel. The create call often holds about 20 seconds until the
-  certificate is issued. If it fails with a 5xx or times out, the order may exist and may issue; the
-  plugin does not retry or cancel it, and the next sync imports it.
+- **Orphaned orders.** If CERTInext rejects the CSR after the order was created, the plugin cancels
+  the order once and returns a failed result carrying the order ID. After a timeout, the plugin
+  checks the order before deciding: it cancels the order only if the CSR never arrived.
 
 ### Renewals and Reissuance
 

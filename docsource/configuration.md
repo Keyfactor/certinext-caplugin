@@ -279,7 +279,7 @@ V1 and V2. This is hardcoded and is not exposed as a connector setting or enviro
 variable — it cannot be changed without modifying the plugin. If a call doesn't return within 120
 seconds, the plugin aborts it and the operation fails.
 
-- **Order placement (V2: the create call, which carries the CSR) is never auto-retried after a timeout or server error**,
+- **Order placement and CSR submission are never auto-retried after a timeout or server error**,
   because CERTInext may have already created the order. If the CA did create it, the next
   [synchronization](#synchronization) imports it. Do not resubmit immediately; check the CERTInext
   portal first.
@@ -405,7 +405,7 @@ With `ProductFamily=private-pki`, the plugin places the order against CERTInext'
 
 ### V2 Order Lifecycle
 
-A V2 enrollment places the order with the CSR inline in a single create call, and then checks the order status; see [V2 enrollment flow](#v2-enrollment-flow) for the full sequence. V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
+A V2 enrollment places the order, submits the CSR, and then checks the order status; see [V2 enrollment flow](#v2-enrollment-flow) for the full sequence. V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
 
 V2 status strings map to Keyfactor enrollment statuses as follows:
 
@@ -413,7 +413,7 @@ V2 status strings map to Keyfactor enrollment statuses as follows:
 |---|---|---|
 | `issued` | Issued | Certificate is immediately downloaded and returned to Command. |
 | `pending-dcv` | Pending External Validation | Order is awaiting domain control validation. |
-| `pending-csr` | Pending External Validation | Order is awaiting a CSR. The plugin sends the CSR inline on create, so it doesn't produce this state; it can still appear on orders placed by other clients. |
+| `pending-csr` | Pending External Validation | Order is awaiting CSR submission or processing. |
 | `pending-agreement` | Pending External Validation | Order requires subscriber agreement acceptance. |
 | `pending-organization-verification` | Pending External Validation | OV/EV order is awaiting organization verification. |
 | `pending-documents` | Pending External Validation | Order is awaiting supporting document submission. |

@@ -12,7 +12,7 @@ The project is split into focused test classes:
 |---|---|---|
 | `CERTInextClientTests`, `CERTInextClientCoverageTests` | `CERTInextClient` V1 HTTP transport, auth, and error branches | WireMock.Net (real loopback HTTP) |
 | `CERTInextClientRequestShapeTests` | V1 `GenerateOrderSSL` request body construction | WireMock.Net |
-| `CERTInextClientV2Tests` | `CERTInextClient` V2 transport: token caching, order create (inline CSR, pinned product)/track/revoke/cancel, DCV, catalog, orders report | WireMock.Net |
+| `CERTInextClientV2Tests` | `CERTInextClient` V2 transport: token caching, order create/track/CSR/revoke/cancel, DCV, catalog, orders report | WireMock.Net |
 | `CERTInextCAPluginTests`, `CERTInextCAPluginCoverageTests` | `CERTInextCAPlugin` V1 logic: enroll, renew, revoke, sync, validation | Moq strict mock of `ICERTInextClient` |
 | `CERTInextCAPluginV2Tests` | V2 dispatch in the plugin: ping, enroll, revoke, single record, sync, validation | Moq strict mock |
 | `CERTInextCAPluginDcvTests`, `CERTInextCAPluginV2DcvTests` | V1 and V2 DNS-01 DCV orchestration | Moq strict mock + `FakeDomainValidator` |
@@ -21,7 +21,7 @@ The project is split into focused test classes:
 | `V2PrivatePkiEnrollmentTests`, `V2FamilyOrderRequestSerializationTests` | V2 Private PKI enrollment and the Private PKI / Document Signer request bodies | Moq strict mock; DTO serialization |
 | `V2ProductVariantDerivationTests`, `V2SignerPlaceRequiredTests`, `V2OrganizationEnrollmentTests`, `V2GroupNumberEnrollmentTests`, `V2SubscriptionEnrollmentTests`, `V2TechnicalContactEnrollmentTests`, `EmailNotificationsEnrollmentTests`, `RequestorDesignationEnrollmentTests` | How each connector and template setting reaches the V2 order body, and the checks that run before an order is placed | Moq strict mock; DTO serialization |
 | `V2SslOrderBodyGoldenTests` | The V2 SSL create-order body is byte-for-byte stable | Moq strict mock; golden JSON |
-| `V2SingleCallCreateTests` | The single-call V2 create end to end through the real client: CSR inline and `X-Product-Code` pinned on the create body, no `PUT .../csr` ever sent, issued / pending-approval / EMS-1165 outcomes, 5xx and dropped-connection create failures (no retry, do-not-resubmit message), blank CSR rejected before any call | WireMock.Net |
+| `V2CsrTransportFailureTests`, `V2OrphanedOrderCancelTests` | What happens when CSR submission fails: cancel the orphaned order, or track it first after a transport error | Moq strict mock |
 | `V2UnknownStatusTests`, `StatusMapperV2Tests`, `V2OrderStatusResponseTests` | V2 status mapping, the `unknown` status, revocation reason mapping, status-response parsing | Pure unit |
 | `CERTInextCAPluginPublicSurfaceTests` | The plugin's gateway-visible public surface | Reflection only |
 | `CERTInextCAPluginAuditLoggingTests`, `CERTInextCAPluginRevokeV2AuditLoggingTests` | Audit log lines for enrollment and V2 revocation | Captured logger |

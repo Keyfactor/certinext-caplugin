@@ -35,7 +35,8 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 │                                                         │
 │ V2  POST /oauth/token · GET /auth/me                    │
 │     GET  /catalog/products · GET /reports/orders        │
-│     POST /{family}   create order (CSR inline)          │
+│     POST /{family}                 create order         │
+│     PUT  /{family}/{id}/csr                             │
 │     GET  /{family}/{id}            track order          │
 │     GET  /{family}/{id}/certificate                     │
 │     GET  /ssl-certificates/{id}/dcv                     │
@@ -338,7 +339,7 @@ With `UseV2Api = true`, every enrollment type (New, Reissue, Renew, RenewOrReiss
 ```mermaid
 flowchart TD
     A([Enroll requested]) --> B["Log the enrollment intent"]
-    B --> C{"Request passes local checks?<br/>family is ssl or private-pki, CSR present, SignerPlace set for SSL,<br/>Private PKI variant and ProductCode set,<br/>OrganizationNumber set for OV or EV,<br/>valid subscription and notification settings"}
+    B --> C{"Request passes local checks?<br/>family is ssl or private-pki, SignerPlace set for SSL,<br/>Private PKI variant and ProductCode set,<br/>OrganizationNumber set for OV or EV,<br/>valid subscription and notification settings"}
     C -- No --> X1(["Enrollment rejected, no order placed"])
     C -- Yes --> D{Private PKI?}
     D -- Yes --> G
@@ -347,13 +348,19 @@ flowchart TD
     F -- No --> X2(["Failed result listing the candidates, no order placed"])
     F -- Yes --> F2{"Single-domain product with extra DNS SANs<br/>in the CSR or SAN list?"}
     F2 -- Yes --> X3(["Failed result, no order placed"])
-    F2 -- No --> G["Create the order with the CSR inline, unchanged<br/>(X-Product-Code and Idempotency-Key headers)"]
-    G --> G2{"Create call answered?"}
-    G2 -- "Rejected by the CA (HTTP 4xx)" --> X4(["Enrollment fails, no order was created"])
-    G2 -- "5xx, timeout, or no response" --> X6(["Enrollment fails with a do-not-resubmit message:<br/>the order may exist and may issue, the next sync imports it"])
-    G2 -- "Yes, order ID returned" --> M["Track the order"]
+    F2 -- No --> G["Create the order<br/>(X-Product-Code and Idempotency-Key headers)"]
+    G --> H["Submit the CSR unchanged<br/>PUT /{family}/{id}/csr"]
+    H --> I{CSR accepted?}
+    I -- "Rejected by the CA (HTTP 4xx)" --> J["Cancel the orphaned order once"]
+    J --> X4(["Failed result carrying the order ID"])
+    I -- "Transport error or timeout" --> K["Track the order"]
+    K --> L{"Still pending-csr?"}
+    L -- Yes --> J
+    L -- "Tracking failed" --> P1(["Pending result with the order ID,<br/>next sync resolves it"])
+    L -- "Moved past pending-csr" --> M
+    I -- Yes --> M["Track the order"]
     M --> M2{Tracking succeeded?}
-    M2 -- No --> P1(["Pending result with the order ID,<br/>next sync resolves it"])
+    M2 -- No --> P1
     M2 -- Yes --> N{"SSL order pending, DCV enabled,<br/>and a DNS provider available?"}
     N -- Yes --> O["Run V2 DCV, then track the order again"]
     N -- No --> Q
@@ -374,7 +381,6 @@ Notes on the V2 flow:
 
 - **Product code.** For SSL/TLS, the plugin fetches the live catalog once per enrollment. With an explicit `ProductCode`, the catalog is used only to recognize multi-domain and wildcard products; if the catalog can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted. Without an explicit code, the plugin selects the catalog entry whose product type matches the selected product and fails if none or several match (unless `DefaultProductCode` names one). Private PKI never fetches the catalog; its `ProductCode` is required and was validated when the template was saved.
 - **Multi-domain products.** DNS SANs other than the primary domain are sent as `additionalDomains`; non-DNS SANs are left off the order with a warning. Private PKI sends DNS and IP SANs as `additionalHosts`.
-- **Single-call create.** The CSR is sent inline in the create body, exactly as Command supplied it, and the create call is always pinned with `X-Product-Code`. There is no separate Submit CSR step: on SSL/TLS, a `PUT .../csr` after an inline CSR is rejected with HTTP 422, and a create without `X-Product-Code` auto-resolves to a PFX product (917) that never issues. Because of this, the create call often holds about 20 seconds until the certificate is issued, and the order ID is only known once it returns. If the call fails with a 5xx or times out, the order may still exist, with its CSR, and issue; the failure message says so, and the next sync imports it.
 - **Idempotency.** V2 order-create and revoke calls carry a fresh `Idempotency-Key` UUID on every call. CERTInext's V2 spec describes the header as parsed but not yet enforced, so the plugin does not rely on it to prevent duplicates: it never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
 - **Revoked before delivery.** An order that CERTInext reports as revoked before any certificate was delivered is returned as failed, never as a revoked record with no certificate.
 - **Full certificate chain.** The V2 `/certificate` endpoint returns the leaf in `certificatePem` and intermediates in `chainPem[]`. The plugin concatenates them, leaf first, into a single PEM before returning it to Command.
@@ -506,13 +512,14 @@ The table below maps each Keyfactor Command operation to the CERTInext API endpo
 |---|---|
 | Obtain Bearer token | `POST /oauth/token` |
 | Test connection | `GET /api/certinext/v2/auth/me` |
-| Create order (CSR inline) | `POST /api/certinext/v2/{family}` |
+| Create order | `POST /api/certinext/v2/{family}` |
+| Submit CSR | `PUT /api/certinext/v2/{family}/{orderId}/csr` |
 | Check order status | `GET /api/certinext/v2/{family}/{orderId}` |
 | Get DCV challenge (SSL/TLS only) | `GET /api/certinext/v2/ssl-certificates/{orderId}/dcv` (with `?domain=` per domain) |
 | Verify DCV (SSL/TLS only) | `POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify` |
 | Download certificate | `GET /api/certinext/v2/{family}/{orderId}/certificate` |
 | Revoke certificate | `POST /api/certinext/v2/{family}/{orderId}/revoke` |
-| Cancel an order (used by test cleanup; `Enroll` no longer calls it) | `POST /api/certinext/v2/{family}/{orderId}/cancel` |
+| Cancel an orphaned order | `POST /api/certinext/v2/{family}/{orderId}/cancel` |
 | List available products | `GET /api/certinext/v2/catalog/products` |
 | Synchronize inventory | `GET /api/certinext/v2/reports/orders` (paginated) |
 

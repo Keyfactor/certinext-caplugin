@@ -156,6 +156,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 ApiUrl            = _v2ApiUrl,
                 UseV2Api          = true,
+                V2InlineCsr       = V2EnvHelper.InlineCsrFromEnv, // CERTINEXT_V2_INLINE_CSR=1 selects the single-call mode
                 OAuthClientId     = _v2ClientId,
                 OAuthClientSecret = _v2ClientSecret,
 
