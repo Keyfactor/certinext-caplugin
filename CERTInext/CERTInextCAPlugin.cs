@@ -565,7 +565,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 errors.Add($"'{Constants.Config.V2InlineCsr}' must be true or false. Got: '{inlineCsrObj}'.");
             }
-            else if (!useV2 && inlineCsrObj is bool inlineOn && inlineOn)
+            else if (!useV2 && inlineCsrObj != null
+                     && (inlineCsrObj is bool inlineOn ? inlineOn
+                         : inlineCsrObj is System.Text.Json.JsonElement inlineJe && inlineJe.ValueKind == System.Text.Json.JsonValueKind.True))
             {
                 _logger.LogWarning(
                     "'{Setting}' is true but UseV2Api is false: the setting only applies to the V2 API and is ignored.",

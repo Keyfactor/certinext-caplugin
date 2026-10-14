@@ -1414,8 +1414,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // Never retried (a replay could duplicate the order). Same wording as V1's
             // PlaceOrderAsync so operators see one message for "created but we never heard back".
             // 401/403 and 4xx keep their dedicated handling in ThrowOnV2Failure below.
+            // Only for an inline-CSR SSL create: in the two-call flow an order created behind a lost
+            // response has no CSR, never issues, and resubmitting is the right move (af036ae behaviour).
+            bool inlineCsrCreate = _config.V2InlineCsr
+                && string.Equals(path, Constants.ApiV2.SslCertificatesPath, StringComparison.Ordinal);
             int createStatus = (int)resp.StatusCode;
-            if (!resp.IsSuccessful && (createStatus == 0 || createStatus >= 500))
+            if (inlineCsrCreate && !resp.IsSuccessful && (createStatus == 0 || createStatus >= 500))
             {
                 LogV2ApiFailure("V2 place order", resp, LogLevel.Warning);
                 Logger.LogWarning(
@@ -1435,7 +1439,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 result = DeserializeV2OrThrow<V2CreateOrderResponse>(resp, "V2 place order");
             }
-            catch (Exception deserEx)
+            catch (Exception deserEx) when (inlineCsrCreate)
             {
                 // A 2xx whose body is empty/unparseable: the CA accepted the create but we cannot read
                 // the order id, so the order exists and the next sync imports it.
