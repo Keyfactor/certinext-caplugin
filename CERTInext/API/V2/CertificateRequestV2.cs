@@ -230,6 +230,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("technicalPointOfContact")]
         public V2TechnicalPointOfContact TechnicalPointOfContact { get; set; }
 
+        /// <summary>
+        /// PKCS#10 CSR, sent inline on the create call exactly as received from Command (PEM).
+        /// Live-verified on SSL: a create carrying <c>csr</c> issues with no follow-up
+        /// <c>PUT .../csr</c> (which is then rejected 422). Omitted when null. Covered by the
+        /// body-log redaction (<c>CERTInextClient.ApplyLoggingRedaction</c>).
+        /// </summary>
+        [JsonPropertyName("csr")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Csr { get; set; }
+
         [JsonPropertyName("remarks")]
         public string Remarks { get; set; }
 
@@ -288,6 +298,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         /// <summary>Mandatory (<c>name</c> + <c>email</c> strictly mandatory; phone/designation optional).</summary>
         [JsonPropertyName("requestor")]
         public V2Requestor Requestor { get; set; }
+
+        /// <summary>
+        /// PKCS#10 CSR, sent inline on the create call exactly as received from Command (PEM).
+        /// Mirrors the SSL create body (see <see cref="V2CreateSslOrderRequest.Csr"/>). Omitted when null. Covered by the
+        /// body-log redaction (<c>CERTInextClient.ApplyLoggingRedaction</c>).
+        /// </summary>
+        [JsonPropertyName("csr")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Csr { get; set; }
 
         /// <summary>Mandatory. Spec: "<c>hostname</c> - primary CN".</summary>
         [JsonPropertyName("hostname")]
@@ -465,20 +484,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("technicalPointOfContact")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public V2TechnicalPointOfContact TechnicalPointOfContact { get; set; }
-    }
-
-    /// <summary>
-    /// Request body for PUT /api/certinext/v2/{family}-certificates/{orderId}/csr. The spec
-    /// documents the identical <c>{ "csr", "attested" }</c> body for the SSL/TLS, Private PKI
-    /// and Document Signer families, so one shape serves all three.
-    /// </summary>
-    public class V2SubmitCsrRequest
-    {
-        [JsonPropertyName("csr")]
-        public string Csr { get; set; }
-
-        [JsonPropertyName("attested")]
-        public bool Attested { get; set; } = false;
     }
 
     /// <summary>

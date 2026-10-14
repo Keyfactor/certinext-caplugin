@@ -365,6 +365,38 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
+        public void ApplyLoggingRedaction_V2CreateBodies_InlineCsr_RedactedWhenFlagOff_KeptWhenFlagOn()
+        {
+            // The V2 create bodies carry the PKCS#10 CSR inline ("csr"); its subject is requester data.
+            string csrBody = MockCertificateData.FakeCsrPem.Split('\n')[1];
+            var ssl = new V2CreateSslOrderRequest
+            {
+                Requestor = new V2Requestor { Name = "Jane Doe", Email = "jane.doe@example.com" },
+                Certificate = new V2CertificateParams { Domain = "example.com" },
+                Csr = MockCertificateData.FakeCsrPem
+            };
+            var pki = new V2CreatePrivatePkiOrderRequest
+            {
+                Variant = "intranet-ssl",
+                Hostname = "intranet.example.com",
+                Requestor = new V2Requestor { Name = "Jane Doe", Email = "jane.doe@example.com" },
+                Csr = MockCertificateData.FakeCsrPem
+            };
+
+            foreach (object body in new object[] { ssl, pki })
+            {
+                string json = JsonSerializer.Serialize(body, body.GetType(), ClientEquivalentJsonOptions());
+                json.Should().Contain(csrBody, "precondition: the serialized create body carries the CSR");
+
+                CERTInextClient.ApplyLoggingRedaction(json, logSensitiveRequestData: false)
+                    .Should().NotContain(csrBody, "the inline CSR must not reach logs unless sensitive logging is on")
+                    .And.Contain("\"csr\":\"***REDACTED***\"");
+                CERTInextClient.ApplyLoggingRedaction(json, logSensitiveRequestData: true)
+                    .Should().Contain(csrBody);
+            }
+        }
+
+        [Fact]
         public void ApplyLoggingRedaction_FlagOn_RedactsCredentialsOnly_LeavesPersonalDataInFull()
         {
             string input = "{\"authKey\":\"deadbeef\",\"requestorName\":\"Jane Doe\",\"requestorEmail\":\"jane.doe@example.com\",\"domainName\":\"example.com\"}";

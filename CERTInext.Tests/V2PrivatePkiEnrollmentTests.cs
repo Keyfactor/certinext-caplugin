@@ -108,7 +108,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         };
 
         /// <summary>
-        /// Stubs the Private PKI placement + CSR submit + track (+ download when issued) and
+        /// Stubs the Private PKI placement (CSR inline) + track (+ download when issued) and
         /// returns an accessor for the captured create body.
         /// </summary>
         private static Func<V2CreatePrivatePkiOrderRequest> StubPrivatePkiOrder(
@@ -118,11 +118,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<V2CreatePrivatePkiOrderRequest>(), It.IsAny<CancellationToken>()))
                 .Callback<string, V2CreatePrivatePkiOrderRequest, CancellationToken>((_, req, __) => captured = req)
-                .ReturnsAsync(new V2CreateOrderResponse { OrderId = OrderId, Status = "pending-csr" });
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = OrderId, Status = "pending-approval" });
 
-            mock.Setup(c => c.SubmitCsrV2Async(
-                    Constants.ApiV2.FamilyPrivatePki, OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .Returns(Task.CompletedTask);
 
             mock.Setup(c => c.TrackOrderV2Async(Constants.ApiV2.FamilyPrivatePki, OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = trackStatus });
@@ -213,6 +210,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var req = captured();
             req.Should().NotBeNull("a private-pki enrollment must use the Private PKI PlaceOrderV2Async overload");
             req.Variant.Should().Be("intranet-ssl");
+            req.Csr.Should().Be(MockCertificateData.FakeCsrPem, "the CSR goes inline on the create call, unchanged");
             req.Hostname.Should().Be(Hostname);
             req.AdditionalHosts.Should().Equal("portal.acme.local");
             req.EmailNotifications.Should().Be("all");
@@ -235,8 +233,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Verify(c => c.PlaceOrderV2Async("149", It.IsAny<V2CreatePrivatePkiOrderRequest>(), It.IsAny<CancellationToken>()),
                 Times.Once, "the explicit ProductCode is sent as X-Product-Code as-is");
 
-            // CSR submit / track / download all hit the private-pki family.
-            mock.Verify(c => c.SubmitCsrV2Async(Constants.ApiV2.FamilyPrivatePki, OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+            // track / download hit the private-pki family.
             mock.Verify(c => c.DownloadCertificateV2Async(Constants.ApiV2.FamilyPrivatePki, OrderId, It.IsAny<CancellationToken>()), Times.Once);
         }
 
@@ -264,7 +261,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             keys.Should().BeEquivalentTo(new[]
             {
-                "variant", "emailNotifications", "groupNumber", "requestor", "hostname", "additionalHosts",
+                "variant", "emailNotifications", "groupNumber", "requestor", "csr", "hostname", "additionalHosts",
                 "subscription", "remarks", "technicalPointOfContact"
             });
             keys.Should().OnlyContain(k => SpecPrivatePkiTopLevelKeys.Contains(k),

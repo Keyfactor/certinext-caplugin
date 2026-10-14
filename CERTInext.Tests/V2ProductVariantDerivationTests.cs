@@ -207,9 +207,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         private static void StubHappyOrderPlacement(Mock<ICERTInextClient> mock, string orderId, string status = "pending-dcv")
         {
-            mock.Setup(c => c.SubmitCsrV2Async(
-                    It.IsAny<string>(), orderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .Returns(Task.CompletedTask);
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), orderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = orderId, Status = status });
         }

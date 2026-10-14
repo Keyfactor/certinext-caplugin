@@ -227,15 +227,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             CancellationToken ct = default);
 
         /// <summary>
-        /// Submits a CSR to an existing V2 order via PUT /api/certinext/v2/{family}/{orderId}/csr.
-        /// </summary>
-        Task SubmitCsrV2Async(
-            string productFamilySlug,
-            string orderId,
-            string csrPem,
-            CancellationToken ct = default);
-
-        /// <summary>
         /// Returns the current status of a V2 order via GET /api/certinext/v2/{family}/{orderId}.
         /// Throws <see cref="KeyNotFoundException"/> when the order does not exist in that family.
         /// </summary>

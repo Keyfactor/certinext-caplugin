@@ -30,7 +30,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// <summary>
     /// At enroll time the gateway never holds a stored
     /// certificate body for a brand-new V2 order, so a REVOKED disposition surfaced from
-    /// <c>EnrollV2Async</c> — whether observed on the post-CSR-submit status check or during the
+    /// <c>EnrollV2Async</c> — whether observed on the post-create status check or during the
     /// synchronous pickup poll (<c>PickUpEnrolledCertificateV2Async</c>) — is always body-less.
     /// Letting that flow straight through to <see cref="CERTInextCAPlugin.Enroll"/>'s
     /// caller as <c>Status=REVOKED, Certificate=null</c> is exactly the shape that poisons
@@ -103,14 +103,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 requestFormat:  RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
-        private static void StubPlaceAndSubmit(Mock<ICERTInextClient> mock, string initialStatus) =>
+        private static void StubPlace(Mock<ICERTInextClient> mock, string initialStatus) =>
             mock.Setup(c => c.PlaceOrderV2Async(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2CreateOrderResponse { OrderId = OrderId, Status = initialStatus });
 
         // ---------------------------------------------------------------------------
-        // REVOKED on the status check immediately after CSR submit -> FAILED
+        // REVOKED on the status check immediately after the create -> FAILED
         // ---------------------------------------------------------------------------
 
         [Fact]
@@ -118,12 +118,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock);
-            StubPlaceAndSubmit(mock, "pending-csr");
-            mock.Setup(c => c.SubmitCsrV2Async(
-                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .Returns(Task.CompletedTask);
+            StubPlace(mock, "pending-approval");
 
-            // The very first status check after CSR submission already reports the order as
+            // The very first status check after the create call already reports the order as
             // revoked — there was never a chance for a certificate body to exist.
             mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "revoked" });
@@ -133,7 +130,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var result = await Enroll(plugin);
 
             result.Status.Should().Be((int)EndEntityStatus.FAILED,
-                "a REVOKED order observed right after CSR submission has no certificate body and " +
+                "a REVOKED order observed right after the create has no certificate body and " +
                 "must never be reported as REVOKED");
             result.Certificate.Should().BeNull();
             result.CARequestID.Should().Be(OrderId);
@@ -155,10 +152,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock);
-            StubPlaceAndSubmit(mock, "pending-csr");
-            mock.Setup(c => c.SubmitCsrV2Async(
-                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .Returns(Task.CompletedTask);
+            StubPlace(mock, "pending-approval");
 
             // Post-CSR check is still pending; the first (and only) poll attempt observes the
             // order was revoked at the CA before ever issuing.
@@ -192,10 +186,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock);
-            StubPlaceAndSubmit(mock, "pending-csr");
-            mock.Setup(c => c.SubmitCsrV2Async(
-                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .Returns(Task.CompletedTask);
+            StubPlace(mock, "pending-approval");
 
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "pending-dcv" })
@@ -220,10 +211,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             StubCatalog(mock);
-            StubPlaceAndSubmit(mock, "pending-csr");
-            mock.Setup(c => c.SubmitCsrV2Async(
-                    It.IsAny<string>(), OrderId, It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .Returns(Task.CompletedTask);
+            StubPlace(mock, "pending-approval");
 
             mock.SetupSequence(c => c.TrackOrderV2Async(It.IsAny<string>(), OrderId, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2OrderStatusResponse { OrderId = OrderId, Status = "pending-dcv" })
