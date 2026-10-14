@@ -29,6 +29,7 @@
 - chore(logging): Startup log now shows whether `OrganizationNumber`, `DefaultProductCode`, `GroupNumber`, `SubmitNonDnsSans`, and `LogSensitiveRequestData` are set, and warns when `LogSensitiveRequestData` is on.
 - chore(config): Field descriptions and configuration docs now match the code for `DefaultProductCode`, `ValidityYears`, signer fallbacks, `LogSensitiveRequestData`, and the pickup clamps.
 - chore(config): Corrected the `AutoApprove` template setting's description, which previously implied the plugin attempts automatic approval of pending certificates.
+- chore(logging): Every plugin function logs `Calling <name>` and `returned from <name>` at Trace, including when it throws.
 
 # 1.0.0
 

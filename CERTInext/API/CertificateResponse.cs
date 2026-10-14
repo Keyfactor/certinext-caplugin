@@ -8,6 +8,9 @@
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
+using Keyfactor.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
 {
@@ -174,6 +177,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
     /// </summary>
     public class TrackOrderDomainVerification
     {
+        private static readonly ILogger _logger = LogHandler.GetClassLogger<TrackOrderDomainVerification>();
+
         /// <summary>Block-level status. Documented values mirror <see cref="DomainVerificationDetail.Status"/>.</summary>
         [JsonPropertyName("status")]
         public string Status { get; set; }
@@ -193,6 +198,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         /// </summary>
         public Dictionary<string, DomainVerificationDetail> GetDomainEntries()
         {
+            using var callTrace = _logger.TraceCall();
             var result = new Dictionary<string, DomainVerificationDetail>();
             if (RawDomainEntries == null) return result;
 
@@ -556,6 +562,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
 
     public class GetProductDetailsResponse
     {
+        private static readonly ILogger _logger = LogHandler.GetClassLogger<GetProductDetailsResponse>();
+
         [JsonPropertyName("meta")]
         public ResponseMeta Meta { get; set; }
 
@@ -574,6 +582,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         /// </summary>
         public List<ProductDetail> FlattenProducts()
         {
+            using var callTrace = _logger.TraceCall();
             var result = new List<ProductDetail>();
             if (Categories == null) return result;
 

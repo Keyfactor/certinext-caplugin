@@ -8,6 +8,9 @@
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 using Keyfactor.AnyGateway.Extensions;
+using Keyfactor.Extensions.CAPlugin.CERTInext.Models;
+using Keyfactor.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext
 {
@@ -17,12 +20,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
     /// </summary>
     public static class CERTInextCAPluginConfig
     {
+        // Static classes cannot be generic type arguments, so use the Type overload.
+        private static readonly ILogger _logger = LogHandler.GetClassLogger(typeof(CERTInextCAPluginConfig));
+
         /// <summary>
         /// Returns the annotation metadata for all CA connector-level configuration fields.
         /// These appear in the Command UI when an administrator sets up the CA connector.
         /// </summary>
         public static Dictionary<string, PropertyConfigInfo> GetCAConnectorAnnotations()
         {
+            using var callTrace = _logger.TraceCall();
             return new Dictionary<string, PropertyConfigInfo>
             {
                 [Constants.Config.ApiUrl] = new PropertyConfigInfo
@@ -449,6 +456,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public static Dictionary<string, PropertyConfigInfo> GetTemplateParameterAnnotations()
         {
+            using var callTrace = _logger.TraceCall();
             return new Dictionary<string, PropertyConfigInfo>
             {
                 [Constants.EnrollmentParam.ProductCode] = new PropertyConfigInfo
@@ -577,6 +585,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
     /// </summary>
     public class CERTInextConfig
     {
+        private static readonly ILogger _logger = LogHandler.GetClassLogger<CERTInextConfig>();
+
         // -----------------------------------------------------------------------
         // Required
         // -----------------------------------------------------------------------
@@ -894,6 +904,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public int GetEffectiveDcvTimeoutMinutes()
         {
+            using var callTrace = _logger.TraceCall();
             var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvTimeoutMinutesEnvVar);
             if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal > 0)
                 return envVal;
@@ -907,6 +918,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public int GetEffectiveDcvWaitForChallengeSeconds()
         {
+            using var callTrace = _logger.TraceCall();
             var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvWaitForChallengeSecondsEnvVar);
             if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal >= 0)
                 return envVal;
@@ -919,6 +931,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public int GetEffectiveDcvWaitForIssuanceSeconds()
         {
+            using var callTrace = _logger.TraceCall();
             var env = System.Environment.GetEnvironmentVariable(Constants.Config.DcvWaitForIssuanceSecondsEnvVar);
             if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int envVal) && envVal >= 0)
                 return envVal;
@@ -930,7 +943,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// [0, <see cref="Constants.Pickup.MaxRetries"/>]. 0 disables the synchronous pickup.
         /// </summary>
         public int GetEffectivePickupRetries()
-            => System.Math.Max(0, System.Math.Min(PickupRetries, Constants.Pickup.MaxRetries));
+        {
+            using var callTrace = _logger.TraceCall();
+            return System.Math.Max(0, System.Math.Min(PickupRetries, Constants.Pickup.MaxRetries));
+        }
 
         /// <summary>
         /// Effective seconds between pickup retries, clamped to
@@ -938,8 +954,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// falls back to the default rather than producing a tight busy-loop.
         /// </summary>
         public int GetEffectivePickupDelaySeconds()
-            => System.Math.Max(1, System.Math.Min(
+        {
+            using var callTrace = _logger.TraceCall();
+            return System.Math.Max(1, System.Math.Min(
                 PickupDelayInSeconds > 0 ? PickupDelayInSeconds : Constants.Pickup.DefaultDelaySeconds,
                 Constants.Pickup.MaxDelaySeconds));
+        }
     }
 }

@@ -9,6 +9,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,6 +34,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
     public class CERTInextCAPlugin : IAnyCAPlugin, IDisposable
     {
         private readonly ILogger _logger = LogHandler.GetClassLogger<CERTInextCAPlugin>();
+        // Call-trace logger for the static helper methods (no instance `_logger` in scope there).
+        private static readonly ILogger _staticLogger = LogHandler.GetClassLogger<CERTInextCAPlugin>();
 
         private CERTInextConfig _config;
         private ICERTInextClient _client;
@@ -101,7 +104,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         ///
         /// See <see href="https://github.com/Keyfactor/certinext-caplugin/issues/7"/>.
         /// </summary>
-        public CERTInextCAPlugin() { }
+        public CERTInextCAPlugin()
+        {
+            using var callTrace = _logger.TraceCall(nameof(CERTInextCAPlugin));
+        }
 
         /// <summary>
         /// Internal constructor used by unit and integration tests to inject a mock
@@ -111,6 +117,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         internal CERTInextCAPlugin(ICERTInextClient client)
         {
+            using var callTrace = _logger.TraceCall(nameof(CERTInextCAPlugin));
             _client = client;
             _clientWasInjected = true;
             _config = new CERTInextConfig();
@@ -123,6 +130,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         internal CERTInextCAPlugin(ICERTInextClient client, ICertificateDataReader certDataReader)
         {
+            using var callTrace = _logger.TraceCall(nameof(CERTInextCAPlugin));
             _client = client;
             _clientWasInjected = true;
             _certificateDataReader = certDataReader;
@@ -135,6 +143,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         internal CERTInextCAPlugin(ICERTInextClient client, ICertificateDataReader certDataReader, CERTInextConfig config)
         {
+            using var callTrace = _logger.TraceCall(nameof(CERTInextCAPlugin));
             _client = client;
             _clientWasInjected = true;
             _certificateDataReader = certDataReader;
@@ -148,6 +157,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         internal CERTInextCAPlugin(ICERTInextClient client, CERTInextConfig config)
         {
+            using var callTrace = _logger.TraceCall(nameof(CERTInextCAPlugin));
             _client = client;
             _clientWasInjected = true;
             _config = config ?? new CERTInextConfig();
@@ -167,6 +177,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 #if SUPPORTS_DCV
         internal CERTInextCAPlugin(ICERTInextClient client, IDomainValidatorFactory domainValidatorFactory, CERTInextConfig config = null)
         {
+            using var callTrace = _logger.TraceCall(nameof(CERTInextCAPlugin));
             _client = client;
             _clientWasInjected = true;
             _domainValidatorFactory = domainValidatorFactory;
@@ -187,6 +198,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public void SetDomainValidatorFactory(object factory)
         {
+            using var callTrace = _logger.TraceCall();
 #if SUPPORTS_DCV
             var typed = factory as IDomainValidatorFactory;
             // SOX change-management / SOC2 CC6.1: log every factory injection so an auditor
@@ -219,6 +231,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public void Dispose()
         {
+            using var callTrace = _logger.TraceCall();
             if (!_clientWasInjected)
                 (_client as IDisposable)?.Dispose();
         }
@@ -233,7 +246,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         public void Initialize(IAnyCAPluginConfigProvider configProvider, ICertificateDataReader certificateDataReader)
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
 
             _certificateDataReader = certificateDataReader;
 
@@ -256,9 +269,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             bool hasDefaultProductCode = !string.IsNullOrWhiteSpace(_config.DefaultProductCode);
             bool hasGroupNumber        = !string.IsNullOrWhiteSpace(_config.GroupNumber);
 
+            // Build version injected by CI (-p:Version=<release>); InformationalVersion adds the commit SHA.
+            string pluginVersion = typeof(CERTInextCAPlugin).Assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+
             _logger.LogInformation(
                 "CERTInext plugin initialized. " +
-                "ApiUrl={ApiUrl}, AuthMode={AuthMode}, Enabled={Enabled}, " +
+                "PluginVersion={PluginVersion}, ApiUrl={ApiUrl}, AuthMode={AuthMode}, Enabled={Enabled}, " +
                 "ApiKeyPresent={ApiKeyPresent}, UsernamePresent={UsernamePresent}, " +
                 "PasswordPresent={PasswordPresent}, OAuth2ClientIdPresent={OAuth2ClientIdPresent}, " +
                 "OAuth2ClientSecretPresent={OAuth2ClientSecretPresent}, OAuth2TokenUrlPresent={OAuth2TokenUrlPresent}, " +
@@ -267,7 +284,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "PageSize={PageSize}, IgnoreExpired={IgnoreExpired}, SubmitNonDnsSans={SubmitNonDnsSans}, " +
                 "DcvEnabled={DcvEnabled}, DcvTxtRecordTemplate={DcvTxtRecordTemplate}, " +
                 "DomainValidatorFactoryInjected={FactoryInjected}, LogSensitiveRequestData={LogSensitiveRequestData}",
-                _config.ApiUrl, _config.AuthMode, _config.Enabled,
+                pluginVersion, _config.ApiUrl, _config.AuthMode, _config.Enabled,
                 hasApiKey, hasUsername,
                 hasPassword, hasClientId,
                 hasClientSecret, hasTokenUrl,
@@ -303,7 +320,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "temporary use while verifying a new deployment; turn it back off once " +
                     "verification is complete.");
             }
-            _logger.MethodExit(LogLevel.Debug);
         }
 
         // ---------------------------------------------------------------------------
@@ -312,15 +328,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <inheritdoc/>
         public Dictionary<string, PropertyConfigInfo> GetCAConnectorAnnotations()
-            => CERTInextCAPluginConfig.GetCAConnectorAnnotations();
+        {
+            using var callTrace = _logger.TraceCall();
+            return CERTInextCAPluginConfig.GetCAConnectorAnnotations();
+        }
 
         /// <inheritdoc/>
         public Dictionary<string, PropertyConfigInfo> GetTemplateParameterAnnotations()
-            => CERTInextCAPluginConfig.GetTemplateParameterAnnotations();
+        {
+            using var callTrace = _logger.TraceCall();
+            return CERTInextCAPluginConfig.GetTemplateParameterAnnotations();
+        }
 
         /// <inheritdoc/>
         public List<string> GetProductIds()
         {
+            using var callTrace = _logger.TraceCall();
             // The product list is a static constant rather than a live API call because:
             // 1. IAnyCAPlugin.GetProductIds() is synchronous — calling GetAwaiter().GetResult()
             //    on GetProductDetailsAsync would risk deadlock in certain synchronization contexts.
@@ -351,12 +374,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <inheritdoc/>
         public async Task Ping()
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
 
             if (!_config.Enabled)
             {
                 _logger.LogWarning("CERTInext connector is disabled — skipping connectivity test.");
-                _logger.MethodExit(LogLevel.Debug);
                 return;
             }
 
@@ -372,16 +394,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogError(ex, "CERTInext ping failed. ApiUrl={ApiUrl}", _config.ApiUrl);
                 throw new Exception($"Unable to reach CERTInext at {_config.ApiUrl}: {ex.Message}", ex);
             }
-            finally
-            {
-                _logger.MethodExit(LogLevel.Debug);
-            }
         }
 
         /// <inheritdoc/>
         public async Task ValidateCAConnectionInfo(Dictionary<string, object> connectionInfo)
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
 
             // SOX CC6.1 / SOC2 CC6.1: log the access attempt so that every configuration
             // change event is traceable in the audit trail.
@@ -399,7 +417,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogWarning(
                     "CA connection validation skipped — connector is disabled. ApiUrl={ApiUrl}",
                     attemptedApiUrl);
-                _logger.MethodExit(LogLevel.Debug);
                 return;
             }
 
@@ -502,13 +519,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _logger.LogInformation(
                 "CA connection validation succeeded. ApiUrl={ApiUrl}, AuthMode={AuthMode}",
                 attemptedApiUrl, attemptedAuthMode);
-            _logger.MethodExit(LogLevel.Debug);
         }
 
         /// <inheritdoc/>
         public async Task ValidateProductInfo(EnrollmentProductInfo productInfo, Dictionary<string, object> connectionInfo)
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
 
             string rawConfig = JsonSerializer.Serialize(connectionInfo);
             var tempConfig = JsonSerializer.Deserialize<CERTInextConfig>(rawConfig);
@@ -581,7 +597,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             _logger.LogInformation("Product/profile validation succeeded. ProfileId={ProfileId}", profileId);
-            _logger.MethodExit(LogLevel.Debug);
         }
 
         // ---------------------------------------------------------------------------
@@ -597,7 +612,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             RequestFormat requestFormat,
             EnrollmentType enrollmentType)
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
 
             var ep = new EnrollmentParams(productInfo);
 
@@ -673,7 +688,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 enrollmentType, result.CARequestID, result.Status,
                 result.Certificate != null ? ExtractSerialFromPem(result.Certificate) : "(pending)",
                 LogSanitizer.Strip(subject), ep.ProfileId);
-            _logger.MethodExit(LogLevel.Debug);
             return result;
         }
 
@@ -684,7 +698,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <inheritdoc/>
         public async Task<AnyCAPluginCertificate> GetSingleRecord(string caRequestID)
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
             _logger.LogInformation("GetSingleRecord started. CARequestID={Id}", caRequestID);
 
             try
@@ -721,7 +735,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogInformation(
                     "GetSingleRecord complete. CARequestID={Id}, Status={Status}, SerialNumber={Serial}",
                     caRequestID, cert.Status, cert.SerialNumber ?? "(none)");
-                _logger.MethodExit(LogLevel.Debug);
                 return record;
             }
             catch (KeyNotFoundException)
@@ -743,7 +756,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <inheritdoc/>
         public async Task<int> Revoke(string caRequestID, string hexSerialNumber, uint revocationReason)
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
 
             string reasonString = StatusMapper.ToRevocationReason(revocationReason);
 
@@ -813,7 +826,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "ReasonCode={ReasonCode}, ReasonString={ReasonString}",
                 caRequestID, hexSerialNumber, LogSanitizer.Strip(current.Subject),
                 revocationReason, reasonString);
-            _logger.MethodExit(LogLevel.Debug);
             return (int)EndEntityStatus.REVOKED;
         }
 
@@ -828,7 +840,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             bool fullSync,
             CancellationToken cancelToken)
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
 
             DateTime? issuedAfter = fullSync ? (DateTime?)null : lastSync;
 
@@ -1097,7 +1109,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 blockingBuffer.CompleteAdding();
             }
 
-            _logger.MethodExit(LogLevel.Debug);
         }
 
         // ---------------------------------------------------------------------------
@@ -1123,6 +1134,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         internal static DcvSyncDecision EvaluateDcvSyncEligibility(
             DateTime? orderDateUtc, DateTime nowUtc, int ageWindowHours, int attemptedSoFar, int perPassCap)
         {
+            using var callTrace = _staticLogger.TraceCall();
             bool eligibleByAge = ageWindowHours <= 0
                 || !orderDateUtc.HasValue
                 || (nowUtc - orderDateUtc.Value).TotalHours <= ageWindowHours;
@@ -1146,7 +1158,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             Dictionary<string, string[]> san,
             EnrollmentParams ep)
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
             var enrollReq = new EnrollCertificateRequest
             {
                 ProfileId = ep.ProfileId,
@@ -1284,7 +1296,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var newResult = BuildEnrollmentResult(enrollResp, ep.AutoApprove);
             newResult = await PickUpEnrolledCertificateAsync(newResult, enrollResp.Id, dcvIssuanceWaitRan);
 
-            _logger.MethodExit(LogLevel.Debug);
             return newResult;
         }
 
@@ -1300,6 +1311,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             EnrollmentProductInfo productInfo,
             EnrollmentParams ep)
         {
+            using var callTrace = _logger.TraceCall();
             // Retrieve the prior certificate serial number from the product parameters.
             // Command injects "PriorCertSN" for renewal flows.
             string priorCertSn = null;
@@ -1458,6 +1470,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private static bool IsPendingDnsDcvEntry(DomainVerificationDetail detail)
         {
+            using var callTrace = _staticLogger.TraceCall();
             if (!string.Equals(detail?.DcvStatus, Constants.Dcv.StatusPending, StringComparison.Ordinal))
                 return false;
             string method = detail?.DcvMethod ?? string.Empty;
@@ -1477,6 +1490,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private async Task<bool> RenewalAwaitsDnsDcvAsync(string orderNumber)
         {
+            using var callTrace = _logger.TraceCall();
             if (_domainValidatorFactory == null || !_config.DcvEnabled || string.IsNullOrWhiteSpace(orderNumber))
                 return false;
 
@@ -1537,6 +1551,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private static bool IsDcvNotYetReady(Exception ex)
         {
+            using var callTrace = _staticLogger.TraceCall();
             if (ex == null) return false;
             string msg = ex.Message ?? string.Empty;
             if (msg.IndexOf("EMS-956", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -1577,7 +1592,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private async Task<bool> TryRunDcvDuringSyncAsync(string orderNumber, CancellationToken ct, bool fastSync = false)
         {
-            _logger.MethodEntry(LogLevel.Debug);
+            using var callTrace = _logger.TraceCall();
 #if SUPPORTS_DCV
             if (_domainValidatorFactory == null || !_config.DcvEnabled || string.IsNullOrEmpty(orderNumber))
                 return false;
@@ -1671,6 +1686,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int? waitForChallengeSecondsOverride = null,
             int? propagationDelaySecondsOverride = null)
         {
+            using var callTrace = _logger.TraceCall();
             // Poll TrackOrder until CERTInext exposes the DCV challenge (domainVerification
             // populated) OR the cert reaches a terminal state OR the wait budget expires.
             // Under concurrent enrollment load CERTInext sometimes takes a few seconds to
@@ -1874,6 +1890,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // record" means.
             async Task CleanupPartialStagingAsync()
             {
+                using var callTrace = _logger.TraceCall(nameof(CleanupPartialStagingAsync));
                 // Concurrent, not sequential: each cleanup call already has its own independent
                 // CleanupValidationTimeoutSeconds bound (see CleanupOneStagedValidationAsync), but
                 // running them one after another meant that bound was per-call, not in aggregate — a
@@ -1897,6 +1914,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 (string domain, string hostname, Keyfactor.AnyGateway.Extensions.IDomainValidator validator) entry,
                 string context)
             {
+                using var callTrace = _logger.TraceCall(nameof(CleanupOneStagedValidationAsync));
                 var (domain, hostname, validator) = entry;
                 try
                 {
@@ -2162,6 +2180,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         private async Task<LegacyGetCertificateResponse> WaitForIssuanceAfterDcvAsync(
             string orderNumber, CancellationToken ct)
         {
+            using var callTrace = _logger.TraceCall();
             int waitBudgetSeconds = _config.GetEffectiveDcvWaitForIssuanceSeconds();
 
             // Fixed 3-second poll interval. CERTInext's post-DCV issuance step typically
@@ -2246,6 +2265,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private async Task WaitForDcvVerificationAsync(string orderNumber, IReadOnlyList<string> domains, CancellationToken ct)
         {
+            using var callTrace = _logger.TraceCall();
             if (domains.Count == 0) return;
 
             var pending = new HashSet<string>(domains, StringComparer.OrdinalIgnoreCase);
@@ -2333,6 +2353,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         private async Task<EnrollmentResult> PickUpEnrolledCertificateAsync(
             EnrollmentResult pendingResult, string orderNumber, bool dcvIssuanceWaitRan)
         {
+            using var callTrace = _logger.TraceCall();
             // The DCV path already owns the in-call issuance wait for this order — running a second
             // stacked poll here would double the wait budget (when DCV ran WaitForIssuanceAfterDcvAsync)
             // or waste it polling an order DCV already found terminal / not-yet-validated. Defer to
@@ -2510,6 +2531,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private EnrollmentResult BuildEnrollmentResult(EnrollCertificateResponse resp, bool autoApprove)
         {
+            using var callTrace = _logger.TraceCall();
             if (resp == null)
                 throw new Exception("CERTInext returned a null enrollment response.");
 
@@ -2565,6 +2587,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private static AnyCAPluginCertificate MapToAnyCAPluginCertificate(LegacyGetCertificateResponse cert)
         {
+            using var callTrace = _staticLogger.TraceCall();
             int status = StatusMapper.ToRequestDisposition(cert.Status);
 
             return new AnyCAPluginCertificate
@@ -2587,6 +2610,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private static int MapRevocationReasonStringToCode(string reason)
         {
+            using var callTrace = _staticLogger.TraceCall();
             switch (reason?.ToLowerInvariant())
             {
                 case "unspecified": return 0;
@@ -2636,6 +2660,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private List<SanEntry> BuildSanList(Dictionary<string, string[]> san, string csr, string subject)
         {
+            using var callTrace = _logger.TraceCall();
             var result = new List<SanEntry>();
             // Type+value identity, so the same name requested as two different SAN types is
             // preserved while an exact repeat across the two sources collapses.
@@ -2647,6 +2672,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             void Add(string type, string value, bool fromCsr = false)
             {
+                using var callTrace = _logger.TraceCall(nameof(Add));
                 if (string.IsNullOrWhiteSpace(value)) return;
                 string trimmed = value.Trim();
                 string key = $"{type}|{trimmed}";
@@ -2656,8 +2682,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             // Issue 0040: email SAN values masked unless LogSensitiveRequestData is on.
-            string FormatSans(IEnumerable<SanEntry> sans) =>
-                LogSanitizer.FormatSans(sans, _config.LogSensitiveRequestData);
+            string FormatSans(IEnumerable<SanEntry> sans)
+            {
+                using var callTrace = _logger.TraceCall(nameof(FormatSans));
+                return LogSanitizer.FormatSans(sans, _config.LogSensitiveRequestData);
+            }
 
             // AnyCA passes SANs keyed by type name — the real gateway uses "dnsname",
             // "rfc822name", "ipaddress"; MapSanType normalizes the spelling variants.
@@ -2808,6 +2837,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         private static string MapSanType(string anyCAType)
         {
+            using var callTrace = _staticLogger.TraceCall();
             switch (anyCAType?.ToLowerInvariant())
             {
                 // "dnsname" is what the AnyCA REST Gateway actually sends; "dns"/"dnsnames"
@@ -2844,6 +2874,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </param>
         private static List<SanEntry> ExtractSanEntriesFromCsr(string csrPem, out List<int> skippedTagNumbers)
         {
+            using var callTrace = _staticLogger.TraceCall();
             var result = new List<SanEntry>();
             skippedTagNumbers = new List<int>();
             if (string.IsNullOrWhiteSpace(csrPem))
@@ -2904,6 +2935,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private static SanEntry GeneralNameToSanEntry(Org.BouncyCastle.Asn1.X509.GeneralName generalName)
         {
+            using var callTrace = _staticLogger.TraceCall();
             string type;
             string value;
 
@@ -2960,6 +2992,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         private static string GetStringValue(
             Dictionary<string, object> dict, string key, string defaultValue = "")
         {
+            using var callTrace = _staticLogger.TraceCall();
             if (dict.TryGetValue(key, out object val) && val != null)
                 return val.ToString()!;
             return defaultValue;
@@ -2975,6 +3008,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private static string ExtractSerialFromPem(string pem)
         {
+            using var callTrace = _staticLogger.TraceCall();
             try
             {
                 // Strip PEM headers and decode the DER bytes

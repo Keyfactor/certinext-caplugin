@@ -16,6 +16,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using Keyfactor.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 {
@@ -36,8 +38,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
     /// </summary>
     internal static class LogSanitizer
     {
+        // Static classes cannot be generic type arguments, so use the Type overload.
+        private static readonly ILogger _logger = LogHandler.GetClassLogger(typeof(LogSanitizer));
+
         internal static string Strip(string value)
         {
+            using var callTrace = _logger.TraceCall();
             if (string.IsNullOrEmpty(value)) return value;
             return value
                 .Replace("\r", "\\r")
@@ -55,6 +61,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// </summary>
         internal static string MaskEmail(string value)
         {
+            using var callTrace = _logger.TraceCall();
             if (string.IsNullOrEmpty(value)) return value;
             int at = value.IndexOf('@');
             if (at <= 0) return "***REDACTED***";
@@ -82,6 +89,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// </summary>
         internal static string SanitizeCaText(string text, bool logSensitiveRequestData)
         {
+            using var callTrace = _logger.TraceCall();
             if (logSensitiveRequestData || string.IsNullOrEmpty(text)) return text;
             try
             {
@@ -122,6 +130,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// </summary>
         internal static string MaskUri(string value)
         {
+            using var callTrace = _logger.TraceCall();
             if (string.IsNullOrEmpty(value) || value.IndexOf('@') < 0) return value;
 
             int schemeEnd = value.IndexOf(':');
@@ -152,6 +161,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// </summary>
         internal static string FormatSanValue(string sanType, string value, bool logSensitiveRequestData)
         {
+            using var callTrace = _logger.TraceCall();
             if (logSensitiveRequestData || string.IsNullOrEmpty(value)) return value;
             if (sanType != null && EmailSanTypes.Contains(sanType)) return MaskEmail(value);
             if (sanType != null && VerbatimSanTypes.Contains(sanType)) return value;
@@ -167,6 +177,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         internal static string FormatSans(
             IEnumerable<KeyValuePair<string, string>> sans, bool logSensitiveRequestData)
         {
+            using var callTrace = _logger.TraceCall();
             var parts = sans?
                 .Select(s => $"{s.Key}:{FormatSanValue(s.Key, s.Value, logSensitiveRequestData)}")
                 .ToList();
@@ -175,16 +186,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 
         /// <summary>Gateway SAN dictionary overload of <see cref="FormatSans(IEnumerable{KeyValuePair{string, string}}, bool)"/>.</summary>
         internal static string FormatSans(Dictionary<string, string[]> san, bool logSensitiveRequestData)
-            => FormatSans(
+        {
+            using var callTrace = _logger.TraceCall();
+            return FormatSans(
                 san?.SelectMany(kvp => (kvp.Value ?? Array.Empty<string>())
                     .Select(v => new KeyValuePair<string, string>(kvp.Key, v))),
                 logSensitiveRequestData);
+        }
 
         /// <summary>Resolved <see cref="API.SanEntry"/> overload of <see cref="FormatSans(IEnumerable{KeyValuePair{string, string}}, bool)"/>.</summary>
         internal static string FormatSans(IEnumerable<API.SanEntry> sans, bool logSensitiveRequestData)
-            => FormatSans(
+        {
+            using var callTrace = _logger.TraceCall();
+            return FormatSans(
                 sans?.Where(s => s != null).Select(s => new KeyValuePair<string, string>(s.Type, s.Value)),
                 logSensitiveRequestData);
+        }
 
         /// <summary>
         /// Formats an untyped list of SAN-derived names (e.g. V1 <c>additionalDomains</c>, or order
@@ -195,6 +212,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         internal static string FormatUntypedSans(
             IEnumerable<string> values, bool logSensitiveRequestData, string separator = "; ")
         {
+            using var callTrace = _logger.TraceCall();
             var parts = values?.Select(v => FormatSanValue(null, v, logSensitiveRequestData)).ToList();
             return parts == null || parts.Count == 0 ? "(none)" : Strip(string.Join(separator, parts));
         }

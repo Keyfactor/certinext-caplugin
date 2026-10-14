@@ -5,7 +5,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions
 // and limitations under the License.
 
+using Keyfactor.Logging;
 using Keyfactor.PKI.Enums.EJBCA;
+using Microsoft.Extensions.Logging;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 {
@@ -19,6 +21,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
     /// </summary>
     internal static class StatusMapper
     {
+        // Static classes cannot be generic type arguments, so use the Type overload.
+        private static readonly ILogger _logger = LogHandler.GetClassLogger(typeof(StatusMapper));
+
         // -----------------------------------------------------------------------
         // Certificate status ID mapping (TrackOrder.orderDetails.certificateStatusId)
         // -----------------------------------------------------------------------
@@ -29,6 +34,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// </summary>
         public static int CertificateStatusIdToRequestDisposition(int certificateStatusId)
         {
+            using var callTrace = _logger.TraceCall();
             switch (certificateStatusId)
             {
                 // Successfully issued and available for download
@@ -79,6 +85,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// </summary>
         public static int CertificateStatusIdToRequestDisposition(string certificateStatusIdString)
         {
+            using var callTrace = _logger.TraceCall();
             if (string.IsNullOrWhiteSpace(certificateStatusIdString))
                 return (int)EndEntityStatus.FAILED;
 
@@ -101,6 +108,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <param name="certinextStatus">Raw status string (legacy inferred format).</param>
         public static int ToRequestDisposition(string certinextStatus)
         {
+            using var callTrace = _logger.TraceCall();
             if (string.IsNullOrWhiteSpace(certinextStatus))
                 return (int)EndEntityStatus.FAILED;
 
@@ -149,6 +157,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <returns>CERTInext revokeReasonId integer string.</returns>
         public static string ToRevocationReasonId(uint crlReason)
         {
+            using var callTrace = _logger.TraceCall();
             switch (crlReason)
             {
                 case 1: return Constants.RevocationReasonId.KeyCompromise.ToString();          // RFC: keyCompromise
@@ -175,6 +184,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// </summary>
         public static string ToRevocationReason(uint crlReason)
         {
+            using var callTrace = _logger.TraceCall();
             switch (crlReason)
             {
                 case 0: return Constants.RevocationReason.Unspecified;
@@ -197,6 +207,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// </summary>
         public static int RevokeReasonIdToCrlCode(int revokeReasonId)
         {
+            using var callTrace = _logger.TraceCall();
             switch (revokeReasonId)
             {
                 case 1: return 1; // keyCompromise

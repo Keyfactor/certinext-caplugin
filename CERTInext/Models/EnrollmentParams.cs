@@ -8,6 +8,8 @@
 using System;
 using System.Collections.Generic;
 using Keyfactor.AnyGateway.Extensions;
+using Keyfactor.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 {
@@ -17,10 +19,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
     /// </summary>
     internal class EnrollmentParams
     {
+        private static readonly ILogger _logger = LogHandler.GetClassLogger<EnrollmentParams>();
+
         private readonly Dictionary<string, string> _parameters;
 
         public EnrollmentParams(EnrollmentProductInfo productInfo)
         {
+            using var callTrace = _logger.TraceCall(nameof(EnrollmentParams));
             _parameters = productInfo?.ProductParameters ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             ProductId = productInfo?.ProductID ?? string.Empty;
         }
@@ -105,6 +110,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 
         private string GetString(string key, string defaultValue)
         {
+            using var callTrace = _logger.TraceCall();
             return _parameters.TryGetValue(key, out string v) && !string.IsNullOrWhiteSpace(v)
                 ? v.Trim()
                 : defaultValue;
@@ -112,6 +118,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 
         private int GetInt(string key, int defaultValue)
         {
+            using var callTrace = _logger.TraceCall();
             if (_parameters.TryGetValue(key, out string v) && int.TryParse(v, out int parsed))
                 return parsed;
             return defaultValue;
@@ -119,6 +126,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
 
         private bool GetBool(string key, bool defaultValue)
         {
+            using var callTrace = _logger.TraceCall();
             if (_parameters.TryGetValue(key, out string v) && bool.TryParse(v, out bool parsed))
                 return parsed;
             return defaultValue;

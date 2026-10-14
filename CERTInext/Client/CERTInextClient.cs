@@ -79,6 +79,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         public CERTInextClient(CERTInextConfig config)
         {
+            using var callTrace = Logger.TraceCall(nameof(CERTInextClient));
             _config = config ?? throw new ArgumentNullException(nameof(config));
 
             var isOAuth = config.AuthMode.Equals(Constants.Config.AuthModeOAuth, StringComparison.OrdinalIgnoreCase) ||
@@ -102,6 +103,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         public void Dispose()
         {
+            using var callTrace = Logger.TraceCall();
             _http?.Dispose();
             _tokenLock?.Dispose();
         }
@@ -125,11 +127,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             public CERTInextOAuthAuthenticator(Func<CancellationToken, Task<string>> tokenProvider)
                 : base(string.Empty) // base stores the token; we override GetAuthenticationParameter instead
             {
+                using var callTrace = Logger.TraceCall(nameof(CERTInextOAuthAuthenticator));
                 _tokenProvider = tokenProvider ?? throw new ArgumentNullException(nameof(tokenProvider));
             }
 
             protected override async ValueTask<Parameter> GetAuthenticationParameter(string accessToken)
             {
+                using var callTrace = Logger.TraceCall();
                 // Fetch (or return the cached) token from the provider.
                 // CancellationToken.None is acceptable here because RestSharp does not
                 // pass a token through the authenticator interface.
@@ -145,7 +149,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <inheritdoc/>
         public async Task PingAsync(CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             // POST {baseURL}ValidateCredentials — the real health/connectivity probe
             var body = new ValidateCredentialsRequest
@@ -199,7 +203,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
 
             Logger.LogInformation("CERTInext health check successful. LatencyMs={Latency}", sw.ElapsedMilliseconds);
-            Logger.MethodExit(LogLevel.Trace);
         }
 
         /// <inheritdoc/>
@@ -207,7 +210,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             GenerateOrderSslRequest request,
             CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             // Inject authentication meta if not already set
             if (request.Meta == null)
@@ -374,14 +377,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             Logger.LogInformation(
                 "CERTInext order placed. OrderNumber={OrderNumber}, RequestNumber={RequestNumber}",
                 result.OrderDetails?.OrderNumber, result.OrderDetails?.RequestNumber);
-            Logger.MethodExit(LogLevel.Trace);
             return result;
         }
 
         /// <inheritdoc/>
         public async Task SubmitCsrAsync(SubmitCsrRequest request, CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             if (request.Meta == null)
                 request.Meta = await BuildMetaAsync(ct);
@@ -426,13 +428,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 throw new Exception($"CERTInext SubmitCSR failed. HTTP {(int)resp.StatusCode}. See gateway logs for details.");
             }
 
-            Logger.MethodExit(LogLevel.Trace);
         }
 
         /// <inheritdoc/>
         public async Task<TrackOrderResponse> TrackOrderAsync(string orderNumber, CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             var body = new TrackOrderRequest
             {
@@ -486,14 +487,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     $"CERTInext TrackOrder failed for order '{orderNumber}': {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}.");
             }
 
-            Logger.MethodExit(LogLevel.Trace);
             return result;
         }
 
         /// <inheritdoc/>
         public async Task<GetCertificateResponse> DownloadCertificateAsync(string orderNumber, CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             var body = new GetCertificateRequest
             {
@@ -535,14 +535,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     $"CERTInext GetCertificate failed for order '{orderNumber}': {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}.");
             }
 
-            Logger.MethodExit(LogLevel.Trace);
             return result;
         }
 
         /// <inheritdoc/>
         public async Task RevokeOrderAsync(RevokeOrderRequest request, CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             if (request.Meta == null)
                 request.Meta = await BuildMetaAsync(ct);
@@ -608,7 +607,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             Logger.LogInformation(
                 "Certificate order revoked in CERTInext. OrderNumber={OrderNumber}, RevokeReasonId={ReasonId}",
                 request.RevocationDetails?.OrderNumber, request.RevocationDetails?.RevokeReasonId);
-            Logger.MethodExit(LogLevel.Trace);
         }
 
         /// <inheritdoc/>
@@ -617,7 +615,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             int pageSize = Constants.Api.DefaultPageSize,
             [EnumeratorCancellation] CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             int page = 1;
             int totalCount = int.MaxValue; // sentinel until we read the first response
@@ -692,13 +690,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 page++;
             }
 
-            Logger.MethodExit(LogLevel.Trace);
         }
 
         /// <inheritdoc/>
         public async Task<List<ProductDetail>> GetProductDetailsAsync(CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             var body = new GetProductDetailsRequest
             {
@@ -738,7 +735,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             var products = result.FlattenProducts();
             Logger.LogInformation("Retrieved {Count} product codes from CERTInext.",
                 products.Count);
-            Logger.MethodExit(LogLevel.Trace);
             return products;
         }
 
@@ -751,7 +747,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             EnrollCertificateRequest request,
             CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
             Logger.LogInformation("Submitting enrollment request to CERTInext (legacy) for profile {ProfileId}", request.ProfileId);
 
             // Build a GenerateOrderSSL request from the legacy EnrollCertificateRequest
@@ -804,7 +800,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             Logger.LogInformation(
                 "CERTInext enrollment submitted (legacy). OrderNumber={OrderNumber}, CertificateStatusId={StatusId}",
                 orderNumber, certStatusId);
-            Logger.MethodExit(LogLevel.Trace);
             return legacyResp;
         }
 
@@ -814,7 +809,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             RenewCertificateRequest request,
             CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
             Logger.LogInformation("Submitting renewal request to CERTInext (legacy). PriorOrderNumber={CertId}", certificateId);
 
             // The real CERTInext API has no dedicated renew endpoint.
@@ -922,7 +917,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             Logger.LogInformation(
                 "CERTInext renewal submitted (legacy). PriorOrderNumber={PriorId}, NewOrderNumber={NewId}",
                 certificateId, newOrderNumber);
-            Logger.MethodExit(LogLevel.Trace);
             return legacyResp;
         }
 
@@ -941,6 +935,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         private async Task<TrackOrderResponse> TryTrackOrderAfterPlacementAsync(
             string orderNumber, string operation, CancellationToken ct)
         {
+            using var callTrace = Logger.TraceCall();
             try
             {
                 return await TrackOrderAsync(orderNumber, ct);
@@ -969,7 +964,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string certificateId,
             CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             // 1. Track order for status and metadata
             TrackOrderResponse trackResp;
@@ -1027,7 +1022,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 result.RevokedAt = revokedAt;
             }
 
-            Logger.MethodExit(LogLevel.Trace);
             return result;
         }
 
@@ -1037,7 +1031,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             RevokeCertificateRequest request,
             CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             // Map the legacy reason string to a CERTInext revokeReasonId
             uint crlCode = MapLegacyReasonStringToCrlCode(request.Reason);
@@ -1056,7 +1050,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             };
 
             await RevokeOrderAsync(revokeReq, ct);
-            Logger.MethodExit(LogLevel.Trace);
         }
 
         /// <inheritdoc/>
@@ -1065,6 +1058,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             int pageSize = Constants.Api.DefaultPageSize,
             [EnumeratorCancellation] CancellationToken ct = default)
         {
+            using var callTrace = Logger.TraceCall();
             // Map the issuedAfter DateTime to an orderDateFrom string if provided
             string orderDateFrom = issuedAfter.HasValue
                 ? issuedAfter.Value.ToUniversalTime().ToString("yyyy-MM-dd")
@@ -1079,7 +1073,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <inheritdoc/>
         public async Task<List<ProfileInfo>> GetProfilesAsync(CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             var products = await GetProductDetailsAsync(ct);
             var profiles = new List<ProfileInfo>();
@@ -1097,7 +1091,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
 
             Logger.LogInformation("Retrieved {Count} profiles from CERTInext.", profiles.Count);
-            Logger.MethodExit(LogLevel.Trace);
             return profiles;
         }
 
@@ -1112,7 +1105,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string dcvMethod,
             CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             var body = new GetDcvRequest
             {
@@ -1164,7 +1157,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 "GetDcv response received. OrderNumber={OrderNumber}, Domain={Domain}, TokenPresent={TokenPresent}",
                 orderNumber, domainName, !string.IsNullOrWhiteSpace(result.DcvDetails?.Token));
 
-            Logger.MethodExit(LogLevel.Trace);
             return result;
         }
 
@@ -1175,7 +1167,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string dcvMethod,
             CancellationToken ct = default)
         {
-            Logger.MethodEntry(LogLevel.Trace);
+            using var callTrace = Logger.TraceCall();
 
             var body = new VerifyDcvRequest
             {
@@ -1237,7 +1229,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // unambiguously reflects that CERTInext acknowledged the verification request.
             Logger.LogInformation(
                 "DCV verification succeeded. OrderNumber={OrderNumber}, Domain={Domain}", orderNumber, domainName);
-            Logger.MethodExit(LogLevel.Trace);
         }
 
         // ---------------------------------------------------------------------------
@@ -1254,6 +1245,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         private Task<RequestMeta> BuildMetaAsync(CancellationToken ct)
         {
+            using var callTrace = Logger.TraceCall();
             string ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:sszzz");
             string txn = GenerateTxnId();
 
@@ -1298,6 +1290,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         private static string ComputeAuthKey(string accessKey, string ts, string txn)
         {
+            using var callTrace = Logger.TraceCall();
             string input = accessKey + ts + txn;
             byte[] inputBytes = Encoding.UTF8.GetBytes(input);
             var digest = new Org.BouncyCastle.Crypto.Digests.Sha256Digest();
@@ -1321,6 +1314,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private static string GenerateTxnId()
         {
+            using var callTrace = Logger.TraceCall();
             // Produce a positive long in [1, 1e18). NextLong() returns the full Int64
             // range including negatives — mask off the sign bit and reduce.
             long val = (_txnRandom.NextLong() & long.MaxValue) % 1_000_000_000_000_000_000L + 1L;
@@ -1332,6 +1326,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         private async Task<string> GetOrRefreshTokenAsync(CancellationToken ct)
         {
+            using var callTrace = Logger.TraceCall();
             if (!string.IsNullOrEmpty(_cachedToken) && DateTime.UtcNow < _tokenExpiry)
                 return _cachedToken;
 
@@ -1414,6 +1409,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             int maxAttempts = 3,
             bool idempotent = true)
         {
+            using var callTrace = Logger.TraceCall();
             int attempts = idempotent ? maxAttempts : 1;
             RestResponse resp = null;
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -1485,6 +1481,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private static uint MapLegacyReasonStringToCrlCode(string reason)
         {
+            using var callTrace = Logger.TraceCall();
             switch (reason?.ToLowerInvariant())
             {
                 case "keycompromise": return 1;
@@ -1502,6 +1499,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private static bool IsCertificateDownloadable(string certStatusId)
         {
+            using var callTrace = Logger.TraceCall();
             if (!int.TryParse(certStatusId, out int id)) return false;
             return id == Constants.CertificateStatusId.CertificateGenerated ||
                    id == Constants.CertificateStatusId.CertificateDownloaded ||
@@ -1512,6 +1510,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private static string MapCertStatusIdToLegacyString(string certStatusId)
         {
+            using var callTrace = Logger.TraceCall();
             if (!int.TryParse(certStatusId, out int id)) return "pending";
             int disposition = StatusMapper.CertificateStatusIdToRequestDisposition(id);
             switch (disposition)
@@ -1526,6 +1525,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private static LegacyGetCertificateResponse MapOrderReportEntryToLegacy(OrderReportEntry entry)
         {
+            using var callTrace = Logger.TraceCall();
             // Note: GetOrderReport does not return requestor name/email in the ordersArray.
             // Those fields are only available via TrackOrder on individual orders.
             System.DateTime? orderDate = null;
@@ -1550,6 +1550,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         private GenerateOrderSslRequest BuildOrderRequestFromLegacyEnrollRequest(EnrollCertificateRequest request)
         {
+            using var callTrace = Logger.TraceCall();
             // Hoisted: additionalDomains is de-duplicated against the primary domain, so both
             // fields have to be built from the same value.
             string domainName = ExtractCnFromSubject(request.Subject) ?? "unknown";
@@ -1600,6 +1601,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string signerPlace,
             string signerIp)
         {
+            using var callTrace = Logger.TraceCall();
             string requestorName  = requesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
             string requestorEmail = requesterEmail ?? _config.RequestorEmail ?? string.Empty;
             string requestorIsd   = string.IsNullOrWhiteSpace(_config.RequestorIsdCode) ? "1" : _config.RequestorIsdCode;
@@ -1669,6 +1671,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         private string ResolveValidityYears(int? validityYears, int? validityDays)
         {
+            using var callTrace = Logger.TraceCall();
             if (validityYears.HasValue)
                 return validityYears.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
             if (validityDays.HasValue)
@@ -1688,6 +1691,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         private TechnicalPointOfContact BuildTechnicalPointOfContact(
             string requestorName, string requestorEmail, string requestorIsd, string requestorMobile)
         {
+            using var callTrace = Logger.TraceCall();
             string email = string.IsNullOrWhiteSpace(_config.TechnicalContactEmail)
                 ? requestorEmail
                 : _config.TechnicalContactEmail;
@@ -1734,6 +1738,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         internal static (string First, string Last) SplitContactName(string name)
         {
+            using var callTrace = Logger.TraceCall();
             string trimmed = name?.Trim();
             if (string.IsNullOrEmpty(trimmed))
                 return (string.Empty, string.Empty);
@@ -1759,6 +1764,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         private AgreementDetails BuildAgreementDetails(
             string templateSignerName, string templateSignerPlace, string templateSignerIp)
         {
+            using var callTrace = Logger.TraceCall();
             // SOC1 accuracy-of-processing: the subscriber agreement is a legal artefact
             // and the SignerIp it carries is part of the audit record CERTInext stores.
             // Submitting 127.0.0.1 is a misrepresentation. We retain the fallback so we
@@ -1811,6 +1817,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         private static void WarnIfSignerIpNotAnAddress(string signerIp, string source)
         {
+            using var callTrace = Logger.TraceCall();
             if (string.IsNullOrWhiteSpace(signerIp) || IPAddress.TryParse(signerIp, out _))
                 return;
 
@@ -1823,12 +1830,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         private static string FirstNonBlank(string first, string second)
-            => !string.IsNullOrWhiteSpace(first) ? first
-             : !string.IsNullOrWhiteSpace(second) ? second
-             : null;
+        {
+            using var callTrace = Logger.TraceCall();
+            return !string.IsNullOrWhiteSpace(first) ? first
+                 : !string.IsNullOrWhiteSpace(second) ? second
+                 : null;
+        }
 
         private static string ExtractCnFromSubject(string subject)
         {
+            using var callTrace = Logger.TraceCall();
             if (string.IsNullOrWhiteSpace(subject)) return null;
             foreach (var part in subject.Split(','))
             {
@@ -1859,6 +1870,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             System.Collections.Generic.List<SanEntry> sans,
             string domainName)
         {
+            using var callTrace = Logger.TraceCall();
             if (sans == null || sans.Count == 0) return null;
 
             var domains = new List<string>();
@@ -1900,6 +1912,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // Instance (not static) — calls LogApiFailure, which needs _config.LogSensitiveRequestData.
         private T DeserializeOrThrow<T>(RestResponse resp, string operation) where T : class
         {
+            using var callTrace = Logger.TraceCall();
             if (!resp.IsSuccessful)
             {
                 // Issue 0073 (port of 0044): V1 documents errors only as HTTP-200 meta envelopes, so a
@@ -1976,6 +1989,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         internal static bool IsRateLimitSurface(string errorMessage)
         {
+            using var callTrace = Logger.TraceCall();
             if (string.IsNullOrEmpty(errorMessage)) return false;
             return errorMessage.IndexOf("Inactive Account User", StringComparison.OrdinalIgnoreCase) >= 0;
         }
@@ -2000,6 +2014,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         internal static double ComputeRateLimitBackoffSeconds(int attempt)
         {
+            using var callTrace = Logger.TraceCall();
             if (attempt < 1) attempt = 1;
             double nominal = RateLimitBaseBackoffSeconds * Math.Pow(2, attempt - 1);
             // ±25% jitter via SecureRandom — non-cryptographic randomness is fine for
@@ -2023,6 +2038,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         private static string Truncate(string s, int max)
         {
+            using var callTrace = Logger.TraceCall();
             if (string.IsNullOrEmpty(s) || s.Length <= max) return s;
             return s.Substring(0, max) + $"…(truncated, {s.Length - max} more chars)";
         }
@@ -2041,6 +2057,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         internal static string RedactCredentials(string body)
         {
+            using var callTrace = Logger.TraceCall();
             if (string.IsNullOrEmpty(body)) return body;
 
             // JSON: "authKey": "..."  → "authKey":"***REDACTED***"
@@ -2128,6 +2145,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         internal static string RedactPersonalData(string body)
         {
+            using var callTrace = Logger.TraceCall();
             if (string.IsNullOrEmpty(body)) return body;
 
             foreach (var key in PersonalEmailFieldNames)
@@ -2148,6 +2166,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         private static string RedactJsonField(string body, string keyName, Func<string, string> transform)
         {
+            using var callTrace = Logger.TraceCall();
             return System.Text.RegularExpressions.Regex.Replace(
                 body,
                 $@"(?i)(""{System.Text.RegularExpressions.Regex.Escape(keyName)}""\s*:\s*"")([^""\\]*(?:\\.[^""\\]*)*)("")",
@@ -2185,6 +2204,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         internal static string MaskEmailsInSanContainers(string body)
         {
+            using var callTrace = Logger.TraceCall();
             if (string.IsNullOrEmpty(body)) return body;
             if (body.IndexOf('@') < 0 && body.IndexOf("\\u0040", StringComparison.OrdinalIgnoreCase) < 0)
                 return body;
@@ -2281,6 +2301,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             static bool MatchesAny(string[] keys, string name)
             {
+                using var callTrace = Logger.TraceCall(nameof(MatchesAny));
                 foreach (var key in keys)
                     if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase)) return true;
                 return false;
@@ -2298,6 +2319,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         internal static string ApplyLoggingRedaction(string body, bool logSensitiveRequestData)
         {
+            using var callTrace = Logger.TraceCall();
             string redacted = RedactCredentials(body);
             return logSensitiveRequestData ? redacted : RedactPersonalData(redacted);
         }
@@ -2339,6 +2361,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string errorMessage = null,
             LogLevel level = LogLevel.Warning)
         {
+            using var callTrace = Logger.TraceCall();
             // Skip the redaction passes entirely when this level is disabled.
             if (!Logger.IsEnabled(level)) return;
             string sanitizedBody = ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)";
@@ -2358,7 +2381,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// <c>LogSensitiveRequestData</c> is on. Use for every CA message that reaches a log line or
         /// an exception message; feed <see cref="IsRateLimitSurface"/> the raw text instead.
         /// </summary>
-        private string MaskCaText(string text) => LogSanitizer.SanitizeCaText(text, _config.LogSensitiveRequestData);
+        private string MaskCaText(string text)
+        {
+            using var callTrace = Logger.TraceCall();
+            return LogSanitizer.SanitizeCaText(text, _config.LogSensitiveRequestData);
+        }
 
         /// <summary>
         /// Builds the exception/log message for a non-success CERTInext body. CA-supplied text
@@ -2369,6 +2396,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         internal static string ExtractErrorMessage(
             string content, string operation, int? httpStatus = null, bool logSensitiveRequestData = false)
         {
+            using var callTrace = Logger.TraceCall();
             string status = httpStatus.HasValue ? $" (HTTP {httpStatus.Value})" : string.Empty;
 
             if (string.IsNullOrWhiteSpace(content))
@@ -2412,10 +2440,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                    "See gateway logs for details.";
         }
 
-        private static JsonSerializerOptions GetJsonOptions() => new JsonSerializerOptions
+        private static JsonSerializerOptions GetJsonOptions()
         {
-            PropertyNameCaseInsensitive = true,
-            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
-        };
+            using var callTrace = Logger.TraceCall();
+            return new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+            };
+        }
     }
 }
