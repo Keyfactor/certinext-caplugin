@@ -52,6 +52,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_V2_LIFECYCLE_WILDCARD_DV",
                 "CERTINEXT_V2_LIFECYCLE_RENEW_REISSUE",
                 "CERTINEXT_V2_LIFECYCLE_FRESH_DCV",
+                // Issue 0090 V2 place-order latency experiment (places real sandbox orders).
+                "CERTINEXT_V2_LATENCY_EXPERIMENT",
+                // Explicit-ID V2 sandbox order cleanup (revokes/cancels the listed orders).
+                "CERTINEXT_V2_CLEANUP_ORDERS",
             };
 
         // ---------------------------------------------------------------------------
