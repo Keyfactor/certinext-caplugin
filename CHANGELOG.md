@@ -20,7 +20,7 @@
 - fix(config): `ApiUrl` and, for V1 OAuth, `OAuthTokenUrl` must use https (http is allowed only for loopback hosts), enforced on save and at startup, so existing http connectors fail to start.
 - fix(logging): Requestor personal data, email SANs, and full request/response payloads are redacted from gateway logs unless `LogSensitiveRequestData` is enabled.
 - fix(enroll): Order and CSR submissions are no longer auto-retried after a timeout, which could create duplicate orders; if the CA did create the order, the next sync imports it.
-- fix(sync): V2 sync (full or incremental) holds back pending and issued orders created in the last 120 s (`V2SyncRecentOrderGraceSeconds`, `0` disables), so it no longer makes an in-flight enrollment fail with a duplicate key when it saves.
+- fix(sync): Sync (full or incremental) holds back pending and issued orders created in the last 120 s (`SyncRecentOrderGraceSeconds`, `0` disables), so it no longer makes an in-flight enrollment fail with a duplicate key when it saves.
 
 ## Chores
 - chore(compat): Requires AnyCA Gateway REST framework 26.2.0 or later; the plugin is built against `IAnyCAPlugin` 3.3.0 with DNS-01 DCV included.

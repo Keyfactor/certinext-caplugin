@@ -3320,7 +3320,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         internal static int GetV2RecentOrderGraceSeconds(CERTInextConfig config)
         {
-            int configured = config?.V2SyncRecentOrderGraceSeconds
+            int configured = config?.SyncRecentOrderGraceSeconds
                              ?? Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds;
             return configured < 0 ? Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds : configured;
         }

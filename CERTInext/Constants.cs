@@ -88,8 +88,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // V2 mode only: incremental-sync lookback window for /reports/orders.
             public const string V2SyncLookbackHours = "V2SyncLookbackHours";
-            // V2 mode only: sync does not emit pending or issued orders younger than this (issue 0090).
-            public const string V2SyncRecentOrderGraceSeconds = "V2SyncRecentOrderGraceSeconds";
+            // V1 and V2: sync does not emit pending or issued orders younger than this (issue 0090).
+            public const string SyncRecentOrderGraceSeconds = "SyncRecentOrderGraceSeconds";
             public const string V2InlineCsr = "V2InlineCsr"; // opt-in: SSL/TLS sends the CSR inline on create (V2 only)
 
             // Environment variable that overrides DcvTimeoutMinutes when set.

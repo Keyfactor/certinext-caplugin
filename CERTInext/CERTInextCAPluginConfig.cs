@@ -461,14 +461,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = Constants.ApiV2.DefaultSyncLookbackHours,
                     Type = "Number"
                 },
-                [Constants.Config.V2SyncRecentOrderGraceSeconds] = new PropertyConfigInfo
+                [Constants.Config.SyncRecentOrderGraceSeconds] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL (V2 mode only): during a Synchronize (full or incremental), a pending or issued " +
+                    Comments = "OPTIONAL: during a Synchronize (full or incremental, in both V1 and V2 modes), a pending or issued " +
                                "order created less than this many seconds ago (plus a small clock margin) is not emitted to " +
                                "the gateway; the next incremental pass imports it. This stops the sync from inserting a " +
                                "gateway row for an order whose enrollment is still in flight, which would make the " +
                                "enrollment's own save fail with a duplicate key. Revoked and failed orders are never held " +
-                               "back. 0 disables the hold. Ignored when UseV2Api is false. " +
+                               "back. 0 disables the hold; a negative value uses the default. " +
                                $"Default: {Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds}.",
                     Hidden = false,
                     DefaultValue = Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds,
@@ -994,14 +994,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public int V2SyncLookbackHours { get; set; } = Constants.ApiV2.DefaultSyncLookbackHours;
 
         /// <summary>
-        /// V2 mode only: during a Synchronize (full or incremental), pending and issued orders created
+        /// During a Synchronize (full or incremental, V1 and V2 modes), pending and issued orders created
         /// less than this many seconds ago (plus <see cref="Constants.ApiV2.SyncRecentOrderClockMarginSeconds"/>)
         /// are not emitted, so the sync cannot create the gateway row an in-flight enrollment is about to
         /// save (issue 0090). 0 disables; a negative value falls back to the default. Revoked and failed
-        /// orders are never held back. Ignored when <see cref="UseV2Api"/> is false. Default: 120.
+        /// orders are never held back. Default: 120.
         /// </summary>
-        [JsonPropertyName("V2SyncRecentOrderGraceSeconds")]
-        public int V2SyncRecentOrderGraceSeconds { get; set; } = Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds;
+        [JsonPropertyName("SyncRecentOrderGraceSeconds")]
+        public int SyncRecentOrderGraceSeconds { get; set; } = Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds;
 
         /// <summary>
         /// OPTIONAL (V2 mode only), default false. When true, SSL/TLS orders carry the CSR inline in the

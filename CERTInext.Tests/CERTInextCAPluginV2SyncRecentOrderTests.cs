@@ -107,7 +107,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 PickupRetries     = 0
             };
             if (graceSeconds.HasValue)
-                config.V2SyncRecentOrderGraceSeconds = graceSeconds.Value;
+                config.SyncRecentOrderGraceSeconds = graceSeconds.Value;
 
             // A reader that says the gateway already holds a body keeps revoked rows from tripping
             // the bodyless-REVOKED guard, which is not what these tests are about.
@@ -368,7 +368,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var (records, _) = await SyncAsync(mock.Object, graceSeconds: 0, fullSync: fullSync, marker: pending);
 
             records.Select(r => r.CARequestID).Should().BeEquivalentTo(new[] { pending, issued },
-                "V2SyncRecentOrderGraceSeconds=0 restores the old behaviour");
+                "SyncRecentOrderGraceSeconds=0 restores the old behaviour");
         }
 
         [Fact]
@@ -467,19 +467,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public void GetV2RecentOrderGraceSeconds_ZeroDisables_NegativeFallsBackToDefault(int? configured, int expected)
         {
             var config = new CERTInextConfig();
-            if (configured.HasValue) config.V2SyncRecentOrderGraceSeconds = configured.Value;
+            if (configured.HasValue) config.SyncRecentOrderGraceSeconds = configured.Value;
 
             CERTInextCAPlugin.GetV2RecentOrderGraceSeconds(config).Should().Be(expected);
         }
 
         [Fact]
-        public void Annotations_V2SyncRecentOrderGraceSeconds_PresentWithDefault()
+        public void Annotations_SyncRecentOrderGraceSeconds_PresentWithDefault()
         {
             var annotations = CERTInextCAPluginConfig.GetCAConnectorAnnotations();
 
-            annotations.Should().ContainKey(Constants.Config.V2SyncRecentOrderGraceSeconds);
-            annotations[Constants.Config.V2SyncRecentOrderGraceSeconds].DefaultValue.Should().Be(DefaultGrace);
-            annotations[Constants.Config.V2SyncRecentOrderGraceSeconds].Type.Should().Be("Number");
+            annotations.Should().ContainKey(Constants.Config.SyncRecentOrderGraceSeconds);
+            annotations[Constants.Config.SyncRecentOrderGraceSeconds].DefaultValue.Should().Be(DefaultGrace);
+            annotations[Constants.Config.SyncRecentOrderGraceSeconds].Type.Should().Be("Number");
         }
     }
 }
