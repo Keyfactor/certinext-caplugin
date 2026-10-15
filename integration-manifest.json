@@ -229,6 +229,13 @@
                     "default": "100"
                 },
                 {
+                    "name": "SyncRecentOrderGraceSeconds",
+                    "description": "OPTIONAL: during Synchronize (full and incremental), a pending or issued order created less than this many seconds ago (plus a small clock margin) is not emitted to the gateway; the next incremental pass imports it. This stops the sync from inserting a gateway row for an order whose enrollment is still in flight, which would make the enrollment's own save fail with a duplicate key even though the certificate issued. Revoked and failed orders are never held back. 0 disables the hold; a negative value uses the default. Default: 120.",
+                    "required": "Optional",
+                    "example": "120",
+                    "default": "120"
+                },
+                {
                     "name": "Enabled",
                     "description": "Enables or disables the CA connector. Set to false to create the connector record before credentials are available. Default: true.",
                     "required": "Optional",

@@ -24,6 +24,7 @@
 - fix(dcv): A DV order that cannot issue (IP or email SAN, no DNS provider) now returns pending immediately; sync finishes the order.
 - fix(dcv): A DV renewal waiting on DNS-01 validation now returns pending immediately instead of blocking a gateway worker for the pickup wait.
 - fix(config): Connector and template validation no longer leaks an HTTP client per check.
+- fix(sync): Sync holds back pending or issued orders created in the last 120 s (`SyncRecentOrderGraceSeconds`, `0` disables), so it no longer makes an in-flight enrollment fail with a duplicate key when it saves.
 
 ## Chores
 - chore(logging): Startup log now shows whether `OrganizationNumber`, `DefaultProductCode`, `GroupNumber`, `SubmitNonDnsSans`, and `LogSensitiveRequestData` are set, and warns when `LogSensitiveRequestData` is on.

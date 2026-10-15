@@ -5,6 +5,7 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
 * CA Synchronization:
     * Download all certificates issued through the CERTInext CA, either as a full inventory or incrementally since the last sync.
     * Expired certificates can optionally be excluded from synchronization using the `IgnoreExpired` configuration flag.
+    * A pending or issued order created in the last `SyncRecentOrderGraceSeconds` seconds (default `120`, plus a 5-second clock margin; `0` turns the hold off) is not imported by that sync pass; the next incremental pass imports it. Without this, a sync that runs while an enrollment is still in flight can list the new order before the enrollment has saved it, and the gateway then rejects the enrollment's own save with a duplicate-key error even though the certificate issued. Revoked and failed orders are never held back. A held-back order reaches the gateway one sync interval later.
 * Certificate Enrollment for profiles configured in CERTInext:
     * New certificate enrollment (new keys and certificate).
     * Certificate renewal — submits a new `GenerateOrderSSL` order when the prior certificate is within the configured renewal window (CERTInext has no dedicated renewal endpoint; the renewal-window check governs how Command tracks old→new, not which API is called).

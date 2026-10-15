@@ -863,7 +863,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             await plugin.Synchronize(buffer, lastSync: lastSync, fullSync: false, cancelToken: CancellationToken.None);
             // CompleteAdding() is called by Synchronize internally.
 
-            capturedIssuedAfter.Should().Be(lastSync);
+            // Issue 0090: the listing looks back by the hold-back window (120 s + 5 s margin + slack)
+            // so an order held at the previous pass is still in this pass's day-granular listing.
+            capturedIssuedAfter.Should().Be(CERTInextCAPlugin.GetSyncIssuedAfter(
+                lastSync, Constants.Api.DefaultSyncRecentOrderGraceSeconds));
+            capturedIssuedAfter.Should().BeOnOrBefore(lastSync);
         }
 
         [Fact]

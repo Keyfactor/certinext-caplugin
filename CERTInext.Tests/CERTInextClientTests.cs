@@ -581,6 +581,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             _server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/GetOrderReport");
         }
 
+        // Issue 0090: the sync hold-back relies on the listing's orderDate being whole-second UTC.
+        // Live GetOrderReport rows carry "yyyy-MM-dd HH:mm:ss" with no zone marker (verified
+        // 2026-10-15 against plugin/gateway UTC timestamps); it must parse as that UTC instant.
+        [Fact]
+        public async Task ListCertificatesAsync_ParsesLiveOrderDateFormat_AsUtcWholeSeconds()
+        {
+            _server
+                .Given(Request.Create().WithPath("/GetOrderReport").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.OrderReportSinglePageJson()
+                        .Replace("\"orderDate\":\"2024-06-01\"", "\"orderDate\":\"2026-10-15 18:59:52\"")));
+
+            var client = BuildClient();
+            var results = new List<LegacyGetCertificateResponse>();
+            await foreach (var cert in client.ListCertificatesAsync(issuedAfter: null, pageSize: 100))
+                results.Add(cert);
+
+            results.Should().HaveCount(1);
+            results[0].OrderDate.Should().Be(new DateTime(2026, 10, 15, 18, 59, 52, DateTimeKind.Utc));
+            (results[0].OrderDate?.Kind).Should().Be(DateTimeKind.Utc);
+        }
+
         // ---------------------------------------------------------------------------
         // GetProfilesAsync (legacy) — calls POST /GetProductDetails
         // ---------------------------------------------------------------------------

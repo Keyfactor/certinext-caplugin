@@ -293,6 +293,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = Constants.Api.DefaultPageSize,
                     Type = "Number"
                 },
+                [Constants.Config.SyncRecentOrderGraceSeconds] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: during Synchronize (full and incremental), a pending or issued order created less " +
+                               "than this many seconds ago (plus a small clock margin) is not emitted to the gateway; the " +
+                               "next incremental pass imports it. This stops the sync from inserting a gateway row for an " +
+                               "order whose enrollment is still in flight, which would make the enrollment's own save fail " +
+                               "with a duplicate key even though the certificate issued. Revoked and failed orders are never " +
+                               "held back. 0 disables the hold; a negative value uses the default. " +
+                               $"Default: {Constants.Api.DefaultSyncRecentOrderGraceSeconds}.",
+                    Hidden = false,
+                    DefaultValue = Constants.Api.DefaultSyncRecentOrderGraceSeconds,
+                    Type = "Number"
+                },
                 [Constants.Config.Enabled] = new PropertyConfigInfo
                 {
                     Comments = "Enables or disables the CA connector. Set to false to create the connector record " +
@@ -778,6 +791,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         [JsonPropertyName("PageSize")]
         public int PageSize { get; set; } = Constants.Api.DefaultPageSize;
+
+        /// <summary>
+        /// During Synchronize (full and incremental), pending or issued orders created less than this
+        /// many seconds ago (plus <see cref="Constants.Api.SyncRecentOrderClockMarginSeconds"/>) are not
+        /// emitted, so the sync cannot create the gateway row an in-flight enrollment is about to save
+        /// (issue 0090). 0 disables; a negative value falls back to the default. Revoked and failed
+        /// orders are unaffected. Default: 120.
+        /// </summary>
+        [JsonPropertyName("SyncRecentOrderGraceSeconds")]
+        public int SyncRecentOrderGraceSeconds { get; set; } = Constants.Api.DefaultSyncRecentOrderGraceSeconds;
 
         [JsonPropertyName("Enabled")]
         public bool Enabled { get; set; } = true;

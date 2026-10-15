@@ -23,6 +23,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SubmitNonDnsSans = "SubmitNonDnsSans";
             public const string PageSize = "PageSize";
 
+            // Enroll/sync race mitigation (issue 0090): Synchronize does not emit pending or issued
+            // orders created less than this many seconds ago, so it cannot insert the gateway row
+            // that an in-flight enrollment is about to save. 0 disables.
+            public const string SyncRecentOrderGraceSeconds = "SyncRecentOrderGraceSeconds";
+
             // Diagnostic escape hatch — see CERTInextConfig.LogSensitiveRequestData. Off by
             // default; only meant for temporary use while verifying a new deployment.
             public const string LogSensitiveRequestData = "LogSensitiveRequestData";
@@ -246,6 +251,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Pagination (used in GetOrderReport searchCriteria)
             public const int DefaultPageSize = 100;
             public const int MaxPageSize = 500;
+
+            // Enroll/sync race mitigation (issue 0090). An incremental or full sync that emits a
+            // pending or issued order whose enrollment has not saved yet makes the gateway insert a
+            // row with that CARequestID, and the enrollment's own save then fails on the unique
+            // (CA, CARequestID) index. So sync holds back such orders younger than this; the next
+            // incremental pass lists and imports them. 120 s is the longest an enrollment normally
+            // runs before it gives up.
+            public const int DefaultSyncRecentOrderGraceSeconds = 120;
+
+            // Added to the grace window when comparing against the listing's orderDate. GetOrderReport
+            // rows carry orderDate as "yyyy-MM-dd HH:mm:ss" (no zone marker): whole seconds, UTC
+            // (verified live 2026-10-15 against plugin timestamps: the stamp is 1-2.4 s before the
+            // order-placed response, and 0.95-2.4 s against the gateway's UTC log clock). Whole-second
+            // truncation makes an order look up to 1 s older than it is, and CA/gateway clock skew is
+            // not bounded by anything we control, so leave a few seconds of slack.
+            public const int SyncRecentOrderClockMarginSeconds = 5;
+
+            // The incremental listing filters orderDateFrom by UTC calendar day (CERTInextClient
+            // ListCertificatesAsync). A held-back order is re-listed on the next pass only if its day is
+            // not before the day of the issuedAfter we send. Looking back by the hold window plus this
+            // slack (for the gateway's lastSync being the previous pass's end rather than its start)
+            // keeps an order created just before UTC midnight in the next pass's listing.
+            public const int SyncRecentOrderLookbackSlackSeconds = 300;
 
             // Legacy path constants — kept so CERTInextClient can still reference them
             // without breaking existing callers while being replaced.
