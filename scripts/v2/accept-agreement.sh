@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
 # V2 ssl-certificates/{orderId}/agreement — record Subscriber Agreement acceptance.
+# MUTATING: the CA proceeds to issue the certificate. Refuses to run and prints the
+# planned request unless --yes-mutate is passed.
 # Required env var: ORDER_ID
+# Env-file keys: CERTINEXT_REQUESTOR_NAME, CERTINEXT_SIGNER_IP (else api.ipify.org lookup)
 #
-# 204 No Content = recorded; the CA proceeds to issue the certificate.
-# After this step poll v2-track-order until status=issued, then v2-download-certificate.
+# 204 No Content = recorded. Then poll track-order.sh until status=issued, and run
+# download-certificate.sh.
+# Credentials: see scripts/v2/README.md.
 set -euo pipefail
-. ~/.env_certinext
+# shellcheck source=scripts/lib/certinext-v2-auth.sh
 . "$(dirname "$0")/../lib/certinext-v2-auth.sh"
+v2_usage() { echo "Usage: ORDER_ID=<orderId> scripts/v2/accept-agreement.sh [--yes-mutate]" >&2; }
+v2_parse_mutating_args "$@"
 
 ORDER_ID="${ORDER_ID:-}"
+v2_require_id ORDER_ID
 
-if [ -z "$ORDER_ID" ]; then
-    echo "Usage: ORDER_ID=<orderId> scripts/v2/accept-agreement.sh" >&2
-    exit 1
-fi
+name=$(v2_cfg CERTINEXT_REQUESTOR_NAME "Keyfactor Gateway Test")
 
-name="${CERTINEXT_REQUESTOR_NAME:-Keyfactor Gateway Test}"
-signerIp="${CERTINEXT_SIGNER_IP:-}"
-if [ -z "$signerIp" ]; then signerIp=$(curl -s https://api.ipify.org); fi
+build_body() {
+    jq -n --arg name "$name" --arg ip "$1" \
+        '{agreement:{signerName:$name,signerIp:$ip,signerPlace:"Gateway",accepted:true}}'
+}
 
-echo "V2 POST /api/certinext/v2/ssl-certificates/$ORDER_ID/agreement  signerName=$name  signerIp=$signerIp"
-curl -s -X POST "$CERTINEXT_V2_API_URL/api/certinext/v2/ssl-certificates/$ORDER_ID/agreement" \
-     -H "Authorization: Bearer $CERTINEXT_V2_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d "$(jq -n \
-         --arg name "$name" \
-         --arg ip "$signerIp" \
-         '{agreement:{signerName:$name,signerIp:$ip,signerPlace:"Gateway",accepted:true}}')" \
-| jq .
+path="/api/certinext/v2/ssl-certificates/$ORDER_ID/agreement"
+v2_mutation_gate POST "$path" "$(build_body "$(v2_signer_ip --offline)")"
+
+body=$(build_body "$(v2_signer_ip)")
+echo "V2 POST $path  signerName=$name" >&2
+v2_request POST "$path" -H "Content-Type: application/json" --data-binary "$body"
