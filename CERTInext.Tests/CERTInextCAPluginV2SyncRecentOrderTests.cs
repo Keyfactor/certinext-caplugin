@@ -31,10 +31,11 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Issue 0090: the V2 incremental sync must not emit a pending order created within the grace
-    /// window (default 120 s plus a clock margin), because the gateway would insert a row with that
-    /// CARequestID and the in-flight enrollment's own save would then fail on the unique
-    /// (CA, CARequestID) index. Full sync, non-pending rows and unparseable dates are unaffected.
+    /// Issue 0090: the V2 sync (full or incremental) must not emit a pending or issued order created
+    /// within the grace window (default 120 s plus a clock margin), because the gateway would insert
+    /// a row with that CARequestID and the in-flight enrollment's own save would then fail on the
+    /// unique (CA, CARequestID) index. A held-back issued order is not downloaded either. Revoked
+    /// and failed rows and unparseable dates are unaffected.
     ///
     /// Log capture swaps <see cref="LogHandler.Factory"/> (same seam and same non-parallel
     /// collection as <see cref="V2UccNonDnsSanLoggingTests"/>); assertions only consider messages
@@ -42,10 +43,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// positively only.
     /// </summary>
     [Collection("LogHandlerFactory-NoParallel")]
-    public class CERTInextCAPluginV2SyncRecentPendingTests
+    public class CERTInextCAPluginV2SyncRecentOrderTests
     {
-        private static readonly int Margin = Constants.ApiV2.SyncRecentPendingClockMarginSeconds;
-        private static readonly int DefaultGrace = Constants.ApiV2.DefaultSyncRecentPendingGraceSeconds;
+        private static readonly int Margin = Constants.ApiV2.SyncRecentOrderClockMarginSeconds;
+        private static readonly int DefaultGrace = Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds;
 
         private sealed class CapturingLoggerProvider : ILoggerProvider
         {
@@ -106,7 +107,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 PickupRetries     = 0
             };
             if (graceSeconds.HasValue)
-                config.V2SyncRecentPendingGraceSeconds = graceSeconds.Value;
+                config.V2SyncRecentOrderGraceSeconds = graceSeconds.Value;
 
             // A reader that says the gateway already holds a body keeps revoked rows from tripping
             // the bodyless-REVOKED guard, which is not what these tests are about.
@@ -165,7 +166,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             log.Should().Contain(m => m.StartsWith("Information|") && m.Contains($"CARequestID={id}")
                                       && m.Contains("AgeSeconds=") && m.Contains($"GraceSeconds={DefaultGrace}"),
                 "each hold-back is logged at Info with the order id and its age");
-            log.Should().Contain(m => m.Contains("V2 synchronization complete") && m.Contains("RecentPendingDeferred=1"),
+            log.Should().Contain(m => m.Contains("V2 synchronization complete") && m.Contains("RecentOrdersDeferred=1"),
                 "the sync summary counts held-back orders");
         }
 
@@ -183,59 +184,141 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             log.Should().NotContain(m => m.Contains($"CARequestID={id}") && m.Contains("holding back"));
         }
 
-        [Fact]
-        public async Task Incremental_IssuedAndRecent_IsEmitted()
-        {
-            string id = NewId();
-            var mock = ClientReturning(Row(id, "Order Fulfilled", "Certificate Downloaded", Ago(10)));
+        private static void SetupDownload(Mock<ICERTInextClient> mock, string id) =>
             mock.Setup(c => c.ResolveAndDownloadCertificateV2Async(id, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new V2CertificateDownloadResponse
                 {
                     OrderId = id, CertificatePem = MockCertificateData.FakePemCertificate
                 });
 
-            var (records, _) = await SyncAsync(mock.Object, null, fullSync: false, marker: id);
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task IssuedAndRecent_IsHeldBack_NoDownloadCall(bool fullSync)
+        {
+            string id = NewId();
+            var mock = ClientReturning(Row(id, "Order Fulfilled", "Certificate Downloaded", Ago(10)));
+            SetupDownload(mock, id);
+
+            var (records, log) = await SyncAsync(mock.Object, null, fullSync, marker: id);
+
+            records.Should().BeEmpty("an issued order created 10 s ago may still be saving in its enrollment");
+            mock.Verify(c => c.ResolveAndDownloadCertificateV2Async(id, It.IsAny<CancellationToken>()), Times.Never,
+                "a held-back issued order must not cost a certificate download");
+            log.Should().Contain(m => m.StartsWith("Information|") && m.Contains($"CARequestID={id}")
+                                      && m.Contains("holding back"));
+            log.Should().Contain(m => m.Contains("V2 synchronization complete") && m.Contains("RecentOrdersDeferred=1"));
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task IssuedAndOlderThanWindow_IsEmitted_WithCertificate(bool fullSync)
+        {
+            string id = NewId();
+            var mock = ClientReturning(
+                Row(id, "Order Fulfilled", "Certificate Downloaded", Ago(DefaultGrace + Margin + 30)));
+            SetupDownload(mock, id);
+
+            var (records, _) = await SyncAsync(mock.Object, null, fullSync, marker: id);
 
             records.Should().ContainSingle();
-            records[0].Status.Should().Be((int)EndEntityStatus.GENERATED, "only pending orders are held back");
+            records[0].CARequestID.Should().Be(id);
+            records[0].Status.Should().Be((int)EndEntityStatus.GENERATED);
             records[0].Certificate.Should().NotBeNullOrEmpty();
+            mock.Verify(c => c.ResolveAndDownloadCertificateV2Async(id, It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]
-        public async Task Incremental_RevokedAndRecent_IsEmitted()
+        public async Task Incremental_IssuedFoundViaTrackFallback_AndRecent_IsHeldBack_NoDownloadCall()
+        {
+            string id = NewId();
+            var mock = ClientReturning(Row(id, "Something New", "Also New", Ago(20)));
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(id, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = id, Status = "issued", Domain = "example.com"
+                }));
+            SetupDownload(mock, id);
+
+            var (records, _) = await SyncAsync(mock.Object, null, fullSync: false, marker: id);
+
+            records.Should().BeEmpty();
+            mock.Verify(c => c.ResolveAndDownloadCertificateV2Async(id, It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task RevokedAndRecent_IsEmitted(bool fullSync)
         {
             string id = NewId();
             var mock = ClientReturning(Row(id, "Revoked", "Certificate Revoked", Ago(10)));
 
-            var (records, _) = await SyncAsync(mock.Object, null, fullSync: false, marker: id);
+            var (records, _) = await SyncAsync(mock.Object, null, fullSync, marker: id);
 
             records.Should().ContainSingle();
             records[0].Status.Should().Be((int)EndEntityStatus.REVOKED);
         }
 
-        [Fact]
-        public async Task Incremental_FailedAndRecent_IsUnaffected_StillSkippedAsTerminal_NotCountedAsHeldBack()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task FailedAndRecent_IsUnaffected_StillSkippedAsTerminal_NotCountedAsHeldBack(bool fullSync)
         {
             string id = NewId();
             var mock = ClientReturning(Row(id, "Order Cancelled", null, Ago(10)));
 
-            var (records, log) = await SyncAsync(mock.Object, null, fullSync: false, marker: id);
+            var (records, log) = await SyncAsync(mock.Object, null, fullSync, marker: id);
 
             records.Should().BeEmpty("a failed/cancelled order is skipped exactly as before");
-            log.Should().NotContain(m => m.Contains("RecentPendingDeferred=1"));
+            log.Should().NotContain(m => m.Contains("RecentOrdersDeferred=1"));
         }
 
         [Fact]
-        public async Task FullSync_PendingAndRecent_IsEmitted()
+        public async Task FullSync_PendingAndRecent_IsHeldBack()
         {
             string id = NewId();
             var mock = ClientReturning(Row(id, "Order Accepted", "Approved by System", Ago(5)));
 
             var (records, log) = await SyncAsync(mock.Object, null, fullSync: true, marker: id);
 
-            records.Should().ContainSingle("a full sync is the backstop and never holds orders back");
+            records.Should().BeEmpty("a full sync can also race an in-flight enrollment");
+            log.Should().Contain(m => m.StartsWith("Information|") && m.Contains($"CARequestID={id}")
+                                      && m.Contains("holding back"));
+            log.Should().Contain(m => m.Contains("V2 synchronization complete") && m.Contains("RecentOrdersDeferred=1"));
+        }
+
+        [Fact]
+        public async Task FullSync_PendingAndOlderThanWindow_IsEmitted()
+        {
+            string id = NewId();
+            var mock = ClientReturning(Row(id, "Order Accepted", "Approved by System", Ago(DefaultGrace + Margin + 30)));
+
+            var (records, _) = await SyncAsync(mock.Object, null, fullSync: true, marker: id);
+
+            records.Should().ContainSingle();
             records[0].Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
-            log.Should().NotContain(m => m.Contains($"CARequestID={id}") && m.Contains("holding back"));
+        }
+
+        [Fact]
+        public async Task FullSync_MixedPage_HoldsBackOnlyTheRecentPendingAndIssued()
+        {
+            string recentPending = NewId(), recentIssued = NewId(), oldPending = NewId(), oldIssued = NewId(), revoked = NewId();
+            int old = DefaultGrace + Margin + 60;
+            var mock = ClientReturning(
+                Row(recentPending, "Order Accepted", "Approved by System", Ago(8)),
+                Row(recentIssued, "Order Fulfilled", "Certificate Downloaded", Ago(9)),
+                Row(oldPending, "Order Accepted", "Approved by System", Ago(old)),
+                Row(oldIssued, "Order Fulfilled", "Certificate Downloaded", Ago(old)),
+                Row(revoked, "Revoked", "Certificate Revoked", Ago(8)));
+            SetupDownload(mock, recentIssued);
+            SetupDownload(mock, oldIssued);
+
+            var (records, _) = await SyncAsync(mock.Object, null, fullSync: true, marker: recentPending);
+
+            records.Select(r => r.CARequestID).Should().BeEquivalentTo(new[] { oldPending, oldIssued, revoked });
+            mock.Verify(c => c.ResolveAndDownloadCertificateV2Async(recentIssued, It.IsAny<CancellationToken>()), Times.Never);
         }
 
         [Theory]
@@ -271,15 +354,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             records.Should().BeEmpty();
         }
 
-        [Fact]
-        public async Task Incremental_GraceZero_DisablesTheHoldBack()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task GraceZero_DisablesTheHoldBack_PendingAndIssued(bool fullSync)
         {
-            string id = NewId();
-            var mock = ClientReturning(Row(id, "Order Accepted", "Approved by System", Ago(5)));
+            string pending = NewId(), issued = NewId();
+            var mock = ClientReturning(
+                Row(pending, "Order Accepted", "Approved by System", Ago(5)),
+                Row(issued, "Order Fulfilled", "Certificate Downloaded", Ago(5)));
+            SetupDownload(mock, issued);
 
-            var (records, _) = await SyncAsync(mock.Object, graceSeconds: 0, fullSync: false, marker: id);
+            var (records, _) = await SyncAsync(mock.Object, graceSeconds: 0, fullSync: fullSync, marker: pending);
 
-            records.Should().ContainSingle("V2SyncRecentPendingGraceSeconds=0 restores the old behaviour");
+            records.Select(r => r.CARequestID).Should().BeEquivalentTo(new[] { pending, issued },
+                "V2SyncRecentOrderGraceSeconds=0 restores the old behaviour");
         }
 
         [Fact]
@@ -310,43 +399,61 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(3600, false)]
         [InlineData(-3, true)]     // CA clock slightly ahead, within the margin
         [InlineData(-60, false)]   // CA clock far ahead: untrustworthy, fail open
-        public void ShouldDeferRecentPendingV2_Pending_AgeBoundaries(double ageSeconds, bool expectDefer)
+        public void ShouldDeferRecentOrderV2_Pending_AgeBoundaries(double ageSeconds, bool expectDefer)
         {
             var now = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
 
-            bool deferred = CERTInextCAPlugin.ShouldDeferRecentPendingV2(
+            bool deferred = CERTInextCAPlugin.ShouldDeferRecentOrderV2(
                 (int)EndEntityStatus.EXTERNALVALIDATION, now.AddSeconds(-ageSeconds), now, DefaultGrace, out double age);
 
             deferred.Should().Be(expectDefer);
             age.Should().BeApproximately(ageSeconds, 0.001);
         }
 
-        [Fact]
-        public void ShouldDeferRecentPendingV2_GraceZero_NeverDeferred()
+        [Theory]
+        [InlineData(0, true)]      // order created this instant
+        [InlineData(119, true)]
+        [InlineData(124, true)]    // inside grace + margin
+        [InlineData(126, false)]   // just past grace + margin
+        [InlineData(3600, false)]
+        [InlineData(-3, true)]     // CA clock slightly ahead, within the margin
+        [InlineData(-60, false)]   // CA clock far ahead: untrustworthy, fail open
+        public void ShouldDeferRecentOrderV2_Issued_AgeBoundaries(double ageSeconds, bool expectDefer)
         {
             var now = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
 
-            CERTInextCAPlugin.ShouldDeferRecentPendingV2(
+            bool deferred = CERTInextCAPlugin.ShouldDeferRecentOrderV2(
+                (int)EndEntityStatus.GENERATED, now.AddSeconds(-ageSeconds), now, DefaultGrace, out double age);
+
+            deferred.Should().Be(expectDefer);
+            age.Should().BeApproximately(ageSeconds, 0.001);
+        }
+
+        [Fact]
+        public void ShouldDeferRecentOrderV2_GraceZero_NeverDeferred()
+        {
+            var now = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
+
+            CERTInextCAPlugin.ShouldDeferRecentOrderV2(
                     (int)EndEntityStatus.EXTERNALVALIDATION, now.AddSeconds(-1), now, 0, out _)
                 .Should().BeFalse();
         }
 
         [Theory]
-        [InlineData((int)EndEntityStatus.GENERATED)]
         [InlineData((int)EndEntityStatus.REVOKED)]
         [InlineData((int)EndEntityStatus.FAILED)]
-        public void ShouldDeferRecentPendingV2_NonPending_NeverDeferred(int disposition)
+        public void ShouldDeferRecentOrderV2_RevokedAndFailed_NeverDeferred(int disposition)
         {
             var now = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
 
-            CERTInextCAPlugin.ShouldDeferRecentPendingV2(disposition, now.AddSeconds(-1), now, DefaultGrace, out _)
+            CERTInextCAPlugin.ShouldDeferRecentOrderV2(disposition, now.AddSeconds(-1), now, DefaultGrace, out _)
                 .Should().BeFalse();
         }
 
         [Fact]
-        public void ShouldDeferRecentPendingV2_NoOrderDate_FailsOpen()
+        public void ShouldDeferRecentOrderV2_NoOrderDate_FailsOpen()
         {
-            CERTInextCAPlugin.ShouldDeferRecentPendingV2(
+            CERTInextCAPlugin.ShouldDeferRecentOrderV2(
                     (int)EndEntityStatus.EXTERNALVALIDATION, null, DateTime.UtcNow, DefaultGrace, out _)
                 .Should().BeFalse();
         }
@@ -357,22 +464,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(45, 45)]
         [InlineData(0, 0)]
         [InlineData(-1, 120)]
-        public void GetV2RecentPendingGraceSeconds_ZeroDisables_NegativeFallsBackToDefault(int? configured, int expected)
+        public void GetV2RecentOrderGraceSeconds_ZeroDisables_NegativeFallsBackToDefault(int? configured, int expected)
         {
             var config = new CERTInextConfig();
-            if (configured.HasValue) config.V2SyncRecentPendingGraceSeconds = configured.Value;
+            if (configured.HasValue) config.V2SyncRecentOrderGraceSeconds = configured.Value;
 
-            CERTInextCAPlugin.GetV2RecentPendingGraceSeconds(config).Should().Be(expected);
+            CERTInextCAPlugin.GetV2RecentOrderGraceSeconds(config).Should().Be(expected);
         }
 
         [Fact]
-        public void Annotations_V2SyncRecentPendingGraceSeconds_PresentWithDefault()
+        public void Annotations_V2SyncRecentOrderGraceSeconds_PresentWithDefault()
         {
             var annotations = CERTInextCAPluginConfig.GetCAConnectorAnnotations();
 
-            annotations.Should().ContainKey(Constants.Config.V2SyncRecentPendingGraceSeconds);
-            annotations[Constants.Config.V2SyncRecentPendingGraceSeconds].DefaultValue.Should().Be(DefaultGrace);
-            annotations[Constants.Config.V2SyncRecentPendingGraceSeconds].Type.Should().Be("Number");
+            annotations.Should().ContainKey(Constants.Config.V2SyncRecentOrderGraceSeconds);
+            annotations[Constants.Config.V2SyncRecentOrderGraceSeconds].DefaultValue.Should().Be(DefaultGrace);
+            annotations[Constants.Config.V2SyncRecentOrderGraceSeconds].Type.Should().Be("Number");
         }
     }
 }
