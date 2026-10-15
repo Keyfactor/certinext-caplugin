@@ -88,6 +88,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // V2 mode only: incremental-sync lookback window for /reports/orders.
             public const string V2SyncLookbackHours = "V2SyncLookbackHours";
+            // V2 mode only: incremental sync does not emit pending orders younger than this (issue 0090).
+            public const string V2SyncRecentPendingGraceSeconds = "V2SyncRecentPendingGraceSeconds";
             public const string V2InlineCsr = "V2InlineCsr"; // opt-in: SSL/TLS sends the CSR inline on create (V2 only)
 
             // Environment variable that overrides DcvTimeoutMinutes when set.
@@ -562,6 +564,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // exactly lastSync, so an order created before lastSync but issued after it
             // (e.g. a slow-DCV order) still surfaces. See CERTInextConfig.V2SyncLookbackHours.
             public const int DefaultSyncLookbackHours = 72;
+
+            // Enroll/sync race mitigation (issue 0090). An incremental sync that emits a pending,
+            // body-less row for an order whose enrollment has not saved yet makes the gateway
+            // insert a row with that CARequestID, and the enrollment's own save then fails on the
+            // unique (CA, CARequestID) index. So an incremental pass withholds pending orders
+            // younger than this; the next pass imports them (the lookback re-lists them).
+            // 120 s is the longest an enrollment normally runs before it gives up.
+            public const int DefaultSyncRecentPendingGraceSeconds = 120;
+
+            // Added to the grace window when comparing against orderDate. The report's orderDate is
+            // whole seconds, UTC, truncated (verified live 2026-10-15: 1318 rows all
+            // yyyy-MM-ddTHH:mm:ssZ, stamps 0.8-1.4 s before the create response). Truncation makes
+            // an order look up to 1 s older than it is, and CA/gateway clock skew is not
+            // bounded by anything we control, so leave a few seconds of slack.
+            public const int SyncRecentPendingClockMarginSeconds = 5;
         }
 
         // V2 config key constants (added here alongside existing Config constants)
