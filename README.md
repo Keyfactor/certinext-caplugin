@@ -165,6 +165,8 @@ The V2 API (`UseV2Api` = `true`) is served from the bare host with no path segme
         * **DcvSyncMaxPerPass** - OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; remaining pending orders are reported as-is and picked up on a later pass (the per-minute incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: 50.
         * **UseV2Api** - OPTIONAL: When true, the plugin routes Ping / Enroll / GetSingleRecord / Revoke / Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 /reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode), OAuthClientId, OAuthClientSecret, and SignerPlace. V1 credentials (ApiKey/AccountNumber/AuthMode) are not required when this is true. Default: false (V1 API).
         * **V2SyncLookbackHours** - OPTIONAL (V2 mode only): during an incremental Synchronize, the plugin queries V2 /reports/orders with a 'from' date of (lastSync minus this many hours) rather than exactly lastSync, since the API's from/to filter may bracket either the order-placement date or the issuance date. A lookback window ensures an order created before lastSync but issued afterward (e.g. a slow DCV order) still surfaces on the next incremental pass. Ignored when UseV2Api is false. Default: 72.
+        * **V2SyncRecentOrderGraceSeconds** - OPTIONAL (V2 mode only): during a Synchronize (full or incremental), a pending or issued order created less than this many seconds ago (plus a small clock margin) is not emitted to the gateway (an issued one is not downloaded); the next incremental pass imports it. This stops the sync from inserting a gateway row for an order whose enrollment is still in flight, which would make the enrollment's own save fail with a duplicate key. Revoked and failed orders are never held back. 0 disables the hold. Ignored when UseV2Api is false. Default: 120.
+        * **V2InlineCsr** - OPTIONAL (V2 mode only): when true, SSL/TLS enrollment sends the CSR inline in the order create call (a single POST /ssl-certificates) instead of the default two-call flow (create the order, then PUT .../csr). This matches a direct single-call API integration and is about 4-5 seconds faster, but the create call then often holds about 20 seconds until the certificate is issued, and a create that times out or returns a 5xx can leave an order that still issues; it is not cancelled and the next synchronization imports it, so do not resubmit. Private PKI orders ignore this setting and always use the two-call flow (the CA rejects an inline CSR on Private PKI create). Ignored when UseV2Api is false. Default: false (two-call).
 
 2. A Keyfactor Command certificate template maps an enrollment request to a specific CERTInext product. Create one template per CERTInext product that you want to make available to requesters.
 
@@ -403,6 +405,8 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 |---|---|---|---|
 | `UseV2Api` | Optional | Enable the V2 API code path for connection tests, enrollment, revocation, status checks, and synchronization. Default: `false`. | `false` |
 | `V2SyncLookbackHours` | Optional | V2 mode only. During an incremental Synchronize, the plugin queries `from` = (last sync time minus this many hours) rather than the exact last-sync time, since the API's `from`/`to` filter may bracket either the order-placement date or the issuance date — a lookback window keeps an order created before last sync but issued afterward (e.g. a slow DCV order) from being missed. Default: `72`. | `72` |
+| `V2SyncRecentOrderGraceSeconds` | Optional | V2 mode only. During a Synchronize (full or incremental), a pending or issued order created less than this many seconds ago (plus a 5-second clock margin) is not emitted to the gateway, and an issued one is not downloaded; the next incremental pass imports it. Without this, a sync that runs while an enrollment is still in flight can list the new order before the enrollment has saved it, and the gateway then rejects the enrollment's own save with a duplicate-key error even though the certificate issued. Revoked and failed orders are never held back, and an order with a missing or unreadable `orderDate` is emitted as before. `0` turns the hold off. Default: `120`. | `120` |
+| `V2InlineCsr` | Optional | V2 mode only. Default `false`: SSL/TLS enrollment creates the order without a CSR and then submits it (`PUT .../csr`). When `true`, SSL/TLS enrollment sends the CSR inline in the create call (a single `POST /ssl-certificates`, no separate Submit CSR). Turn it on to match a direct single-call API integration; it is about 4-5 seconds faster. The trade-offs: the create call then often holds about 20 seconds until the certificate is issued (the order ID is known only when it returns), and a create that times out or returns a 5xx can leave an order that still issues. The plugin never retries the create and doesn't cancel the order, and the next [synchronization](#synchronization) imports it, so don't resubmit. Private PKI orders ignore this setting and always use the two-call flow, because CERTInext rejects an inline CSR on the Private PKI create. Default: `false`. | `true` |
 
 #### V2 OAuth2 Setup
 
@@ -450,10 +454,11 @@ With `ProductFamily=private-pki`, the plugin places the order against CERTInext'
 - **SANs, including IP addresses.** Additional SANs are sent in the order's `additionalHosts` field, which accepts DNS names and IPv4/IPv6 addresses. SANs come from the gateway's SAN list; the plugin falls back to the SANs in the CSR only when the gateway supplies none. Email and URI SANs can't be expressed in `additionalHosts`, so they're left off the order and a warning is written to the gateway log. `SubmitNonDnsSans` isn't consulted for Private PKI orders.
 - **No DCV, organization, or subscriber agreement.** Private PKI orders have none of these steps, so DCV is never attempted for them, and `OrganizationNumber`, `AutoSecureWww`, `SignerName`, `SignerPlace`, and `SignerIp` aren't used.
 - **Shared fields.** The requestor, technical contact, subscription, email-notification, and group settings are sent exactly as they are for SSL/TLS orders.
+- **Two-call CSR delivery.** The plugin creates the order without a CSR and then submits it, always. CERTInext rejects an inline CSR on the Private PKI create (HTTP 422), so the SSL/TLS-only `V2InlineCsr` setting doesn't apply; when it's on, the plugin logs a one-time notice that Private PKI ignores it.
 
 ### V2 Order Lifecycle
 
-A V2 enrollment places the order, submits the CSR, and then checks the order status; see [V2 enrollment flow](#v2-enrollment-flow) for the full sequence. V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
+A V2 enrollment places the order, submits the CSR (or, with `V2InlineCsr` on for SSL/TLS, sends it inline in the create call), and then checks the order status; see [V2 enrollment flow](#v2-enrollment-flow) for the full sequence. V2 orders are identified by the `orderId` the V2 order placement endpoint returns, which the plugin stores unchanged as the `CARequestID` and uses for all later tracking, certificate download, and revocation calls. The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (e.g. `6625262451`). Treat the ID as an opaque string.
 
 V2 status strings map to Keyfactor enrollment statuses as follows:
 
@@ -678,6 +683,13 @@ pointing a production template at the V2 connector. At minimum, confirm:
   the order once and returns a failed result carrying the order ID. After a timeout, the plugin
   checks the order before deciding: it cancels the order only if the CSR never arrived.
 
+- **CSR delivery.** By default V2 enrollment creates the order and then submits the CSR, as above. The
+  optional `V2InlineCsr` connector setting (SSL/TLS only, default `false`) sends the CSR inline in the
+  create call instead: about 4-5 seconds faster and the same call shape as a direct single-call API
+  integration, but the create call can hold about 20 seconds until issuance, and a create that times
+  out or returns a 5xx can leave an order that issues and is imported by the next sync rather than
+  cancelled. Private PKI always uses the two-call flow.
+
 ### Renewals and Reissuance
 
 CERTInext V2 has no *renew* endpoint, but it does document a `/reissue` endpoint (`mode:
@@ -785,7 +797,7 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 │ V2  POST /oauth/token · GET /auth/me                    │
 │     GET  /catalog/products · GET /reports/orders        │
 │     POST /{family}                 create order         │
-│     PUT  /{family}/{id}/csr                             │
+│     PUT  /{family}/{id}/csr   (two-call, the default)   │
 │     GET  /{family}/{id}            track order          │
 │     GET  /{family}/{id}/certificate                     │
 │     GET  /ssl-certificates/{id}/dcv                     │
@@ -1088,16 +1100,22 @@ With `UseV2Api = true`, every enrollment type (New, Reissue, Renew, RenewOrReiss
 ```mermaid
 flowchart TD
     A([Enroll requested]) --> B["Log the enrollment intent"]
-    B --> C{"Request passes local checks?<br/>family is ssl or private-pki, SignerPlace set for SSL,<br/>Private PKI variant and ProductCode set,<br/>OrganizationNumber set for OV or EV,<br/>valid subscription and notification settings"}
+    B --> C{"Request passes local checks?<br/>family is ssl or private-pki, CSR present, SignerPlace set for SSL,<br/>Private PKI variant and ProductCode set,<br/>OrganizationNumber set for OV or EV,<br/>valid subscription and notification settings"}
     C -- No --> X1(["Enrollment rejected, no order placed"])
     C -- Yes --> D{Private PKI?}
-    D -- Yes --> G
+    D -- Yes --> G0
     D -- No --> E["Fetch the product catalog<br/>and resolve the product code and product type"]
     E --> F{"Code resolved?<br/>Explicit ProductCode, or exactly one catalog match,<br/>or DefaultProductCode among several"}
     F -- No --> X2(["Failed result listing the candidates, no order placed"])
     F -- Yes --> F2{"Single-domain product with extra DNS SANs<br/>in the CSR or SAN list?"}
     F2 -- Yes --> X3(["Failed result, no order placed"])
-    F2 -- No --> G["Create the order<br/>(X-Product-Code and Idempotency-Key headers)"]
+    F2 -- No --> G0{"SSL/TLS with V2InlineCsr on?<br/>(Private PKI never)"}
+    G0 -- "No: two-call, the default" --> G["Create the order without a CSR<br/>(X-Product-Code and Idempotency-Key headers)"]
+    G0 -- "Yes: single call" --> GI["Create the order with the CSR inline, unchanged<br/>(X-Product-Code and Idempotency-Key headers)"]
+    GI --> GI2{"Create call answered?"}
+    GI2 -- "Rejected by the CA (HTTP 4xx)" --> X5a(["Enrollment fails, no order was created"])
+    GI2 -- "5xx, timeout, or no response" --> X5b(["Enrollment fails with a do-not-resubmit message:<br/>the order may exist and may issue, the next sync imports it"])
+    GI2 -- "Yes, order ID returned" --> M["Track the order"]
     G --> H["Submit the CSR unchanged<br/>PUT /{family}/{id}/csr"]
     H --> I{CSR accepted?}
     I -- "Rejected by the CA (HTTP 4xx)" --> J["Cancel the orphaned order once"]
@@ -1107,7 +1125,7 @@ flowchart TD
     L -- Yes --> J
     L -- "Tracking failed" --> P1(["Pending result with the order ID,<br/>next sync resolves it"])
     L -- "Moved past pending-csr" --> M
-    I -- Yes --> M["Track the order"]
+    I -- Yes --> M
     M --> M2{Tracking succeeded?}
     M2 -- No --> P1
     M2 -- Yes --> N{"SSL order pending, DCV enabled,<br/>and a DNS provider available?"}
@@ -1130,6 +1148,7 @@ Notes on the V2 flow:
 
 - **Product code.** For SSL/TLS, the plugin fetches the live catalog once per enrollment. With an explicit `ProductCode`, the catalog is used only to recognize multi-domain and wildcard products; if the catalog can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted. Without an explicit code, the plugin selects the catalog entry whose product type matches the selected product and fails if none or several match (unless `DefaultProductCode` names one). Private PKI never fetches the catalog; its `ProductCode` is required and was validated when the template was saved.
 - **Multi-domain products.** DNS SANs other than the primary domain are sent as `additionalDomains`; non-DNS SANs are left off the order with a warning. Private PKI sends DNS and IP SANs as `additionalHosts`.
+- **CSR delivery (`V2InlineCsr`).** By default the plugin creates the order without a CSR and then submits it with `PUT .../csr`; if that submit is rejected the plugin cancels the orphaned order once. With `V2InlineCsr = true` (SSL/TLS only), the CSR is sent inline in the create body, exactly as Command supplied it, and there is no Submit CSR step: a `PUT .../csr` after an inline CSR is rejected with HTTP 422. The create call then often holds about 20 seconds until the certificate is issued, and the order ID is only known once it returns. If that call fails with a 5xx or times out, the order may still exist and issue; the failure message says so, the plugin doesn't cancel it, and the next sync imports it. Private PKI ignores the setting and always uses two calls, because CERTInext rejects an inline CSR on the Private PKI create (HTTP 422). Either way the create call is pinned with `X-Product-Code` (an unpinned create auto-resolves to a PFX product that never issues) and a blank CSR is rejected before any CA call.
 - **Idempotency.** V2 order-create and revoke calls carry a fresh `Idempotency-Key` UUID on every call. CERTInext's V2 spec describes the header as parsed but not yet enforced, so the plugin does not rely on it to prevent duplicates: it never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
 - **Revoked before delivery.** An order that CERTInext reports as revoked before any certificate was delivered is returned as failed, never as a revoked record with no certificate.
 - **Full certificate chain.** The V2 `/certificate` endpoint returns the leaf in `certificatePem` and intermediates in `chainPem[]`. The plugin concatenates them, leaf first, into a single PEM before returning it to Command.
@@ -1261,8 +1280,8 @@ The table below maps each Keyfactor Command operation to the CERTInext API endpo
 |---|---|
 | Obtain Bearer token | `POST /oauth/token` |
 | Test connection | `GET /api/certinext/v2/auth/me` |
-| Create order | `POST /api/certinext/v2/{family}` |
-| Submit CSR | `PUT /api/certinext/v2/{family}/{orderId}/csr` |
+| Create order | `POST /api/certinext/v2/{family}` (carries the CSR inline only with `V2InlineCsr`, SSL/TLS) |
+| Submit CSR | `PUT /api/certinext/v2/{family}/{orderId}/csr` (two-call flow: the default, and always for Private PKI) |
 | Check order status | `GET /api/certinext/v2/{family}/{orderId}` |
 | Get DCV challenge (SSL/TLS only) | `GET /api/certinext/v2/ssl-certificates/{orderId}/dcv` (with `?domain=` per domain) |
 | Verify DCV (SSL/TLS only) | `POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify` |
