@@ -105,7 +105,7 @@ def main():
 
     # -----------------------------------------------------------------------
     # Variant 1: Minimal — mirrors Postman body exactly (no agreementDetails,
-    # no accountingModel, no delegationInformation, no subscriptionDetails)
+    # no accountingModel, no groupNumber, no subscriptionDetails)
     # -----------------------------------------------------------------------
     print(f"\n=== Variant 1: Minimal (Postman-style)  product={args.product}  saveAndHold={args.save_and_hold} ===")
     meta = make_meta(account_num, access_key)
@@ -181,15 +181,17 @@ def main():
     print(json.dumps(resp2, indent=2))
 
     # -----------------------------------------------------------------------
-    # Variant 3: With delegationInformation (groupNumber)
+    # Variant 3: With orderDetails.groupNumber
+    # (CERTInext's GenerateOrderSSL placement; delegationInformation.groupNumber
+    # is not read. Assumed, not yet confirmed live, for GenerateOrderPrivatePKI.)
     # -----------------------------------------------------------------------
-    print(f"\n=== Variant 3: With delegationInformation  product={args.product}  saveAndHold={args.save_and_hold} ===")
+    print(f"\n=== Variant 3: With groupNumber  product={args.product}  saveAndHold={args.save_and_hold} ===")
     meta = make_meta(account_num, access_key)
     payload_with_group = {
         "meta": meta,
         "orderDetails": {
             "productCode": args.product,
-            "delegationInformation": {"groupNumber": group_num},
+            "groupNumber": group_num,
             "requestorInformation": {
                 "requestorName": req_name,
                 "requestorIsdCode": "1",
