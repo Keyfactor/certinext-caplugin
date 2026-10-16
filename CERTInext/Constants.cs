@@ -114,7 +114,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string ProductCode = "ProductCode";   // CERTInext numeric product code
             public const string ProfileId = "ProfileId";       // alias for ProductCode (kept for back-compat)
             public const string ValidityYears = "ValidityYears"; // 1, 2, or 3
-            public const string ValidityDays = "ValidityDays";   // legacy; mapped to years if set
+            public const string ValidityDays = "ValidityDays";   // converted to whole years (rounded up); larger of years/days wins
             public const string AutoApprove = "AutoApprove";
             public const string RequesterName = "RequesterName";
             public const string RequesterEmail = "RequesterEmail";

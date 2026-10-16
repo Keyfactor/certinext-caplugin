@@ -18,7 +18,7 @@
 - fix(enroll): `www.` is no longer added to orders by default because `AutoSecureWww` (default `0`) is now honored; set it to `1` to keep the old behavior.
 - fix(enroll): Orders now route to the configured `GroupNumber`, which previously was not applied to orders.
 - fix(enroll): Renewals now follow the connector's `SubscriptionAutoRenew`, `EmailNotifications`, and validity settings instead of fixed 1-year validity with auto-renew and notifications on.
-- fix(enroll): The `ValidityYears` template parameter now takes effect and wins over `ValidityDays`, so templates with `ValidityYears` 2 or 3 order multi-year subscriptions, and a template value overrides `SubscriptionValidityYears`.
+- fix(enroll): The `ValidityYears` template parameter now takes effect, and the order term is the larger of `ValidityYears` and `ValidityDays` (rounded up to years) so templates saved with only `ValidityDays` keep their term.
 - fix(enroll): The technical contact is omitted, with a Warning, when no contact name or email resolves, since CERTInext requires both once the block is sent.
 - fix(logging): The V1 API error log line now reads `CERTInext API non-success. Operation=...` instead of `CERTInext API error during ...`; update any log alerts keyed on the old text.
 - fix(dcv): A DV order that cannot issue (IP or email SAN, no DNS provider) now returns pending immediately; sync finishes the order.
