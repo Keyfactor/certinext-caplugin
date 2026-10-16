@@ -38,6 +38,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_ALGO_MATRIX",
                 "CERTINEXT_ALGO_MATRIX_DCV",
                 "CERTINEXT_SAN_PROBE",
+                "CERTINEXT_PROBE_VALIDITY",
             };
 
         // ---------------------------------------------------------------------------
