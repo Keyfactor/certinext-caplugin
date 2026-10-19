@@ -54,6 +54,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_V2_LIFECYCLE_FRESH_DCV",
                 // Selects the V2InlineCsr connector setting for the V2 enrollment tests (see V2EnvHelper).
                 "CERTINEXT_V2_INLINE_CSR",
+                // V2 certificate-lifetime probe (V2ValidityProbeTests) — places real sandbox orders.
+                "CERTINEXT_PROBE_VALIDITY",
             };
 
         // ---------------------------------------------------------------------------
