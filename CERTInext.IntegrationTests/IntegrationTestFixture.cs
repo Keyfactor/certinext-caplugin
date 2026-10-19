@@ -39,6 +39,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_ALGO_MATRIX_DCV",
                 "CERTINEXT_SAN_PROBE",
                 "CERTINEXT_PROBE_VALIDITY",
+                "CERTINEXT_SYNC_HOLDBACK",
+                "CERTINEXT_SYNC_HOLDBACK_MAX_ROWS",
             };
 
         // ---------------------------------------------------------------------------

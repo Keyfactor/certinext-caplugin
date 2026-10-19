@@ -59,6 +59,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         [InlineData("CERTINEXT_ALGO_MATRIX_DCV")]
         [InlineData("CERTINEXT_SAN_PROBE")]
         [InlineData("CERTINEXT_PROBE_VALIDITY")]
+        [InlineData("CERTINEXT_SYNC_HOLDBACK")]
+        [InlineData("CERTINEXT_SYNC_HOLDBACK_MAX_ROWS")]
         [InlineData("certinext_complete_pending")] // env-file keys are matched case-insensitively
         public void PromoteToProcessEnvironment_DoesNotPromoteOptInFlags(string flag)
         {
