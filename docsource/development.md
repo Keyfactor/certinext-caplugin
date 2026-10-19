@@ -114,26 +114,12 @@ See `CERTInext.IntegrationTests/INTEGRATION_TESTING.md` for a full description o
 
 ## Product Integration Test Coverage
 
-The table below records live draft-order results against the Production — India instance. Orders were placed with `saveAndHold:"1"` so no billing, DCV, or CA issuance was triggered. Tests are in `CERTInext.IntegrationTests/DraftOrderTests.cs`.
+`DraftOrderTests.cs` (and `TrackOrderTests.cs`) previously recorded live draft-order results here, but both were removed: they asserted specific `requestNumber` values hardcoded from one developer's account, which don't exist on any other account and so failed everywhere else. Their intent — verifying draft-order and track-order semantics — is now covered by `LifecycleTests`, which creates its own order and asserts on it without relying on account-specific identifiers.
 
-| Product | Code | Test Status | requestNumber | Notes |
-|---|---|---|---|---|
-| DV SSL | `838` | ✓ Tested | 4572531551 | Base domain; no extra fields required beyond base set |
-| DV SSL Wildcard | `839` | ✓ Tested | 9149755266 | CSR CN must be `*.domain`; `domainName` must also use wildcard format |
-| DV SSL UCC | `840` | ✓ Tested | 1611445122 | `certificateInformation.additionalDomains` array required |
-| DV SSL Wildcard UCC | `841` | ✗ Blocked | — | EMS-918: "Additional Information cannot be empty" — required fields for this product not yet identified |
-| OV SSL | `842` | ✓ Tested | 5546366498 | Requires `locality` and `postalCode` in `certificateInformation` |
-| OV SSL Wildcard | `843` | ✗ Not tested | — | Draft order not yet placed |
-| OV SSL UCC | `844` | ✗ Not tested | — | Draft order not yet placed |
-| OV SSL Wildcard UCC | `845` | ✗ Blocked | — | EMS-918: "Additional Information cannot be empty" — required fields for this product not yet identified |
-| EV SSL | `846` | ✓ Tested | 3932332114 | Requires `contractSignerInfo`, `certificateApproverInfo`, non-empty `streetAddress2`, `companyRegistrationNumber` |
-| EV SSL UCC | `847` | ✗ Blocked | — | EMS-918: "Additional Information cannot be empty" — required fields for this product not yet identified |
-| DV SSL 1 Month | N/A | ✗ Not supported | — | Visible in portal but not returned by `GetProductDetails` API; no product code available. Not supported by plugin. |
-| DV SSL Wildcard 1 Month | N/A | ✗ Not supported | — | Visible in portal but not returned by `GetProductDetails` API; no product code available. Not supported by plugin. |
-| emSign Intranet SSL | `100` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |
-| IGTF Host | `104` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |
-| S/MIME | `894` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |
-| Natural Person Doc Signer | `825` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |
-| Legal Entity Doc Signer | `819` | ✗ Not tested | — | EMS-1162: not provisioned on this account type |
+Product codes are provisioned per account by eMudhra and are not portable across accounts (see the [Product Codes](configuration.md#product-codes) section in configuration.md). To discover which codes and required fields apply to *your* account:
 
-Products returning EMS-1162 require special provisioning by eMudhra that is not included on a standard SSL/TLS account. The plugin code supports submitting orders for any product code; whether the order is accepted depends on what is provisioned for your account.
+```bash
+make probe-products
+```
+
+This places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which return a `requestNumber` (valid/provisioned) versus an error (invalid or not provisioned). See `CERTInext.IntegrationTests/TESTING.md` for the current, account-specific findings and expected test results.
