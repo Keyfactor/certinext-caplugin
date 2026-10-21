@@ -91,3 +91,31 @@ Older gateway image whose bundled `Keyfactor.AnyGateway.IAnyCAPlugin` assembly i
 **Mitigation**
 
 Deploy the default (no-DCV) build for AnyCA Gateway 25.5.x; do not deploy the DCV build on a 25.5.x host. The **default build (no-DCV, IAnyCAPlugin 3.2.0)** is the one that loads *and* persists records on AnyCA Gateway 25.5.x, and it is what the released artifact ships. The DCV-capable build (IAnyCAPlugin 3.3.0-PRERELEASE, `dotnet build -p:DcvSupport=true`) is for AnyCA Gateway 26.x; loading it on a 25.5.x host triggers the type-load error above and, even when it loads, its records do not persist on a 3.2 host. See the `DcvSupport` build variants in the developer guide.
+
+### Enrollment fails with `invalid custom extension or certificate policy OIDs`
+
+**Symptom**
+
+Command reports this error for an enrollment:
+
+```
+An error occurred while performing the operation. This may be due to invalid custom extension or certificate policy OIDs. Please see CA logs for more information.
+```
+
+The certificate request may be valid, and CERTInext may already have issued the certificate.
+
+**Why it happens**
+
+This is a known timing issue. If the scheduled gateway sync runs while an enrollment is still finishing, the sync can create the record for that request first. The enrollment's own save then fails, because a record for the same request already exists. That record may or may not include the certificate yet. The error message does not describe this, so it looks like a problem with the request. The problem is more likely when the sync runs more often.
+
+**What to do before you retry**
+
+1. Check whether CERTInext has already issued a certificate for the request.
+2. In Command, search for the certificate by subject name. It may already be there, or it may appear after a later sync.
+3. Check the gateway log for a "duplicate key" error. If you find one, this issue is the likely cause.
+
+Retrying can place a second order with CERTInext, which may be billed again. Check first.
+
+**Versions**
+
+Seen with the CERTInext plugin on AnyCA REST Gateway 25.5. Other versions have not been tested.

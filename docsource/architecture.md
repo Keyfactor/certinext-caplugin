@@ -66,9 +66,9 @@ sequenceDiagram
     participant API as CERTInext API
 
     GW->>Plugin: Load CA connector configuration
-    Plugin->>Plugin: Validate required fields\n(API URL, account number, credentials)
-    Plugin->>Plugin: Initialize API client\nwith configured auth mode
-    Plugin->>Plugin: Record which credential fields are populated\n(values are never logged)
+    Plugin->>Plugin: Validate required fields<br/>(API URL, account number, credentials)
+    Plugin->>Plugin: Initialize API client<br/>with configured auth mode
+    Plugin->>Plugin: Record which credential fields are populated<br/>(values are never logged)
     GW->>Plugin: Test connection
     Plugin->>API: Verify credentials
     API-->>Plugin: Credentials accepted
@@ -87,11 +87,11 @@ sequenceDiagram
     participant Plugin as CERTInext Plugin
     participant API as CERTInext API
 
-    CMD->>Plugin: Start synchronization\n(full refresh or incremental since last sync)
-    Plugin->>Plugin: Determine date filter\n(none for full sync, last sync date for incremental)
+    CMD->>Plugin: Start synchronization<br/>(full refresh or incremental since last sync)
+    Plugin->>Plugin: Determine date filter<br/>(none for full sync, last sync date for incremental)
 
     loop Retrieve one page at a time
-        Plugin->>API: Request next page of orders\n(filtered by date if incremental)
+        Plugin->>API: Request next page of orders<br/>(filtered by date if incremental)
         API-->>Plugin: Page of order records
 
         loop For each order on the page
@@ -129,29 +129,29 @@ sequenceDiagram
     participant Plugin as CERTInext Plugin
     participant API as CERTInext API
 
-    CMD->>Plugin: Request new certificate\n(CSR, subject, SANs, product code, requester details)
+    CMD->>Plugin: Request new certificate<br/>(CSR, subject, SANs, product code, requester details)
     Plugin->>Plugin: Validate product code is present
-    Plugin->>Plugin: Record enrollment intent in audit log\n(subject, SANs, product, requester — before any API call)
+    Plugin->>Plugin: Record enrollment intent in audit log<br/>(subject, SANs, product, requester — before any API call)
 
-    Plugin->>API: Place certificate order\n(CSR, domain, organization details,\nsubscriber agreement, requestor info)
+    Plugin->>API: Place certificate order<br/>(CSR, domain, organization details,<br/>subscriber agreement, requestor info)
     API-->>Plugin: Order accepted — order number assigned
     Plugin->>API: Check order status
     API-->>Plugin: Order status and certificate details
 
     alt DNS-01 DCV engaged (DCV build, DCV enabled, DNS provider available)
         opt Order has domains pending DNS-01 validation
-            Plugin->>Plugin: Publish DNS TXT challenge\nvia the configured DNS provider plugin
+            Plugin->>Plugin: Publish DNS TXT challenge<br/>via the configured DNS provider plugin
             Plugin->>API: Ask CERTInext to verify the record
             API-->>Plugin: Domain validated (or skipped / still pending)
         end
         opt Every pending domain validated
-            loop DCV issuance wait\n(bounded by DcvWaitForIssuanceSeconds, 60s by default)
+            loop DCV issuance wait<br/>(bounded by DcvWaitForIssuanceSeconds, 60s by default)
                 Plugin->>API: Poll for the certificate
                 API-->>Plugin: Status and certificate, if ready
             end
         end
     else DCV not engaged and order still pending
-        loop Certificate-pickup retries\n(bounded, ~55s by default — PickupRetries/PickupDelay)
+        loop Certificate-pickup retries<br/>(bounded, ~55s by default — PickupRetries/PickupDelay)
             Plugin->>API: Poll for the certificate
             API-->>Plugin: Status and certificate, if ready
         end
@@ -162,10 +162,10 @@ sequenceDiagram
     else Order rejected by CERTInext
         Plugin-->>CMD: Enrollment failed — see gateway logs
     else Certificate still not available
-        Plugin-->>CMD: Pending — Command will pick it up\nduring the next synchronization
+        Plugin-->>CMD: Pending — Command will pick it up<br/>during the next synchronization
     end
 
-    Plugin->>Plugin: Record enrollment outcome in audit log\n(order number, serial number, status)
+    Plugin->>Plugin: Record enrollment outcome in audit log<br/>(order number, serial number, status)
 ```
 
 **DCV:** on a DCV-enabled build, DNS-01 validation runs inline for DV orders that require it, bounded by `DcvTimeoutMinutes`. DCV is "engaged" whenever the build supports it, `DcvEnabled` is set, and a DNS provider is available, whether or not this particular order ends up needing a challenge. An engaged order whose domains are already validated skips TXT staging and goes straight to the DCV issuance wait. When DCV isn't enabled, isn't built into this host, or no DNS provider is available, DCV does not engage and the order follows the synchronous pickup path below like any other asynchronously-issued order.
@@ -184,15 +184,15 @@ When Command initiates a renewal, the plugin checks whether the existing certifi
 
 ```mermaid
 flowchart TD
-    A([Renewal requested]) --> B{Prior certificate\nserial number\nprovided?}
+    A([Renewal requested]) --> B{Prior certificate<br/>serial number<br/>provided?}
     B -- No --> C[Issue new certificate]
-    B -- Yes --> D[Look up prior order\nin Command database]
-    D --> E{Prior order\nfound?}
+    B -- Yes --> D[Look up prior order<br/>in Command database]
+    D --> E{Prior order<br/>found?}
     E -- No --> C
-    E -- Yes --> F[Check certificate\nexpiry date]
-    F --> G{Within renewal\nwindow?}
-    G -- Yes\nwithin window --> H[Submit new order\nlinked to prior record]
-    G -- No\noutside window --> C
+    E -- Yes --> F[Check certificate<br/>expiry date]
+    F --> G{Within renewal<br/>window?}
+    G -- Yes<br/>within window --> H[Submit new order<br/>linked to prior record]
+    G -- No<br/>outside window --> C
     H --> I([Certificate issued or pending])
     C --> I
 ```
@@ -211,8 +211,8 @@ sequenceDiagram
     participant Plugin as CERTInext Plugin
     participant API as CERTInext API
 
-    CMD->>Plugin: Revoke certificate\n(order number, serial number, reason code)
-    Plugin->>Plugin: Record revocation intent in audit log\n(order number, serial, reason — before any API call)
+    CMD->>Plugin: Revoke certificate<br/>(order number, serial number, reason code)
+    Plugin->>Plugin: Record revocation intent in audit log<br/>(order number, serial, reason — before any API call)
 
     Plugin->>API: Retrieve current certificate status
     API-->>Plugin: Current status and details
@@ -224,10 +224,10 @@ sequenceDiagram
         Plugin->>Plugin: Log error — cannot revoke
         Plugin-->>CMD: Error — certificate is not revocable
     else Certificate is issued and active
-        Plugin->>API: Submit revocation request\n(order number, reason, remarks)
+        Plugin->>API: Submit revocation request<br/>(order number, reason, remarks)
         API-->>Plugin: Revocation confirmed
 
-        Plugin->>Plugin: Record revocation outcome in audit log\n(order number, serial, subject, reason)
+        Plugin->>Plugin: Record revocation outcome in audit log<br/>(order number, serial, subject, reason)
         Plugin-->>CMD: Certificate revoked
     end
 ```
@@ -244,14 +244,14 @@ When an administrator saves or edits a CERTInext CA connector in the Keyfactor C
 
 ```mermaid
 flowchart TD
-    A([Save connector configuration]) --> B{Connector\nmarked as disabled?}
-    B -- Yes --> C([Saved without validation\nConnector will not process requests])
-    B -- No --> D{Required fields\npresent and valid?\nAPI URL · Account Number · Credentials}
+    A([Save connector configuration]) --> B{Connector<br/>marked as disabled?}
+    B -- Yes --> C([Saved without validation<br/>Connector will not process requests])
+    B -- No --> D{Required fields<br/>present and valid?<br/>API URL · Account Number · Credentials}
     D -- Missing or invalid --> E([Validation error shown to administrator])
-    D -- Valid --> F[Build temporary API client\nfrom supplied settings]
-    F --> G[Send test request\nto CERTInext]
-    G --> H{API accepted\nthe credentials?}
-    H -- No --> I([Connection test failed\nCheck credentials and API URL])
+    D -- Valid --> F[Build temporary API client<br/>from supplied settings]
+    F --> G[Send test request<br/>to CERTInext]
+    G --> H{API accepted<br/>the credentials?}
+    H -- No --> I([Connection test failed<br/>Check credentials and API URL])
     H -- Yes --> J([Connector saved and active])
 ```
 
