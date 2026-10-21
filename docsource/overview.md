@@ -46,7 +46,7 @@ Empirically the limit kicks in at roughly **16+ enrollments submitted within 10 
 - **For high-volume migration scenarios**: split the workload into batches of ~10 orders separated by a short pause, rather than firing everything at once.
 - **No client-side automatic retry on this error**: a defensive retry inside `PlaceOrderAsync` would paper over the misleading error string and burn the operator's order quota on retries. We document the gotcha instead.
 
-### Enrollment returns immediately with `Status=90 (EXTERNALVALIDATION)`
+### Enrollment returns `Status=90 (EXTERNALVALIDATION)` (pending)
 
 **Symptom**
 
@@ -54,14 +54,15 @@ Enrollment completes successfully but the cert is not yet issued — Command sho
 
 **Root cause**
 
-This is the expected return shape on two paths:
+This is the expected return shape on these paths:
 
-1. The plugin was loaded on an older gateway host (pre-IAnyCAPlugin v3.3) that does not inject `IDomainValidatorFactory`. DCV cannot run, so any product that requires DNS validation completes only after CERTInext-side validation finishes.
-2. The plugin's bounded `Enroll()` budget (`DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds`, defaults 60s each) elapsed before CERTInext finished asynchronous issuance.
+1. The synchronous pickup budget (`PickupRetries` × `PickupDelay`, ~55s by default, ceiling 180s) elapsed before CERTInext issued the certificate. OV/EV orders issue asynchronously over minutes to hours, so they usually return pending. Renewals use the same pickup. Setting `PickupRetries` to `0` always returns pending.
+2. The plugin was loaded on an older gateway host (pre-IAnyCAPlugin v3.3) that does not inject `IDomainValidatorFactory`. DCV cannot run, so any product that requires DNS validation completes only after CERTInext-side validation finishes.
+3. On the DCV build, DCV engaged for the order and its bounded waits (`DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds`, defaults 60s each) elapsed, or some domain could not be validated (for example an IP or email SAN with no DNS provider). When DCV engages, these waits replace the pickup wait; they do not stack. A renewal still pending DNS-01 validation returns pending at once.
 
 **Mitigation**
 
-The next gateway sync cycle will pick the cert up and transition it to `GENERATED`. The plugin's sync-driven DCV retry is single-shot per record, so even with hundreds of pending orders the sync completes in seconds, not minutes — see [configuration.md](configuration.md) for the `DcvWaitForChallengeSeconds`/`DcvWaitForIssuanceSeconds` knobs if you want to tune the Enroll-time budget.
+The next gateway sync cycle will pick the cert up and transition it to `GENERATED`. The plugin's sync-driven DCV retry is single-shot per record, so even with hundreds of pending orders the sync completes in seconds, not minutes — see [configuration.md](configuration.md) for the `PickupRetries`/`PickupDelay` knobs and, on the DCV build, the `DcvWaitForChallengeSeconds`/`DcvWaitForIssuanceSeconds` knobs if you want to tune the Enroll-time budget.
 
 ### `EMS-956 "Invalid Request for this API"` from `GetDcv`
 
