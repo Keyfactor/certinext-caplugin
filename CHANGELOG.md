@@ -30,6 +30,7 @@
 - chore(logging): Startup log now shows whether `OrganizationNumber`, `DefaultProductCode`, `GroupNumber`, `SubmitNonDnsSans`, and `LogSensitiveRequestData` are set, and warns when `LogSensitiveRequestData` is on.
 - chore(config): Field descriptions and configuration docs now match the code for `DefaultProductCode`, `ValidityYears`, signer fallbacks, `LogSensitiveRequestData`, and the pickup clamps.
 - chore(config): Corrected the `AutoApprove` template setting's description, which previously implied the plugin attempts automatic approval of pending certificates.
+- chore(tests): Opt-in live sandbox test that renews through `plugin.Enroll(RenewOrReissue)` end to end (`CERTINEXT_RENEWAL_E2E=1`).
 
 # 1.0.0
 

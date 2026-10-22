@@ -41,6 +41,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_PROBE_VALIDITY",
                 "CERTINEXT_SYNC_HOLDBACK",
                 "CERTINEXT_SYNC_HOLDBACK_MAX_ROWS",
+                "CERTINEXT_RENEWAL_E2E",
             };
 
         // ---------------------------------------------------------------------------
