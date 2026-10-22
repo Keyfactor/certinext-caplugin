@@ -59,6 +59,9 @@ The file is parsed line by line:
 - Each line must be in `KEY=VALUE` format.
 - Values are not quoted — do not surround values with `"` or `'`.
 - Real environment variables override file values (useful for CI injection).
+- Opt-in flags that place real orders (`CERTINEXT_COMPLETE_PENDING`, `CERTINEXT_RUN_BULK_TEST`,
+  `CERTINEXT_ALGO_MATRIX`, `CERTINEXT_ALGO_MATRIX_DCV`, `CERTINEXT_SAN_PROBE`, `CERTINEXT_RENEWAL_E2E`) are **ignored** in this file;
+  they must be exported in the shell (see `IntegrationTestFixture.OptInOnlyFlags`).
 
 ---
 
@@ -132,6 +135,12 @@ test constructor.
 | `Ping_ThroughPlugin_Succeeds` | Calls `IAnyCAPlugin.Ping()`; asserts no exception |
 | `GetProductIds_ReturnsAtLeastOneProduct` | Calls `IAnyCAPlugin.GetProductIds()`; asserts a non-null list is returned without throwing |
 | `Synchronize_ReturnsAtLeastOneRecord` | Runs a full sync; asserts at least one `AnyCAPluginCertificate` record is produced |
+
+### `RenewalLiveTests` (DCV build only)
+
+| Test | What it checks |
+|------|---------------|
+| `Enroll_RenewOrReissue_ThroughPlugin_PlacesRenewalOrder_WithTemplateProductCode` | Opt-in (`CERTINEXT_RENEWAL_E2E=1`, `-p:DcvSupport=true`, Cloudflare creds): `plugin.Enroll(RenewOrReissue)` with `PriorCertSN` places a renewal order with the template product code and no EMS-918; see `TESTING.md` |
 
 ---
 

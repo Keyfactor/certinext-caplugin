@@ -94,6 +94,9 @@ The file is parsed line by line:
 - Each line must be in `KEY=VALUE` format.
 - Values are not quoted — do not surround values with `"` or `'`.
 - Real environment variables override file values (useful for CI injection).
+- Opt-in flags that place real orders (`CERTINEXT_COMPLETE_PENDING`, `CERTINEXT_RUN_BULK_TEST`,
+  `CERTINEXT_ALGO_MATRIX`, `CERTINEXT_ALGO_MATRIX_DCV`, `CERTINEXT_SAN_PROBE`, `CERTINEXT_RENEWAL_E2E`) are **ignored** in this file;
+  they must be exported in the shell (see `IntegrationTestFixture.OptInOnlyFlags`).
 
 ---
 
@@ -189,6 +192,22 @@ account.  These tests do not require any pre-existing account state.
 | Test | What it checks |
 |------|---------------|
 | `Enroll_Synchronize_Revoke_FullLifecycle` | (1) Generates a fresh RSA-2048 CSR; (2) calls `Enroll` and asserts a non-empty `CARequestID` is returned; (3) runs a full sync and asserts the new order appears by `CARequestID`; (4) attempts revocation — skips gracefully if the order is not yet in an issued/approved state |
+
+### `RenewalLiveTests` (DCV build only, opt-in)
+
+Places 2 sandbox DV orders (needs Cloudflare DCV creds + `CERTINEXT_DCV_DOMAIN`); both are revoked afterwards.
+Build/run with `-p:DcvSupport=true` and `CERTINEXT_RENEWAL_E2E=1` exported in the shell.
+
+| Test | What it checks |
+|------|---------------|
+| `Enroll_RenewOrReissue_ThroughPlugin_PlacesRenewalOrder_WithTemplateProductCode` | `plugin.Enroll(New)` to issuance, then `plugin.Enroll(RenewOrReissue)` with a new CSR and `PriorCertSN` = the issued serial inside the renewal window: no EMS-918, new `CARequestID`, order exists with the template product code (not `DefaultProductCode`), CN/SAN match, renewal issues against the new key (skips if the sandbox never issues the first order) |
+| `CleanupLeftoverOrders` | Revokes orders listed in `CERTINEXT_RENEWAL_E2E_CLEANUP_ORDERS` (also needs `CERTINEXT_RENEWAL_E2E=1`) after an interrupted run |
+
+```sh
+set -a; . ~/.env_certinext; set +a
+CERTINEXT_RENEWAL_E2E=1 dotnet test CERTInext.IntegrationTests/CERTInext.IntegrationTests.csproj -c Release \
+  -p:DcvSupport=true --filter "FullyQualifiedName~RenewalLiveTests" --logger "console;verbosity=detailed"
+```
 
 ---
 
