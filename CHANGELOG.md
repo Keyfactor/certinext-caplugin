@@ -11,6 +11,7 @@
 - fix(enroll): A `SignerIp` that is not a valid IP address now logs a Warning naming whether it came from the template or the connector; the value is still sent unchanged.
 - fix(enroll): A Warning is now logged when `SignerName` or `SignerPlace` fall back to their placeholders, naming what to set.
 - fix(enroll): `GroupNumber`, `AutoSecureWww`, and the technical contact now send in the correct request fields CERTInext reads.
+- fix(enroll): Renewals no longer fail with `EMS-918: Additional Information cannot be empty`; the renewal order now sends `additionalInformation.remarks`.
 - fix(enroll): Renewals now send the full order details (group, `AutoSecureWww`, technical contact, organization, remarks), matching a new enrollment.
 - fix(enroll): A failed status check or DCV step after placing an order now returns pending with the order number so sync can finish the order and a retry cannot place a duplicate.
 - fix(enroll): Non-DNS SANs (IP, email, URI) are now submitted instead of silently dropped; set `SubmitNonDnsSans` to `false` to restore the old behavior.
