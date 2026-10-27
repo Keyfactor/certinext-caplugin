@@ -1,4 +1,4 @@
-// Copyright 2026 Keyfactor
+// Copyright 2024 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -292,6 +292,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Certificate = null,
                 ProfileId = ProfileIdTls,
                 Message = "Awaiting approval."
+            };
+
+        // Reproduces the CERTInext "auto-approved" race: TrackOrder reports a
+        // certificateStatusId the client legacy-maps to "issued", but the immediate
+        // GetCertificate download failed (cert bytes not generated yet), so no PEM
+        // ever arrived. See issue 0009.
+        public static EnrollCertificateResponse AutoApprovedNoBodyEnrollResponse(string id = null) =>
+            new EnrollCertificateResponse
+            {
+                Id = id ?? CertId1,
+                Status = "issued",
+                Certificate = null,
+                ProfileId = ProfileIdTls,
+                Message = "Order auto-approved."
             };
 
         // -----------------------------------------------------------------------

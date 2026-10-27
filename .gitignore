@@ -36,7 +36,14 @@ terraform/terraform.tfvars
 
 # Analysis / scratch — never commit
 analysis/
+logs/*
 
-# Local-only working notes — never commit
-DCV_BUILD_SUPPORT.md
-
+# AI
+handoffs/
+planning/
+plans/
+plan/
+.claude*
+CLAUDE.md
+.codex*
+AGENTS.md

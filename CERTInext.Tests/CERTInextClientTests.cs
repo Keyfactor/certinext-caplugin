@@ -1,4 +1,4 @@
-// Copyright 2026 Keyfactor
+// Copyright 2024 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -581,6 +581,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             _server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/GetOrderReport");
         }
 
+        // Issue 0090: the sync hold-back relies on the listing's orderDate being whole-second UTC.
+        // Live GetOrderReport rows carry "yyyy-MM-dd HH:mm:ss" with no zone marker (verified
+        // 2026-10-15 against plugin/gateway UTC timestamps); it must parse as that UTC instant.
+        [Fact]
+        public async Task ListCertificatesAsync_ParsesLiveOrderDateFormat_AsUtcWholeSeconds()
+        {
+            _server
+                .Given(Request.Create().WithPath("/GetOrderReport").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.OrderReportSinglePageJson()
+                        .Replace("\"orderDate\":\"2024-06-01\"", "\"orderDate\":\"2026-10-15 18:59:52\"")));
+
+            var client = BuildClient();
+            var results = new List<LegacyGetCertificateResponse>();
+            await foreach (var cert in client.ListCertificatesAsync(issuedAfter: null, pageSize: 100))
+                results.Add(cert);
+
+            results.Should().HaveCount(1);
+            results[0].OrderDate.Should().Be(new DateTime(2026, 10, 15, 18, 59, 52, DateTimeKind.Utc));
+            (results[0].OrderDate?.Kind).Should().Be(DateTimeKind.Utc);
+        }
+
         // ---------------------------------------------------------------------------
         // GetProfilesAsync (legacy) — calls POST /GetProductDetails
         // ---------------------------------------------------------------------------
@@ -788,6 +812,42 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().ThrowAsync<Exception>()
                 .WithMessage("*GetDcv failed*");
+        }
+
+        /// <summary>
+        /// Regression: this client is built with ThrowOnAnyError=false, so RestSharp catches a
+        /// cancelled HttpClient.SendAsync internally and returns a non-throwing, unsuccessful
+        /// RestResponse instead of propagating OperationCanceledException. Before this fix,
+        /// ExecuteWithRetryAsync passed that response straight to DeserializeOrThrow, which wrapped
+        /// it in a plain Exception — indistinguishable from a genuine API failure. A caller such as
+        /// PerformDcvIfNeededAsync's per-domain "catch (OperationCanceledException) { throw; }" guard
+        /// (added specifically to stop a DCV timeout from being mislabeled as an ordinary per-domain
+        /// failure) could never actually see the real cancellation, because it never arrived as
+        /// OperationCanceledException in the first place — a gap a Moq-level test of the plugin alone
+        /// cannot expose, since a mock can be told to throw whatever type is asked for. This test
+        /// exercises the real client against a real (if local) HTTP call, which is the only way to
+        /// pin the actual failure mode.
+        /// </summary>
+        [Fact]
+        public async Task GetDcvAsync_ThrowsOperationCanceled_WhenCancellationTokenIsCancelled()
+        {
+            _server
+                .Given(Request.Create().WithPath("/GetDcv").UsingPost())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(MockCertificateData.GetDcvSuccessJson()));
+
+            var client = BuildClient();
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            Func<Task> act = () => client.GetDcvAsync(
+                MockCertificateData.OrderNumber1, "example.com", Constants.Dcv.MethodDnsTxt, cts.Token);
+
+            await act.Should().ThrowAsync<OperationCanceledException>(
+                "a cancelled token must surface as a genuine cancellation, not get wrapped into a " +
+                "plain Exception that a caller's cancellation-specific catch clause cannot recognize");
         }
 
         [Fact]

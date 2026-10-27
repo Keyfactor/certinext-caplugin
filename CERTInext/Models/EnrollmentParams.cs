@@ -1,4 +1,4 @@
-// Copyright 2026 Keyfactor
+// Copyright 2024 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -52,14 +52,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// <summary>Alias for ProductCode — kept for backward compat.</summary>
         public string ProfileId => ProductCode;
 
-        /// <summary>
-        /// Requested subscription validity in years (1, 2, or 3); 0 means "not set" —
-        /// falls back to <see cref="ValidityDays"/> (if set) and then to the connector-level
-        /// <c>SubscriptionValidityYears</c> config default. See issue 0005.
-        /// </summary>
+        /// <summary>Requested subscription term in years (1, 2, or 3). The order uses the larger of this and ValidityDays in years.</summary>
         public int ValidityYears => GetInt(Constants.EnrollmentParam.ValidityYears, 0);
 
-        /// <summary>Requested validity in days; 0 means "use profile default".</summary>
+        /// <summary>Requested validity in days, converted to whole years (rounded up); 0 means unset.</summary>
         public int ValidityDays => GetInt(Constants.EnrollmentParam.ValidityDays, 0);
 
         /// <summary>Whether to auto-approve pending-approval certificates.</summary>

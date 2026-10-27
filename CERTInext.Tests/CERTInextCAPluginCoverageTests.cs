@@ -1,4 +1,4 @@
-// Copyright 2026 Keyfactor
+// Copyright 2024 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -257,6 +257,60 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             clientMock.Verify(c => c.EnrollCertificateAsync(
                 It.IsAny<EnrollCertificateRequest>(),
                 It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        // ---------------------------------------------------------------------------
+        // A1d-2: renewal within window carries the template's product code onto the
+        // RenewCertificateRequest, not just the connector-level DefaultProductCode.
+        // Regression for issue #26 / local issues/0012.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task RenewOrReissue_CallsRenewApi_UsesTemplateProductCode()
+        {
+            var clientMock = NewMock();
+            var readerMock = NewReaderMock();
+
+            // Expiry is 30 days in the future, renewal window is 90 days → within window
+            DateTime expiry = DateTime.UtcNow.AddDays(30);
+
+            readerMock
+                .Setup(r => r.GetRequestIDBySerialNumber(It.IsAny<string>()))
+                .ReturnsAsync(MockCertificateData.CertId1);
+
+            readerMock
+                .Setup(r => r.GetExpirationDateByRequestId(MockCertificateData.CertId1))
+                .Returns(expiry);
+
+            clientMock
+                .Setup(c => c.RenewCertificateAsync(
+                    MockCertificateData.CertId1,
+                    It.Is<RenewCertificateRequest>(r => r.ProfileId == MockCertificateData.ProfileIdClient),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse("cert-renewed-002"));
+
+            var plugin = new CERTInextCAPlugin(clientMock.Object, readerMock.Object);
+
+            // ProfileId is a non-default value distinct from the connector's DefaultProductCode.
+            var productInfo = MakeProductInfo(profileId: MockCertificateData.ProfileIdClient, extras: new Dictionary<string, string>
+            {
+                ["PriorCertSN"] = "AABBCCDDEEFF",
+                ["RenewalWindowDays"] = "90"
+            });
+
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem,
+                subject: "CN=test.example.com",
+                san: null,
+                productInfo: productInfo,
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.RenewOrReissue);
+
+            result.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            clientMock.Verify(c => c.RenewCertificateAsync(
+                MockCertificateData.CertId1,
+                It.Is<RenewCertificateRequest>(r => r.ProfileId == MockCertificateData.ProfileIdClient),
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         // ---------------------------------------------------------------------------
@@ -813,73 +867,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // ValidityDays == 0 when parse fails, so request should have null
             capturedRequest!.ValidityDays.Should().BeNull(
                 "invalid ValidityDays should fall back to null (use profile default)");
-        }
-
-        // ---------------------------------------------------------------------------
-        // Issue 0005: ValidityYears template parameter must reach EnrollCertificateRequest
-        // ---------------------------------------------------------------------------
-
-        [Fact]
-        public async Task Enroll_PassesValidityYearsToRequest()
-        {
-            EnrollCertificateRequest capturedRequest = null;
-
-            var mock = NewMock();
-            mock.Setup(c => c.EnrollCertificateAsync(
-                    It.IsAny<EnrollCertificateRequest>(),
-                    It.IsAny<CancellationToken>()))
-                .Callback<EnrollCertificateRequest, CancellationToken>((req, _) => capturedRequest = req)
-                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse());
-
-            var plugin = new CERTInextCAPlugin(mock.Object);
-
-            var productInfo = MakeProductInfo(extras: new Dictionary<string, string>
-            {
-                ["ValidityYears"] = "3"
-            });
-
-            await plugin.Enroll(
-                csr: MockCertificateData.FakeCsrPem,
-                subject: "CN=test.example.com",
-                san: null,
-                productInfo: productInfo,
-                requestFormat: RequestFormat.PKCS10,
-                enrollmentType: EnrollmentType.New);
-
-            capturedRequest.Should().NotBeNull();
-            capturedRequest!.ValidityYears.Should().Be(3);
-        }
-
-        [Fact]
-        public async Task Enroll_WithInvalidValidityYears_FallsBackToNull()
-        {
-            EnrollCertificateRequest capturedRequest = null;
-
-            var mock = NewMock();
-            mock.Setup(c => c.EnrollCertificateAsync(
-                    It.IsAny<EnrollCertificateRequest>(),
-                    It.IsAny<CancellationToken>()))
-                .Callback<EnrollCertificateRequest, CancellationToken>((req, _) => capturedRequest = req)
-                .ReturnsAsync(MockCertificateData.IssuedEnrollResponse());
-
-            var plugin = new CERTInextCAPlugin(mock.Object);
-
-            var productInfo = MakeProductInfo(extras: new Dictionary<string, string>
-            {
-                ["ValidityYears"] = "not-a-number"
-            });
-
-            await plugin.Enroll(
-                csr: MockCertificateData.FakeCsrPem,
-                subject: "CN=test.example.com",
-                san: null,
-                productInfo: productInfo,
-                requestFormat: RequestFormat.PKCS10,
-                enrollmentType: EnrollmentType.New);
-
-            capturedRequest.Should().NotBeNull();
-            capturedRequest!.ValidityYears.Should().BeNull(
-                "invalid ValidityYears should fall back to null (use ValidityDays/connector default)");
         }
 
         // ---------------------------------------------------------------------------

@@ -113,6 +113,8 @@ sequenceDiagram
 
 **Expired certificates:** The `IgnoreExpired` connector setting controls whether expired certificates are included in synchronization. When enabled, expired certificates are silently skipped and will not appear in the Keyfactor Command inventory.
 
+**DCV-during-sync:** on a DCV-enabled build, each sync pass also drives DNS-01 validation forward for pending DV orders that are still waiting on it, bounded by `DcvSyncMaxOrderAgeHours` (skip orders older than this) and `DcvSyncMaxPerPass` (cap how many are attempted per pass), so a large backlog of stalled pending orders can't slow down every sync.
+
 ---
 
 ## Certificate Enrollment
@@ -133,20 +135,44 @@ sequenceDiagram
 
     Plugin->>API: Place certificate order<br/>(CSR, domain, organization details,<br/>subscriber agreement, requestor info)
     API-->>Plugin: Order accepted — order number assigned
-
     Plugin->>API: Check order status
     API-->>Plugin: Order status and certificate details
 
-    alt Certificate issued immediately
+    alt DNS-01 DCV engaged (DCV build, DCV enabled, DNS provider available)
+        opt Order has domains pending DNS-01 validation
+            Plugin->>Plugin: Publish DNS TXT challenge<br/>via the configured DNS provider plugin
+            Plugin->>API: Ask CERTInext to verify the record
+            API-->>Plugin: Domain validated (or skipped / still pending)
+        end
+        opt Every pending domain validated
+            loop DCV issuance wait<br/>(bounded by DcvWaitForIssuanceSeconds, 60s by default)
+                Plugin->>API: Poll for the certificate
+                API-->>Plugin: Status and certificate, if ready
+            end
+        end
+    else DCV not engaged and order still pending
+        loop Certificate-pickup retries<br/>(bounded, ~55s by default — PickupRetries/PickupDelay)
+            Plugin->>API: Poll for the certificate
+            API-->>Plugin: Status and certificate, if ready
+        end
+    end
+
+    alt Certificate available (immediately, or during the DCV or pickup wait)
         Plugin-->>CMD: Certificate ready — PEM returned
-    else Certificate pending approval
-        Plugin-->>CMD: Pending — Command will pick it up<br/>during the next synchronization
     else Order rejected by CERTInext
         Plugin-->>CMD: Enrollment failed — see gateway logs
+    else Certificate still not available
+        Plugin-->>CMD: Pending — Command will pick it up<br/>during the next synchronization
     end
 
     Plugin->>Plugin: Record enrollment outcome in audit log<br/>(order number, serial number, status)
 ```
+
+**DCV:** on a DCV-enabled build, DNS-01 validation runs inline for DV orders that require it, bounded by `DcvTimeoutMinutes`. DCV is "engaged" whenever the build supports it, `DcvEnabled` is set, and a DNS provider is available, whether or not this particular order ends up needing a challenge. An engaged order whose domains are already validated skips TXT staging and goes straight to the DCV issuance wait. When DCV isn't enabled, isn't built into this host, or no DNS provider is available, DCV does not engage and the order follows the synchronous pickup path below like any other asynchronously-issued order.
+
+**Waiting for issuance — DCV and pickup are alternatives, not stacked:** when DCV engages for an order, DCV owns the in-call wait and the pickup loop does not run. After DCV verifies, `Enroll()` polls for the certificate for up to `DcvWaitForIssuanceSeconds` (default 60s), but only if every pending domain was validated. If any domain was skipped or rejected (for example an IP or email SAN with no DNS provider), a DCV step failed, or CERTInext never exposed the challenge within `DcvWaitForChallengeSeconds`, there is no further in-call wait: `Enroll()` returns pending carrying the order number and the next sync finishes the order.
+
+**Synchronous certificate pickup:** when DCV did not engage (the default build, `DcvEnabled` off, or no DNS provider) and the order is still pending, `Enroll()` polls CERTInext a bounded number of times (`PickupRetries` × `PickupDelay`, each clamped and the total capped at a 180s ceiling) before giving up and returning pending. This lets a fast-issuing certificate (DV, or an already-approved order) come back in the same enrollment call instead of always waiting for the next sync. OV/EV orders validate asynchronously over minutes to hours and typically exhaust this window regardless.
 
 ### Renewal
 
@@ -154,20 +180,24 @@ When Command initiates a renewal, the plugin checks whether the existing certifi
 
 > **Note:** CERTInext does not have a dedicated certificate renewal endpoint. Both renewal and reissuance paths submit a new `GenerateOrderSSL` order. The distinction affects how Keyfactor Command tracks the certificate record, not what is sent to CERTInext.
 
+> **Note:** If the prior-order lookup itself throws (rather than cleanly returning "not found" — e.g. a transient database error), the plugin falls back to issuing a new certificate rather than failing the enrollment.
+
 ```mermaid
 flowchart TD
-    A([Renewal requested]) --> B{"Prior certificate<br/>serial number<br/>provided?"}
+    A([Renewal requested]) --> B{Prior certificate<br/>serial number<br/>provided?}
     B -- No --> C[Issue new certificate]
-    B -- Yes --> D["Look up prior order<br/>in Command database"]
-    D --> E{"Prior order<br/>found?"}
+    B -- Yes --> D[Look up prior order<br/>in Command database]
+    D --> E{Prior order<br/>found?}
     E -- No --> C
-    E -- Yes --> F["Check certificate<br/>expiry date"]
-    F --> G{"Within renewal<br/>window?"}
-    G -- Yes, within window --> H["Submit new order<br/>linked to prior record"]
-    G -- No, outside window --> C
+    E -- Yes --> F[Check certificate<br/>expiry date]
+    F --> G{Within renewal<br/>window?}
+    G -- Yes<br/>within window --> H[Submit new order<br/>linked to prior record]
+    G -- No<br/>outside window --> C
     H --> I([Certificate issued or pending])
     C --> I
 ```
+
+**Pickup on renewal:** a renewal order goes through the same synchronous pickup as a new enrollment, so a fast-issuing renewal returns the certificate in the same call. The renew path never runs DCV in the call, so on a DCV build with `DcvEnabled` a renewal that is still waiting on DNS-01 validation can't issue inside the pickup window: it skips the wait and returns pending at once, and the next sync completes DCV and imports the certificate. Renewals that aren't waiting on DNS-01 validation (validation reused, DCV disabled, or the DCV-state check fails) keep the normal pickup.
 
 ---
 
@@ -204,7 +234,7 @@ sequenceDiagram
 
 **Idempotency:** If Command retries a revocation request (for example, after a timeout), the plugin detects that the certificate is already revoked and returns success without submitting a duplicate request to CERTInext.
 
-**Audit trail:** The revocation intent is written to the gateway log *before* the API call is made. This ensures that the intent is captured even if the API call subsequently fails.
+**Audit trail:** The revocation intent is written to the gateway log *before* the API call is made. This ensures that the intent is captured even if the API call subsequently fails, satisfying SOX audit requirements.
 
 ---
 
@@ -214,14 +244,14 @@ When an administrator saves or edits a CERTInext CA connector in the Keyfactor C
 
 ```mermaid
 flowchart TD
-    A([Save connector configuration]) --> B{"Connector<br/>marked as disabled?"}
-    B -- Yes --> C(["Saved without validation<br/>Connector will not process requests"])
-    B -- No --> D{"Required fields<br/>present and valid?<br/>API URL · Account Number · Credentials"}
+    A([Save connector configuration]) --> B{Connector<br/>marked as disabled?}
+    B -- Yes --> C([Saved without validation<br/>Connector will not process requests])
+    B -- No --> D{Required fields<br/>present and valid?<br/>API URL · Account Number · Credentials}
     D -- Missing or invalid --> E([Validation error shown to administrator])
-    D -- Valid --> F["Build temporary API client<br/>from supplied settings"]
-    F --> G[Send test request to CERTInext]
-    G --> H{"API accepted<br/>the credentials?"}
-    H -- No --> I(["Connection test failed<br/>Check credentials and API URL"])
+    D -- Valid --> F[Build temporary API client<br/>from supplied settings]
+    F --> G[Send test request<br/>to CERTInext]
+    G --> H{API accepted<br/>the credentials?}
+    H -- No --> I([Connection test failed<br/>Check credentials and API URL])
     H -- Yes --> J([Connector saved and active])
 ```
 

@@ -59,6 +59,9 @@ The file is parsed line by line:
 - Each line must be in `KEY=VALUE` format.
 - Values are not quoted — do not surround values with `"` or `'`.
 - Real environment variables override file values (useful for CI injection).
+- Opt-in flags that place real orders (`CERTINEXT_COMPLETE_PENDING`, `CERTINEXT_RUN_BULK_TEST`,
+  `CERTINEXT_ALGO_MATRIX`, `CERTINEXT_ALGO_MATRIX_DCV`, `CERTINEXT_SAN_PROBE`, `CERTINEXT_RENEWAL_E2E`) are **ignored** in this file;
+  they must be exported in the shell (see `IntegrationTestFixture.OptInOnlyFlags`).
 
 ---
 
@@ -70,10 +73,10 @@ The file is parsed line by line:
 dotnet test CERTInext.IntegrationTests/ --verbosity normal
 ```
 
-### Using the justfile
+### Using the Makefile
 
 ```sh
-just integration-test
+make integration-test
 ```
 
 ### From the solution root (all tests including unit tests)
@@ -133,6 +136,12 @@ test constructor.
 | `GetProductIds_ReturnsAtLeastOneProduct` | Calls `IAnyCAPlugin.GetProductIds()`; asserts a non-null list is returned without throwing |
 | `Synchronize_ReturnsAtLeastOneRecord` | Runs a full sync; asserts at least one `AnyCAPluginCertificate` record is produced |
 
+### `RenewalLiveTests` (DCV build only)
+
+| Test | What it checks |
+|------|---------------|
+| `Enroll_RenewOrReissue_ThroughPlugin_PlacesRenewalOrder_WithTemplateProductCode` | Opt-in (`CERTINEXT_RENEWAL_E2E=1`, `-p:DcvSupport=true`, Cloudflare creds): `plugin.Enroll(RenewOrReissue)` with `PriorCertSN` places a renewal order with the template product code and no EMS-918; see `TESTING.md` |
+
 ---
 
 ## Authentication
@@ -160,4 +169,4 @@ never transmitted over the wire — only the derived `authKey` hash is sent.
 | All tests skipped | Missing or empty `~/.env_certinext` | Create the file with required variables |
 | `Ping` fails with 401 | Wrong `CERTINEXT_ACCESS_KEY` | Regenerate the key in the CERTInext portal |
 | `Ping` fails with timeout | Wrong `CERTINEXT_API_URL` | Verify the URL matches your account region |
-| `GetOrderReport` returns 0 orders | Account has no orders | Place a test order first (see `just generate-order` in the project justfile) |
+| `GetOrderReport` returns 0 orders | Account has no orders | Place a test order first (see `make generate-order` in the project Makefile) |

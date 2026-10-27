@@ -1,4 +1,4 @@
-// Copyright 2026 Keyfactor
+// Copyright 2024 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +20,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string AuthMode = "AuthMode";
             public const string Enabled = "Enabled";
             public const string IgnoreExpired = "IgnoreExpired";
+            public const string SubmitNonDnsSans = "SubmitNonDnsSans";
             public const string PageSize = "PageSize";
+
+            // Enroll/sync race mitigation (issue 0090): Synchronize does not emit pending or issued
+            // orders created less than this many seconds ago, so it cannot insert the gateway row
+            // that an in-flight enrollment is about to save. 0 disables.
+            public const string SyncRecentOrderGraceSeconds = "SyncRecentOrderGraceSeconds";
+
+            // Diagnostic escape hatch — see CERTInextConfig.LogSensitiveRequestData. Off by
+            // default; only meant for temporary use while verifying a new deployment.
+            public const string LogSensitiveRequestData = "LogSensitiveRequestData";
+
+            // Synchronous certificate pickup (parity with the legacy Sectigo connector).
+            // After submitting an order, Enroll() polls GetCertificate up to PickupRetries
+            // times, PickupDelay seconds apart (after a fixed initial delay), so a fast-issuing
+            // order returns the issued certificate in the same enrollment call instead of
+            // waiting for the next synchronization. On timeout the order is returned pending and
+            // imported by a later sync — behaviour identical to before this feature.
+            public const string PickupRetries = "PickupRetries";
+            public const string PickupDelay = "PickupDelay";
+
             public const string RequestorName = "RequestorName";
             public const string RequestorEmail = "RequestorEmail";
             public const string RequestorIsdCode = "RequestorIsdCode";
@@ -28,7 +48,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string SignerPlace = "SignerPlace";
             public const string SignerIp = "SignerIp";
 
-            // Technical point-of-contact defaults (TpcName/Email default to Requestor* when blank)
+            // Technical point-of-contact (each poc* field defaults to its Requestor* value when blank)
             public const string TechnicalContactName = "TechnicalContactName";
             public const string TechnicalContactEmail = "TechnicalContactEmail";
             public const string TechnicalContactIsdCode = "TechnicalContactIsdCode";
@@ -70,10 +90,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string DcvSyncMaxOrderAgeHours = "DcvSyncMaxOrderAgeHours";
             public const string DcvSyncMaxPerPass = "DcvSyncMaxPerPass";
 
-            // When true, follows CNAME delegation for the DCV challenge hostname before staging
-            // the TXT record / resolving the DNS provider plugin (issue 0006). Off by default.
-            public const string DcvFollowCnameDelegation = "DcvFollowCnameDelegation";
-
             // Environment variable that overrides DcvTimeoutMinutes when set.
             public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";
             public const string DcvWaitForChallengeSecondsEnvVar = "CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS";
@@ -103,7 +119,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string ProductCode = "ProductCode";   // CERTInext numeric product code
             public const string ProfileId = "ProfileId";       // alias for ProductCode (kept for back-compat)
             public const string ValidityYears = "ValidityYears"; // 1, 2, or 3
-            public const string ValidityDays = "ValidityDays";   // legacy; mapped to years if set
+            public const string ValidityDays = "ValidityDays";   // converted to whole years (rounded up); larger of years/days wins
             public const string AutoApprove = "AutoApprove";
             public const string RequesterName = "RequesterName";
             public const string RequesterEmail = "RequesterEmail";
@@ -236,6 +252,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const int DefaultPageSize = 100;
             public const int MaxPageSize = 500;
 
+            // Enroll/sync race mitigation (issue 0090). An incremental or full sync that emits a
+            // pending or issued order whose enrollment has not saved yet makes the gateway insert a
+            // row with that CARequestID, and the enrollment's own save then fails on the unique
+            // (CA, CARequestID) index. So sync holds back such orders younger than this; the next
+            // incremental pass lists and imports them. 120 s is the longest an enrollment normally
+            // runs before it gives up.
+            public const int DefaultSyncRecentOrderGraceSeconds = 120;
+
+            // Added to the grace window when comparing against the listing's orderDate. GetOrderReport
+            // rows carry orderDate as "yyyy-MM-dd HH:mm:ss" (no zone marker): whole seconds, UTC
+            // (verified live 2026-10-15 against plugin timestamps: the stamp is 1-2.4 s before the
+            // order-placed response, and 0.95-2.4 s against the gateway's UTC log clock). Whole-second
+            // truncation makes an order look up to 1 s older than it is, and CA/gateway clock skew is
+            // not bounded by anything we control, so leave a few seconds of slack.
+            public const int SyncRecentOrderClockMarginSeconds = 5;
+
+            // The incremental listing filters orderDateFrom by UTC calendar day (CERTInextClient
+            // ListCertificatesAsync). A held-back order is re-listed on the next pass only if its day is
+            // not before the day of the issuedAfter we send. Looking back by the hold window plus this
+            // slack (for the gateway's lastSync being the previous pass's end rather than its start)
+            // keeps an order created just before UTC midnight in the next pass's listing.
+            public const int SyncRecentOrderLookbackSlackSeconds = 300;
+
             // Legacy path constants — kept so CERTInextClient can still reference them
             // without breaking existing callers while being replaced.
             // These do NOT exist in the real API.
@@ -272,6 +311,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const int Default = KeyCompromise;
         }
 
+        public static class Pickup
+        {
+            // Defaults mirror the legacy Sectigo connector's PickUpEnrolledCertificate:
+            // a 5-second initial delay, then up to 5 poll attempts 10 seconds apart, so the
+            // maximum time an enrollment call occupies a Command worker thread is
+            // InitialDelaySeconds + DefaultRetries * DefaultDelaySeconds = 5 + 5*10 = 55 seconds.
+            // Set PickupRetries to 0 to disable the wait entirely (immediate pending return).
+            public const int DefaultRetries = 5;
+            public const int DefaultDelaySeconds = 10;
+
+            // Small static delay before the first poll — gives a fast order a chance to finish
+            // issuing before we poll at all, avoiding a guaranteed-miss first attempt.
+            public const int InitialDelaySeconds = 5;
+
+            // Per-factor safety clamps so a single mis-typed value cannot produce a tight busy-loop
+            // or an absurd per-attempt delay. These bound each knob independently; the *product*
+            // (retries * delay) is bounded separately by MaxTotalWaitSeconds below.
+            public const int MaxRetries = 30;
+            public const int MaxDelaySeconds = 60;
+
+            // Hard ceiling on total in-call pickup occupancy (initial delay + retries * delay).
+            // The per-factor clamps above still permit a ~1805s product at the extremes, which could
+            // push Enroll() past Command's enrollment timeout; PickUpEnrolledCertificateAsync caps the
+            // effective retry count so the total never exceeds this. Kept comfortably under a typical
+            // enrollment timeout while leaving room for the documented ~90s default guidance.
+            public const int MaxTotalWaitSeconds = 180;
+        }
+
         public static class Dcv
         {
             // CERTInext dcvMethod values (dcvDetails.dcvMethod in GetDcv / VerifyDcv)
@@ -289,6 +356,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Override via the DcvTxtRecordTemplate connector config field.
             public const string DefaultTxtRecordTemplate = "_emsign-validation.{0}";
 
+            // Independent bound for a single CleanupValidation (TXT-record removal) call. This is
+            // deliberately its own fixed ceiling, not a fraction of DcvTimeoutMinutes and not the
+            // ambient DCV-flow cancellation token: cleanup is a best-effort compensating action that
+            // must get a real chance to run even when the operation it's cleaning up after was
+            // itself cancelled (the ambient token would already be cancelled at that point), but it
+            // still must not be allowed to hang the calling gateway request forever if a DNS
+            // provider plugin's underlying network call stalls. 60s comfortably covers a single
+            // DELETE-shaped call under normal conditions (the reference CloudflareDomainValidator's
+            // HttpClient default alone is 100s) without risking an indefinite hang.
+            public const int CleanupValidationTimeoutSeconds = 60;
+
             // Defaults for the DCV-during-sync bounds (issue 0002).
             public const int DefaultSyncMaxOrderAgeHours = 24;
             public const int DefaultSyncMaxPerPass = 50;
@@ -299,11 +377,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // A few seconds is enough for the staged TXT to be visible to CERTInext's resolver;
             // if a verify lands too early, the order simply stays pending and is retried next pass.
             public const int SyncPropagationDelaySeconds = 3;
-
-            // Maximum number of CNAME hops followed when DcvFollowCnameDelegation is enabled
-            // (issue 0006). Bounds worst-case resolution time and backstops the loop-detection
-            // check against pathological/misconfigured zones.
-            public const int MaxCnameDepth = 10;
         }
 
         // Legacy string revocation reasons — retained so StatusMapper still compiles.
