@@ -1,7 +1,7 @@
 # 1.0.2
 
 ## Bug Fixes
-- fix(sync): `Synchronize` and `GetSingleRecord` no longer send the gateway a revoked record without a certificate unless the gateway already stores that certificate. Such a record made the gateway's revoked-certificate search fail, which stopped every Command scan of the CA. A revoked order the gateway has without a certificate is now reported as failed; one the gateway has never seen is skipped. Rows already stored this way must be repaired in the gateway database (0049).
+- fix(sync): `Synchronize` and `GetSingleRecord` no longer send the gateway a revoked record without a certificate unless the gateway already stores that certificate. Such a record made the gateway's revoked-certificate search fail, which stopped every Command scan of the CA. A revoked order the gateway has without a certificate is now reported as failed; one the gateway has never seen is skipped. Rows already stored this way must be repaired in the gateway database.
 
 # 1.0.1
 
