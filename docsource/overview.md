@@ -14,6 +14,8 @@ Before the gateway can register a CA backed by this plugin, the Keyfactor Comman
 
 After signing in, navigate to the certificate-authority / chain download page in the portal, export each CA in the chain as PEM or DER, and import them into the appropriate Windows certificate stores on the gateway host (Trusted Root for the root CA, Intermediate Certification Authorities for any subordinates). See [configuration.md](configuration.md#gateway-registration) and the [README](../README.md#configuration) for the full Gateway Registration walkthrough.
 
+> Note: eMudhra is withdrawing from public TLS, and the emSign roots are being phased out by browser root programs (Chrome and Firefox after November 16, 2026; Apple on November 30, 2026). CERTInext public TLS certificates will be issued under a different CA, so the steps above need repeating with the new chain. See [Change of issuing CA](configuration.md#change-of-issuing-ca-emudhra-exit-from-public-tls).
+
 ## Troubleshooting
 
 ### `"Inactive Account User."` returned from `GenerateOrderSSL`
