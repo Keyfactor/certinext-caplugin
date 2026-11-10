@@ -860,6 +860,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int skipped = 0;
             int deferredRecentOrders = 0;   // pending/issued orders withheld because they are younger than the grace window
             int skippedWithBody = 0;   // skipped records that nonetheless carried a cert body (should be 0)
+            int unchangedInGateway = 0;   // incremental only: issued/revoked orders the gateway already holds as-is
             int errors = 0;
 
 #if SUPPORTS_DCV
@@ -929,6 +930,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 "still be saving it). CARequestID={Id}, AgeSeconds={Age:F1}, GraceSeconds={Grace}.",
                                 current.Id, recentOrderAgeSeconds, recentOrderGraceSeconds);
                             deferredRecentOrders++;
+                            continue;
+                        }
+
+                        // Issue 0093: the listing filter is a calendar day, so an incremental pass
+                        // re-lists every order placed that day. Without this check each issued or
+                        // revoked one costs a TrackOrder + DownloadCertificate on every pass, even
+                        // when the gateway already holds it unchanged. Same rule as the Entrust ECS,
+                        // HashiCorp Vault and Nexus plugins: skip when the gateway's status matches.
+                        // Full sync still refreshes everything.
+                        if (!fullSync
+                            && (status == (int)EndEntityStatus.GENERATED
+                                || status == (int)EndEntityStatus.REVOKED)
+                            && await IsUnchangedInGatewayAsync(current.Id, status))
+                        {
+                            unchangedInGateway++;
                             continue;
                         }
 
@@ -1145,12 +1161,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 #endif
                 _logger.LogInformation(
                     "CERTInext synchronization complete. Synced={Synced}, Skipped={Skipped} (withBody={SkippedWithBody}), " +
+                    "UnchangedInGateway={UnchangedInGateway} (incremental, already held — not refetched), " +
                     "Errors={Errors}. Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
                     "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
                     "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
                     "BodylessRevokedSkipped={BodylessRevokedSkipped} (issue 0049 guard). " +
                     "RecentOrderDeferred={RecentOrderDeferred} (younger than {Grace}s, imported next pass). {DcvClause}",
-                    synced, skipped, skippedWithBody, errors,
+                    synced, skipped, skippedWithBody, unchangedInGateway, errors,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
                     deferredRecentOrders, recentOrderGraceSeconds,
@@ -2736,6 +2753,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <c>null</c> when the row exists but has no body, and throws
         /// <see cref="ArgumentException"/> when there is no row at all.
         /// </summary>
+        /// <summary>
+        /// Issue 0093: true when the gateway already holds this order with the status the listing
+        /// reports and a stored certificate body, so an incremental pass can skip the TrackOrder +
+        /// DownloadCertificate refetch. A row whose status differs (e.g. issued → revoked), a row
+        /// with no body (an earlier refetch failed), no row at all (new order), no reader, or any
+        /// lookup failure all return false and the order is processed as before.
+        /// </summary>
+        private async Task<bool> IsUnchangedInGatewayAsync(string caRequestId, int listedStatus)
+        {
+            if (_certificateDataReader == null || string.IsNullOrWhiteSpace(caRequestId))
+                return false;
+
+            try
+            {
+                int dbStatus = await _certificateDataReader.GetStatusByRequestID(caRequestId);
+                if (dbStatus != listedStatus)
+                    return false;
+
+                bool unchanged = _certificateDataReader.GetExpirationDateByRequestId(caRequestId).HasValue;
+                if (unchanged)
+                {
+                    _logger.LogTrace(
+                        "Sync: order '{Id}' is already held by the gateway with status {Status} — not refetching.",
+                        caRequestId, listedStatus);
+                }
+                return unchanged;
+            }
+            catch (Exception ex)
+            {
+                // The reader throws when there is no gateway row yet (new order); treat that and any
+                // other failure as "changed" so the order is processed as before.
+                _logger.LogTrace(ex,
+                    "Sync: could not confirm gateway state for order '{Id}'; processing it normally.",
+                    caRequestId);
+                return false;
+            }
+        }
+
         private BodylessRevokedDecision DecideBodylessRevokedRecord(string caRequestId)
         {
             if (_certificateDataReader == null)
