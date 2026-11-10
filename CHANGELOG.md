@@ -1,3 +1,12 @@
+# 1.0.2
+
+## Bug Fixes
+- fix(sync): `Synchronize` and `GetSingleRecord` no longer send the gateway a revoked record without a certificate unless the gateway already stores that certificate. Such a record made the gateway's revoked-certificate search fail, which stopped every Command scan of the CA. A revoked order the gateway has without a certificate is now reported as failed; one the gateway has never seen is skipped. Rows already stored this way must be repaired in the gateway database.
+- fix(sync): Incremental sync no longer re-downloads every issued or revoked order placed that day on every pass. An order the gateway already stores with the same status and its certificate is skipped; new orders, status changes and orders stored without a certificate are fetched as before. Full sync is unchanged. On a day with many orders, incremental passes previously made two API calls per order and could run longer than the sync interval.
+
+## Documentation
+- docs: Added steps for the change of issuing CA after eMudhra's exit from public TLS (SSL.com for InCommon members, Sectigo offered by eMudhra), with the emSign G1 distrust dates. No plugin change is needed; Command, gateway and orchestrator trust stores and the gateway's CA certificate need the new chain.
+
 # 1.0.1
 
 ## Bug Fixes
