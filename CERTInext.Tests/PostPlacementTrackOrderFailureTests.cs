@@ -267,7 +267,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var reader = new Mock<ICertificateDataReader>();
             reader.Setup(r => r.GetRequestIDBySerialNumber(It.IsAny<string>())).ReturnsAsync(PriorOrder);
             reader.Setup(r => r.GetExpirationDateByRequestId(PriorOrder)).Returns(DateTime.UtcNow.AddDays(30));
-            var plugin = new CERTInextCAPlugin(BuildClient(), Config(), reader.Object);
+            var plugin = new CERTInextCAPlugin(BuildClient(), reader.Object, Config());
 
             var result = await plugin.Enroll(
                 MockCertificateData.FakeCsrPem, "CN=test.example.com",
