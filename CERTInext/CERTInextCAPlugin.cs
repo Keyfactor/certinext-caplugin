@@ -3791,6 +3791,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             }
                         }
                     }
+                    catch (Exception dcvEx)
+                    {
+                        // The order is already placed (and paid for) at CERTInext. A failure of the
+                        // in-call DCV / issuance wait — a TrackOrder or VerifyDcv error, or the
+                        // DcvTimeoutMinutes token firing (Enroll has no caller token, so that
+                        // cancellation is always the internal timeout, never the caller) — must not
+                        // fail the enrollment: Command would never learn the order number and an
+                        // operator retry would place a duplicate paid order. Return the pending
+                        // result instead; the sync-DCV retry path completes the order.
+                        _logger.LogWarning(dcvEx,
+                            "In-call DCV/issuance wait failed after order {OrderNumber} was placed. Returning the " +
+                            "pending result carrying the order number; the next synchronization will retry DCV " +
+                            "and pick up the certificate.",
+                            orderNumber);
+                    }
                     finally
                     {
                         _dcvInFlight.TryRemove(orderNumber, out _);

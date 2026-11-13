@@ -22,6 +22,7 @@
   <ItemGroup Condition="!$(DefineConstants.Contains('SUPPORTS_DCV'))">
     <Compile Remove="CERTInextCAPluginDcvTests.cs" />
     <Compile Remove="CERTInextCAPluginV2DcvTests.cs" />
+    <Compile Remove="PostPlacementDcvFailureTests.cs" />
     <Compile Remove="FakeDomainValidator.cs" />
   </ItemGroup>
 
