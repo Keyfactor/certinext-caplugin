@@ -376,5 +376,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string to = null,
             int pageSize = Constants.Api.DefaultPageSize,
             CancellationToken ct = default);
+
+        /// <summary>
+        /// Reads an organization's SSL.com validation status via
+        /// GET /api/certinext/v2/organizations/{orgNumber}/ca-validations/sslcom: status per level
+        /// (OV, EV) with validTill, what is still missing before submission, and the SSL.com contact.
+        /// </summary>
+        Task<V2SslComValidation> GetSslComValidationAsync(string organizationNumber, CancellationToken ct = default);
+
+        /// <summary>
+        /// Re-reads the organization from SSL.com via
+        /// POST /api/certinext/v2/organizations/{orgNumber}/ca-validations/sslcom/sync and returns the
+        /// same body as the GET.
+        /// </summary>
+        Task<V2SslComValidation> SyncSslComValidationAsync(string organizationNumber, CancellationToken ct = default);
+
+        /// <summary>
+        /// Submits an organization to SSL.com for validation via
+        /// POST /api/certinext/v2/organizations/{orgNumber}/ca-validations/sslcom. The body's
+        /// <c>subscriberAgreementAccepted</c> must be true, i.e. calling this accepts SSL.com's
+        /// subscriber agreement on the organization's behalf. Spec: "Safe to repeat: a level already
+        /// requested is skipped." Returns the response body, or null when the CA answers with none.
+        /// </summary>
+        Task<V2SslComValidation> SubmitSslComValidationAsync(
+            string organizationNumber, V2SslComSubmitRequest request, CancellationToken ct = default);
     }
 }

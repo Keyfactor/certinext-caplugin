@@ -460,6 +460,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = false,
                     Type = "Boolean"
+                },
+                [Constants.Config.SslComSubmitOrganization] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL (V2 mode only): before an OV or EV SSL/TLS order, the plugin checks " +
+                               "whether SSL.com has validated the organization (OrganizationNumber) at that level, " +
+                               "refreshing the status once if not. When this is true and the organization is still " +
+                               "unvalidated and ready to submit, the plugin also SUBMITS it to SSL.com for validation. " +
+                               "WARNING: enabling this ACCEPTS SSL.COM'S SUBSCRIBER AGREEMENT ON THE ORGANIZATION'S " +
+                               "BEHALF; each acceptance is audit-logged. Leave false unless you are authorized to do " +
+                               "that. Whatever the outcome, the order is placed anyway and a not-validated organization " +
+                               "only logs a warning. Default: false.",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
+                },
+                [Constants.Config.SslComAdminEmail] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL (V2 mode only): administrator email sent as adminEmail when the plugin " +
+                               "submits an organization to SSL.com (only used when SslComSubmitOrganization is true). " +
+                               "Blank omits it and SSL.com uses the organization's own contact.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
                 }
             };
         }
@@ -1002,6 +1025,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         [JsonPropertyName("V2InlineCsr")]
         public bool V2InlineCsr { get; set; } = false;
+
+        /// <summary>
+        /// V2 only. When true, an OV/EV SSL/TLS enrollment whose organization SSL.com has not
+        /// validated (and that is ready to submit) submits it to SSL.com, which accepts SSL.com's
+        /// subscriber agreement on the organization's behalf. Default false: the plugin only reads
+        /// the status and warns. The order is placed regardless.
+        /// </summary>
+        [JsonPropertyName("SslComSubmitOrganization")]
+        public bool SslComSubmitOrganization { get; set; } = false;
+
+        /// <summary>
+        /// V2 only. Optional <c>adminEmail</c> sent on an SSL.com organization submission (only used
+        /// when <see cref="SslComSubmitOrganization"/> is true).
+        /// </summary>
+        [JsonPropertyName("SslComAdminEmail")]
+        public string SslComAdminEmail { get; set; } = string.Empty;
 
         /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the

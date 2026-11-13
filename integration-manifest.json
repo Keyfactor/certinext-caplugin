@@ -346,6 +346,20 @@
                     "required": "Optional",
                     "example": "false",
                     "default": "false"
+                },
+                {
+                    "name": "SslComSubmitOrganization",
+                    "description": "OPTIONAL (V2 mode only): before an OV or EV SSL/TLS order, the plugin checks whether SSL.com has validated the organization (OrganizationNumber) at that level, refreshing the status once if not. When this is true and the organization is still unvalidated and ready to submit, the plugin also SUBMITS it to SSL.com for validation. WARNING: enabling this ACCEPTS SSL.COM'S SUBSCRIBER AGREEMENT ON THE ORGANIZATION'S BEHALF; each acceptance is audit-logged. Leave false unless you are authorized to do that. Whatever the outcome, the order is placed anyway and a not-validated organization only logs a warning. Default: false.",
+                    "required": "Optional",
+                    "example": "false",
+                    "default": "false"
+                },
+                {
+                    "name": "SslComAdminEmail",
+                    "description": "OPTIONAL (V2 mode only): administrator email sent as adminEmail when the plugin submits an organization to SSL.com (only used when SslComSubmitOrganization is true). Blank omits it and SSL.com uses the organization's own contact.",
+                    "required": "Optional",
+                    "example": "pki-admin@example.com",
+                    "default": ""
                 }
             ],
             "enrollment_config": [

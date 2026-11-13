@@ -499,6 +499,8 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 |---|---|---|
 | `UseV2Api` | Optional | Enables the V2 code path for connection tests, enrollment, revocation, status checks, and synchronization. Default: `false`. |
 | `V2SyncLookbackHours` | Optional | Hours subtracted from the last-sync time on incremental sync. Default: `72`. |
+| `SslComSubmitOrganization` | Optional | OV/EV on V2. `true` lets the plugin submit an unvalidated organization to SSL.com, which **accepts SSL.com's subscriber agreement on the organization's behalf**; see [SSL.com organization validation](#sslcom-organization-validation). Default: `false`. |
+| `SslComAdminEmail` | Optional | Administrator email sent as `adminEmail` on that submission. Blank omits it. Example: `pki-admin@example.com`. |
 | `V2InlineCsr` | Optional | SSL/TLS only. `true` sends the CSR inline in the create call (a single `POST /ssl-certificates`) instead of creating the order and then submitting the CSR. It is about 4-5 seconds faster, but the create call can hold about 20 seconds until issuance, and a create that times out or returns a 5xx can leave an order that issues and is imported by the next sync rather than cancelled. Private PKI always uses two calls. Default: `false`. |
 
 - **Why a lookback:** the API's `from`/`to` filter may bracket either the order-placement date or the issuance date. The window keeps an order created before the last sync but issued afterward (for example a slow DCV order) from being missed.
@@ -589,6 +591,19 @@ mapped to Failed — see the gateway trace log if certificates unexpectedly show
 - Otherwise a revoked order is reported as Failed (the gateway has a record without a body) or skipped (no record), so the gateway never stores a revoked record without a certificate.
 - `IgnoreExpired` is applied here: expired certificates are skipped.
 - An issued order whose download answers 422 `EMS-1165` is emitted without a certificate body and counted as `IssuedNotGeneratedYet` in the sync summary instead of logging a warning per order; a later pass picks it up.
+
+#### SSL.com organization validation
+
+OV and EV certificates are issued under an organization that SSL.com must have validated. Before placing a V2 OV or EV SSL/TLS order for the connector's `OrganizationNumber`, the plugin reads that organization's SSL.com validation status (`GET /organizations/{orgNumber}/ca-validations/sslcom`):
+
+1. **Validated at the order's level (OV or EV):** nothing more is done.
+2. **Not validated:** the plugin asks SSL.com to refresh the status once (`POST .../sslcom/sync`) and checks again.
+3. **Still not validated, and `SslComSubmitOrganization` is `true`,** the level isn't already requested, and SSL.com's readiness block says the organization is ready for that level (`ready` for OV, `evReady` for EV, with nothing missing): the plugin submits it (`POST .../sslcom` with `levels` set to the order's level, `subscriberAgreementAccepted: true`, and `adminEmail` when `SslComAdminEmail` is set). **This accepts SSL.com's subscriber agreement on the organization's behalf.** The intent is logged at Information level before the call, and the connector start-up log warns that the setting is on. Leave it `false` (the default) unless you are authorized to accept that agreement; the plugin then only reads and refreshes the status.
+4. **Whatever happens, the order is still placed.** A not-validated organization, a not-ready organization, or any failed SSL.com call logs one warning and never blocks or fails the enrollment (a not-validated organization's OV/EV order simply stays pending until SSL.com validates it). The warning includes SSL.com's status, `lastError`, and the fields it reports missing; email addresses are masked unless `LogSensitiveRequestData` is on.
+
+DV and Private PKI orders skip this check entirely.
+
+**How "validated" is decided.** The spec describes the response only in prose ("status per level (OV, EV) with validTill"), so the plugin reads it defensively. A level counts as validated when its entry in `levels` carries a validated status word (`VALIDATED`, `VALID`, `APPROVED`, `ACTIVE`, `COMPLETE`, `COMPLETED`, or `ISSUED`) or a true `validated` flag, or has no status but a `validTill` in the future; an entry whose `validTill` has passed is not validated. A bare level name in `levels` counts only when the overall `status` is itself a validated word. The overall `status` and `validatedAt` alone never count, since they aren't per level. Any shape the plugin doesn't recognize is treated as not validated; because that only produces a warning, the cost of a false "not validated" is a log line.
 
 #### Subscriber agreement fallback
 

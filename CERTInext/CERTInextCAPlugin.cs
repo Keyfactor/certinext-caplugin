@@ -350,6 +350,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Audit trail: this is the one place that records sensitive-data logging
             // was switched on, so a reviewer scanning gateway logs can see exactly when it started
             // (and, from the absence of a corresponding line on a later restart, when it stopped).
+            // Audit trail: this setting makes the plugin accept SSL.com's subscriber agreement on an
+            // organization's behalf during OV/EV enrollment, so its state is recorded on every start.
+            if (_config.UseV2Api && _config.SslComSubmitOrganization)
+            {
+                _logger.LogWarning(
+                    "SslComSubmitOrganization=true — OV/EV enrollments for an organization that SSL.com has not " +
+                    "validated will submit it to SSL.com, which ACCEPTS SSL.COM'S SUBSCRIBER AGREEMENT ON THE " +
+                    "ORGANIZATION'S BEHALF. Each acceptance is audit-logged. AdminEmailConfigured={AdminEmailConfigured}",
+                    !string.IsNullOrWhiteSpace(_config.SslComAdminEmail));
+            }
+
             if (_config.LogSensitiveRequestData)
             {
                 _logger.LogWarning(
@@ -444,6 +455,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>True for a bool or a JSON true/false element (a string would fail config deserialization).</summary>
+        /// <summary>True for a plausible single email address: one '@', no whitespace, text on both sides, a dot in the domain.</summary>
+        internal static bool LooksLikeEmailAddress(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            string v = value.Trim();
+            if (v.Any(char.IsWhiteSpace)) return false;
+            int at = v.IndexOf('@');
+            if (at <= 0 || at != v.LastIndexOf('@') || at == v.Length - 1) return false;
+            string domain = v.Substring(at + 1);
+            return domain.Contains('.') && !domain.StartsWith(".") && !domain.EndsWith(".");
+        }
+
         internal static bool IsBooleanSettingValue(object value)
         {
             if (value is bool) return true;
@@ -585,6 +608,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 _logger.LogWarning(
                     "'{Setting}' is true but UseV2Api is false: the setting only applies to the V2 API and is ignored.",
                     Constants.Config.V2InlineCsr);
+            }
+
+            // SslComSubmitOrganization is a Boolean (V2 only), validated like V2InlineCsr. It accepts a
+            // third party's subscriber agreement on the organization's behalf, so a malformed value must
+            // not silently fall back to anything.
+            if (connectionInfo.TryGetValue(Constants.Config.SslComSubmitOrganization, out object sslComSubmitObj)
+                && sslComSubmitObj != null && !IsBooleanSettingValue(sslComSubmitObj))
+            {
+                errors.Add($"'{Constants.Config.SslComSubmitOrganization}' must be true or false. Got: '{sslComSubmitObj}'.");
+            }
+
+            // SslComAdminEmail, when set, must look like one email address (it is sent to SSL.com).
+            string sslComAdminEmail = GetStringValue(connectionInfo, Constants.Config.SslComAdminEmail);
+            if (!string.IsNullOrWhiteSpace(sslComAdminEmail) && !LooksLikeEmailAddress(sslComAdminEmail))
+            {
+                errors.Add($"'{Constants.Config.SslComAdminEmail}' must be a single email address (for example admin@example.com), or blank.");
             }
 
             if (errors.Any())
@@ -2253,6 +2292,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "SSL/TLS orders still use the single-call flow. This message is logged once per connector.");
             }
 
+            // OV/EV: SSL.com validates the organization out of band, and an order for an organization it
+            // has not validated stays pending. Check (and optionally submit) before placing the order.
+            // Strictly advisory: it never blocks or fails the enrollment.
+            if (isOvOrEv && !string.IsNullOrWhiteSpace(_config.OrganizationNumber))
+            {
+                await EnsureSslComOrganizationValidationAsync(
+                    _config.OrganizationNumber, sslProductVariant.ToUpperInvariant());
+            }
+
             V2CreateOrderResponse createResp;
             if (isPrivatePki)
             {
@@ -2596,6 +2644,173 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int status = int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
             return status < 400 || status >= 500;
         }
+
+        /// <summary>
+        /// SSL.com organization-validation pre-check for a V2 OV or EV SSL/TLS order. Advisory only:
+        /// every failure and every not-validated outcome is logged as a warning and the order is
+        /// placed anyway, so this never throws and never blocks an enrollment.
+        ///
+        /// 1. GET the organization's SSL.com status. If SSL.com reports <paramref name="level"/>
+        ///    validated (<see cref="V2SslComValidation.IsLevelValidated"/>), done.
+        /// 2. Otherwise POST /sync once (SSL.com may have validated it since the last read) and
+        ///    re-evaluate.
+        /// 3. Still not validated: when <c>SslComSubmitOrganization</c> is on, the level isn't already
+        ///    requested, and the readiness block says the organization is ready for that level (a
+        ///    missing readiness block counts as not ready), POST the submission with
+        ///    <c>subscriberAgreementAccepted: true</c> (and <c>SslComAdminEmail</c> if set). That
+        ///    accepts SSL.com's subscriber agreement on the organization's behalf, so the intent is
+        ///    audit-logged before the call.
+        /// 4. Anything still not validated is logged once at Warning with what SSL.com reports
+        ///    missing; contact emails are masked unless <c>LogSensitiveRequestData</c> is on.
+        /// </summary>
+        private async Task EnsureSslComOrganizationValidationAsync(string organizationNumber, string level)
+        {
+            _logger.MethodEntry(LogLevel.Debug);
+            V2SslComValidation validation;
+            try
+            {
+                validation = await _client.GetSslComValidationAsync(organizationNumber);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    "SSL.com validation status for organization {OrganizationNumber} could not be read; placing the {Level} " +
+                    "order anyway. Error={Error}", organizationNumber, level, RedactAndCapForLog(ex.Message));
+                _logger.MethodExit(LogLevel.Debug);
+                return;
+            }
+
+            if (validation != null && validation.IsLevelValidated(level))
+            {
+                _logger.LogInformation(
+                    "SSL.com has validated organization {OrganizationNumber} at {Level}.", organizationNumber, level);
+                _logger.MethodExit(LogLevel.Debug);
+                return;
+            }
+
+            // Not validated according to the cached status: ask SSL.com once for a fresh read.
+            try
+            {
+                var refreshed = await _client.SyncSslComValidationAsync(organizationNumber);
+                if (refreshed != null) validation = refreshed;
+                if (validation != null && validation.IsLevelValidated(level))
+                {
+                    _logger.LogInformation(
+                        "SSL.com has validated organization {OrganizationNumber} at {Level} (after a status refresh).",
+                        organizationNumber, level);
+                    _logger.MethodExit(LogLevel.Debug);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    "SSL.com validation refresh for organization {OrganizationNumber} failed; using the status read earlier. " +
+                    "Error={Error}", organizationNumber, RedactAndCapForLog(ex.Message));
+            }
+
+            bool submitted = false;
+            string submitSkipReason = null;
+            if (validation == null)
+            {
+                submitSkipReason = "SSL.com returned no status";
+            }
+            else if (!_config.SslComSubmitOrganization)
+            {
+                submitSkipReason = "SslComSubmitOrganization is off";
+            }
+            else if (validation.IsLevelListed(level))
+            {
+                submitSkipReason = $"{level} was already requested from SSL.com";
+            }
+            else if (!SslComReadyFor(validation.Readiness, level))
+            {
+                submitSkipReason = $"SSL.com reports the organization is not ready for {level} (or no readiness information)";
+            }
+            else
+            {
+                string adminEmail = string.IsNullOrWhiteSpace(_config.SslComAdminEmail) ? null : _config.SslComAdminEmail.Trim();
+
+                // Audit trail: this call accepts SSL.com's subscriber agreement on the organization's
+                // behalf, so the intent is recorded before it is made, even if the call then fails.
+                _logger.LogInformation(
+                    "SSL.com organization validation submission attempt started. OrganizationNumber={OrganizationNumber}, " +
+                    "Levels=[{Level}], SubscriberAgreementAccepted=true (SSL.com's subscriber agreement is accepted on the " +
+                    "organization's behalf, per SslComSubmitOrganization=true), AdminEmail={AdminEmail}",
+                    organizationNumber, level,
+                    adminEmail == null ? "(none)" : MaskEmailForLog(adminEmail));
+
+                try
+                {
+                    var response = await _client.SubmitSslComValidationAsync(organizationNumber, new V2SslComSubmitRequest
+                    {
+                        Levels = new List<string> { level },
+                        SubscriberAgreementAccepted = true,
+                        AdminEmail = adminEmail
+                    });
+                    submitted = true;
+                    if (response != null) validation = response;
+                    _logger.LogInformation(
+                        "SSL.com organization validation submitted. OrganizationNumber={OrganizationNumber}, Level={Level}, " +
+                        "SslComStatus={Status}", organizationNumber, level, DescribeSslComText(validation?.Status));
+                    if (validation != null && validation.IsLevelValidated(level))
+                    {
+                        _logger.MethodExit(LogLevel.Debug);
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        "SSL.com organization validation submission failed. OrganizationNumber={OrganizationNumber}, Level={Level}, " +
+                        "Error={Error}", organizationNumber, level, RedactAndCapForLog(ex.Message));
+                }
+            }
+
+            // Not validated, whatever was tried: warn with what SSL.com says, then place the order anyway.
+            var readiness = validation?.Readiness;
+            var missing = string.Equals(level, "EV", StringComparison.OrdinalIgnoreCase) ? readiness?.EvMissing : readiness?.Missing;
+            _logger.LogWarning(
+                "SSL.com has not validated organization {OrganizationNumber} at {Level}; placing the order anyway, so it " +
+                "may stay pending until SSL.com validates the organization. SslComStatus={Status}, Levels={Levels}, " +
+                "LastError={LastError}, Missing=[{Missing}], SoftMissing=[{SoftMissing}], SubmittedThisCall={Submitted}, " +
+                "NotSubmittedBecause={SkipReason}, SslComContact={Contact}",
+                organizationNumber, level,
+                DescribeSslComText(validation?.Status),
+                validation == null ? "(unknown)" : DescribeSslComText(validation.Levels.ValueKind == System.Text.Json.JsonValueKind.Undefined
+                    ? null : validation.Levels.GetRawText()),
+                DescribeSslComText(validation?.LastError),
+                string.Join(", ", (missing ?? new List<string>()).Select(DescribeSslComText)),
+                string.Join(", ", (readiness?.SoftMissing ?? new List<string>()).Select(DescribeSslComText)),
+                submitted, submitSkipReason ?? "(not applicable)",
+                string.IsNullOrWhiteSpace(validation?.Contact?.Email) ? "(none)" : MaskEmailForLog(validation.Contact.Email));
+            _logger.MethodExit(LogLevel.Debug);
+        }
+
+        /// <summary>
+        /// True when the SSL.com readiness block says the organization can be submitted at
+        /// <paramref name="level"/>: the matching ready flag is true and the matching missing list is empty.
+        /// A missing block, or a flag that is absent, counts as not ready.
+        /// </summary>
+        internal static bool SslComReadyFor(V2SslComReadiness readiness, string level)
+        {
+            if (readiness == null) return false;
+            bool ev = string.Equals(level, "EV", StringComparison.OrdinalIgnoreCase);
+            bool? flag = ev ? readiness.EvReady : readiness.Ready;
+            var missing = ev ? readiness.EvMissing : readiness.Missing;
+            return flag == true && (missing == null || missing.Count == 0);
+        }
+
+        /// <summary>SSL.com/CA free text for a log line: control characters stripped, emails masked unless sensitive logging is on, capped.</summary>
+        private string DescribeSslComText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return "(none)";
+            string sanitized = LogSanitizer.SanitizeCaText(text, _config.LogSensitiveRequestData);
+            return sanitized.Length <= 200 ? sanitized : sanitized.Substring(0, 200) + "…";
+        }
+
+        private string MaskEmailForLog(string email) =>
+            _config.LogSensitiveRequestData ? LogSanitizer.Strip(email) : LogSanitizer.MaskEmail(email);
 
         /// <summary>
         /// The signer values for, and the per-order "already attempted" memory of, the V2

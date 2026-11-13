@@ -91,6 +91,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // V1 and V2: sync does not emit pending or issued orders younger than this (issue 0090).
             public const string SyncRecentOrderGraceSeconds = "SyncRecentOrderGraceSeconds";
             public const string V2InlineCsr = "V2InlineCsr"; // opt-in: SSL/TLS sends the CSR inline on create (V2 only)
+            // V2 OV/EV orders: opt-in submission of the organization to SSL.com for validation, which
+            // accepts SSL.com's subscriber agreement on the organization's behalf (default off).
+            public const string SslComSubmitOrganization = "SslComSubmitOrganization";
+            public const string SslComAdminEmail = "SslComAdminEmail";
 
             // Environment variable that overrides DcvTimeoutMinutes when set.
             public const string DcvTimeoutMinutesEnvVar = "CERTINEXT_DCV_TIMEOUT_MINUTES";
@@ -482,6 +486,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string PrivatePkiCertificatesPath = "/api/certinext/v2/private-pki-certificates";
             public const string SignatureCertificatesPath  = "/api/certinext/v2/signature-certificates";
             public const string CatalogProductsPath        = "/api/certinext/v2/catalog/products";
+
+            // SSL.com organization validation: {OrganizationsPath}/{orgNumber}/{SslComValidationSuffix}
+            // (GET status, POST submit) and .../{SslComValidationSuffix}/sync (POST refresh).
+            public const string OrganizationsPath          = "/api/certinext/v2/organizations";
+            public const string SslComValidationSuffix     = "ca-validations/sslcom";
 
             // Order status strings (V2 REST — NOT numeric IDs)
             public const string StatusPendingDcv                     = "pending-dcv";

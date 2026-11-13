@@ -1659,6 +1659,77 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             Logger.MethodExit(LogLevel.Trace);
         }
 
+        // ---------------------------------------------------------------------------
+        // SSL.com organization validation (V2)
+        // ---------------------------------------------------------------------------
+
+        private static string BuildSslComValidationPath(string organizationNumber)
+        {
+            if (string.IsNullOrWhiteSpace(organizationNumber))
+                throw new ArgumentException("An organization number is required.", nameof(organizationNumber));
+            return $"{Constants.ApiV2.OrganizationsPath}/{Uri.EscapeDataString(organizationNumber.Trim())}/" +
+                   Constants.ApiV2.SslComValidationSuffix;
+        }
+
+        /// <summary>
+        /// Executes one SSL.com validation call and parses the body. The body carries the SSL.com
+        /// contact (personal data), so it is only ever logged, at Trace, through
+        /// <see cref="ApplyLoggingRedaction"/>.
+        /// </summary>
+        private async Task<V2SslComValidation> ExecuteSslComValidationAsync(
+            string path, Method method, object body, string operation, bool bodyOptional, CancellationToken ct)
+        {
+            EnsureV2Client();
+            var req = await BuildV2RequestAsync(path, method, ct);
+            if (body != null)
+                req.AddJsonBody(JsonSerializer.Serialize(body, GetJsonOptions()));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            sw.Stop();
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method={Method}, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
+                method, path, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+            if (Logger.IsEnabled(LogLevel.Trace))
+                Logger.LogTrace("{Operation} response: {Body}", operation,
+                    ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
+            ThrowOnV2Failure(resp, operation);
+            if (bodyOptional && string.IsNullOrWhiteSpace(resp.Content))
+                return null;
+            return DeserializeV2OrThrow<V2SslComValidation>(resp, operation);
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2SslComValidation> GetSslComValidationAsync(string organizationNumber, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var result = await ExecuteSslComValidationAsync(
+                BuildSslComValidationPath(organizationNumber), Method.Get, null, "V2 SSL.com validation status", false, ct);
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2SslComValidation> SyncSslComValidationAsync(string organizationNumber, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            var result = await ExecuteSslComValidationAsync(
+                BuildSslComValidationPath(organizationNumber) + "/sync", Method.Post, null, "V2 SSL.com validation sync", false, ct);
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2SslComValidation> SubmitSslComValidationAsync(
+            string organizationNumber, V2SslComSubmitRequest request, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            var result = await ExecuteSslComValidationAsync(
+                BuildSslComValidationPath(organizationNumber), Method.Post, request, "V2 SSL.com validation submit", true, ct);
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
         /// <inheritdoc/>
         public async Task<V2CancelOrderOutcome> CancelOrderV2Async(
             string productFamilySlug,
@@ -3069,7 +3140,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // bodies that may echo older field names.
         private static readonly string[] PersonalEmailFieldNames =
         {
-            "requestorEmail", "requesterEmail", "pocEmail", "tpcEmail", "requestorEmailId", "dcvEmail", "email"
+            "requestorEmail", "requesterEmail", "pocEmail", "tpcEmail", "requestorEmailId", "dcvEmail", "email",
+            // V2 SSL.com organization-validation submit body (optional admin contact).
+            "adminEmail"
         };
 
         // Exact JSON key names carrying other person/contact data (name, phone/ISD/mobile,
