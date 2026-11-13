@@ -984,7 +984,7 @@ Keyfactor Command periodically synchronizes its certificate inventory with CERTI
 
 #### V1 synchronization
 
-A full sync reads every order in the account. An incremental sync requests only orders placed on or after the date of the previous sync. The filter is a date only (`yyyy-MM-dd`) on the order date, with no lookback, so an older order that is slow to issue is missed by incremental syncs; run a full sync to import it. V2 avoids this with `V2SyncLookbackHours`.
+A full sync reads every order in the account. An incremental sync requests only orders placed on or after the date of the previous sync. The filter is a date only (`yyyy-MM-dd`) on the order date, with no lookback, so an older order that is slow to issue is missed by incremental syncs; run a full sync to import it. V2 avoids this with `V2SyncLookbackHours`. The one exception is the recent-order hold-back below, which moves the incremental start back by the hold window.
 
 ```mermaid
 flowchart TD
@@ -993,19 +993,29 @@ flowchart TD
     C -- No more pages --> Z["Log totals and signal completion to the gateway"]
     C -- Next order --> D{"IgnoreExpired is on and the expiry date<br/>is known and past? (V1 never sets the<br/>expiry date yet)"}
     D -- Yes --> C
-    D -- No --> E{"Order is pending, DCV is enabled, a DNS provider is<br/>available, and it is inside the age window and<br/>per-pass cap?"}
+    D -- No --> D2{"Order is pending or issued and younger than<br/>SyncRecentOrderGraceSeconds?"}
+    D2 -- Yes --> C
+    D2 -- No --> E{"Order is pending, DCV is enabled, a DNS provider is<br/>available, and it is inside the age window and<br/>per-pass cap?"}
     E -- Yes --> F["Run DNS-01 DCV for the order<br/>then refetch it if DCV ran"]
     E -- No --> G
     F --> G{Order failed, rejected,<br/>or cancelled?}
     G -- Yes --> C
     G -- No --> H{"Issued or revoked,<br/>and no certificate body in the listing?"}
     H -- Yes --> I["Fetch the certificate (TrackOrder + download)<br/>keeping the listing's subject, product, and order date"]
-    H -- No --> J
-    I --> J["Emit the record to the gateway buffer<br/>(issued with PEM, revoked, or pending)"]
+    H -- No --> K
+    I --> K{"Revoked with no certificate body?"}
+    K -- No --> J["Emit the record to the gateway buffer<br/>(issued with PEM, revoked, or pending)"]
+    K -- Yes --> L{"Gateway already holds a certificate<br/>body for this order?"}
+    L -- Yes --> J
+    L -- "Row but no body" --> M["Emit as failed"]
+    L -- "No row" --> C
+    M --> C
     J --> C
 ```
 
 - **Errors.** If processing an order throws, the plugin logs and counts the error and moves on to the next order. After at least 50 records, if more than 25 percent have errored, the sync aborts and is retried on the next cycle instead of completing with mostly failed records. V2 synchronization applies the same rule.
+- **Recent-order hold-back.** A pending or issued order created less than `SyncRecentOrderGraceSeconds` (default 120, plus a 5-second clock margin) ago is not emitted, and issued ones are not downloaded, so a sync cannot insert the gateway row an in-flight enrollment is about to save and make that enrollment fail with a duplicate key. The next incremental pass imports the order. To keep a held order created just before UTC midnight in that next listing, the incremental start date is moved back by the grace window, the 5-second margin, and 5 minutes of slack. Revoked and failed orders, and orders with no usable order date, are never held. `0` disables the hold.
+- **Revoked orders without a certificate body.** The V1 client never downloads a revoked order's certificate, so a revoked order is emitted as revoked only if the gateway already holds the certificate body. If the gateway has the order's row but no body it is emitted as failed, and if the gateway has no row for it (or the check cannot be made) the order is skipped. See [Single-Record Retrieval](#single-record-retrieval).
 - **Expired certificates.** `IgnoreExpired` is applied on V2 only. On V1 the order report never populates a certificate expiry date, so the setting has no effect yet and expired certificates are imported.
 - **DCV during sync.** Pending orders go through DNS-01 validation only while younger than `DcvSyncMaxOrderAgeHours` (older orders are reported as pending and left alone) and only up to `DcvSyncMaxPerPass` orders per pass, so a backlog of stalled orders can't slow every sync.
 - **DCV timing.** The V1 sync path uses a short fixed propagation delay and a single-shot challenge check rather than the longer `Enroll` waits. See [Domain Control Validation](#domain-control-validation).
@@ -1054,9 +1064,9 @@ When Command asks for one order (`GetSingleRecord`), for example to refresh a pe
 | Look up the order | `TrackOrder`, then `GetCertificate` when the order is downloadable | Find the product family that owns the order, then track it |
 | Pending order | Run DCV, then refetch the certificate if DCV ran (a failed refetch is logged and the earlier result is returned) | Run DCV when the order lists a domain, bounded by `DcvTimeoutMinutes`, then track again (a DCV failure is logged and ignored) |
 | Issued order | Certificate PEM from `GetCertificate` | Download the chain, leaf first (a failed download is logged and the record is returned without a body) |
-| Revoked order with no certificate body | Status, date, and reason come from `TrackOrder` | Returned as revoked only if the gateway already holds the certificate body; otherwise returned as failed |
+| Revoked order with no certificate body | Status, date, and reason come from `TrackOrder`. Returned as revoked only if the gateway already holds the certificate body; otherwise returned as failed | Returned as revoked only if the gateway already holds the certificate body; otherwise returned as failed |
 
-The last V2 row is the body-less revoked guard. CERTInext does not serve the body of a revoked order, and a body-less revoked record would break Command's revoked-certificate scans for the whole CA. `Synchronize` applies the same guard but skips the order when the gateway has no row for it, whereas `GetSingleRecord` must return something and so returns failed.
+The last row is the body-less revoked guard, which applies to both V1 and V2. CERTInext does not serve the body of a revoked order, and a body-less revoked record would break Command's revoked-certificate scans for the whole CA. `Synchronize` applies the same guard but skips the order when the gateway has no row for it, whereas `GetSingleRecord` must return something and so returns failed.
 
 ### Domain Control Validation
 

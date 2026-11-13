@@ -439,9 +439,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                "gateway row for an order whose enrollment is still in flight, which would make the " +
                                "enrollment's own save fail with a duplicate key. Revoked and failed orders are never held " +
                                "back. 0 disables the hold; a negative value uses the default. " +
-                               $"Default: {Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds}.",
+                               $"Default: {Constants.Api.DefaultSyncRecentOrderGraceSeconds}.",
                     Hidden = false,
-                    DefaultValue = Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds,
+                    DefaultValue = Constants.Api.DefaultSyncRecentOrderGraceSeconds,
                     Type = "Number"
                 },
                 [Constants.Config.V2InlineCsr] = new PropertyConfigInfo
@@ -982,13 +982,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// During a Synchronize (full or incremental, V1 and V2 modes), pending and issued orders created
-        /// less than this many seconds ago (plus <see cref="Constants.ApiV2.SyncRecentOrderClockMarginSeconds"/>)
+        /// less than this many seconds ago (plus <see cref="Constants.Api.SyncRecentOrderClockMarginSeconds"/>)
         /// are not emitted, so the sync cannot create the gateway row an in-flight enrollment is about to
         /// save (issue 0090). 0 disables; a negative value falls back to the default. Revoked and failed
         /// orders are never held back. Default: 120.
         /// </summary>
         [JsonPropertyName("SyncRecentOrderGraceSeconds")]
-        public int SyncRecentOrderGraceSeconds { get; set; } = Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds;
+        public int SyncRecentOrderGraceSeconds { get; set; } = Constants.Api.DefaultSyncRecentOrderGraceSeconds;
 
         /// <summary>
         /// OPTIONAL (V2 mode only), default false. When true, SSL/TLS orders carry the CSR inline in the

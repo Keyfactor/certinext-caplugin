@@ -1218,14 +1218,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return;
             }
 
-            DateTime? issuedAfter = fullSync ? (DateTime?)null : lastSync;
+            // Hold back pending/issued orders that an in-flight enrollment may still be about to
+            // save (full and incremental passes alike).
+            int recentOrderGraceSeconds = GetSyncRecentOrderGraceSeconds(_config);
+
+            DateTime? issuedAfter = fullSync ? (DateTime?)null : GetSyncIssuedAfter(lastSync, recentOrderGraceSeconds);
 
             _logger.LogInformation(
-                "Starting CERTInext synchronization. FullSync={FullSync}, IssuedAfter={IssuedAfter}, UseV2Api={UseV2Api}",
-                fullSync, issuedAfter?.ToString("O") ?? "none", _config.UseV2Api);
+                "Starting CERTInext synchronization. FullSync={FullSync}, IssuedAfter={IssuedAfter}, " +
+                "RecentOrderGraceSeconds={Grace}, UseV2Api={UseV2Api}",
+                fullSync, issuedAfter?.ToString("O") ?? "none", recentOrderGraceSeconds, _config.UseV2Api);
 
             int synced = 0;
             int skipped = 0;
+            int deferredRecentOrders = 0;   // pending/issued orders withheld because they are younger than the grace window
             int skippedWithBody = 0;   // skipped records that nonetheless carried a cert body (should be 0)
             int errors = 0;
 
@@ -1280,6 +1286,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             current.Id, current.Status, status,
                             current.OrderDate?.ToString("o") ?? "(none)",
                             !string.IsNullOrWhiteSpace(current.Certificate));
+
+                        // Do not hand the gateway a row (pending, or issued with a body we would
+                        // fetch) for an order whose enrollment may still be in flight. The gateway
+                        // would insert a row with this CARequestID and the enrollment's own save
+                        // would then fail on the unique (CA, CARequestID) index. Held before any DCV,
+                        // refetch or download call. Not emitting is safe: the next incremental pass
+                        // re-lists the order (the listing lookback keeps it in the window) and
+                        // imports it.
+                        if (ShouldDeferRecentOrder(
+                                status, current.OrderDate, DateTime.UtcNow, recentOrderGraceSeconds,
+                                out double recentOrderAgeSeconds))
+                        {
+                            _logger.LogInformation(
+                                "Sync: holding back recent order until the next pass (an enrollment may " +
+                                "still be saving it). CARequestID={Id}, AgeSeconds={Age:F1}, GraceSeconds={Grace}.",
+                                current.Id, recentOrderAgeSeconds, recentOrderGraceSeconds);
+                            deferredRecentOrders++;
+                            continue;
+                        }
 
                         // Deferred DCV: pending orders (EXTERNALVALIDATION) often need DCV driven
                         // forward during sync — CERTInext parks fresh orders and exposes the DCV
@@ -1497,10 +1522,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "Errors={Errors}. Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
                     "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
                     "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
-                    "BodylessRevokedSkipped={BodylessRevokedSkipped} (bodyless-REVOKED guard). {DcvClause}",
+                    "BodylessRevokedSkipped={BodylessRevokedSkipped} (bodyless-REVOKED guard). " +
+                    "RecentOrderDeferred={RecentOrderDeferred} (younger than {Grace}s, imported next pass). {DcvClause}",
                     synced, skipped, skippedWithBody, errors,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
+                    deferredRecentOrders, recentOrderGraceSeconds,
                     dcvClause);
             }
             catch (OperationCanceledException)
@@ -3014,7 +3041,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // Issue 0090: hold back pending and issued orders that an in-flight enrollment may still be
             // about to save. Applies to full and incremental passes alike; the next incremental pass
             // imports what was held back (its lookback reaches well before any held-back order).
-            int recentOrderGraceSeconds = GetV2RecentOrderGraceSeconds(_config);
+            int recentOrderGraceSeconds = GetSyncRecentOrderGraceSeconds(_config);
 
             _logger.LogInformation(
                 "Starting CERTInext V2 synchronization. FullSync={FullSync}, LastSync={LastSync}, " +
@@ -3116,7 +3143,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // pass re-lists the order (lookback window) and imports it. This runs before
                         // the DCV attempt and the certificate download, so a held-back order costs
                         // no extra CA calls.
-                        if (ShouldDeferRecentOrderV2(
+                        if (ShouldDeferRecentOrder(
                                 disposition.Value, orderDateUtc, DateTime.UtcNow, recentOrderGraceSeconds,
                                 out double recentOrderAgeSeconds))
                         {
@@ -3378,20 +3405,42 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// Effective grace window (seconds) for holding back recent pending and issued orders in a
-        /// V2 sync (full or incremental): 0 disables, a negative value (invalid) falls back to the default.
+        /// V1 or V2 sync (full or incremental): 0 disables, a negative value (invalid) falls back to
+        /// the default.
         /// </summary>
-        internal static int GetV2RecentOrderGraceSeconds(CERTInextConfig config)
+        internal static int GetSyncRecentOrderGraceSeconds(CERTInextConfig config)
         {
             int configured = config?.SyncRecentOrderGraceSeconds
-                             ?? Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds;
-            return configured < 0 ? Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds : configured;
+                             ?? Constants.Api.DefaultSyncRecentOrderGraceSeconds;
+            return configured < 0 ? Constants.Api.DefaultSyncRecentOrderGraceSeconds : configured;
         }
 
         /// <summary>
-        /// Issue 0090 gate: true when a V2 sync row should be withheld because it is pending
+        /// The <c>issuedAfter</c> passed to the V1 order listing for an incremental pass. The listing
+        /// keeps only the UTC calendar day of this value (<c>orderDateFrom</c>), so with the hold-back
+        /// active it is moved back by the hold window (grace plus clock margin) plus a slack for the
+        /// previous pass's duration. Without that, an order created in the last minutes before UTC
+        /// midnight and held back by a pass that starts after midnight would fall on a day before the
+        /// next pass's <c>orderDateFrom</c> and never be re-listed until a full sync. With the
+        /// hold-back disabled (<paramref name="graceSeconds"/> 0) the value is unchanged. V2 does not
+        /// need this: its listing already looks back <c>V2SyncLookbackHours</c>.
+        /// </summary>
+        internal static DateTime? GetSyncIssuedAfter(DateTime? lastSync, int graceSeconds)
+        {
+            if (!lastSync.HasValue || graceSeconds <= 0)
+                return lastSync;
+
+            return lastSync.Value.AddSeconds(
+                -(graceSeconds
+                  + Constants.Api.SyncRecentOrderClockMarginSeconds
+                  + Constants.Api.SyncRecentOrderLookbackSlackSeconds));
+        }
+
+        /// <summary>
+        /// Issue 0090 gate: true when a V1 or V2 sync row should be withheld because it is pending
         /// (<see cref="EndEntityStatus.EXTERNALVALIDATION"/>) or issued
         /// (<see cref="EndEntityStatus.GENERATED"/>) and was created less than
-        /// <paramref name="graceSeconds"/> plus <see cref="Constants.ApiV2.SyncRecentOrderClockMarginSeconds"/>
+        /// <paramref name="graceSeconds"/> plus <see cref="Constants.Api.SyncRecentOrderClockMarginSeconds"/>
         /// ago, so an enrollment that is still in flight can save its own row first.
         ///
         /// Age is measured at the moment the row is processed (<paramref name="nowUtc"/>), which is
@@ -3402,7 +3451,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// missing or unparseable date, a revoked or failed disposition, and a disabled
         /// (<paramref name="graceSeconds"/> &lt;= 0) window.
         /// </summary>
-        internal static bool ShouldDeferRecentOrderV2(
+        internal static bool ShouldDeferRecentOrder(
             int disposition,
             DateTime? orderDateUtc,
             DateTime nowUtc,
@@ -3417,10 +3466,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return false;
 
             ageSeconds = (nowUtc - orderDateUtc.Value).TotalSeconds;
-            if (ageSeconds < -Constants.ApiV2.SyncRecentOrderClockMarginSeconds)
+            if (ageSeconds < -Constants.Api.SyncRecentOrderClockMarginSeconds)
                 return false; // order dated well in the future: clock disagreement, don't hold it back
 
-            return ageSeconds < graceSeconds + Constants.ApiV2.SyncRecentOrderClockMarginSeconds;
+            return ageSeconds < graceSeconds + Constants.Api.SyncRecentOrderClockMarginSeconds;
         }
 
         /// <summary>

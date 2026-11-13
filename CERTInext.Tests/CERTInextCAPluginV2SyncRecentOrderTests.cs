@@ -45,8 +45,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     [Collection(LoggingStateCollection.Name)]
     public class CERTInextCAPluginV2SyncRecentOrderTests
     {
-        private static readonly int Margin = Constants.ApiV2.SyncRecentOrderClockMarginSeconds;
-        private static readonly int DefaultGrace = Constants.ApiV2.DefaultSyncRecentOrderGraceSeconds;
+        private static readonly int Margin = Constants.Api.SyncRecentOrderClockMarginSeconds;
+        private static readonly int DefaultGrace = Constants.Api.DefaultSyncRecentOrderGraceSeconds;
 
         private sealed class CapturingLoggerProvider : ILoggerProvider
         {
@@ -399,11 +399,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(3600, false)]
         [InlineData(-3, true)]     // CA clock slightly ahead, within the margin
         [InlineData(-60, false)]   // CA clock far ahead: untrustworthy, fail open
-        public void ShouldDeferRecentOrderV2_Pending_AgeBoundaries(double ageSeconds, bool expectDefer)
+        public void ShouldDeferRecentOrder_Pending_AgeBoundaries(double ageSeconds, bool expectDefer)
         {
             var now = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
 
-            bool deferred = CERTInextCAPlugin.ShouldDeferRecentOrderV2(
+            bool deferred = CERTInextCAPlugin.ShouldDeferRecentOrder(
                 (int)EndEntityStatus.EXTERNALVALIDATION, now.AddSeconds(-ageSeconds), now, DefaultGrace, out double age);
 
             deferred.Should().Be(expectDefer);
@@ -418,11 +418,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(3600, false)]
         [InlineData(-3, true)]     // CA clock slightly ahead, within the margin
         [InlineData(-60, false)]   // CA clock far ahead: untrustworthy, fail open
-        public void ShouldDeferRecentOrderV2_Issued_AgeBoundaries(double ageSeconds, bool expectDefer)
+        public void ShouldDeferRecentOrder_Issued_AgeBoundaries(double ageSeconds, bool expectDefer)
         {
             var now = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
 
-            bool deferred = CERTInextCAPlugin.ShouldDeferRecentOrderV2(
+            bool deferred = CERTInextCAPlugin.ShouldDeferRecentOrder(
                 (int)EndEntityStatus.GENERATED, now.AddSeconds(-ageSeconds), now, DefaultGrace, out double age);
 
             deferred.Should().Be(expectDefer);
@@ -430,11 +430,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public void ShouldDeferRecentOrderV2_GraceZero_NeverDeferred()
+        public void ShouldDeferRecentOrder_GraceZero_NeverDeferred()
         {
             var now = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
 
-            CERTInextCAPlugin.ShouldDeferRecentOrderV2(
+            CERTInextCAPlugin.ShouldDeferRecentOrder(
                     (int)EndEntityStatus.EXTERNALVALIDATION, now.AddSeconds(-1), now, 0, out _)
                 .Should().BeFalse();
         }
@@ -442,18 +442,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Theory]
         [InlineData((int)EndEntityStatus.REVOKED)]
         [InlineData((int)EndEntityStatus.FAILED)]
-        public void ShouldDeferRecentOrderV2_RevokedAndFailed_NeverDeferred(int disposition)
+        public void ShouldDeferRecentOrder_RevokedAndFailed_NeverDeferred(int disposition)
         {
             var now = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
 
-            CERTInextCAPlugin.ShouldDeferRecentOrderV2(disposition, now.AddSeconds(-1), now, DefaultGrace, out _)
+            CERTInextCAPlugin.ShouldDeferRecentOrder(disposition, now.AddSeconds(-1), now, DefaultGrace, out _)
                 .Should().BeFalse();
         }
 
         [Fact]
-        public void ShouldDeferRecentOrderV2_NoOrderDate_FailsOpen()
+        public void ShouldDeferRecentOrder_NoOrderDate_FailsOpen()
         {
-            CERTInextCAPlugin.ShouldDeferRecentOrderV2(
+            CERTInextCAPlugin.ShouldDeferRecentOrder(
                     (int)EndEntityStatus.EXTERNALVALIDATION, null, DateTime.UtcNow, DefaultGrace, out _)
                 .Should().BeFalse();
         }
@@ -464,12 +464,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(45, 45)]
         [InlineData(0, 0)]
         [InlineData(-1, 120)]
-        public void GetV2RecentOrderGraceSeconds_ZeroDisables_NegativeFallsBackToDefault(int? configured, int expected)
+        public void GetSyncRecentOrderGraceSeconds_ZeroDisables_NegativeFallsBackToDefault(int? configured, int expected)
         {
             var config = new CERTInextConfig();
             if (configured.HasValue) config.SyncRecentOrderGraceSeconds = configured.Value;
 
-            CERTInextCAPlugin.GetV2RecentOrderGraceSeconds(config).Should().Be(expected);
+            CERTInextCAPlugin.GetSyncRecentOrderGraceSeconds(config).Should().Be(expected);
         }
 
         [Fact]

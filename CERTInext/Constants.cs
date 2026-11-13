@@ -328,6 +328,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const int DefaultPageSize = 100;
             public const int MaxPageSize = 500;
 
+            // Enroll/sync race mitigation (issue 0090), shared by the V1 and V2 syncs. A sync that
+            // emits a row for an order whose enrollment has not saved yet makes the gateway insert a
+            // row with that CARequestID, and the enrollment's own save then fails on the unique
+            // (CA, CARequestID) index. So a sync (full or incremental) withholds pending and issued
+            // orders younger than this; the next incremental pass imports them (V2: the lookback
+            // re-lists them; V1: GetSyncIssuedAfter moves the listing start back).
+            // 120 s is the longest an enrollment normally runs before it gives up.
+            public const int DefaultSyncRecentOrderGraceSeconds = 120;
+
+            // Added to the grace window when comparing against orderDate. Both listings carry
+            // orderDate as whole seconds, UTC, truncated (verified live 2026-10-15: V1 GetOrderReport
+            // rows are "yyyy-MM-dd HH:mm:ss", stamps 0.95-2.4 s before the gateway's UTC log clock; V2
+            // /reports/orders rows are yyyy-MM-ddTHH:mm:ssZ, 0.8-1.4 s before the create response).
+            // Truncation makes an order look up to 1 s older than it is, and CA/gateway clock skew is
+            // not bounded by anything we control, so leave a few seconds of slack.
+            public const int SyncRecentOrderClockMarginSeconds = 5;
+
+            // V1 only: the incremental listing filters orderDateFrom by UTC calendar day
+            // (CERTInextClient.ListCertificatesAsync). A held-back order is re-listed on the next pass
+            // only if its day is not before the day of the issuedAfter we send. Looking back by the
+            // hold window plus this slack (for the gateway's lastSync being the previous pass's end
+            // rather than its start) keeps an order created just before UTC midnight in the next
+            // pass's listing.
+            public const int SyncRecentOrderLookbackSlackSeconds = 300;
+
             // Legacy path constants — kept so CERTInextClient can still reference them
             // without breaking existing callers while being replaced.
             // These do NOT exist in the real API.
@@ -571,21 +596,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // exactly lastSync, so an order created before lastSync but issued after it
             // (e.g. a slow-DCV order) still surfaces. See CERTInextConfig.V2SyncLookbackHours.
             public const int DefaultSyncLookbackHours = 72;
-
-            // Enroll/sync race mitigation (issue 0090). A sync that emits a row for an order whose
-            // enrollment has not saved yet makes the gateway insert a row with that CARequestID,
-            // and the enrollment's own save then fails on the unique (CA, CARequestID) index. So
-            // a sync (full or incremental) withholds pending and issued orders younger than this;
-            // the next incremental pass imports them (the lookback re-lists them).
-            // 120 s is the longest an enrollment normally runs before it gives up.
-            public const int DefaultSyncRecentOrderGraceSeconds = 120;
-
-            // Added to the grace window when comparing against orderDate. The report's orderDate is
-            // whole seconds, UTC, truncated (verified live 2026-10-15: 1318 rows all
-            // yyyy-MM-ddTHH:mm:ssZ, stamps 0.8-1.4 s before the create response). Truncation makes
-            // an order look up to 1 s older than it is, and CA/gateway clock skew is not
-            // bounded by anything we control, so leave a few seconds of slack.
-            public const int SyncRecentOrderClockMarginSeconds = 5;
         }
 
         // V2 config key constants (added here alongside existing Config constants)
