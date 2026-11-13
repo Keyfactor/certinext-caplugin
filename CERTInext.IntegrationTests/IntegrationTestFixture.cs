@@ -54,6 +54,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_V2_LIFECYCLE_FRESH_DCV",
                 // Selects the V2InlineCsr connector setting for the V2 enrollment tests (see V2EnvHelper).
                 "CERTINEXT_V2_INLINE_CSR",
+                // Issue 0090 V2 place-order latency experiment (places real sandbox orders).
+                "CERTINEXT_V2_LATENCY_EXPERIMENT",
+                // Explicit-ID V2 sandbox order cleanup (revokes/cancels the listed orders).
+                "CERTINEXT_V2_CLEANUP_ORDERS",
+                // Issues 0062/0090 V2 inline-CSR vs two-call issuance experiment (places real sandbox orders).
+                "CERTINEXT_V2_INLINE_CSR_EXPERIMENT",
             };
 
         // ---------------------------------------------------------------------------
