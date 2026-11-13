@@ -27,6 +27,8 @@ To import the chain:
 
 See [configuration.md](configuration.md#gateway-registration) for the full Gateway Registration walkthrough.
 
+> Note: eMudhra is withdrawing from public TLS, and the emSign roots are being phased out by browser root programs (Chrome and Firefox after November 16, 2026; Apple on November 30, 2026). CERTInext public TLS certificates will be issued under a different CA, so the steps above need repeating with the new chain. See [Change of issuing CA](configuration.md#change-of-issuing-ca-emudhra-exit-from-public-tls).
+
 ## Troubleshooting
 
 | Symptom | Section |
