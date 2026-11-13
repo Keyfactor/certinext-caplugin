@@ -1,4 +1,4 @@
-// Copyright 2024 Keyfactor
+// Copyright 2026 Keyfactor
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,17 +27,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 [Constants.Config.ApiUrl] = new PropertyConfigInfo
                 {
-                    Comments = "REQUIRED: CERTInext API base URL. " +
-                               "Sandbox (US): https://sandbox-us-api.certinext.io/emSignHub-API/ — " +
-                               "Production (US): https://us-api.certinext.io/ — " +
-                               "Production (Global/India): https://api.certinext.io/",
+                    Comments = "REQUIRED: CERTInext API base URL. V1 (default): host plus /emSignHub-API/, e.g. " +
+                               "https://us-api.certinext.io/emSignHub-API/. V2 (UseV2Api=true): bare host, e.g. " +
+                               "https://us-api.certinext.io. Must use https.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.AccountNumber] = new PropertyConfigInfo
                 {
-                    Comments = "REQUIRED: Your CERTInext account number (numeric string). " +
+                    Comments = "REQUIRED when UseV2Api is false: your CERTInext account number (numeric string). " +
+                               "Included in the `meta` block of every V1 request. Not used when UseV2Api is true. " +
                                "Available in the CERTInext portal.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -45,102 +45,100 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.GroupNumber] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: CERTInext group (delegation) number. " +
-                               "When set, it is included in GetProductDetails requests AND in the " +
-                               "`delegationInformation.groupNumber` field of every SSL order so the order " +
-                               "is routed to the correct account group. Some accounts will queue orders for " +
-                               "additional review when this field is omitted. " +
-                               "Available in the CERTInext portal under Delegation → Groups.",
+                    Comments = "OPTIONAL: CERTInext group (delegation) number. When set, it is included in " +
+                               "product-catalog requests and in the order (`orderDetails.groupNumber` on V1, " +
+                               "`groupNumber` on V2) so the order is routed to the configured account group, and V2 " +
+                               "synchronization is scoped to the group. When blank, CERTInext uses the account's " +
+                               "default group. Available in the CERTInext portal under Delegation → Groups.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.OrganizationNumber] = new PropertyConfigInfo
                 {
-                    Comments = "STRONGLY RECOMMENDED for OV/EV and faster DV issuance: numeric " +
-                               "CERTInext organization number for a pre-vetted organization (e.g. " +
-                               "your company's pre-vetted entry). When set, every SSL order is submitted " +
-                               "with `organizationDetails.preVetting=\"1\"` and the configured " +
-                               "`organizationNumber`, telling CERTInext to skip the manual " +
-                               "organization-vetting queue. Without this value, orders are placed without " +
-                               "any organizationDetails block and CERTInext may park them in " +
-                               "`Pending System RA` for extended manual review (observed: tens of hours). " +
-                               "Available in the CERTInext portal under Organizations → " +
-                               "Pre-vetted Organizations.",
+                    Comments = "OPTIONAL: Pre-vetted CERTInext organization number. Required for OV/EV on V2; " +
+                               "recommended for V1 OV/EV and faster DV. Skips CERTInext's manual vetting queue.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.TechnicalContactName] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Name sent in the `technicalPointOfContact.tpcName` field of every " +
-                               "SSL order. Defaults to the configured RequestorName when blank. " +
-                               "Some product configurations require a TPoC to be present; omitting it can " +
-                               "cause CERTInext to park orders awaiting manual completion of the field.",
+                    Comments = "OPTIONAL: Name sent as the order's technical point of contact (V1 " +
+                               "`technicalPointOfContact.pocFirstName` / `pocLastName`, V2 `technicalPointOfContact.name`). " +
+                               "On V1 the name is split on the first whitespace: the first word is the first name and the " +
+                               "rest is the last name; a single-word name is sent in both. Defaults to the configured " +
+                               "RequestorName when blank. On V1, if no contact name or no email resolves (including from " +
+                               "RequestorName/RequestorEmail), the whole technicalPointOfContact block is omitted from the " +
+                               "order and a Warning is logged, since CERTInext requires both inside the block.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.TechnicalContactEmail] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Email sent in the `technicalPointOfContact.tpcEmail` field of every " +
-                               "SSL order. Defaults to the configured RequestorEmail when blank.",
+                    Comments = "OPTIONAL: Email sent as the order's technical point of contact (V1 " +
+                               "`technicalPointOfContact.pocEmail`, V2 `email`). Defaults to the configured RequestorEmail " +
+                               "when blank. On V1, if no contact name or no email resolves (including from " +
+                               "RequestorName/RequestorEmail), the whole technicalPointOfContact block is omitted from the " +
+                               "order and a Warning is logged, since CERTInext requires both inside the block.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.TechnicalContactIsdCode] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: International dialing code for the TPoC phone number. " +
-                               "Defaults to the configured RequestorIsdCode when blank.",
+                    Comments = "OPTIONAL: International dialing code for the technical contact phone number. Defaults to " +
+                               "the configured RequestorIsdCode when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.TechnicalContactMobileNumber] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Mobile number for the TPoC (digits only). " +
-                               "Defaults to the configured RequestorMobileNumber when blank.",
+                    Comments = "OPTIONAL: Mobile number for the technical contact (digits only). Defaults to the " +
+                               "configured RequestorMobileNumber when blank.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.AuthMode] = new PropertyConfigInfo
                 {
-                    Comments = "REQUIRED: Authentication mode. " +
-                               "'AccessKey' (default) — uses authKey = SHA256(accessKey + ts + txn) in every request body. " +
-                               "'OAuth' — uses an OAuth2 bearer token (requires OAuthTokenUrl, OAuthClientId, OAuthClientSecret).",
+                    Comments = "OPTIONAL, legacy (V1 only): leave as 'AccessKey' (default). V1 does not honor OAuth " +
+                               "tokens, so 'OAuth' is unsupported. Ignored when UseV2Api is true.",
                     Hidden = false,
                     DefaultValue = Constants.Config.AuthModeAccessKey,
                     Type = "String"
                 },
                 [Constants.Config.ApiKey] = new PropertyConfigInfo
                 {
-                    Comments = "REQUIRED when AuthMode is 'AccessKey': the REST API Access Key generated in the " +
-                               "CERTInext portal under Integrations → APIs. " +
-                               "This value is used to compute authKey = SHA256(accessKey + ts + txn); " +
-                               "it is never transmitted directly.",
+                    Comments = "REQUIRED when UseV2Api is false: the REST API Access Key generated in the CERTInext " +
+                               "portal under Integrations → APIs. Used to compute authKey = SHA256(accessKey + ts + " +
+                               "txn); never transmitted directly. Not used when UseV2Api is true.",
                     Hidden = true,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.OAuth2TokenUrl] = new PropertyConfigInfo
                 {
-                    Comments = "OAuth token endpoint URL. Required when AuthMode is 'OAuth'.",
+                    Comments = "Legacy / unsupported (V1): V1 does not honor OAuth tokens; leave blank. Ignored when " +
+                               "UseV2Api is true — V2 requests its token from {ApiUrl}/oauth/token.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.OAuth2ClientId] = new PropertyConfigInfo
                 {
-                    Comments = "OAuth client ID. Required when AuthMode is 'OAuth'.",
+                    Comments = "OAuth client ID. REQUIRED when UseV2Api is true: V2 authenticates with " +
+                               "client_credentials against {ApiUrl}/oauth/token. The key must be generated in OAuth mode " +
+                               "in the CERTInext portal. Not used on V1.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.OAuth2ClientSecret] = new PropertyConfigInfo
                 {
-                    Comments = "OAuth client secret. Required when AuthMode is 'OAuth'.",
+                    Comments = "OAuth client secret. REQUIRED when UseV2Api is true (see OAuthClientId). Not used on V1.",
                     Hidden = true,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -175,42 +173,61 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
+                [Constants.Config.RequestorDesignation] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: Job title / role of the requestor (e.g. 'IT Administrator'). Sent as " +
+                               "requestorInformation.requestorDesignation (V1) and requestor.designation (V2). Free " +
+                               "text. Omitted when blank.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
                 [Constants.Config.SignerPlace] = new PropertyConfigInfo
                 {
-                    Comments = "City or location of the subscriber agreement signer. Required by CERTInext for all orders.",
+                    Comments = "City or location of the subscriber agreement signer (e.g. 'San Francisco, CA'). " +
+                               "REQUIRED when UseV2Api is on: the V2 Subscriber Agreement sent with every SSL order " +
+                               "requires it, so the connector cannot be saved with it blank. A per-template " +
+                               "SignerPlace enrollment parameter overrides it. On V1, if neither is set, the " +
+                               "placeholder \"Gateway\" is sent and a Warning is logged; set it so the agreement audit " +
+                               "record is accurate.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.SignerIp] = new PropertyConfigInfo
                 {
-                    Comments = "IP address of the subscriber agreement signer. Required by CERTInext for all orders.",
+                    Comments = "V1 ONLY: IP address of the subscriber agreement signer. A template-level SignerIp " +
+                               "enrollment parameter overrides it. If neither is set, the placeholder 127.0.0.1 is sent " +
+                               "and a Warning is logged, and a value that is not an IP address is still sent unchanged, " +
+                               "with a Warning. Ignored on V2: the V2 agreement block has no signer IP field, so it is " +
+                               "never sent.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 ["DefaultProductCode"] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Default numeric product code used when not specified at template level. " +
-                               "Product codes are provided by eMudhra (e.g. the SSL DV 1-year code for your account). " +
-                               "Retrieve available codes from Integrations → APIs → GetProductDetails.",
+                    Comments = "OPTIONAL: Default numeric product code. V1 only: used for renewals when the template " +
+                               "supplies none. Not used on V2, where the product is resolved by CERTInext (set the " +
+                               "template's ProductCode to override). Get codes via GetProductDetails.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.AccountingModel] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel`. " +
-                               "\"2\" = credit-based (most accounts, default). \"1\" = cash model.",
+                    Comments = "OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel` on V1 orders. " +
+                               "\"2\" = credit-based (most accounts, default). \"1\" = cash model. Not used by V2.",
                     Hidden = false,
                     DefaultValue = "2",
                     Type = "String"
                 },
                 [Constants.Config.EmailNotifications] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Whether CERTInext sends lifecycle-event emails to the requestor. " +
-                               "\"1\" = enabled, \"0\" = silent (recommended for gateway-driven orders so end users " +
-                               "aren't surprised by CA emails). Default: \"0\".",
+                    Comments = "OPTIONAL: Lifecycle emails to the requestor. \"1\" = full set (V2: \"all\"), \"0\" = silent " +
+                               "(V1: \"0\"; V2: \"consent-only\", the quietest value the V2 API accepts). " +
+                               "Blank: silent on V1, omitted on V2 (CA default applies). Other values fail V2 " +
+                               "enrollment. Default: \"0\".",
                     Hidden = false,
                     DefaultValue = "0",
                     Type = "String"
@@ -218,7 +235,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.Config.SubscriptionValidityYears] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Default validity in years for SSL orders. \"1\", \"2\", or \"3\". " +
-                               "Override per template via the ValidityYears product parameter. Default: \"1\".",
+                               "Used when the template sets no ValidityYears (and, on V1, no ValidityDays); a template " +
+                               "term (on V1 the larger of ValidityYears and ValidityDays in years) overrides it. " +
+                               "Default: \"1\".",
                     Hidden = false,
                     DefaultValue = "1",
                     Type = "String"
@@ -242,24 +261,36 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.AutoSecureWww] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the " +
-                               "primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied " +
-                               "with the CSR. Default: \"0\".",
+                    Comments = "OPTIONAL: Sent as `orderDetails.autoSecureWWW` on every V1 SSL order (new and " +
+                               "renewal) and as `autoSecureWww` on V2 SSL orders. If \"1\", CERTInext automatically adds " +
+                               "the `www.` variant of the primary domain as an additional SAN, which must also pass " +
+                               "domain validation. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\".",
                     Hidden = false,
                     DefaultValue = "0",
                     Type = "String"
                 },
                 [Constants.Config.IgnoreExpired] = new PropertyConfigInfo
                 {
-                    Comments = "If true, expired certificates will be skipped during synchronization. Default: false.",
+                    Comments = "If true, expired certificates are skipped during synchronization. V2 only: the V1 sync " +
+                               "does not currently apply it. Default: false.",
                     Hidden = false,
                     DefaultValue = false,
                     Type = "Boolean"
                 },
+                [Constants.Config.SubmitNonDnsSans] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL (V1 only): If true (default), non-DNS SANs (IP, email, URI) are submitted, but " +
+                               "CERTInext cannot validate them, so the order won't issue. If false, only DNS names are " +
+                               "submitted.",
+                    Hidden = false,
+                    DefaultValue = true,
+                    Type = "Boolean"
+                },
                 [Constants.Config.PageSize] = new PropertyConfigInfo
                 {
-                    Comments = "Number of orders to fetch per page during synchronization. " +
-                               $"Default: {Constants.Api.DefaultPageSize}, max: {Constants.Api.MaxPageSize}.",
+                    Comments = $"Number of orders to fetch per page during synchronization (1 or higher). Default: " +
+                               $"{Constants.Api.DefaultPageSize}, max: {Constants.Api.MaxPageSize} (V2 `/reports/orders` " +
+                               $"pages are capped at {Constants.ApiV2.OrdersReportMaxPageSize}).",
                     Hidden = false,
                     DefaultValue = Constants.Api.DefaultPageSize,
                     Type = "Number"
@@ -272,14 +303,49 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = true,
                     Type = "Boolean"
                 },
-                [Constants.Config.DcvEnabled] = new PropertyConfigInfo
+                [Constants.Config.LogSensitiveRequestData] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: When true, the gateway will perform DNS-based Domain Control Validation (DCV) " +
-                               "during enrollment for orders that require it, using the configured DNS provider plugin. " +
-                               "Requires a DNS provider plugin (e.g. azure-azuredns-dnsplugin) to be deployed on the gateway. " +
-                               "Default: false.",
+                    Comments = "OPTIONAL temporary diagnostic switch. When true, requestor personal data (name, email, " +
+                               "phone) and full CA payloads are logged. Credentials are always redacted. Turn off after " +
+                               "verifying. Default: false.",
                     Hidden = false,
                     DefaultValue = false,
+                    Type = "Boolean"
+                },
+                [Constants.Config.PickupRetries] = new PropertyConfigInfo
+                {
+                    Comments = $"OPTIONAL: Times Enroll() polls CERTInext for the certificate after order submission " +
+                               $"(0-{Constants.Pickup.MaxRetries}; 0 disables the wait). Unissued orders are picked up by " +
+                               $"sync. Default: {Constants.Pickup.DefaultRetries}.",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultRetries,
+                    Type = "Number"
+                },
+                [Constants.Config.PickupDelay] = new PropertyConfigInfo
+                {
+                    Comments = $"OPTIONAL: Seconds between certificate-pickup polls " +
+                               $"(1-{Constants.Pickup.MaxDelaySeconds}). Total wait is " +
+                               $"{Constants.Pickup.InitialDelaySeconds} s + PickupRetries x this value. Command's own " +
+                               $"enrollment call into the gateway is bounded at roughly " +
+                               $"{Constants.Pickup.CommandEnrollmentBudgetSeconds} s, so the plugin caps the total at " +
+                               $"{Constants.Pickup.MaxTotalWaitSeconds} s regardless of how PickupRetries/PickupDelay " +
+                               $"are set, reducing the retry count to fit. Keep your configured total well under that " +
+                               $"ceiling. Default: {Constants.Pickup.DefaultDelaySeconds} " +
+                               $"(~{Constants.Pickup.InitialDelaySeconds + Constants.Pickup.DefaultRetries * Constants.Pickup.DefaultDelaySeconds} " +
+                               $"s with default retries).",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultDelaySeconds,
+                    Type = "Number"
+                },
+                [Constants.Config.DcvEnabled] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: When true, the plugin performs DNS-based Domain Control Validation (DCV) " +
+                               "during enrollment and synchronization for orders that require it, using the DNS provider " +
+                               "plugin deployed on the gateway (e.g. azure-azuredns-dnsplugin). Without a DNS provider " +
+                               "plugin, orders that need validation stay pending and the plugin logs why. Set to false " +
+                               "to skip DCV. Default: true.",
+                    Hidden = false,
+                    DefaultValue = true,
                     Type = "Boolean"
                 },
                 [Constants.Config.DcvTxtRecordTemplate] = new PropertyConfigInfo
@@ -310,54 +376,113 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.DcvWaitForChallengeSeconds] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() for CERTInext to " +
-                               "expose the DCV challenge (i.e. populate `domainVerification` in TrackOrder). Under " +
-                               "concurrent load CERTInext sometimes takes a few seconds after GenerateOrderSSL " +
-                               "before the slot appears. Without this wait, the plugin's initial TrackOrder check " +
-                               "sees null and skips DCV — the order then has to wait for the next gateway sync " +
-                               "cycle to be picked up. Setting to 0 disables the wait (single-check behaviour). " +
-                               $"Can also be set via the {Constants.Config.DcvWaitForChallengeSecondsEnvVar} " +
-                               "environment variable; the env var takes precedence when both are set. Default: 60.",
+                    Comments = "OPTIONAL (V1 only): Seconds Enroll() waits for CERTInext to expose the DCV challenge. 0 " +
+                               "disables the wait. CERTINEXT_DCV_WAIT_FOR_CHALLENGE_SECONDS overrides it. Default: 60.",
                     Hidden = false,
                     DefaultValue = 60,
                     Type = "Number"
                 },
                 [Constants.Config.DcvWaitForIssuanceSeconds] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: How long (seconds) the plugin will wait inside Enroll() after DCV " +
-                               "verifies for CERTInext to finish generating the certificate. CERTInext issuance " +
-                               "is async — DCV may be verified but the cert PEM isn't yet available for download. " +
-                               "Without this wait, Enroll() returns a pending result and the issued cert is " +
-                               "picked up by the next sync cycle. Setting to 0 disables the wait (single-fetch " +
-                               "behaviour). " +
-                               $"Can also be set via the {Constants.Config.DcvWaitForIssuanceSecondsEnvVar} " +
-                               "environment variable; the env var takes precedence when both are set. Default: 60.",
+                    Comments = "OPTIONAL (V1 only): Seconds Enroll() waits for issuance after DCV verifies. 0 disables " +
+                               "the wait. CERTINEXT_DCV_WAIT_FOR_ISSUANCE_SECONDS overrides it. Default: 60.",
                     Hidden = false,
                     DefaultValue = 60,
                     Type = "Number"
                 },
                 [Constants.Config.DcvSyncMaxOrderAgeHours] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: During synchronization, only pending DV orders younger than this many hours " +
-                               "are eligible to be driven through DCV. This keeps a sync pass fast when there is a " +
-                               "large backlog of old, never-completing pending orders (e.g. abandoned orders or domains " +
-                               "outside the configured DNS provider's zone): they age out and are simply reported as " +
-                               "pending rather than retried every pass. Recently-placed orders (the ones that legitimately " +
-                               "deferred DCV) are always within the window and complete via the normal scan cadence. " +
-                               $"Set to 0 to disable the age filter (attempt DCV for all pending). Default: {Constants.Dcv.DefaultSyncMaxOrderAgeHours}.",
+                    Comments = $"OPTIONAL: During synchronization, only pending DV orders younger than this many hours " +
+                               $"are driven through DCV. 0 disables the filter. Default: " +
+                               $"{Constants.Dcv.DefaultSyncMaxOrderAgeHours}.",
                     Hidden = false,
                     DefaultValue = Constants.Dcv.DefaultSyncMaxOrderAgeHours,
                     Type = "Number"
                 },
                 [Constants.Config.DcvSyncMaxPerPass] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Maximum number of pending DV orders the plugin will attempt to drive through DCV " +
-                               "in a single synchronization pass. Bounds the per-pass cost regardless of backlog size; " +
-                               "remaining pending orders are reported as-is and picked up on a later pass (the per-minute " +
-                               $"incremental scan keeps recent orders moving). Set to 0 to disable the cap. Default: {Constants.Dcv.DefaultSyncMaxPerPass}.",
+                    Comments = $"OPTIONAL: Maximum pending DV orders driven through DCV per synchronization pass. 0 " +
+                               $"disables the cap. Default: {Constants.Dcv.DefaultSyncMaxPerPass}.",
                     Hidden = false,
                     DefaultValue = Constants.Dcv.DefaultSyncMaxPerPass,
                     Type = "Number"
+                },
+
+                // -----------------------------------------------------------------------
+                // V2 API settings — only required when UseV2Api = true
+                // -----------------------------------------------------------------------
+
+                [Constants.ConfigV2.UseV2Api] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: When true, the plugin routes Ping / Enroll / GetSingleRecord / Revoke / " +
+                               "Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 " +
+                               "/reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode), " +
+                               "OAuthClientId, OAuthClientSecret, and SignerPlace. V1 credentials " +
+                               "(ApiKey/AccountNumber/AuthMode) are not required when this is true. Default: false (V1 " +
+                               "API).",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
+                },
+                [Constants.Config.V2SyncLookbackHours] = new PropertyConfigInfo
+                {
+                    Comments = $"OPTIONAL (V2 only): Hours subtracted from the last-sync time on incremental sync, so an " +
+                               $"order created earlier but issued later is not missed. Default: " +
+                               $"{Constants.ApiV2.DefaultSyncLookbackHours}.",
+                    Hidden = false,
+                    DefaultValue = Constants.ApiV2.DefaultSyncLookbackHours,
+                    Type = "Number"
+                },
+                [Constants.Config.SyncRecentOrderGraceSeconds] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL: during a Synchronize (full or incremental, in both V1 and V2 modes), a pending or issued " +
+                               "order created less than this many seconds ago (plus a small clock margin) is not emitted to " +
+                               "the gateway; the next incremental pass imports it. This stops the sync from inserting a " +
+                               "gateway row for an order whose enrollment is still in flight, which would make the " +
+                               "enrollment's own save fail with a duplicate key. Revoked and failed orders are never held " +
+                               "back. 0 disables the hold; a negative value uses the default. " +
+                               $"Default: {Constants.Api.DefaultSyncRecentOrderGraceSeconds}.",
+                    Hidden = false,
+                    DefaultValue = Constants.Api.DefaultSyncRecentOrderGraceSeconds,
+                    Type = "Number"
+                },
+                [Constants.Config.V2InlineCsr] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL (V2 mode only): when true (the default), SSL/TLS enrollment sends the CSR inline in " +
+                               "the order create call (a single POST /ssl-certificates), as a direct API integration " +
+                               "does. When false, the plugin creates the order and then submits the CSR (PUT .../csr); " +
+                               "that two-call flow fails for a domain the account has already validated, because " +
+                               "CERTInext approves the order at create and then rejects the CSR. A create that times " +
+                               "out or returns a 5xx can leave an order that still issues; it is not cancelled and the " +
+                               "next synchronization imports it, so do not resubmit. Private PKI orders ignore this " +
+                               "setting and always use the two-call flow (the CA rejects an inline CSR on Private PKI " +
+                               "create). Ignored when UseV2Api is false. Default: true (single call).",
+                    Hidden = false,
+                    DefaultValue = true,
+                    Type = "Boolean"
+                },
+                [Constants.Config.SslComSubmitOrganization] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL (V2 mode only): before an OV or EV SSL/TLS order, the plugin checks " +
+                               "whether SSL.com has validated the organization (OrganizationNumber) at that level, " +
+                               "refreshing the status once if not. When this is true and the organization is still " +
+                               "unvalidated and ready to submit, the plugin also SUBMITS it to SSL.com for validation. " +
+                               "WARNING: enabling this ACCEPTS SSL.COM'S SUBSCRIBER AGREEMENT ON THE ORGANIZATION'S " +
+                               "BEHALF; each acceptance is audit-logged. Leave false unless you are authorized to do " +
+                               "that. Whatever the outcome, the order is placed anyway and a not-validated organization " +
+                               "only logs a warning. Default: false.",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
+                },
+                [Constants.Config.SslComAdminEmail] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL (V2 mode only): administrator email sent as adminEmail when the plugin " +
+                               "submits an organization to SSL.com (only used when SslComSubmitOrganization is true). " +
+                               "Blank omits it and SSL.com uses the organization's own contact.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
                 }
             };
         }
@@ -372,9 +497,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 [Constants.EnrollmentParam.ProductCode] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Override the numeric CERTInext product code for this template. " +
-                               "When omitted, the default production code for the selected product is used automatically " +
-                               "(e.g. DV SSL → 838). Set this explicitly when targeting sandbox or a non-standard code.",
+                    Comments = "OPTIONAL: Override the numeric CERTInext product code for this template. When omitted: " +
+                               "on V1, the default production code for the selected product is used (e.g. DV SSL → 838); " +
+                               "on V2, no X-Product-Code header is sent and CERTInext resolves the product from the " +
+                               "variant, the wildcard shape of the domain and any additional domains. On V2 an explicit " +
+                               "value is an override, sent as X-Product-Code to choose between several matching " +
+                               "catalog products (for example different CA profiles for the same variant).",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -389,7 +517,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.ValidityYears] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Subscription validity in years: 1, 2, or 3. Default: 1. " +
+                    Comments = "OPTIONAL: Subscription term in years: 1, 2, or 3. On V1 the order's term is the " +
+                               "larger of ValidityYears and ValidityDays rounded up to whole years (365 days = 1 year); " +
+                               "a field left at its default (1 year) never overrides the other. On V2 only " +
+                               "ValidityYears is used. A template value overrides the connector's " +
+                               "SubscriptionValidityYears. Because the larger value wins on V1, a stale larger " +
+                               "ValidityDays cannot be shortened with ValidityYears alone; set ValidityDays back to " +
+                               "365. Default: 1. " +
                                "Note: CERTInext validates per 390-day certificate within the subscription; " +
                                "the 'validity' field in the order is the subscription term, not certificate lifetime.",
                     Hidden = false,
@@ -398,56 +532,63 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.ValidityDays] = new PropertyConfigInfo
                 {
-                    Comments = "DEPRECATED: Use ValidityYears instead. " +
-                               "If set, value is divided by 365 and rounded up to get the subscription year count.",
+                    Comments = "OPTIONAL: V1 only (ignored on V2, which uses ValidityYears). Requested validity in " +
+                               "days. CERTInext's order API takes whole subscription years, so days are converted to " +
+                               "years, rounded up (365 days = 1 year). The order's term is the larger of this and " +
+                               "ValidityYears; a field left at its default (365 days = 1 year) never overrides the " +
+                               "other. Kept because certificate lifetimes are shrinking and days is the unit that will " +
+                               "matter if CERTInext adds a lifetime field. To shorten a template with a larger value, " +
+                               "set this back to 365. Default: 365.",
                     Hidden = false,
                     DefaultValue = 365,
                     Type = "Number"
                 },
                 [Constants.EnrollmentParam.AutoApprove] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: If true, the gateway will attempt automatic approval of certificates " +
-                               "that are returned in a pending-approval state. Default: false.",
+                    Comments = "Currently has no effect — reserved for future use. The plugin does not call " +
+                               "any approval endpoint against CERTInext regardless of this setting.",
                     Hidden = false,
                     DefaultValue = false,
                     Type = "Boolean"
                 },
                 [Constants.EnrollmentParam.RequesterName] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Default requester name to include in the enrollment request. " +
-                               "Used when no requester name can be derived from the subject.",
+                    Comments = "OPTIONAL: Overrides the connector RequestorName for this template when non-blank. Never " +
+                               "derived from the certificate subject.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.RequesterEmail] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Default requester email address. " +
-                               "Used when no email can be derived from the subject.",
+                    Comments = "OPTIONAL: Overrides the connector RequestorEmail for this template when non-blank. Never " +
+                               "derived from the certificate subject.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.RenewalWindowDays] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Number of days before certificate expiration within which a renewal is " +
-                               "triggered. Certificates expiring further than this window are reissued instead. " +
-                               "Certificates that have already expired also fall back to reissue. Default: 90.",
+                    Comments = "OPTIONAL: V1 only. Number of days before certificate expiration within which a renewal " +
+                               "is triggered. Certificates expiring further than this window are reissued instead. " +
+                               "Certificates that have already expired also fall back to reissue. V2 places a new order " +
+                               "for every renewal and reissue. Default: 90.",
                     Hidden = false,
                     DefaultValue = 90,
                     Type = "Number"
                 },
                 [Constants.EnrollmentParam.KeyType] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Key algorithm to request (e.g. 'RSA2048', 'RSA4096', 'EC256', 'EC384'). " +
-                               "If omitted, the profile default is used.",
+                    Comments = "OPTIONAL: Informational. The key algorithm is determined by the submitted CSR; CERTInext " +
+                               "accepts RSA 2048/3072/4096 and ECC P-256/P-384 and rejects larger RSA, ECC P-521, and " +
+                               "Ed25519/Ed448.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.DomainName] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Primary domain for SSL/TLS orders. " +
+                    Comments = "OPTIONAL: Primary domain for SSL/TLS orders (for V2 private-pki orders, the primary hostname). " +
                                "Derived from the CSR CN if omitted.",
                     Hidden = false,
                     DefaultValue = string.Empty,
@@ -455,26 +596,55 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.SignerName] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Per-template subscriber agreement signer name. " +
-                               "Falls back to the connector-level RequestorName if omitted.",
+                    Comments = "OPTIONAL: Per-template subscriber agreement signer name. Falls back to the " +
+                               "connector-level RequestorName if omitted (V2: the requestor name). If no name resolves, " +
+                               "V1 sends the placeholder \"Keyfactor Gateway\" and logs a Warning.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.SignerPlace] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Per-template signer city/location. " +
-                               "Falls back to the connector-level SignerPlace if omitted.",
+                    Comments = "OPTIONAL: Per-template signer city/location. Falls back to the connector-level " +
+                               "SignerPlace if omitted. If neither is set, V1 sends the placeholder \"Gateway\" and logs " +
+                               "a Warning.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.SignerIp] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Per-template signer IP address. " +
-                               "Falls back to the connector-level SignerIp if omitted.",
+                    Comments = "V1 ONLY, OPTIONAL: Per-template signer IP address. Falls back to the connector-level " +
+                               "SignerIp if omitted. If neither is set, V1 sends the placeholder 127.0.0.1 and logs a " +
+                               "Warning; a V1 value that is not an IP address is sent unchanged, with a Warning. " +
+                               "Ignored on V2 (the V2 agreement block has no signer IP field).",
                     Hidden = false,
                     DefaultValue = string.Empty,
+                    Type = "String"
+                },
+
+                // -----------------------------------------------------------------------
+                // V2 API enrollment parameters (only used when UseV2Api = true)
+                // -----------------------------------------------------------------------
+
+                [Constants.EnrollmentParam.ProductFamily] = new PropertyConfigInfo
+                {
+                    Comments = "V2 ONLY: Product family for this template. Accepted values: 'ssl' (default) or " +
+                               "'private-pki'. 'private-pki' requires a Private PKI ProductVariant. 'signature' " +
+                               "(Document Signer) is accepted by the parameter, but Document " +
+                               "Signer enrollment is not supported.",
+                    Hidden = false,
+                    DefaultValue = "ssl",
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.ProductVariant] = new PropertyConfigInfo
+                {
+                    Comments = "V2 ONLY: Product variant sent in the V2 order body. ProductFamily 'ssl': 'dv', 'ov', or " +
+                               "'ev' — if omitted, derived from the selected product; an explicit value that contradicts " +
+                               "the product fails enrollment. ProductFamily 'private-pki': 'intranet-ssl' or 'igtf-host' " +
+                               "(required; no default).",
+                    Hidden = false,
+                    DefaultValue = "dv",
                     Type = "String"
                 }
             };
@@ -492,8 +662,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // -----------------------------------------------------------------------
 
         /// <summary>
-        /// CERTInext API base URL, e.g. "https://us-api.certinext.io/emSignHub-API/".
-        /// Must end with a trailing slash or the endpoint path segment.
+        /// CERTInext API base URL. V1 (default): host plus the /emSignHub-API/ path, e.g.
+        /// "https://us-api.certinext.io/emSignHub-API/". V2 (UseV2Api=true): the bare host, e.g.
+        /// "https://us-api.certinext.io". A trailing slash is optional; the client trims and re-adds it.
         /// </summary>
         [JsonPropertyName("ApiUrl")]
         public string ApiUrl { get; set; } = string.Empty;
@@ -507,9 +678,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Optional CERTInext group (delegation) number.  When set, it is passed in
         /// the <c>productDetails.groupNumber</c> field of <c>GetProductDetails</c>
-        /// requests AND in the <c>delegationInformation.groupNumber</c> field of every
-        /// SSL order body so the order is routed to the correct account group.  Some
-        /// accounts queue orders for extra review when this field is omitted.
+        /// requests AND in the <c>orderDetails.groupNumber</c> field of every
+        /// SSL order body (new and renewal) so the order is routed to the configured account
+        /// group.  When blank, CERTInext uses the account's default group.
         /// </summary>
         [JsonPropertyName("GroupNumber")]
         public string GroupNumber { get; set; } = string.Empty;
@@ -533,7 +704,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // -----------------------------------------------------------------------
 
         /// <summary>
-        /// Authentication mode: "AccessKey" (default) or "OAuth".
+        /// Legacy. "AccessKey" (default). V1 does not honor OAuth tokens, so "OAuth" is unsupported;
+        /// the field is kept so connectors saved with it keep loading. Ignored when UseV2Api is true.
         /// </summary>
         [JsonPropertyName("AuthMode")]
         public string AuthMode { get; set; } = Constants.Config.AuthModeAccessKey;
@@ -541,21 +713,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Raw REST API Access Key generated in CERTInext portal (Integrations → APIs).
         /// Used to compute authKey = SHA256(accessKey + ts + txn).
-        /// Required when AuthMode is "AccessKey".
+        /// Required on V1 (AccessKey); not used on V2.
         /// NEVER logged or transmitted directly — only the derived authKey is sent.
         /// </summary>
         [JsonPropertyName("ApiKey")]
         public string ApiKey { get; set; } = string.Empty;
 
-        /// <summary>OAuth token endpoint URL. Required when AuthMode is "OAuth".</summary>
+        /// <summary>Legacy / unsupported: V1 does not honor OAuth tokens. Ignored on V2, which uses {ApiUrl}/oauth/token.</summary>
         [JsonPropertyName("OAuthTokenUrl")]
         public string OAuthTokenUrl { get; set; } = string.Empty;
 
-        /// <summary>OAuth client ID. Required when AuthMode is "OAuth".</summary>
+        /// <summary>OAuth client ID. Required when UseV2Api is true; not used on V1.</summary>
         [JsonPropertyName("OAuthClientId")]
         public string OAuthClientId { get; set; } = string.Empty;
 
-        /// <summary>OAuth client secret. Required when AuthMode is "OAuth".</summary>
+        /// <summary>OAuth client secret. Required when UseV2Api is true; not used on V1.</summary>
         [JsonPropertyName("OAuthClientSecret")]
         public string OAuthClientSecret { get; set; } = string.Empty;
 
@@ -594,16 +766,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("RequestorMobileNumber")]
         public string RequestorMobileNumber { get; set; } = string.Empty;
 
+        /// <summary>
+        /// Default requestor job title / role. Blank by default; when blank, the V2 order's
+        /// <c>requestor.designation</c> field is omitted rather than sent with any default value.
+        /// </summary>
+        [JsonPropertyName("RequestorDesignation")]
+        public string RequestorDesignation { get; set; } = string.Empty;
+
         /// <summary>Subscriber agreement signer place (city/location). Required by CERTInext.</summary>
         [JsonPropertyName("SignerPlace")]
         public string SignerPlace { get; set; } = string.Empty;
 
-        /// <summary>Subscriber agreement signer IP address. Required by CERTInext.</summary>
+        /// <summary>Subscriber agreement signer IP address (V1 only; the V2 agreement block has no such field).</summary>
         [JsonPropertyName("SignerIp")]
         public string SignerIp { get; set; } = string.Empty;
 
         /// <summary>
-        /// Default product code used when the template-level ProductCode is not specified.
+        /// Default product code used when the template-level ProductCode is not specified (V1 only:
+        /// renewals). Ignored on V2, which sends X-Product-Code only for an explicit template ProductCode.
         /// Product codes are numeric strings provided by eMudhra (e.g. "844" for DV SSL 1-year).
         /// </summary>
         [JsonPropertyName("DefaultProductCode")]
@@ -639,7 +819,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("AccountingModel")]
         public string AccountingModel { get; set; } = "2";
 
-        /// <summary>"1" = enable lifecycle emails to requestor, "0" = silent (default).</summary>
+        /// <summary>
+        /// "1" = full notification set (V1 sends it as-is; V2 maps to "all"). "0" = silent on
+        /// both V1 and V2 (default). Blank stays silent on V1 (sent
+        /// as "0") but is omitted on V2, letting the CA's own default ("all") apply instead. Any
+        /// other value fails V2 enrollment before any CA call.
+        /// </summary>
         [JsonPropertyName("EmailNotifications")]
         public string EmailNotifications { get; set; } = "0";
 
@@ -666,11 +851,45 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("IgnoreExpired")]
         public bool IgnoreExpired { get; set; } = false;
 
+        /// <summary>
+        /// Whether non-DNS SANs (IP address, email, URI) are submitted to CERTInext.
+        ///
+        /// Defaults to <c>true</c>: nothing the subscriber requested is dropped silently. CERTInext
+        /// registers such values verbatim as order domains, and they cannot pass domain validation,
+        /// so the order will not issue until they are removed — a visible failure, deliberately
+        /// preferred over a certificate quietly missing requested names.
+        ///
+        /// Set to <c>false</c> to submit DNS names only, restoring the pre-1.0.1 behaviour where the
+        /// order issues but the non-DNS names are absent from the certificate. This exists as an
+        /// upgrade escape hatch: on a host that was issuing certificates for requests carrying an IP
+        /// or email SAN, the default flips those enrollments from "issues (incomplete)" to "parks
+        /// pending", and an operator needs a way back that does not involve downgrading the plugin.
+        /// </summary>
+        [JsonPropertyName("SubmitNonDnsSans")]
+        public bool SubmitNonDnsSans { get; set; } = true;
+
         [JsonPropertyName("PageSize")]
         public int PageSize { get; set; } = Constants.Api.DefaultPageSize;
 
         [JsonPropertyName("Enabled")]
         public bool Enabled { get; set; } = true;
+
+        /// <summary>
+        /// OPTIONAL diagnostic escape hatch. When true, full CA request/response payloads are
+        /// logged at Trace (beyond the credential scrubbing that always applies), and the
+        /// enrollment-attempt Information log line includes the requestor's name and email in
+        /// full. This writes personal data belonging to whoever placed the order — name, email,
+        /// phone, and other organization contact fields — plus complete CA request/response
+        /// bodies into the gateway's log files. Intended only for temporary use while verifying
+        /// a new deployment (confirming exactly what was sent to the CA and that the order
+        /// succeeded); turn it back off once verification is complete. When false (default),
+        /// personal-data fields are replaced with "***REDACTED***" (email values are masked but
+        /// keep their domain, e.g. "j***@example.com") and the enrollment log line omits the
+        /// requester name entirely. Credentials (API keys, OAuth secrets, tokens) are always
+        /// redacted regardless of this setting. Default: false.
+        /// </summary>
+        [JsonPropertyName("LogSensitiveRequestData")]
+        public bool LogSensitiveRequestData { get; set; } = false;
 
         // -----------------------------------------------------------------------
         // DCV — domain control validation via DNS provider plugins
@@ -679,10 +898,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// When true, the plugin will run DNS DCV for orders that require it during enrollment.
         /// Requires <c>IDomainValidatorFactory</c> to be injected by the gateway (available from
-        /// <c>IAnyCAPlugin 3.3.0-prerelease</c>). Default: false.
+        /// <c>IAnyCAPlugin 3.3.0</c>). Default: true.
         /// </summary>
         [JsonPropertyName("DcvEnabled")]
-        public bool DcvEnabled { get; set; } = false;
+        public bool DcvEnabled { get; set; } = true;
 
         /// <summary>
         /// Format string for the TXT record hostname.  <c>{0}</c> is replaced with the domain.
@@ -695,6 +914,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// Seconds to wait after publishing the DNS TXT record before calling VerifyDcv.
         /// Default: 30.
         /// </summary>
+        /// <summary>
+        /// Number of GetCertificate poll attempts inside <c>Enroll()</c> after an order is
+        /// submitted, before falling back to a pending result (picked up by the next sync).
+        /// Mirrors the legacy Sectigo connector's <c>PickupRetries</c>. Set to 0 to disable.
+        /// Default: 5.
+        /// </summary>
+        [JsonPropertyName("PickupRetries")]
+        public int PickupRetries { get; set; } = Constants.Pickup.DefaultRetries;
+
+        /// <summary>
+        /// Seconds between certificate-pickup retries. <c>PickupRetries * PickupDelay</c> (plus a
+        /// short initial delay) bounds the time an enrollment call occupies a Command worker
+        /// thread. Mirrors the legacy Sectigo connector's <c>PickupDelay</c>. Default: 10.
+        /// </summary>
+        [JsonPropertyName("PickupDelay")]
+        public int PickupDelayInSeconds { get; set; } = Constants.Pickup.DefaultDelaySeconds;
+
         [JsonPropertyName("DcvPropagationDelaySeconds")]
         public int DcvPropagationDelaySeconds { get; set; } = 30;
 
@@ -746,6 +982,67 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("DcvSyncMaxPerPass")]
         public int DcvSyncMaxPerPass { get; set; } = Constants.Dcv.DefaultSyncMaxPerPass;
 
+        // -----------------------------------------------------------------------
+        // V2 API settings
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// When true, Enroll / GetSingleRecord / Revoke / Synchronize use the CERTInext V2 REST
+        /// API. In this mode <see cref="ApiUrl"/> is the V2 base URL (e.g.
+        /// https://sandbox-us-api.certinext.io, no trailing path suffix) and V2 OAuth2 auth reuses
+        /// <see cref="OAuthClientId"/> / <see cref="OAuthClientSecret"/>. V1-only credentials
+        /// (<see cref="ApiKey"/>, <see cref="AccountNumber"/>, <see cref="AuthMode"/>) are not
+        /// required when this is true. Default: false.
+        /// </summary>
+        [JsonPropertyName("UseV2Api")]
+        public bool UseV2Api { get; set; } = false;
+
+        /// <summary>
+        /// V2 mode only: during an incremental Synchronize, query V2 /reports/orders with a
+        /// 'from' date of (lastSync minus this many hours) rather than exactly lastSync — see
+        /// <see cref="Constants.ApiV2.DefaultSyncLookbackHours"/> (the
+        /// from/to filter's order-date-vs-issue-date semantics are not documented).
+        /// Ignored when <see cref="UseV2Api"/> is false. Default: 72.
+        /// </summary>
+        [JsonPropertyName("V2SyncLookbackHours")]
+        public int V2SyncLookbackHours { get; set; } = Constants.ApiV2.DefaultSyncLookbackHours;
+
+        /// <summary>
+        /// During a Synchronize (full or incremental, V1 and V2 modes), pending and issued orders created
+        /// less than this many seconds ago (plus <see cref="Constants.Api.SyncRecentOrderClockMarginSeconds"/>)
+        /// are not emitted, so the sync cannot create the gateway row an in-flight enrollment is about to
+        /// save (issue 0090). 0 disables; a negative value falls back to the default. Revoked and failed
+        /// orders are never held back. Default: 120.
+        /// </summary>
+        [JsonPropertyName("SyncRecentOrderGraceSeconds")]
+        public int SyncRecentOrderGraceSeconds { get; set; } = Constants.Api.DefaultSyncRecentOrderGraceSeconds;
+
+        /// <summary>
+        /// OPTIONAL (V2 mode only), default true. When true, SSL/TLS orders carry the CSR inline in the
+        /// create call (single call, no <c>PUT .../csr</c>). When false, the plugin creates the order
+        /// without a CSR and then submits it; that two-call flow fails for an already-validated domain,
+        /// where CERTInext approves the order at create and then rejects the CSR. Private PKI ignores this and always uses the two-call
+        /// flow. Ignored when <see cref="UseV2Api"/> is false.
+        /// </summary>
+        [JsonPropertyName("V2InlineCsr")]
+        public bool V2InlineCsr { get; set; } = true;
+
+        /// <summary>
+        /// V2 only. When true, an OV/EV SSL/TLS enrollment whose organization SSL.com has not
+        /// validated (and that is ready to submit) submits it to SSL.com, which accepts SSL.com's
+        /// subscriber agreement on the organization's behalf. Default false: the plugin only reads
+        /// the status and warns. The order is placed regardless.
+        /// </summary>
+        [JsonPropertyName("SslComSubmitOrganization")]
+        public bool SslComSubmitOrganization { get; set; } = false;
+
+        /// <summary>
+        /// V2 only. Optional <c>adminEmail</c> sent on an SSL.com organization submission (only used
+        /// when <see cref="SslComSubmitOrganization"/> is true).
+        /// </summary>
+        [JsonPropertyName("SslComAdminEmail")]
+        public string SslComAdminEmail { get; set; } = string.Empty;
+
         /// <summary>
         /// Returns the effective DCV timeout, preferring the environment variable over the
         /// config field so operators can adjust the ceiling without a connector reconfiguration.
@@ -782,5 +1079,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return envVal;
             return DcvWaitForIssuanceSeconds >= 0 ? DcvWaitForIssuanceSeconds : 60;
         }
+
+        /// <summary>
+        /// Effective number of certificate-pickup retries, clamped to
+        /// [0, <see cref="Constants.Pickup.MaxRetries"/>]. 0 disables the synchronous pickup.
+        /// </summary>
+        public int GetEffectivePickupRetries()
+            => System.Math.Max(0, System.Math.Min(PickupRetries, Constants.Pickup.MaxRetries));
+
+        /// <summary>
+        /// Effective seconds between pickup retries, clamped to
+        /// [1, <see cref="Constants.Pickup.MaxDelaySeconds"/>]. A non-positive configured value
+        /// falls back to the default rather than producing a tight busy-loop.
+        /// </summary>
+        public int GetEffectivePickupDelaySeconds()
+            => System.Math.Max(1, System.Math.Min(
+                PickupDelayInSeconds > 0 ? PickupDelayInSeconds : Constants.Pickup.DefaultDelaySeconds,
+                Constants.Pickup.MaxDelaySeconds));
     }
 }
