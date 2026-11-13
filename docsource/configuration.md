@@ -332,9 +332,20 @@ The V2-only template parameters `ProductFamily` and `ProductVariant` are describ
 
 ## Product Codes
 
-CERTInext uses numeric product codes to identify certificate types. **Product codes are provisioned per account by eMudhra** — the codes available to your account are determined when your account is set up. The codes in the tables below are example values for the sandbox and production environments; your account may have different codes.
+**V2 connectors (`UseV2Api = true`) don't need product codes.** CERTInext picks the product from the template's `ProductVariant` and the request's shape, so leave `ProductCode` blank. Set it only to choose one product when several match (see [V2 Product Code Resolution](#v2-product-code-resolution)). The variants the V2 API defines are:
 
-To retrieve the exact codes available to your account, call the `GetProductDetails` endpoint:
+| Family (`ProductFamily`) | `ProductVariant` values | How the exact product is chosen |
+|---|---|---|
+| `ssl` | `dv`, `ov`, `ev` | The variant plus the domain's shape: a `*.` domain selects a wildcard product, and extra DNS names select a multi-domain (UCC) product |
+| `private-pki` | `intranet-ssl`, `igtf-host` | The variant |
+
+Where several catalog products match a variant, CERTInext picks one, and it may not be the one you want: on the US sandbox, `dv` resolves to a 1-month product that rejects a client CSR. If that happens, set `ProductCode` on the template.
+
+The rest of this section applies to **V1 connectors**, which select every product by its numeric code. It also applies to the optional V2 override.
+
+CERTInext uses numeric product codes to identify certificate types. **Product codes are provisioned per account by eMudhra**, so the codes available to your account depend on how it was set up and which CA it issues from. The tables below are **eMudhra's published reference values from the emSign era**. They haven't been verified against every environment, and they may differ for accounts that issue through SSL.com after eMudhra's exit from public TLS. Your account's own product list is the only authority.
+
+To retrieve the exact codes available to your account, call the `GetProductDetails` endpoint (V1) or `GET /api/certinext/v2/catalog/products` (V2):
 - If you have a `GroupNumber` configured, include it in the request `productDetails` block — some accounts require this to return a non-empty list.
 - Use the `make get-product-details-group` Makefile target to retrieve products from the sandbox with `groupNumber` included.
 
@@ -367,7 +378,7 @@ The product codes in this table are for:
 
 > Note: SSL/TLS codes are offset by 4 between the US sandbox and Production India in the tables above — treat that as a coincidence, not a guarantee. eMudhra controls the per-account mapping and may use different numeric codes for any new account. Always confirm via `GetProductDetails`.
 
-> Note: The CERTInext portal may display additional short-validity products (e.g. **DV SSL Certificate 1 Month**, **DV SSL Certificate Wildcard 1 Month**) that do not appear in the `GetProductDetails` API response and have no published product code. These products are not accessible via the API and are therefore **not supported by this plugin**. Contact eMudhra to determine whether API ordering is available for these products on your account.
+> Note: Some accounts also have short-validity products (for example **SSL DV 1 month**, code `917` on the US sandbox). They don't always appear in the V1 `GetProductDetails` response, but they can appear in the V2 catalog. Under V2, CERTInext may pick one for a `dv` order with no `ProductCode`, and on the sandbox that product rejects a client-supplied CSR. Set `ProductCode` on the template to the 1-year product you want.
 
 ### Private PKI
 
