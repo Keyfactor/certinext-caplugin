@@ -39,6 +39,7 @@ See [configuration.md](configuration.md#gateway-registration) for the full Gatew
 | HTTP 500 and a `TypeLoadException` in the gateway log | [Plugin fails to load](#plugin-fails-to-load-with-could-not-load-type-keyfactoranygatewayextensionsidomainvalidatorfactory) |
 | Connector fails to start with an `https` error | [`ApiUrl` must use https](#connector-fails-to-start-apiurl--must-use-https) |
 | V2 enrollment lists several product codes | [Multiple catalog products match](#v2-multiple-certinext-catalog-products-match-productid-) |
+| Enrollment fails with `invalid custom extension or certificate policy OIDs` | [Enrollment fails with `invalid custom extension or certificate policy OIDs`](#enrollment-fails-with-invalid-custom-extension-or-certificate-policy-oids) |
 
 ### `"Inactive Account User."` returned from `GenerateOrderSSL` (V1)
 
@@ -85,8 +86,10 @@ This is the expected result in any of these cases:
 - **OV or EV order:** CERTInext issues these after organization verification (minutes to hours), longer than the enrollment call waits.
 - **DCV enabled but unable to run:** no DNS provider plugin is deployed on the gateway, or none resolves the order's domain. The plugin logs why. The order completes only after the domain is validated some other way.
 - **`Enroll()` budget elapsed:** the plugin's bounded wait ended before CERTInext finished issuing. The budget is:
-    - `PickupRetries` × `PickupDelay` for the certificate pickup poll;
-    - on V1, `DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds` (default 60 s each) around DCV.
+    - `PickupRetries` × `PickupDelay` for the certificate pickup poll, capped at 75 s in total (inside Command's roughly 100 s enrollment-call timeout);
+    - on V1, `DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds` (default 60 s each) around DCV. When DCV engages for an order, these waits replace the pickup wait; they do not stack.
+- **DCV could not validate every domain:** for example an IP or email SAN with no DNS provider. V1 still validates the other domains but returns pending without waiting for issuance.
+- **V1 renewal still pending DNS-01 validation:** with DCV enabled, a renewal waiting on DNS-01 validation returns pending at once instead of holding a worker for the pickup wait; the next sync completes the validation.
 
 **Mitigation**
 
@@ -147,3 +150,33 @@ The live V2 catalog carries more than one product at the same assurance level (f
 **Mitigation**
 
 Set `ProductCode` on the template to one of the listed codes, or set the connector's `DefaultProductCode` to one of them. See [V2 Product Code Resolution](configuration.md#v2-product-code-resolution).
+
+### Enrollment fails with `invalid custom extension or certificate policy OIDs`
+
+**Symptom**
+
+Command reports this error for an enrollment:
+
+```
+An error occurred while performing the operation. This may be due to invalid custom extension or certificate policy OIDs. Please see CA logs for more information.
+```
+
+The certificate request may be valid, and CERTInext may already have issued the certificate.
+
+**Root cause**
+
+This is a known timing issue. If the scheduled gateway sync runs while an enrollment is still finishing, the sync can create the record for that request first. The enrollment's own save then fails, because a record for the same request already exists. That record may or may not include the certificate yet. The error message does not describe this, so it looks like a problem with the request. The problem is more likely when the sync runs more often.
+
+The plugin reduces the race: a sync skips pending and issued orders created in the last `SyncRecentOrderGraceSeconds` (default 120, plus a 5-second margin) and imports them on the next pass. That makes the error less likely, not impossible. An enrollment that takes longer than about two minutes to finish saving, or a connector with `SyncRecentOrderGraceSeconds` set to `0`, can still hit it.
+
+**What to do before you retry**
+
+1. Check whether CERTInext has already issued a certificate for the request.
+2. In Command, search for the certificate by subject name. It may already be there, or it may appear after a later sync.
+3. Check the gateway log for a "duplicate key" error. If you find one, this issue is the likely cause.
+
+Retrying can place a second order with CERTInext, which may be billed again. Check first.
+
+**Versions**
+
+Seen with the CERTInext plugin on AnyCA REST Gateway 25.5, before the hold-back existed. Other versions have not been tested.

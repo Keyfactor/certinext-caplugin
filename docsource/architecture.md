@@ -343,13 +343,15 @@ sequenceDiagram
 - **Issued but not yet downloadable.** An order CERTInext reports as issued before the certificate can be downloaded is returned as pending, not as an issued result with no certificate.
 - **OV and EV.** These orders issue after organization verification (minutes to hours) and almost always exhaust the pickup window, so the next synchronization imports them.
 - **Rate limiting.** A rate-limit rejection (`Inactive Account User.`) on order placement is retried with backoff before the failure is surfaced.
+- **Failures after the order is placed.** The order already exists at CERTInext, so a failed `TrackOrder` status check or a failed in-call DCV or issuance wait is logged as a warning and the enrollment returns pending with the order number. Failing instead would hide the order number from Command and let a retry place a duplicate paid order. A later synchronization finishes the order.
+- **DCV that skips a domain.** If DCV validates some domains but skips others (for example an IP or email SAN with no DNS provider), the validated domains are still verified and cleaned up, but `Enroll` does not wait for issuance, because the order cannot issue yet. It returns pending and the sync-driven DCV retry picks the order up.
 - **Synchronous pickup.** After placing an order, the plugin polls CERTInext up to `PickupRetries` times (default 5), `PickupDelay` seconds apart (default 10), after a fixed 5-second initial delay and within a hard ceiling of 75 seconds, which keeps the call inside Command's own enrollment timeout of about 100 seconds. This lets fast-issuing DV certificates come back in the same enrollment call; only a result with a certificate body counts as issued.
 
 #### V1 renewal and RenewOrReissue
 
 When Command initiates a renewal, the plugin checks whether the prior certificate is within the configured renewal window. Inside the window it places a renewal order; outside the window, or when the prior certificate can't be found, it places a new order.
 
-> **Note:** CERTInext does not have a dedicated certificate renewal endpoint. Both paths submit a new `GenerateOrderSSL` order; the prior order is not revoked. The distinction determines how the request is built, not which endpoint is called. A renewal order does not run inline DCV; sync-driven DCV completes a pending DV renewal.
+> **Note:** CERTInext does not have a dedicated certificate renewal endpoint. Both paths submit a new `GenerateOrderSSL` order; the prior order is not revoked. The distinction determines how the request is built, not which endpoint is called. A renewal order does not run inline DCV; sync-driven DCV completes a pending DV renewal. With DCV enabled and a DNS provider available, a renewal that is still waiting on DNS-01 validation returns pending at once and skips the pickup poll, because the poll cannot succeed until the sync-driven DCV validates the domain. Other renewals keep the pickup poll.
 
 > **Note:** If the prior-order lookup itself throws (rather than cleanly returning "not found" — for example a transient database error), the plugin falls back to a new order rather than failing the enrollment.
 
@@ -364,7 +366,9 @@ flowchart TD
     F --> G{"Expiry is in the future and<br/>within RenewalWindowDays?"}
     G -- Yes --> H["Place a renewal order<br/>(GenerateOrderSSL, prior order looked up first)"]
     G -- "No: outside the window, already expired, or expiry unknown" --> C
-    H --> I["Pickup poll<br/>PickupRetries x PickupDelay"]
+    H --> H2{"DCV enabled, order pending,<br/>and a domain waiting on DNS-01?"}
+    H2 -- Yes --> J
+    H2 -- No --> I["Pickup poll<br/>PickupRetries x PickupDelay"]
     C --> J(["Issued, pending, or failed result<br/>returned to Command"])
     I --> J
 ```
