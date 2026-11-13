@@ -60,6 +60,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_V2_CLEANUP_ORDERS",
                 // Issues 0062/0090 V2 inline-CSR vs two-call issuance experiment (places real sandbox orders).
                 "CERTINEXT_V2_INLINE_CSR_EXPERIMENT",
+                // V2 certificate-lifetime probe (V2ValidityProbeTests) — places real sandbox orders.
+                "CERTINEXT_PROBE_VALIDITY",
             };
 
         // ---------------------------------------------------------------------------
