@@ -276,8 +276,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
                 var req = new RestRequest(Constants.Api.GenerateOrderSslPath, Method.Post);
                 string jsonBody = JsonSerializer.Serialize(request, GetJsonOptions());
-                Logger.LogTrace("PlaceOrderAsync request payload: {Payload}",
-                    ApplyLoggingRedaction(jsonBody, _config.LogSensitiveRequestData));
+                // Guarded: redaction is a regex + JSON-reader pass that must not run when Trace is off.
+                if (Logger.IsEnabled(LogLevel.Trace))
+                    Logger.LogTrace("PlaceOrderAsync request payload: {Payload}",
+                        ApplyLoggingRedaction(jsonBody, _config.LogSensitiveRequestData));
                 req.AddJsonBody(jsonBody);
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -487,8 +489,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
 
             var result = DeserializeOrThrow<TrackOrderResponse>(resp, $"track order {orderNumber}");
-            Logger.LogTrace("TrackOrderAsync response payload (Order={OrderNumber}): {Payload}",
-                orderNumber, ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
+            // Guarded: full syncs call TrackOrder thousands of times; skip redaction when Trace is off.
+            if (Logger.IsEnabled(LogLevel.Trace))
+                Logger.LogTrace("TrackOrderAsync response payload (Order={OrderNumber}): {Payload}",
+                    orderNumber, ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
 
             // A meta status of "0" with errorCode EMS-913 or similar means the order was not found
             if (result.Meta != null && !result.Meta.IsSuccess)
@@ -1445,8 +1449,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (!string.IsNullOrWhiteSpace(productCode))
                 req.AddHeader("X-Product-Code", productCode);
             string json = JsonSerializer.Serialize(request, GetJsonOptions());
-            Logger.LogTrace("PlaceOrderV2Async request payload: {Payload}",
-                ApplyLoggingRedaction(json, _config.LogSensitiveRequestData));
+            if (Logger.IsEnabled(LogLevel.Trace))
+                Logger.LogTrace("PlaceOrderV2Async request payload: {Payload}",
+                    ApplyLoggingRedaction(json, _config.LogSensitiveRequestData));
             req.AddJsonBody(json);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var resp = await _httpV2.ExecuteAsync(req, ct);
@@ -1454,8 +1459,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             Logger.LogInformation(
                 "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
                 path, (int)resp.StatusCode, sw.ElapsedMilliseconds);
-            Logger.LogTrace("PlaceOrderV2Async response: {Body}",
-                ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
+            if (Logger.IsEnabled(LogLevel.Trace))
+                Logger.LogTrace("PlaceOrderV2Async response: {Body}",
+                    ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
 
             // Transient/network failure (5xx or no HTTP status) on a non-idempotent create: the
             // order may exist at the CA (with V2InlineCsr it carries the CSR and may even issue).
@@ -2189,6 +2195,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         // Instance (not static) so it can read _config.LogSensitiveRequestData.
         private void LogV2ApiFailure(string operation, RestResponse resp, LogLevel level = LogLevel.Warning)
         {
+            // Skip the redaction passes entirely when this level is disabled.
+            if (!Logger.IsEnabled(level)) return;
             string sanitizedBody = Truncate(
                 ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)",
                 LoggedResponseBodyCapBytes);
@@ -3305,6 +3313,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             string errorMessage = null,
             LogLevel level = LogLevel.Warning)
         {
+            // Skip the redaction passes entirely when this level is disabled.
+            if (!Logger.IsEnabled(level)) return;
             string sanitizedBody = ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)";
             Logger.Log(
                 level,
