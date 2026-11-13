@@ -38,7 +38,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
     /// </summary>
     public class CERTInextClient : ICERTInextClient, IDisposable
     {
-        private static readonly ILogger Logger = LogHandler.GetClassLogger<CERTInextClient>();
+        // Not readonly only so unit tests can capture the client's log output through
+        // OverrideLoggerForTests. Production code never reassigns it.
+        private static ILogger Logger = LogHandler.GetClassLogger<CERTInextClient>();
+
+        /// <summary>
+        /// Test seam: swaps the class-wide logger so a unit test can assert exactly what the client
+        /// logs (request/response payload dumps, warnings). The logger is static and resolved once
+        /// per process, so swapping <c>LogHandler.Factory</c> cannot reach it. Dispose the returned
+        /// handle to restore the previous logger.
+        /// </summary>
+        internal static IDisposable OverrideLoggerForTests(ILogger logger)
+        {
+            var prior = Logger;
+            Logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            return new LoggerOverride(prior);
+        }
+
+        private sealed class LoggerOverride : IDisposable
+        {
+            private ILogger _prior;
+            public LoggerOverride(ILogger prior) => _prior = prior;
+            public void Dispose()
+            {
+                if (_prior == null) return;
+                Logger = _prior;
+                _prior = null;
+            }
+        }
 
         private readonly CERTInextConfig _config;
         private readonly RestClient _http;
@@ -2516,16 +2543,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <summary>
-        /// Resolves <c>subscriptionDetails.validity</c> (years). An explicit ValidityYears wins;
-        /// ValidityDays is rounded up to whole years as a fallback; otherwise the connector's
-        /// <c>SubscriptionValidityYears</c> (default "1") applies.
+        /// Resolves <c>subscriptionDetails.validity</c> (whole subscription years). The term is
+        /// <c>max(ValidityYears, ceil(ValidityDays / 365))</c>, counting each only when it is set
+        /// (&gt; 0). Both template fields default to one year, so a field left at its default can
+        /// never override an explicit value in the other; this keeps templates saved with only
+        /// ValidityDays (the sole working knob in 1.0.0) on the same term. When neither is set the
+        /// connector's <c>SubscriptionValidityYears</c> (default "1") applies.
         /// </summary>
         private string ResolveValidityYears(int? validityYears, int? validityDays)
         {
-            if (validityYears.HasValue)
-                return validityYears.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            if (validityDays.HasValue)
-                return Math.Ceiling(validityDays.Value / 365.0).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
+            int years = Math.Max(validityYears ?? 0, 0);
+            int days = Math.Max(validityDays ?? 0, 0);
+            int daysAsYears = (int)Math.Ceiling(days / 365.0);
+            int term = Math.Max(years, daysAsYears);
+            if (term > 0)
+                return term.ToString(System.Globalization.CultureInfo.InvariantCulture);
             return string.IsNullOrWhiteSpace(_config.SubscriptionValidityYears) ? "1" : _config.SubscriptionValidityYears;
         }
 

@@ -197,7 +197,7 @@ When the connector is saved (and `Enabled` is `true`), the plugin checks only th
 | `DefaultProductCode` | Both | Optional | Numeric product code fallback. See [DefaultProductCode](#defaultproductcode). |
 | `AccountingModel` | V1 | Optional | Billing model: `2` = credit-based (most accounts), `1` = cash. Default: `2`. |
 | `EmailNotifications` | Both | Optional | Lifecycle emails to the requestor. See [EmailNotifications values](#emailnotifications-values). Default: `0`. |
-| `SubscriptionValidityYears` | Both | Optional | Default validity in years: `1`, `2`, or `3`. A template `ValidityYears` overrides it. Default: `1`. |
+| `SubscriptionValidityYears` | Both | Optional | Default validity in years: `1`, `2`, or `3`. Used when the template sets no `ValidityYears` (and, on V1, no `ValidityDays`); a template term overrides it. Default: `1`. |
 | `SubscriptionAutoRenew` | Both | Optional | `0` = CERTInext does not auto-renew (recommended; Command drives renewal), `1` = enabled. Default: `0`. |
 | `SubscriptionRenewCriteriaDays` | Both | Optional | Days before expiry at which CERTInext auto-renews. Honored only when `SubscriptionAutoRenew` is `1`. Default: `30`. |
 | `AutoSecureWww` | Both | Optional | `1` adds the `www.` variant of the primary domain as an extra SAN, which must also pass domain validation. Sent as `orderDetails.autoSecureWWW` on every V1 SSL order (new and renewal). Default: `0`. |
@@ -307,8 +307,8 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 |---|---|---|---|---|
 | `ProductCode` | Optional | String | Overrides the numeric CERTInext product code. Get the right code from `GetProductDetails` for your account. Required for `ProductFamily=private-pki`. | DV SSL: `842` (sandbox) or `838` (production) |
 | `ProfileId` | Deprecated | String | Legacy alias for `ProductCode`. Accepted for backward compatibility — if `ProductCode` is not set, `ProfileId` is used in its place. New templates should use `ProductCode`. | `838` |
-| `ValidityYears` | Optional | Number | Subscription validity period in years: `1`, `2`, or `3`. Default: `1`. CERTInext certificates are issued within a subscription term at up to 390 days per certificate, with free renewals within the term. | `1` |
-| `ValidityDays` | Deprecated | Number | Legacy validity field, V1 only. If set, the value is divided by 365 and rounded up to derive a year count. New templates should use `ValidityYears`. | `365` |
+| `ValidityYears` | Optional | Number | Subscription term in years: `1`, `2`, or `3`. Default: `1`. CERTInext certificates are issued within a subscription term at up to 390 days per certificate, with free renewals within the term. | `1` |
+| `ValidityDays` | Optional | Number | V1 only; ignored on V2. Requested validity in days, converted to whole subscription years and rounded up (365 days = 1 year), because the order API takes years. Default: `365`. See the note below the table. | `365` |
 | `AutoApprove` | Optional | Boolean | **Currently has no effect** — reserved for future use. The plugin does not call any approval endpoint against CERTInext regardless of this setting. | `false` |
 | `RequesterName` | Optional | String | Overrides the connector `RequestorName` for this template when non-blank. Never derived from the certificate subject. | `Keyfactor Automation` |
 | `RequesterEmail` | Optional | String | Overrides the connector `RequestorEmail` for this template when non-blank. Never derived from the certificate subject. | `pki-admin@example.com` |
@@ -319,6 +319,7 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 | `SignerPlace` | Optional | String | V2 only: per-template override for the subscriber agreement signer location. When omitted, defaults to the connector-level `SignerPlace`. V1 uses the connector-level value. | `Austin` |
 | `SignerIp` | Optional | String | V2 only: per-template override for the subscriber agreement signer IP address. When omitted, defaults to the connector-level `SignerIp`. V1 uses the connector-level value. | `203.0.113.10` |
 
+- **Subscription term (V1):** the order's term is the larger of `ValidityYears` and `ValidityDays` rounded up to whole years (365 days = 1 year). Each field counts only when it is set, and a field left at its default (1 year) never overrides the other, so a template saved with only `ValidityDays` keeps its term. Because the larger value wins, a stale larger `ValidityDays` cannot be shortened with `ValidityYears` alone; set `ValidityDays` back to `365`. V2 uses only `ValidityYears`.
 - **Key types:** larger RSA, ECC P-521, and the Ed25519/Ed448 curves are rejected by the CA (`Invalid key size`).
 
 When `ProductCode` is omitted:

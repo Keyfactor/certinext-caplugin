@@ -70,10 +70,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
                 GetString(Constants.EnrollmentParam.ProfileId, string.Empty));
         }
 
-        /// <summary>Requested subscription validity in years (1, 2, or 3). Takes precedence over ValidityDays.</summary>
+        /// <summary>Requested subscription validity in years (1, 2, or 3). On V1 the order uses the larger of this and ValidityDays in years; V2 uses only this.</summary>
         public int ValidityYears => GetInt(Constants.EnrollmentParam.ValidityYears, 0);
 
-        /// <summary>Requested validity in days; 0 means "use profile default".</summary>
+        /// <summary>Requested validity in days (V1 only), converted to whole years (rounded up); 0 means unset.</summary>
         public int ValidityDays => GetInt(Constants.EnrollmentParam.ValidityDays, 0);
 
         /// <summary>Whether to auto-approve pending-approval certificates.</summary>

@@ -229,7 +229,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.Config.SubscriptionValidityYears] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Default validity in years for SSL orders. \"1\", \"2\", or \"3\". " +
-                               "Override per template via the ValidityYears product parameter. Default: \"1\".",
+                               "Used when the template sets no ValidityYears (and, on V1, no ValidityDays); a template " +
+                               "term (on V1 the larger of ValidityYears and ValidityDays in years) overrides it. " +
+                               "Default: \"1\".",
                     Hidden = false,
                     DefaultValue = "1",
                     Type = "String"
@@ -486,7 +488,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.ValidityYears] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Subscription validity in years: 1, 2, or 3. Default: 1. " +
+                    Comments = "OPTIONAL: Subscription term in years: 1, 2, or 3. On V1 the order's term is the " +
+                               "larger of ValidityYears and ValidityDays rounded up to whole years (365 days = 1 year); " +
+                               "a field left at its default (1 year) never overrides the other. On V2 only " +
+                               "ValidityYears is used. A template value overrides the connector's " +
+                               "SubscriptionValidityYears. Because the larger value wins on V1, a stale larger " +
+                               "ValidityDays cannot be shortened with ValidityYears alone; set ValidityDays back to " +
+                               "365. Default: 1. " +
                                "Note: CERTInext validates per 390-day certificate within the subscription; " +
                                "the 'validity' field in the order is the subscription term, not certificate lifetime.",
                     Hidden = false,
@@ -495,8 +503,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.ValidityDays] = new PropertyConfigInfo
                 {
-                    Comments = "DEPRECATED: Use ValidityYears instead. V1 only: if set, value is divided by 365 and " +
-                               "rounded up to get the subscription year count.",
+                    Comments = "OPTIONAL: V1 only (ignored on V2, which uses ValidityYears). Requested validity in " +
+                               "days. CERTInext's order API takes whole subscription years, so days are converted to " +
+                               "years, rounded up (365 days = 1 year). The order's term is the larger of this and " +
+                               "ValidityYears; a field left at its default (365 days = 1 year) never overrides the " +
+                               "other. Kept because certificate lifetimes are shrinking and days is the unit that will " +
+                               "matter if CERTInext adds a lifetime field. To shorten a template with a larger value, " +
+                               "set this back to 365. Default: 365.",
                     Hidden = false,
                     DefaultValue = 365,
                     Type = "Number"
