@@ -53,7 +53,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private readonly string _v2ApiUrl;
         private readonly string _v2ClientId;
         private readonly string _v2ClientSecret;
-        private readonly string _v2ProductCode;
         private readonly string _v2Domain;
         private readonly bool _v2Enabled;
         private readonly string _cfApiToken;
@@ -70,7 +69,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _v2ApiUrl       = V2EnvHelper.GetEnv(env, "CERTINEXT_API_URL");
             _v2ClientId     = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_ID");
             _v2ClientSecret = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_SECRET");
-            _v2ProductCode  = V2EnvHelper.GetEnv(env, "CERTINEXT_PRODUCT_CODE", "842");
             _v2Domain       = V2EnvHelper.GetEnv(env, "CERTINEXT_DCV_DOMAIN", "test.example.com");
             _cfApiToken     = V2EnvHelper.GetEnv(env, "CERTINEXT_CF_API_TOKEN");
             _cfZoneId       = V2EnvHelper.GetEnv(env, "CERTINEXT_CF_ZONE_ID");
@@ -243,16 +241,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
         }
 
-        private EnrollmentProductInfo BuildV2ProductInfo() =>
-            new EnrollmentProductInfo
-            {
-                ProductID         = _v2ProductCode,
-                ProductParameters = new Dictionary<string, string>
-                {
-                    [Constants.EnrollmentParam.ProductCode] = _v2ProductCode,
-                    [Constants.EnrollmentParam.ProfileId]   = _v2ProductCode,
-                }
-            };
+        /// <summary>
+        /// Product info for the "DV SSL" gateway template in <paramref name="mode"/>: pinned
+        /// (<c>ProductCode</c> set, e.g. 842) or the unpinned "V2 template" (no <c>ProductCode</c>, so
+        /// CERTInext resolves the product). See <see cref="V2ProductPinning"/>.
+        /// </summary>
+        private static EnrollmentProductInfo BuildV2ProductInfo(V2PinMode mode) =>
+            V2ProductPinning.Info(Constants.Products.DvSsl, mode);
 
         /// <summary>
         /// Parses an issued certificate PEM and asserts its public key matches the requested
@@ -294,10 +289,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // Enroll with DCV on, V2 path, does not throw
         // ---------------------------------------------------------------------------
 
-        [SkippableFact]
-        public async Task DcvEnroll_V2_CompletesWithoutThrowing()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task DcvEnroll_V2_CompletesWithoutThrowing(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
 
             var config = BuildV2Config(dcvEnabled: true);
             using var probeClient = new CERTInextClient(config);
@@ -311,7 +308,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 csr:            GenerateCsrPem(_v2Domain),
                 subject:        $"CN={_v2Domain}",
                 san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
-                productInfo:    BuildV2ProductInfo(),
+                productInfo:    BuildV2ProductInfo(mode),
                 requestFormat:  RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
@@ -352,10 +349,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // Enroll with DCV off, V2 path, does not invoke the DNS provider
         // ---------------------------------------------------------------------------
 
-        [SkippableFact]
-        public async Task EnrollWithoutDcv_V2_DoesNotInvokeDnsProvider()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task EnrollWithoutDcv_V2_DoesNotInvokeDnsProvider(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
 
             var config = BuildV2Config(dcvEnabled: false);
             var recordingFactory = new RecordingDomainValidatorFactory(BuildV2DnsFactory());
@@ -365,7 +364,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 csr:            GenerateCsrPem(_v2Domain),
                 subject:        $"CN={_v2Domain}",
                 san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
-                productInfo:    BuildV2ProductInfo(),
+                productInfo:    BuildV2ProductInfo(mode),
                 requestFormat:  RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
@@ -423,10 +422,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // End-to-end DCV-on enrollment, issued cert appears in sync
         // ---------------------------------------------------------------------------
 
-        [SkippableFact]
-        public async Task EnrollWithDcvOn_V2_OrderIssuedEndToEnd_AndAppearsInSync()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task EnrollWithDcvOn_V2_OrderIssuedEndToEnd_AndAppearsInSync(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
             Skip.If(!_dcvEnabled,
                 "CERTINEXT_CF_API_TOKEN + CERTINEXT_CF_ZONE_ID required — DCV-on test must publish real TXT records.");
 
@@ -442,7 +443,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 csr:            GenerateCsrPem(_v2Domain),
                 subject:        $"CN={_v2Domain}",
                 san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
-                productInfo:    BuildV2ProductInfo(),
+                productInfo:    BuildV2ProductInfo(mode),
                 requestFormat:  RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
@@ -495,10 +496,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // ---------------------------------------------------------------------------
 
         [SkippableTheory]
-        [MemberData(nameof(KeyAlgorithms.AsMemberData), MemberType = typeof(KeyAlgorithms))]
-        public async Task EnrollWithDcvOn_V2_IssuesPerKeyAlgorithm(string tag)
+        [V2PinModesWithKeyAlgorithms]
+        public async Task EnrollWithDcvOn_V2_IssuesPerKeyAlgorithm(string tag, V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_ALGO_MATRIX") != "1",
                 "Opt-in: set CERTINEXT_V2_ALGO_MATRIX=1 to issue one real V2 cert per key algorithm.");
             Skip.If(!_dcvEnabled,
@@ -518,7 +520,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     csr:            csr,
                     subject:        $"CN={cn}",
                     san:            new Dictionary<string, string[]> { ["dns"] = new[] { cn } },
-                    productInfo:    BuildV2ProductInfo(),
+                    productInfo:    BuildV2ProductInfo(mode),
                     requestFormat:  RequestFormat.PKCS10,
                     enrollmentType: EnrollmentType.New);
             }
@@ -591,6 +593,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             // syncLookbackHours narrowed to 2h: the default 72h margin would otherwise re-download
             // every issued cert in a multi-day window on EACH of the (up to 8) sync passes below,
             // compounded by the retry loop.
+            // Volume/pagination test (101 orders): deliberately NOT doubled by pin mode. Product resolution is
+            // not what it exercises, and a second pass would place another 101 sandbox orders. Runs pinned.
             var plugin = BuildV2DcvPlugin(dcvEnabled: true, propagationDelaySeconds: 5, pageSize: 100, syncLookbackHours: 2);
 
             var enrolled = new ConcurrentBag<(int idx, string cn, EnrollmentResult result)>();
@@ -612,7 +616,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                             csr:            csr,
                             subject:        $"CN={cn}",
                             san:            new Dictionary<string, string[]> { ["dns"] = new[] { cn } },
-                            productInfo:    BuildV2ProductInfo(),
+                            productInfo:    BuildV2ProductInfo(V2PinMode.Pinned),
                             requestFormat:  RequestFormat.PKCS10,
                             enrollmentType: EnrollmentType.New);
 

@@ -202,10 +202,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// and cleaned==staged.
         /// Expected sandbox order count: 1.
         /// </summary>
-        [SkippableFact]
-        public async System.Threading.Tasks.Task EnrollWithDcvOn_V2_FreshUnverifiedSubdomain_StagesAndCleansUpTxt()
+        [SkippableTheory]
+        [V2PinModes]
+        public async System.Threading.Tasks.Task EnrollWithDcvOn_V2_FreshUnverifiedSubdomain_StagesAndCleansUpTxt(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
             Skip.If(!_dcvEnabled,
                 "CERTINEXT_CF_API_TOKEN and CERTINEXT_CF_ZONE_ID must be set so the plugin can publish a real TXT record.");
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_FRESH_DCV") != "1",
@@ -224,7 +226,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     csr:            GenerateCsrPem(freshDomain),
                     subject:        $"CN={freshDomain}",
                     san:            new Dictionary<string, string[]> { ["dns"] = new[] { freshDomain } },
-                    productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.DvSsl },
+                    productInfo:    V2ProductPinning.Info(Constants.Products.DvSsl, mode),
                     requestFormat:  RequestFormat.PKCS10,
                     enrollmentType: EnrollmentType.New);
 
@@ -286,10 +288,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// or cancel) must succeed regardless of outcome, so this probe never leaks a live order.
         /// Expected sandbox order count: 1.
         /// </summary>
-        [SkippableFact]
-        public async System.Threading.Tasks.Task EnrollWithDcvOn_V2_WildcardFreshSubdomain_RecordsTxtHostnameAndCleansUp()
+        [SkippableTheory]
+        [V2PinModes]
+        public async System.Threading.Tasks.Task EnrollWithDcvOn_V2_WildcardFreshSubdomain_RecordsTxtHostnameAndCleansUp(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSslWildcard, mode);
             Skip.If(!_dcvEnabled,
                 "CERTINEXT_CF_API_TOKEN and CERTINEXT_CF_ZONE_ID must be set so the plugin can publish a real TXT record.");
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_FRESH_DCV") != "1",
@@ -310,7 +314,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     csr:            GenerateCsrPem(wildcard),
                     subject:        $"CN={wildcard}",
                     san:            new Dictionary<string, string[]> { ["dns"] = new[] { wildcard } },
-                    productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.DvSslWildcard },
+                    productInfo:    V2ProductPinning.Info(Constants.Products.DvSslWildcard, mode),
                     requestFormat:  RequestFormat.PKCS10,
                     enrollmentType: EnrollmentType.New);
 

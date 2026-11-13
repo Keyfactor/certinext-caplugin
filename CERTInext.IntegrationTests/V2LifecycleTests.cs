@@ -52,7 +52,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private readonly string _v2ApiUrl;
         private readonly string _v2ClientId;
         private readonly string _v2ClientSecret;
-        private readonly string _v2ProductCode;
         private readonly string _v2Domain;
         private readonly bool _v2Enabled;
 
@@ -66,7 +65,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _v2ApiUrl       = V2EnvHelper.GetEnv(env, "CERTINEXT_API_URL");
             _v2ClientId     = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_ID");
             _v2ClientSecret = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_SECRET");
-            _v2ProductCode  = V2EnvHelper.GetEnv(env, "CERTINEXT_PRODUCT_CODE", "842");
             _v2Domain       = V2EnvHelper.GetEnv(env, "CERTINEXT_DCV_DOMAIN", "test.example.com");
 
             _v2Enabled = !string.IsNullOrWhiteSpace(V2EnvHelper.GetEnv(env, "CERTINEXT_USE_V2_API"))
@@ -198,16 +196,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             return record;
         }
 
-        private EnrollmentProductInfo BuildV2ProductInfo() =>
-            new EnrollmentProductInfo
-            {
-                ProductID         = _v2ProductCode,
-                ProductParameters = new Dictionary<string, string>
-                {
-                    [Constants.EnrollmentParam.ProductCode] = _v2ProductCode,
-                    [Constants.EnrollmentParam.ProfileId]   = _v2ProductCode,
-                }
-            };
+        /// <summary>
+        /// Product info for the "DV SSL" gateway template in <paramref name="mode"/>: pinned
+        /// (<c>ProductCode</c> set, e.g. 842) or the unpinned "V2 template" (no <c>ProductCode</c>, so
+        /// CERTInext resolves the product). See <see cref="V2ProductPinning"/>.
+        /// </summary>
+        private static EnrollmentProductInfo BuildV2ProductInfo(V2PinMode mode) =>
+            V2ProductPinning.Info(Constants.Products.DvSsl, mode);
 
         /// <summary>
         /// Resolves the order ID to exercise for tests that need a pre-existing V2 order.
@@ -227,10 +222,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// is set and the freshly-enrolled order never reaches GENERATED within the poll
         /// budget — sandboxes may require DCV to auto-issue.
         /// </summary>
-        private async Task<(string orderId, CERTInextCAPlugin plugin)> EnsureIssuedOrderIdAsync()
+        private async Task<(string orderId, CERTInextCAPlugin plugin)> EnsureIssuedOrderIdAsync(V2PinMode mode)
         {
             var plugin = BuildV2Plugin();
             string envOrderId = ResolveOrderId();
+            // With an env order the test does not enroll, so only the pinned row is meaningful.
+            V2ProductPinning.SkipUnpinnedWhenOrderSuppliedByEnv(mode, envOrderId, "CERTINEXT_V2_ORDER_ID");
             if (!string.IsNullOrWhiteSpace(envOrderId))
                 return (envOrderId, plugin);
 
@@ -238,14 +235,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 csr:            GenerateCsrPem(_v2Domain),
                 subject:        $"CN={_v2Domain}",
                 san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
-                productInfo:    BuildV2ProductInfo(),
+                productInfo:    BuildV2ProductInfo(mode),
                 requestFormat:  RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
             enrollResult.Should().NotBeNull();
             enrollResult.CARequestID.Should().NotBeNullOrWhiteSpace();
             _output.WriteLine(
-                $"EnsureIssuedOrderIdAsync: no CERTINEXT_V2_ORDER_ID set — enrolled fresh order {enrollResult.CARequestID}.");
+                $"{V2ProductPinning.Label(Constants.Products.DvSsl, mode)} EnsureIssuedOrderIdAsync: no CERTINEXT_V2_ORDER_ID set — enrolled fresh order {enrollResult.CARequestID}.");
 
             var record = await WaitForIssuanceAsync(plugin, enrollResult.CARequestID);
             Skip.If(record?.Status != (int)EndEntityStatus.GENERATED,
@@ -260,10 +257,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // Enroll() via the plugin, V2 path
         // ---------------------------------------------------------------------------
 
-        [SkippableFact]
-        public async Task Enroll_V2_ReturnsCARequestID()
+        /// <summary>
+        /// Runs twice: <see cref="V2PinMode.Pinned"/> (template carries a <c>ProductCode</c>) and
+        /// <see cref="V2PinMode.V2Template"/> (no <c>ProductCode</c>; CERTInext resolves the product).
+        /// </summary>
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Enroll_V2_ReturnsCARequestID(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
 
             var plugin = BuildV2Plugin();
 
@@ -271,7 +274,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 csr:            GenerateCsrPem(_v2Domain),
                 subject:        $"CN={_v2Domain}",
                 san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
-                productInfo:    BuildV2ProductInfo(),
+                productInfo:    BuildV2ProductInfo(mode),
                 requestFormat:  RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
@@ -317,12 +320,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             revokeResult.Should().Be((int)EndEntityStatus.REVOKED);
         }
 
-        [SkippableFact]
-        public async Task Revoke_V2_IssuedOrder_ReturnsRevoked()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Revoke_V2_IssuedOrder_ReturnsRevoked(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
 
-            var (orderId, plugin) = await EnsureIssuedOrderIdAsync();
+            var (orderId, plugin) = await EnsureIssuedOrderIdAsync(mode);
 
             var current = await plugin.GetSingleRecord(orderId);
             Skip.If(current?.Status != (int)EndEntityStatus.GENERATED,
@@ -385,10 +390,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // Enroll -> Synchronize -> Revoke, full V2 lifecycle via the plugin
         // ---------------------------------------------------------------------------
 
-        [SkippableFact]
-        public async Task Enroll_Synchronize_Revoke_V2_FullLifecycle()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Enroll_Synchronize_Revoke_V2_FullLifecycle(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
 
             // Narrow lookback (1h): the plugin's default 72h margin makes an un-narrowed delta
             // sync slow against this busy shared sandbox, and the order enrolled below is
@@ -401,7 +408,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 csr:            GenerateCsrPem(_v2Domain),
                 subject:        $"CN={_v2Domain}",
                 san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
-                productInfo:    BuildV2ProductInfo(),
+                productInfo:    BuildV2ProductInfo(mode),
                 requestFormat:  RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
@@ -470,12 +477,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // GetSingleRecord() cert-body check, V2 path
         // ---------------------------------------------------------------------------
 
-        [SkippableFact]
-        public async Task GetSingleRecord_V2_IssuedOrder_HasParseableCertBody()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task GetSingleRecord_V2_IssuedOrder_HasParseableCertBody(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
 
-            var (orderId, plugin) = await EnsureIssuedOrderIdAsync();
+            var (orderId, plugin) = await EnsureIssuedOrderIdAsync(mode);
             var record = await WaitForIssuanceAsync(plugin, orderId, maxPolls: 1);
 
             Skip.If(record?.Status != (int)EndEntityStatus.GENERATED,

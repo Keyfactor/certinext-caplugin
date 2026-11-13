@@ -101,6 +101,25 @@ dotnet test certinext-caplugin.sln --verbosity normal
 
 The DCV test classes compile into the default build; no build flag is needed.
 
+### V2: pinned and unpinned ("V2 template") runs
+
+Every V2 test that enrolls a product runs twice, mirroring the two gateway template sets that
+`scripts/register/` registers (see [scripts/register/README.md](../scripts/register/README.md)):
+
+| Row (`mode:`) | `ProductID` | `ProductCode` parameter | Plugin sends `X-Product-Code` |
+|---|---|---|---|
+| `Pinned` | product name, e.g. `DV SSL` | the product's code | yes |
+| `V2Template` (unpinned) | same product name | none | no, CERTInext resolves the product |
+
+Select a set with `--filter "DisplayName~Pinned"` or `--filter "DisplayName~V2Template"`. Pinned
+codes default to the sandbox catalog (DV SSL 842, DV Wildcard 843, DV UCC 844, DV Wildcard UCC 845,
+OV 846-849 in the same order, EV SSL 850, EV UCC 851); override with `CERTINEXT_PRODUCT_CODE` (DV SSL
+only) or `CERTINEXT_PRODUCT_CODE_MAP_JSON` (for example `{"OV SSL":"900"}`). On the sandbox the
+unpinned DV product currently resolves to a product that rejects the CSR at submit, so `V2Template`
+rows that issue are expected to fail until CERTInext fixes the account; that is a product finding, not
+a test bug. Tests handed an existing order through an env variable (`CERTINEXT_V2_ORDER_ID`,
+`CERTINEXT_V2_ISSUED_ORDER_ID`) do not enroll, so only their `Pinned` row runs.
+
 ---
 
 ## Skip Behaviour

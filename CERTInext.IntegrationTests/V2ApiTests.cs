@@ -138,8 +138,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// then revokes the order.
         /// Skips when CERTINEXT_USE_V2_API is not set.
         /// </summary>
-        [SkippableFact]
-        public async Task Lifecycle_V2_EnrollTrackRevoke()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Lifecycle_V2_EnrollTrackRevoke(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
@@ -147,7 +148,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             // Place order
             var orderReq   = BuildStandardOrderRequest();
-            var createResp = await PlaceOrderTrackedAsync(client, orderReq);
+            var createResp = await PlaceOrderTrackedAsync(client, orderReq, mode);
 
             createResp.Should().NotBeNull();
             createResp.OrderId.Should().NotBeNullOrEmpty(
@@ -350,15 +351,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// status.  The order will typically be issued, pending-approval or pending-dcv (the CSR is inline on create); that is fine.
         /// Skips when CERTINEXT_USE_V2_API is not set.
         /// </summary>
-        [SkippableFact]
-        public async Task GetSingleRecord_V2_ReturnsOrderDetails()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task GetSingleRecord_V2_ReturnsOrderDetails(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
             using var client = BuildV2Client();
 
             var orderReq = BuildStandardOrderRequest();
-            var createResp = await PlaceOrderTrackedAsync(client, orderReq);
+            var createResp = await PlaceOrderTrackedAsync(client, orderReq, mode);
 
             createResp.Should().NotBeNull();
             string orderId = createResp.OrderId;
@@ -381,13 +383,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// and polls (bounded) for issuance, so the test does not depend on another test's
         /// run order to have a usable order ID.
         /// </summary>
-        [SkippableFact]
-        public async Task Revoke_V2_IssuedOrder()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Revoke_V2_IssuedOrder(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
             using var client = BuildV2Client();
-            var (orderId, family) = await EnsureIssuedOrderIdAsync(client);
+            var (orderId, family) = await EnsureIssuedOrderIdAsync(client, mode);
 
             // Revoke — sandbox may report 'issued' via track but reject revocation
             // with 422 ("Certificate Request still being processed") while the order
@@ -445,8 +448,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// treated here as the reuse-path outcome, not a failure: the publish/verify
         /// steps are skipped and the order is polled directly for leaving pending-dcv.
         /// </summary>
-        [SkippableFact]
-        public async Task DcvFlow_V2_PublishesAndVerifies()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task DcvFlow_V2_PublishesAndVerifies(V2PinMode mode)
         {
             Skip.If(!_dcvEnabled,
                 "DCV test requires CERTINEXT_USE_V2_API + CERTINEXT_CF_API_TOKEN + CERTINEXT_CF_ZONE_ID — skipping.");
@@ -463,7 +467,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 // 1. Place a DV SSL order — it lands in pending-dcv
                 var orderReq   = BuildStandardOrderRequest();
-                var createResp = await PlaceOrderTrackedAsync(client, orderReq);
+                var createResp = await PlaceOrderTrackedAsync(client, orderReq, mode);
                 orderId = createResp.OrderId;
                 orderId.Should().NotBeNullOrEmpty();
 
@@ -561,13 +565,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Prefers CERTINEXT_V2_ISSUED_ORDER_ID; otherwise self-enrolls a fresh order
         /// via <see cref="EnsureIssuedOrderIdAsync"/>.
         /// </summary>
-        [SkippableFact]
-        public async Task ChainPem_V2_IsAssembled()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task ChainPem_V2_IsAssembled(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
             using var client = BuildV2Client();
-            var (orderId, family) = await EnsureIssuedOrderIdAsync(client);
+            var (orderId, family) = await EnsureIssuedOrderIdAsync(client, mode);
 
             V2CertificateDownloadResponse downloadResp;
             try
@@ -701,11 +706,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
         }
 
-        private async Task<V2CreateOrderResponse> PlaceOrderTrackedAsync(CERTInextClient client, V2CreateSslOrderRequest req)
+        /// <summary>
+        /// Places the standard DV SSL order in <paramref name="mode"/>: pinned sends the product code
+        /// (<c>X-Product-Code</c>), the V2 template sends none (<c>productCode</c> null omits the header)
+        /// and lets CERTInext resolve the product. Logs the mode and the response's
+        /// <c>ResolvedProductCode</c> (the product CERTInext actually picked).
+        /// </summary>
+        private async Task<V2CreateOrderResponse> PlaceOrderTrackedAsync(
+            CERTInextClient client, V2CreateSslOrderRequest req, V2PinMode mode)
         {
-            var resp = await client.PlaceOrderV2Async(Constants.ApiV2.FamilySsl, _v2ProductCode, req);
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
+            V2CreateOrderResponse resp;
+            try
+            {
+                resp = await client.PlaceOrderV2Async(
+                    Constants.ApiV2.FamilySsl, V2ProductPinning.CodeSent(Constants.Products.DvSsl, mode), req);
+            }
+            catch (Exception ex)
+            {
+                _output.WriteLine($"{V2ProductPinning.Label(Constants.Products.DvSsl, mode)} order create FAILED: " +
+                                  $"{ex.GetType().Name}: {ex.Message}");
+                throw;
+            }
+
             if (!string.IsNullOrWhiteSpace(resp?.OrderId))
                 _placedOrderIds.Add(resp.OrderId);
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode,
+                resp?.ResolvedProductCode ?? "(not reported)");
             return resp;
         }
 
@@ -748,8 +775,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// no env ID is set and the freshly-placed order never reaches <c>issued</c> within
         /// the poll budget — sandboxes may require DCV to auto-issue.
         /// </summary>
-        private async Task<(string orderId, string family)> EnsureIssuedOrderIdAsync(CERTInextClient client)
+        private async Task<(string orderId, string family)> EnsureIssuedOrderIdAsync(CERTInextClient client, V2PinMode mode)
         {
+            // With an env order the test does not place one, so only the pinned row is meaningful.
+            V2ProductPinning.SkipUnpinnedWhenOrderSuppliedByEnv(mode, _issuedOrderId, "CERTINEXT_V2_ISSUED_ORDER_ID");
             if (!string.IsNullOrWhiteSpace(_issuedOrderId))
             {
                 var (family, status) = await ResolveOrderFamilyAsync(client, _issuedOrderId);
@@ -759,7 +788,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
 
             var orderReq   = BuildStandardOrderRequest();
-            var createResp = await PlaceOrderTrackedAsync(client, orderReq);
+            var createResp = await PlaceOrderTrackedAsync(client, orderReq, mode);
             createResp.Should().NotBeNull();
             string orderId = createResp.OrderId;
             orderId.Should().NotBeNullOrEmpty("PlaceOrderV2Async must return a non-empty orderId");

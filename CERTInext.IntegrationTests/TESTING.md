@@ -81,6 +81,12 @@ a `requestNumber` (valid) and which return an error (invalid or not provisioned)
 
 The V2 tests skip unless the V2 credentials are present (see [INTEGRATION_TESTING.md](INTEGRATION_TESTING.md#skip-behaviour)).
 
+Every V2 test that enrolls a product is a `[SkippableTheory]` that runs twice: `mode: Pinned` (the
+template carries a `ProductCode`) and `mode: V2Template` (no `ProductCode`; CERTInext resolves the
+product). See [INTEGRATION_TESTING.md](INTEGRATION_TESTING.md#v2-pinned-and-unpinned-v2-template-runs).
+`BulkV2Enrollment_AllOrdersIssue_AndPaginationWorks` (a volume/pagination test, 101 orders) runs pinned
+only. `PrivatePki_V2_*`, the validity/latency/inline-CSR experiments, and the read-only probes are not doubled.
+
 | Class | Test | What it checks |
 |---|---|---|
 | `V2ApiTests` | `Connectivity_V2_Ping` | `GET /auth/me` succeeds with an OAuth token |

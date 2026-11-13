@@ -317,10 +317,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// GENERATED, else cancel).
         /// Expected sandbox order count: 1.
         /// </summary>
-        [SkippableFact]
-        public async Task Enroll_V2_DvUcc_WithMultipleSans_FullLifecycle()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Enroll_V2_DvUcc_WithMultipleSans_FullLifecycle(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSslUcc, mode);
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_DV_UCC") != "1",
                 "CERTINEXT_V2_LIFECYCLE_DV_UCC=1 not set — this places a real DV UCC sandbox order. Skipping.");
 
@@ -335,7 +337,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             string orderId = null;
             try
             {
-                var productInfo = new EnrollmentProductInfo { ProductID = Constants.Products.DvSslUcc };
+                var productInfo = V2ProductPinning.Info(Constants.Products.DvSslUcc, mode);
 
                 var enrollResult = await plugin.Enroll(
                     csr:            GenerateCsrPem(primary),
@@ -387,10 +389,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// <see cref="OvEvCreateTimeoutTarget"/> for the 120s-vs-300s client timeout caveat.
         /// Expected sandbox order count: 1.
         /// </summary>
-        [SkippableFact]
-        public async Task Enroll_V2_Ov_FullLifecycle()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Enroll_V2_Ov_FullLifecycle(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.OvSsl, mode);
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_OV") != "1",
                 "CERTINEXT_V2_LIFECYCLE_OV=1 not set — this places a real OV sandbox order. Skipping.");
 
@@ -414,7 +418,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                         csr:            GenerateCsrPem(domain, probeTag),
                         subject:        $"CN={domain},OU={probeTag}",
                         san:            new Dictionary<string, string[]> { ["dns"] = new[] { domain } },
-                        productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.OvSsl },
+                        productInfo:    V2ProductPinning.Info(Constants.Products.OvSsl, mode),
                         requestFormat:  RequestFormat.PKCS10,
                         enrollmentType: EnrollmentType.New);
                 }
@@ -462,10 +466,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// caveat as the plain OV test above.
         /// Expected sandbox order count: 1.
         /// </summary>
-        [SkippableFact]
-        public async Task Enroll_V2_OvUcc_WithMultipleSans_FullLifecycle()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Enroll_V2_OvUcc_WithMultipleSans_FullLifecycle(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.OvSslUcc, mode);
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_OV_UCC") != "1",
                 "CERTINEXT_V2_LIFECYCLE_OV_UCC=1 not set — this places a real OV UCC sandbox order. Skipping.");
 
@@ -493,7 +499,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                         csr:            GenerateCsrPem(primary, probeTag),
                         subject:        $"CN={primary},OU={probeTag}",
                         san:            new Dictionary<string, string[]> { ["dns"] = new[] { sanA, sanB } },
-                        productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.OvSslUcc },
+                        productInfo:    V2ProductPinning.Info(Constants.Products.OvSslUcc, mode),
                         requestFormat:  RequestFormat.PKCS10,
                         enrollmentType: EnrollmentType.New);
                 }
@@ -543,10 +549,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// currently have; the test skips cleanly rather than guessing.
         /// Expected sandbox order count: 1.
         /// </summary>
-        [SkippableFact]
-        public async Task Enroll_V2_Ev_FullLifecycle()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Enroll_V2_Ev_FullLifecycle(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.EvSsl, mode);
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_EV") != "1",
                 "CERTINEXT_V2_LIFECYCLE_EV=1 not set — this places a real EV sandbox order. Skipping.");
 
@@ -569,7 +577,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                         csr:            GenerateCsrPem(domain),
                         subject:        $"CN={domain}",
                         san:            new Dictionary<string, string[]> { ["dns"] = new[] { domain } },
-                        productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.EvSsl },
+                        productInfo:    V2ProductPinning.Info(Constants.Products.EvSsl, mode),
                         requestFormat:  RequestFormat.PKCS10,
                         enrollmentType: EnrollmentType.New);
                 }
@@ -621,10 +629,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// first-class DV SSL Wildcard product shape.
         /// Expected sandbox order count: 1.
         /// </summary>
-        [SkippableFact]
-        public async Task Enroll_V2_WildcardDv_WildcardOnly_FullLifecycle()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Enroll_V2_WildcardDv_WildcardOnly_FullLifecycle(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSslWildcard, mode);
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_WILDCARD_DV") != "1",
                 "CERTINEXT_V2_LIFECYCLE_WILDCARD_DV=1 not set — this places real wildcard DV sandbox orders. Skipping.");
 
@@ -639,7 +649,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     csr:            GenerateCsrPem(wildcard),
                     subject:        $"CN={wildcard}",
                     san:            new Dictionary<string, string[]> { ["dns"] = new[] { wildcard } },
-                    productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.DvSslWildcard },
+                    productInfo:    V2ProductPinning.Info(Constants.Products.DvSslWildcard, mode),
                     requestFormat:  RequestFormat.PKCS10,
                     enrollmentType: EnrollmentType.New);
 
@@ -678,10 +688,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Expected sandbox order count: 0 or 1 (0 if CERTInext itself rejects a FAILED result
         /// before any order is ever placed — see the FAILED branch below).
         /// </summary>
-        [SkippableFact]
-        public async Task Enroll_V2_WildcardDv_WildcardPlusApexSan_RecordsActualBehavior()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task Enroll_V2_WildcardDv_WildcardPlusApexSan_RecordsActualBehavior(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSslWildcard, mode);
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_WILDCARD_DV") != "1",
                 "CERTINEXT_V2_LIFECYCLE_WILDCARD_DV=1 not set — this places real wildcard DV sandbox orders. Skipping.");
 
@@ -698,7 +710,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     csr:            GenerateCsrPem(wildcard),
                     subject:        $"CN={wildcard}",
                     san:            new Dictionary<string, string[]> { ["dns"] = new[] { wildcard, apex } },
-                    productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.DvSslWildcard },
+                    productInfo:    V2ProductPinning.Info(Constants.Products.DvSslWildcard, mode),
                     requestFormat:  RequestFormat.PKCS10,
                     enrollmentType: EnrollmentType.New);
 
@@ -772,10 +784,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// FAILED three times and call it a pass."
         /// Expected sandbox order count: up to 3 (original + renew + reissue).
         /// </summary>
-        [SkippableFact]
-        public async Task EnrollRenewReissue_V2_IssuedDvOrder_RecordsActualBehavior()
+        [SkippableTheory]
+        [V2PinModes]
+        public async Task EnrollRenewReissue_V2_IssuedDvOrder_RecordsActualBehavior(V2PinMode mode)
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
             Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_LIFECYCLE_RENEW_REISSUE") != "1",
                 "CERTINEXT_V2_LIFECYCLE_RENEW_REISSUE=1 not set — this places up to 3 real DV sandbox orders. Skipping.");
 
@@ -790,7 +804,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     csr:            GenerateCsrPem(domain),
                     subject:        $"CN={domain}",
                     san:            new Dictionary<string, string[]> { ["dns"] = new[] { domain } },
-                    productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.DvSsl },
+                    productInfo:    V2ProductPinning.Info(Constants.Products.DvSsl, mode),
                     requestFormat:  RequestFormat.PKCS10,
                     enrollmentType: EnrollmentType.New);
 
@@ -810,7 +824,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     csr:            GenerateCsrPem(domain),
                     subject:        $"CN={domain}",
                     san:            new Dictionary<string, string[]> { ["dns"] = new[] { domain } },
-                    productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.DvSsl, ProductParameters = priorParams },
+                    productInfo:    V2ProductPinning.Info(Constants.Products.DvSsl, mode, priorParams),
                     requestFormat:  RequestFormat.PKCS10,
                     enrollmentType: EnrollmentType.Renew);
 
@@ -830,7 +844,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     csr:            GenerateCsrPem(domain),
                     subject:        $"CN={domain}",
                     san:            new Dictionary<string, string[]> { ["dns"] = new[] { domain } },
-                    productInfo:    new EnrollmentProductInfo { ProductID = Constants.Products.DvSsl, ProductParameters = priorParams },
+                    productInfo:    V2ProductPinning.Info(Constants.Products.DvSsl, mode, priorParams),
                     requestFormat:  RequestFormat.PKCS10,
                     enrollmentType: EnrollmentType.Reissue);
 
