@@ -16,6 +16,7 @@
 - feat(config): V2 orders honor `GroupNumber`, `OrganizationNumber`, `TechnicalContact*`, `EmailNotifications`, and the subscription renewal settings.
 
 ## Bug Fixes
+- fix(v2): `EmailNotifications=0` (silent) is sent as `consent-only` on V2 order create, the quietest value in the spec's `consent-only | all` enum; the old `"0"` isn't a member of it.
 - fix(v2): Order create no longer sends `agreement.signerIp`, which isn't in the V2 spec's `Agreement` schema; the `SignerIp` settings now apply to V1 only.
 - fix(enroll): V2 UCC and renewal orders keep their SANs and primary domain, and renewals use the template's product code, as V1 does from 1.0.1.
 - fix(enroll): A V2 order auto-approved before it finishes issuing returns pending, not an issued result with no certificate.

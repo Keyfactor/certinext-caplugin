@@ -42,7 +42,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// <see cref="V2CreateSslOrderRequest.EmailNotifications"/>, following the pattern established
     /// by <c>V2SubscriptionEnrollmentTests.cs</c>.
     ///
-    /// Mapping under test: "1" -&gt; "all", "0" -&gt; "0",
+    /// Mapping under test: "1" -&gt; "all", "0" -&gt; "consent-only" (the V2 spec's enum is
+    /// `consent-only | all`; the old literal "0" is not a member),
     /// blank/whitespace/unset -&gt; null (omitted; CA defaults to "all"), any other value
     /// (including the literal "all") fails the enrollment before any CA call.
     /// </summary>
@@ -158,7 +159,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Enroll_V2_EmailNotifications_0_StaysZero()
+        public async Task Enroll_V2_EmailNotifications_0_MapsToConsentOnly()
         {
             var mock = NewMock();
             StubCatalog(mock, "842", "13");
@@ -169,9 +170,49 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var (result, captured) = await RunEnrollAsync(mock, plugin, "ord_email_002");
 
             result.CARequestID.Should().Be("ord_email_002");
-            captured!.EmailNotifications.Should().Be("0",
-                "EmailNotifications=\"0\" must be forwarded as the literal \"0\", which " +
-                "suppresses order-creation emails on V2, the same as V1");
+            captured!.EmailNotifications.Should().Be("consent-only",
+                "EmailNotifications=\"0\" (silent) must be sent as the V2 spec's \"consent-only\"; the " +
+                "legacy literal \"0\" is not a member of the `consent-only | all` enum");
+            captured.EmailNotifications.Should().NotBe("0");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_PrivatePki_EmailNotifications_0_MapsToConsentOnly()
+        {
+            // The Private PKI create body shares the same connector mapping (the spec's enum is the
+            // same `consent-only | all` there).
+            var mock = NewMock();
+            V2CreatePrivatePkiOrderRequest captured = null;
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<V2CreatePrivatePkiOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, V2CreatePrivatePkiOrderRequest, CancellationToken>((_, req, __) => captured = req)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_email_pki", Status = "pending-csr" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    Constants.ApiV2.FamilyPrivatePki, "ord_email_pki", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(Constants.ApiV2.FamilyPrivatePki, "ord_email_pki", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_email_pki", Status = "pending-approval" });
+
+            var plugin = BuildV2Plugin(mock.Object, emailNotifications: "0");
+            await plugin.Enroll(
+                csr: GenerateCsrPem("intranet.example.com"),
+                subject: "CN=intranet.example.com",
+                san: null,
+                productInfo: new EnrollmentProductInfo
+                {
+                    ProductID = "DV SSL",
+                    ProductParameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["ProductFamily"]  = "private-pki",
+                        ["ProductVariant"] = "intranet-ssl",
+                        ["DomainName"]     = "intranet.example.com"
+                    }
+                },
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            captured.Should().NotBeNull();
+            captured!.EmailNotifications.Should().Be("consent-only");
         }
 
         [Fact]
@@ -237,13 +278,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var request = new V2CreateSslOrderRequest
             {
                 ProductVariant     = "dv",
-                EmailNotifications = "0",
+                EmailNotifications = "consent-only",
                 Certificate        = new V2CertificateParams { Domain = "example.com" }
             };
 
             string json = JsonSerializer.Serialize(request, ClientEquivalentJsonOptions());
 
-            json.Should().Contain("\"emailNotifications\":\"0\"");
+            json.Should().Contain("\"emailNotifications\":\"consent-only\"");
         }
 
         // Mirrors the client's actual GetJsonOptions() (private) — see

@@ -187,7 +187,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             slug.Should().Be(Constants.ApiV2.FamilySsl);
             code.Should().Be("842");
             json.Should().Be(
-                "{\"productVariant\":\"dv\",\"emailNotifications\":\"0\"," +
+                "{\"productVariant\":\"dv\",\"emailNotifications\":\"consent-only\"," +
                 "\"requestor\":{\"name\":\"Test User\",\"email\":\"test@example.com\",\"phone\":\"\"}," +
                 "\"certificate\":{\"domain\":\"example.com\",\"autoSecureWww\":false}," +
                 "\"subscription\":{\"validityYears\":1,\"autoRenew\":false,\"renewBeforeDays\":30}," +
@@ -229,7 +229,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             code.Should().Be("842");
             // Same body as the default golden above, plus the CSR exactly as Enroll received it (PEM).
             json.Should().Be(
-                "{\"productVariant\":\"dv\",\"emailNotifications\":\"0\"," +
+                "{\"productVariant\":\"dv\",\"emailNotifications\":\"consent-only\"," +
                 "\"requestor\":{\"name\":\"Test User\",\"email\":\"test@example.com\",\"phone\":\"\"}," +
                 "\"certificate\":{\"domain\":\"example.com\",\"autoSecureWww\":false}," +
                 "\"subscription\":{\"validityYears\":1,\"autoRenew\":false,\"renewBeforeDays\":30}," +

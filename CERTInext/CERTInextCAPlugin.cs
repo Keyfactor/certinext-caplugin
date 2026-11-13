@@ -1921,10 +1921,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             // EmailNotifications: the connector field uses V1's "0"/"1" vocabulary and defaults
-            // to "0". V2 honors "0" by suppressing the order-creation emails — it does not
-            // silently coerce back to "all" — so the mapping below is user-decided, not a guess:
+            // to "0". The V2 spec's emailNotifications enum is `consent-only | all` (the old "0" is
+            // not a member of it), so the mapping below is user-decided, not a guess:
             // "1" -> "all" (full notification set), "0" ->
-            // "0" (silent, matching V1's own wire vocabulary), blank/unset -> null (omitted; the
+            // "consent-only" (the silent setting: only the mails the CA must send for consent),
+            // blank/unset -> null (omitted; the
             // client's global WhenWritingNull option drops the key and the CA falls back to its
             // documented default of "all", NOT silent — this is the one place V1 and V2 defaults
             // diverge for a blank config value, since V1's own fallback always sends "0"). Any
@@ -1942,7 +1943,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             else if (configEmailNotifications == "0")
             {
-                emailNotifications = "0";
+                emailNotifications = Constants.ApiV2.EmailNotificationsConsentOnly;
             }
             else
             {

@@ -224,7 +224,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.EmailNotifications] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Lifecycle emails to the requestor. \"1\" = full set (V2: \"all\"), \"0\" = silent. " +
+                    Comments = "OPTIONAL: Lifecycle emails to the requestor. \"1\" = full set (V2: \"all\"), \"0\" = silent " +
+                               "(V1: \"0\"; V2: \"consent-only\", the quietest value the V2 API accepts). " +
                                "Blank: silent on V1, omitted on V2 (CA default applies). Other values fail V2 " +
                                "enrollment. Default: \"0\".",
                     Hidden = false,

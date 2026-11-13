@@ -539,6 +539,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     PrivatePkiVariantIgtfHost
                 };
 
+            // Create-body `emailNotifications` silent value. The spec's enum is
+            // `consent-only | all` (it used to accept "0"); "consent-only" is the quietest setting.
+            // The connector's EmailNotifications=0 maps to it and =1 maps to "all".
+            public const string EmailNotificationsConsentOnly = "consent-only";
+
             // Catalog productTypeID for Private PKI products. Spec, Catalog -> List Products
             // "productTypeID values": `"39"` | Private PKI | Private PKI (`8`). Also observed live
             // on the sandbox catalog (product 149, "Sandbox emSign Intranet SSL 1 Year").

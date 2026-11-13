@@ -225,7 +225,7 @@ Calling `GetProductDetails` against your account lists the codes available to yo
 | Value | V1 | V2 |
 |---|---|---|
 | `1` | Full notification set (sent as `1`) | Sent as `all` |
-| `0` | Silent | Silent |
+| `0` | Silent (sent as `0`) | Silent: sent as `consent-only`, the quietest value the V2 spec allows (its enum is `consent-only` or `all`) |
 | Blank | Silent (sent as `0`) | Omitted, so the CA default (`all`, not silent) applies |
 | Anything else | Sent unchanged, not validated | Enrollment fails before any CA call |
 

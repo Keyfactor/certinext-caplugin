@@ -192,7 +192,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         public string ProductVariant { get; set; } = "dv";
 
         /// <summary>
-        /// "all" = full notification set, "0" = silent, null = omitted (CA defaults to "all").
+        /// Spec enum <c>consent-only | all</c>: "all" = full notification set, "consent-only" = the
+        /// silent setting (the connector's <c>EmailNotifications=0</c>), null = omitted (CA defaults
+        /// to "all").
         /// See <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin.EnrollV2Async"/>
         /// for the connector config mapping. No default here — relies solely
         /// on the client's global <c>DefaultIgnoreCondition = WhenWritingNull</c> serializer option
