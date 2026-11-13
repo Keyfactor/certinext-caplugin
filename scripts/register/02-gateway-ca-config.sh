@@ -15,6 +15,12 @@
 #   CA_CONNECTION_JSON     override the entire CAConnection object (advanced)
 #   TEMPLATE_PARAMS_JSON   default per-template Parameters object (default: {})
 #   FULL_SCAN_MINUTES      default 720;  INCR_SCAN_MINUTES default 5
+#   V2_TEMPLATES           1 (default) = also emit the unpinned "V2 template" set:
+#                          {ProductID:P, CertificateProfile:"P V2", Parameters:{...}}
+#                          with NO ProductCode/ProfileId (the plugin then sends no
+#                          X-Product-Code and CERTInext resolves the product).
+#                          Requires the "P V2" gateway profiles from stage 01.
+#                          0 = pinned set only (previous behavior).
 #   DRY_RUN=1              print the body, make no write call
 #
 # CAConnection is assembled from the CERTINEXT_* env vars (same values the
@@ -47,6 +53,11 @@ GATEWAY_CERT_FILE="${GATEWAY_CERT_FILE:-$REPO_ROOT/certinext-sandbox-chain.pem}"
 [ -n "${PRODUCT_CODE_MAP_JSON:-}" ] || PRODUCT_CODE_MAP_JSON='{}'
 FULL_SCAN_MINUTES="${FULL_SCAN_MINUTES:-720}"
 INCR_SCAN_MINUTES="${INCR_SCAN_MINUTES:-5}"
+V2_TEMPLATES="${V2_TEMPLATES:-1}"
+case "$V2_TEMPLATES" in
+    0|1) ;;
+    *) echo "ERROR: V2_TEMPLATES must be 0 or 1 (got '$V2_TEMPLATES')" >&2; exit 1 ;;
+esac
 
 echo "== Stage 02: gateway CA configuration =="
 echo "   gateway : $(gw_show)"
@@ -96,13 +107,27 @@ else
     echo "   warn: GATEWAY_CERT_FILE not found ($GATEWAY_CERT_FILE) — sending empty cert block" >&2
 fi
 
-# --- Templates[] (one per product_id) ---------------------------------------
+# --- Templates[] -------------------------------------------------------------
+# Pinned set: one per product_id, CertificateProfile = ProductID, ProductCode
+# from PRODUCT_CODE_MAP_JSON when present. Command imports these as
+# AnyCA_<ProductID>.
+# V2 set (V2_TEMPLATES=1): same ProductID, CertificateProfile "<ProductID> V2",
+# never a ProductCode/ProfileId (stripped even if TEMPLATE_PARAMS_JSON or the
+# codes map carries one). Command imports these as AnyCA_<ProductID> V2.
 TEMPLATES="$(manifest_product_ids "$MANIFEST" | jq -R . | jq -s \
     --argjson params "$TEMPLATE_PARAMS_JSON" \
     --argjson codes "$PRODUCT_CODE_MAP_JSON" \
-    '[.[] | . as $p
-      | {ProductID: $p, CertificateProfile: $p,
-         Parameters: ($params + (if $codes[$p] then {ProductCode: $codes[$p]} else {} end))}]')"
+    --argjson v2 "$V2_TEMPLATES" \
+    '. as $ids
+     | [$ids[] | . as $p
+        | {ProductID: $p, CertificateProfile: $p,
+           Parameters: ($params + (if $codes[$p] then {ProductCode: $codes[$p]} else {} end))}]
+       + (if $v2 == 1 then
+            [$ids[] | . as $p
+             | {ProductID: $p, CertificateProfile: ($p + " V2"),
+                Parameters: ($params | del(.ProductCode, .ProfileId))}]
+          else [] end)')"
+echo "   templates: $(echo "$TEMPLATES" | jq 'length') (V2_TEMPLATES=$V2_TEMPLATES)"
 
 # --- Assemble configuration body --------------------------------------------
 BODY="$(jq -n \
