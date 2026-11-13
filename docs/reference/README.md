@@ -8,16 +8,13 @@ in [`QUICKSTART.md`](../../QUICKSTART.md)).
 
 ## Source
 
-Generated from the `kfclab` localhost-kind reference lab on
-2026-05-22 via:
-
-```
-kfclab snapshot -f examples/localhost-kind/kfclab.yaml --out /tmp/snap
-```
-
-Then trimmed to the CERTInext-relevant subset, with sensitive fields
-either already masked by the upstream API (`ClientSecret`) or omitted
-entirely (no access keys, no PAM literals).
+Captured on 2026-05-22 from a local reference lab (a single-node
+Kubernetes deployment of Command, the AnyCA REST Gateway, and an OIDC
+identity provider), then trimmed to the CERTInext-relevant subset.
+Sensitive fields are either already masked by the upstream API
+(`ClientSecret`) or omitted entirely (no access keys, no PAM literals).
+Hostnames and identity-provider values in the files are lab-specific
+examples; replace them with your own.
 
 ## Layout
 
@@ -34,16 +31,22 @@ docs/reference/
 
 ## `gateway/certificate-profiles.json`
 
-Eight profiles, one per CERTInext sandbox product. Each carries the
-same `key_algs` block — the canonical "permit RSA 2048–8192 + ECDSA
-P-256/384/521 + Ed25519/Ed448" policy. Match this `key_algs` shape on
-new profiles to avoid Command's misleading `0xA0110004` "Key type
-disallowed by policy" error.
+Eight profiles, covering eight of the ten advertised products (the
+non-EV ones). Each carries the same `key_algs` block, which is the lab's
+deliberately broad policy:
 
-> **Note:** The gateway profile defines what Command permits; CERTInext itself only
-> accepts RSA 2048/3072/4096 and ECC P-256/P-384. Orders using P-521, Ed25519,
-> Ed448, or RSA larger than 4096 bits are accepted by Command but rejected by
-> CERTInext with `Invalid key size`.
+| Algorithm | Permitted in this capture | Accepted by CERTInext |
+|---|---|---|
+| RSA | 2048, 3072, 4096, 6144, 8192 | 2048, 3072, 4096 only |
+| ECDSA | P-256, P-384, P-521 | P-256, P-384 only |
+| Ed25519 / Ed448 | Both | Neither |
+
+Always include a populated `key_algs` block on new profiles, or Command
+reports a misleading `0xA0110004` "Key type disallowed by policy" error.
+Do **not** copy this capture's broad policy. The gateway profile defines
+what Command permits; CERTInext rejects the extra key types with
+`Invalid key size`. The recommended, narrower policy is in
+[QUICKSTART step 2](../../QUICKSTART.md#key-algorithm-policy).
 
 The profiles **don't** carry CA-binding information; they're top-level
 gateway resources. The CA configuration's `Templates[].CertificateProfile`
@@ -52,11 +55,10 @@ field is what binds a product to its profile by name.
 ## `gateway/claims.json`
 
 The gateway authorisation table. Each row maps an OIDC subject (token
-`sub`) to a gateway role. The lab seeds these on every
-`init-gateway`:
+`sub`) to a gateway role. The lab has three entries:
 
-- Two for the gateway's own machine client (admin + user — defensive)
-- One for `akadmin` (the Authentik admin's `nameClaimType=sub`)
+- Two for the gateway's own machine client (admin + user, defensive)
+- One for the identity provider's admin user (`akadmin` in this lab)
 
 Production deployments add per-operator entries here. There are no
 secrets in this file.
@@ -74,9 +76,15 @@ Read-only fields populated by Command (e.g. `Id`, `LastSyncTime`,
 ## `command/templates-certinext.json`
 
 The eight Command templates created by `POST /KeyfactorAPI/Templates/Import`
-(`ConfigurationTenant=certinext-caplugin`). Each is a 1-to-1 mapping
-of a CERTInext sandbox product → a Command template named
-`AnyCA_<ProductID>` and tied back to the CA by `ConfigurationTenant`.
+(`ConfigurationTenant=certinext-caplugin`). Each maps one non-EV
+CERTInext product to one Command template and is tied back to the CA
+by `ConfigurationTenant`.
+
+| Field | Value | Example |
+|---|---|---|
+| `CommonName` | `AnyCA_<ProductID>` | `AnyCA_DV SSL` |
+| `TemplateName` / `DisplayName` | `AnyCA (<ProductID>)` | `AnyCA (DV SSL)` |
+
 Useful as a sanity check after running step 5 of the quickstart: the
 template count and `CommonName` set should match this file (modulo
 `Id` churn).

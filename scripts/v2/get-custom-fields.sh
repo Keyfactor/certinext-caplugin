@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
-# V2 catalog/products/{code}/custom-fields — mandatory + optional custom fields for a product.
+# V2 catalog/products/{code}/custom-fields — mandatory + optional custom fields for a
+# product. Read-only.
 # Required env var: PRODUCT_CODE
+# Credentials: see scripts/v2/README.md.
 set -euo pipefail
-. ~/.env_certinext
+# shellcheck source=scripts/lib/certinext-v2-auth.sh
 . "$(dirname "$0")/../lib/certinext-v2-auth.sh"
+v2_usage() { echo "Usage: PRODUCT_CODE=<code> scripts/v2/get-custom-fields.sh" >&2; }
+v2_parse_args "$@"
 
 PRODUCT_CODE="${PRODUCT_CODE:-}"
+v2_require_id PRODUCT_CODE
 
-if [ -z "$PRODUCT_CODE" ]; then
-    echo "Usage: PRODUCT_CODE=<code> scripts/v2/get-custom-fields.sh" >&2
-    exit 1
-fi
-
-echo "V2 GET /api/certinext/v2/catalog/products/$PRODUCT_CODE/custom-fields"
-curl -s -X GET "$CERTINEXT_V2_API_URL/api/certinext/v2/catalog/products/$PRODUCT_CODE/custom-fields" \
-     -H "Authorization: Bearer $CERTINEXT_V2_TOKEN" \
-     -H "Accept: application/json" \
-| jq .
+echo "V2 GET /api/certinext/v2/catalog/products/$PRODUCT_CODE/custom-fields" >&2
+v2_request GET "/api/certinext/v2/catalog/products/$PRODUCT_CODE/custom-fields"

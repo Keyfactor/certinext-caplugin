@@ -2,11 +2,13 @@
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // At http://www.apache.org/licenses/LICENSE-2.0
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using Keyfactor.AnyGateway.Extensions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Xunit;
 
@@ -72,6 +74,41 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     $"configured product code \"{_fixture.ProductCode}\" should be available " +
                     "in the account's product list when GetProductDetails returns results");
             }
+        }
+
+        /// <summary>
+        /// Drives
+        /// <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin.ValidateProductInfo"/>
+        /// (not just the client method) through the plugin, the same path AnyGatewayREST's
+        /// <c>ConfigurationValidator</c> exercises when a template is saved. V1 mode (the
+        /// default, <c>UseV2Api</c> unset) must be unaffected by V2-specific validation paths.
+        /// </summary>
+        [SkippableFact]
+        public async Task ValidateProductInfo_V1_AcceptsConfiguredProductCode()
+        {
+            IntegrationSkip.IfNotConfigured(_fixture);
+            Skip.If(string.IsNullOrWhiteSpace(_fixture.ProductCode),
+                "CERTINEXT_PRODUCT_CODE not set — cannot assert against a real product code.");
+
+            var plugin = new Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin();
+            var connectionInfo = new Dictionary<string, object>
+            {
+                ["ApiUrl"] = _fixture.ApiUrl,
+                ["AuthMode"] = "AccessKey",
+                ["ApiKey"] = _fixture.AccessKey,
+                ["AccountNumber"] = _fixture.AccountNumber,
+                ["GroupNumber"] = _fixture.GroupNumber
+            };
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = "ssl",
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = _fixture.ProductCode }
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connectionInfo);
+
+            await act.Should().NotThrowAsync(
+                $"configured product code \"{_fixture.ProductCode}\" should validate in V1 mode");
         }
     }
 }
