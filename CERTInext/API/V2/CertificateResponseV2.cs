@@ -97,6 +97,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("status")]
         public string Status { get; set; }
 
+        /// <summary>
+        /// The catalog product code CERTInext's wrapper actually used for the order. The spec's
+        /// create description lists it in the 201 response; it is what tells an operator which
+        /// product an order with no <c>X-Product-Code</c> header resolved to. Logged by the
+        /// plugin; absent when the CA does not return it.
+        /// </summary>
+        [JsonPropertyName("resolvedProductCode")]
+        public string ResolvedProductCode { get; set; }
+
         [JsonPropertyName("_links")]
         public V2Links Links { get; set; }
     }

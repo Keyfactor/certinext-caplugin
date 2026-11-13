@@ -665,7 +665,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var params_ = new EnrollmentParams(productInfo);
             string profileId = params_.ProfileId;
 
-            if (string.IsNullOrWhiteSpace(profileId))
+            // On V2 the template's ProductCode is an optional override (sent as X-Product-Code
+            // only when set); without one CERTInext's wrapper resolves the product itself, so
+            // there is nothing to require here. params_.ProfileId must not be used for V2 in that
+            // case: its fallback is the V1-era code table.
+            bool v2WithoutProductCode = useV2 && !params_.HasExplicitProductCode;
+            if (v2WithoutProductCode)
+                profileId = null;
+
+            if (string.IsNullOrWhiteSpace(profileId) && !v2WithoutProductCode)
             {
                 _logger.LogWarning(
                     "Product/profile validation failed — ProfileId parameter is missing or empty. ProductID={ProductID}",
@@ -676,7 +684,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             _logger.LogInformation(
                 "Product/profile validation attempt started. ProfileId={ProfileId}, ProductID={ProductID}, UseV2Api={UseV2Api}",
-                profileId, productInfo?.ProductID, useV2);
+                v2WithoutProductCode ? "(none — CERTInext resolves the product)" : profileId, productInfo?.ProductID, useV2);
 
             bool isPrivatePki = useV2
                 && string.Equals(params_.ProductFamilySlug, Constants.ApiV2.FamilyPrivatePki, StringComparison.Ordinal);
@@ -690,10 +698,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             try
             {
-                // A V2 private-pki template needs a Private PKI ProductVariant and an
-                // explicit ProductCode — checked before any catalog call, with the same rules
-                // EnrollV2Async enforces, so a template that can never enroll is rejected at save
-                // time. Inside the try so the finally block's credential scrubbing still runs.
+                // A V2 private-pki template needs a Private PKI ProductVariant — checked before any
+                // catalog call, with the same rules EnrollV2Async enforces, so a template that can
+                // never enroll is rejected at save time. Inside the try so the finally block's
+                // credential scrubbing still runs.
                 if (isPrivatePki)
                 {
                     string pkiConfigError = ValidatePrivatePkiEnrollmentParams(params_, out _);
@@ -730,7 +738,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 List<string> availableIds;
                 bool found;
 
-                if (useV2)
+                if (v2WithoutProductCode)
+                {
+                    // No explicit ProductCode: no X-Product-Code header is sent at enroll time and
+                    // CERTInext's wrapper picks the product from the variant, wildcard shape and
+                    // additional domains, so there is no code to look up in the catalog (and an
+                    // ambiguous catalog match is no longer a template error). The ProductVariant
+                    // and private-pki checks above already ran.
+                    _logger.LogInformation(
+                        "Product/profile validation: no explicit ProductCode on the V2 template, so no catalog " +
+                        "check is needed; CERTInext resolves the product at order time. ProductID={ProductID}",
+                        params_.ProductId);
+                    availableIds = new List<string>();
+                    found = true;
+                }
+                else if (useV2)
                 {
                     var products = await tempClient.GetProductDetailsV2Async();
                     availableIds = products.Select(p => p.ProductCode).ToList();
@@ -771,9 +793,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                         found = true;
                     }
-                    else if (params_.HasExplicitProductCode)
+                    else
                     {
-                        // Explicit override: the code must exist in the catalog AND the matched
+                        // Explicit override (the no-ProductCode case was handled above): the code must exist in the catalog AND the matched
                         // catalog entry's productTypeID must actually correspond to the selected
                         // ProductId — not just "does this code exist as *some* product". A code
                         // can exist and still mean a different, wrong-assurance-level product than
@@ -805,76 +827,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             throw new AnyCAValidationException(
                                 $"ProductCode '{profileId}' exists in the CERTInext catalog, but it does not " +
                                 $"correspond to the selected product '{params_.ProductId}'. Verify the ProductCode " +
-                                "override is correct for this product, or remove the override to let the plugin " +
-                                "resolve it automatically from the catalog.");
-                        }
-
-                        found = true;
-                    }
-                    else
-                    {
-                        // No explicit override: resolve/validate by matching the live catalog's
-                        // productTypeID for the selected ProductId — do NOT fall back to
-                        // Constants.Products.DefaultProductCodes (V1-era numbering that does not
-                        // match the live V2 catalog).
-                        if (!Constants.Products.ProductTypeIdsV2.TryGetValue(params_.ProductId ?? string.Empty, out string expectedTypeId))
-                        {
-                            _logger.LogWarning(
-                                "Product/profile validation failed — no productTypeID mapping is defined for " +
-                                "ProductID '{ProductID}'.", params_.ProductId);
-                            throw new AnyCAValidationException(
-                                $"No V2 productTypeID mapping is defined for ProductID '{params_.ProductId}'. " +
-                                "Set the ProductCode template parameter explicitly, or contact support to add a " +
-                                "mapping for this product.");
-                        }
-
-                        // Mirrors EnrollV2Async's own ambiguity handling (so a template is
-                        // rejected/flagged at save time, not only discovered at enroll time):
-                        // the live catalog can carry MORE THAN ONE entry with this productTypeID
-                        // (e.g. type 13/DV SSL on the sandbox). Resolve automatically only when
-                        // exactly one match exists, or when the connector's DefaultProductCode
-                        // names one of several matches; otherwise reject with the candidates
-                        // listed.
-                        var matchingProducts = products
-                            .Where(p => string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
-                            .ToList();
-
-                        if (matchingProducts.Count == 0)
-                        {
-                            _logger.LogWarning(
-                                "Product/profile validation failed — no CERTInext V2 catalog entry has " +
-                                "productTypeID '{ExpectedTypeId}' for ProductID '{ProductID}'. AvailableCount={AvailableCount}",
-                                expectedTypeId, params_.ProductId, availableIds.Count);
-                            throw new AnyCAValidationException(
-                                $"Could not find a CERTInext V2 catalog entry for product '{params_.ProductId}' " +
-                                $"(expected productTypeID '{expectedTypeId}'). Verify the account is entitled to " +
-                                "this product.");
-                        }
-
-                        if (matchingProducts.Count > 1)
-                        {
-                            bool resolvedByDefault = matchingProducts.Any(p =>
-                                !string.IsNullOrWhiteSpace(tempConfig.DefaultProductCode) &&
-                                string.Equals(p.ProductCode, tempConfig.DefaultProductCode, StringComparison.OrdinalIgnoreCase));
-
-                            if (!resolvedByDefault)
-                            {
-                                string candidates = string.Join(", ",
-                                    matchingProducts.Select(p => $"{p.ProductCode} ('{p.ProductName}')"));
-                                _logger.LogWarning(
-                                    "Product/profile validation failed — multiple CERTInext V2 catalog entries " +
-                                    "share productTypeID '{ExpectedTypeId}' for ProductID '{ProductID}', and none " +
-                                    "match the configured DefaultProductCode ('{DefaultProductCode}'). " +
-                                    "Candidates=[{Candidates}]",
-                                    expectedTypeId, params_.ProductId,
-                                    string.IsNullOrWhiteSpace(tempConfig.DefaultProductCode) ? "(not set)" : tempConfig.DefaultProductCode,
-                                    candidates);
-                                throw new AnyCAValidationException(
-                                    $"Multiple CERTInext catalog products match ProductID '{params_.ProductId}' " +
-                                    $"(productTypeID '{expectedTypeId}'): {candidates}. Set the ProductCode " +
-                                    "template parameter explicitly, or set the CA connector's DefaultProductCode " +
-                                    "to one of these codes, to disambiguate.");
-                            }
+                                "override is correct for this product, or remove the override and let CERTInext " +
+                                "resolve the product from the order shape.");
                         }
 
                         found = true;
@@ -1623,6 +1577,43 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// DNS SANs on a V2 SSL request beyond what a single-domain order covers: the UNION of the
+        /// CSR's own subjectAltName entries and the gateway's SAN dictionary (deliberately not
+        /// <c>BuildSanList</c>'s "dictionary wins, CSR only as fallback" rule — the create call
+        /// sends the CSR to CERTInext regardless of what the dictionary says, so a CSR-embedded
+        /// extra still reaches the CA), minus the primary <paramref name="domain"/>, its
+        /// <c>www.</c> variant (autoSecureWww), and — for a wildcard order — the bare apex of the
+        /// wildcard (a wildcard CSR routinely carries it alongside <c>*.example.com</c>).
+        /// Lower-cased and de-duplicated.
+        /// </summary>
+        internal static List<string> FindExtraDnsSans(
+            string csr, Dictionary<string, string[]> san, string domain, bool isWildcard)
+        {
+            string wildcardApexDomain = isWildcard && domain != null
+                && domain.StartsWith("*.", StringComparison.Ordinal)
+                ? StripWildcardPrefix(domain)
+                : null;
+
+            var csrSanEntries = ExtractSanEntriesFromCsr(csr, out _);
+            // CollectRequestedSanEntries(san, csr: null, ...) yields exactly the SAN
+            // dictionary's own (MapSanType-normalized) entries: when san is non-null the
+            // CSR-fallback branch never runs, and when san is null there is nothing to
+            // collect (csr: null makes the fallback branch's own CSR read a no-op) — the
+            // real CSR is already covered by csrSanEntries above, so no double-count.
+            var dictSanEntries = CollectRequestedSanEntries(san, csr: null, out _, out _);
+            return csrSanEntries
+                .Concat(dictSanEntries)
+                .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                .Select(s => s.Value?.ToLowerInvariant())
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
+                .Where(v => !string.Equals(v, "www." + domain, StringComparison.OrdinalIgnoreCase))
+                .Where(v => wildcardApexDomain == null || !string.Equals(v, wildcardApexDomain, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        /// <summary>
         /// Validates the template parameters a V2 <c>private-pki</c> order needs
         /// beyond the SSL ones, before any CA call. Shared by <see cref="EnrollV2Async"/> (fail
         /// fast with a FAILED result) and <see cref="ValidateProductInfo"/> (reject at template
@@ -1631,10 +1622,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// - <c>ProductVariant</c> must be one of the spec's create-body <c>variant</c> values
         ///   (<see cref="Constants.ApiV2.PrivatePkiVariants"/>). Its SSL-only "dv" default is
         ///   rejected rather than silently mapped to a Private PKI variant.
-        /// - <c>ProductCode</c> must be set explicitly. <see cref="GetProductIds"/> only advertises
-        ///   SSL/TLS product names, so <see cref="Constants.Products.ProductTypeIdsV2"/> would
-        ///   resolve an SSL product code for a private-pki template; and per the spec's Product
-        ///   Codes reference, "Private PKI codes vary per customer catalog".
+        /// - <c>ProductCode</c> is optional: the spec's X-Product-Code is an "explicit override" and
+        ///   the wrapper resolves the Private PKI product from <c>variant</c>. It is sent only when
+        ///   the template sets it (to disambiguate between several matching catalog products).
         /// </summary>
         internal static string ValidatePrivatePkiEnrollmentParams(EnrollmentParams ep, out string normalizedVariant)
         {
@@ -1647,14 +1637,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return $"ProductFamily 'private-pki' requires the '{Constants.EnrollmentParam.ProductVariant}' " +
                        $"template parameter to be one of: {Constants.ApiV2.PrivatePkiVariantIntranetSsl}, " +
                        $"{Constants.ApiV2.PrivatePkiVariantIgtfHost}. Current value: {configured}.";
-            }
-
-            if (!ep.HasExplicitProductCode)
-            {
-                return $"ProductFamily 'private-pki' requires the '{Constants.EnrollmentParam.ProductCode}' " +
-                       "template parameter to be set explicitly to your account's Private PKI catalog product " +
-                       "code (Private PKI codes vary per customer catalog and cannot be resolved from the " +
-                       "selected SSL/TLS product name).";
             }
 
             normalizedVariant = variant.ToLowerInvariant();
@@ -1729,7 +1711,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 "EnrollV2Async started. EnrollmentType={EnrollmentType}, ProductFamily={Family}, ProductVariant={Variant}, " +
                 "ProductId={ProductId}, HasExplicitProductCode={HasExplicit}, ConfiguredProductCode={Code}",
                 enrollmentType, ep.ProductFamilySlug, ep.ProductVariant, ep.ProductId, ep.HasExplicitProductCode,
-                ep.HasExplicitProductCode ? ep.ProductCode : "(resolved from catalog)");
+                ep.HasExplicitProductCode ? ep.ProductCode : "(not set — CERTInext resolves it)");
 
             // The create-order body is family-specific: Private PKI and Document Signer each need
             // their own shape, not the SSL body (productVariant/certificate/agreement...). ssl
@@ -1980,37 +1962,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 };
             }
 
-            // Resolve the real V2 product code (and UCC-ness) from the live Catalog response.
-            // Fetched once here and reused for both purposes — no second catalog call.
+            // Product selection. The spec makes X-Product-Code an optional override: CERTInext's
+            // wrapper resolves the catalog product itself from productVariant, whether
+            // certificate.domain is a wildcard (starts "*."), and whether additionalDomains is
+            // non-empty (UCC). So the header is sent ONLY when the template explicitly sets
+            // ProductCode (or the deprecated ProfileId alias) — to disambiguate between several
+            // matching catalog products. The connector's DefaultProductCode no longer pins a V2
+            // order (it remains a V1 renewal fallback), and the V1-era Constants.Products.
+            // DefaultProductCodes table is never consulted (its numbering does not match the live
+            // V2 catalog). A null productCode means "send no header".
             //
-            // Explicit override (ProductCode/ProfileId set on the template): trust the
-            // administrator's value as-is; the catalog is only consulted for UCC detection, and a
-            // catalog lookup failure there must not block enrollment — fall back to non-UCC
-            // (single-domain) behavior, the strictly-safer failure mode: the CSR-SAN-count guard
-            // below still runs against that non-UCC assumption, so a surplus-SAN CSR is rejected
-            // rather than silently accepted.
+            // UCC / wildcard detection decides whether extra DNS SANs are carried in
+            // additionalDomains (UCC) or rejected by the single-domain guard below:
+            //  - Explicit override: the live catalog entry for the code is looked up and its
+            //    productTypeID decides (UCC / non-UCC wildcard). A catalog lookup failure must not
+            //    block enrollment — it falls back to non-UCC (single-domain), the strictly-safer
+            //    failure mode: the guard below still runs and rejects a surplus-SAN CSR rather than
+            //    silently accepting it.
+            //  - No override: no catalog call at all. The wildcard shape is the domain itself
+            //    (starts "*."), exactly what the wrapper keys on. UCC is the template's product
+            //    type (ProductId -> productTypeID, as before) OR the request carrying DNS SANs
+            //    beyond the primary domain (its www. variant and a wildcard's bare apex are not
+            //    "extra"), which is what makes the wrapper pick a UCC product — so those extras go
+            //    out in additionalDomains instead of failing the single-domain guard.
             //
-            // No explicit override: the code must NOT fall back to
-            // Constants.Products.DefaultProductCodes (V1-era numbering that does not match the
-            // live V2 catalog, e.g. its "842" is OV SSL but the live V2 catalog's "842" is DV
-            // SSL). Instead resolve the live product code by matching the catalog
-            // entry whose productTypeID equals the stable numeric type ID for ep.ProductId
-            // (Constants.Products.ProductTypeIdsV2) — productTypeID is a small CERTInext-documented
-            // enum, unlike productCode (wrong table) or productName (spelling varies by
-            // account/catalog version). Here, a catalog failure or an
-            // unresolvable mapping MUST fail the enrollment loudly: there is no safe fallback code
-            // to send on the wire.
-            //
-            // Private PKI: the explicit ProductCode is required (validated above) and
-            // trusted as-is, exactly like the SSL explicit-override case; the catalog is not
-            // fetched at all because its only use on that path — SSL UCC detection — does not
-            // apply (ValidateProductInfo checks the code's productTypeID at template save time).
-            string productCode;
+            // Private PKI: ProductCode is likewise optional (the wrapper resolves it from
+            // `variant`); the catalog is never fetched because its only use on this path — SSL UCC
+            // detection — does not apply.
+            string productCode = ep.HasExplicitProductCode ? ep.ProductCode : null;
             bool isUccProduct = false;
             bool isWildcardProduct = false;
-            List<ProductDetail> catalog = null;
-            if (!isPrivatePki)
+            if (!isPrivatePki && ep.HasExplicitProductCode)
             {
+                List<ProductDetail> catalog = null;
                 try
                 {
                     catalog = await _client.GetProductDetailsV2Async();
@@ -2018,21 +2002,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 catch (Exception catalogEx)
                 {
                     _logger.LogWarning(catalogEx,
-                        "EnrollV2Async: could not fetch the live V2 product catalog. ProductId={ProductId}, " +
-                        "HasExplicitProductCode={HasExplicit}", ep.ProductId, ep.HasExplicitProductCode);
+                        "EnrollV2Async: could not fetch the live V2 product catalog to detect UCC/wildcard for the " +
+                        "explicit ProductCode; treating the order as single-domain. ProductId={ProductId}", ep.ProductId);
                 }
-            }
-
-            if (isPrivatePki)
-            {
-                productCode = ep.ProductCode;
-            }
-            else if (ep.HasExplicitProductCode)
-            {
-                productCode = ep.ProductCode;
 
                 var matchedProduct = catalog?.FirstOrDefault(p =>
-                    string.Equals(p.ProductCode, productCode, StringComparison.OrdinalIgnoreCase));
+                    string.Equals(p.ProductCode, ep.ProductCode, StringComparison.OrdinalIgnoreCase));
                 isUccProduct = matchedProduct != null
                     && !string.IsNullOrWhiteSpace(matchedProduct.ProductTypeId)
                     && Constants.ApiV2.UccProductTypeIds.Contains(matchedProduct.ProductTypeId);
@@ -2040,103 +2015,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     && !string.IsNullOrWhiteSpace(matchedProduct.ProductTypeId)
                     && Constants.ApiV2.WildcardProductTypeIds.Contains(matchedProduct.ProductTypeId);
             }
-            else
+            else if (!isPrivatePki)
             {
-                if (!Constants.Products.ProductTypeIdsV2.TryGetValue(ep.ProductId ?? string.Empty, out string expectedTypeId))
-                {
-                    _logger.LogError(
-                        "EnrollV2Async rejected an order for ProductId={ProductId} — no productTypeID mapping " +
-                        "is defined for this product name, and no explicit ProductCode override is configured.",
-                        ep.ProductId);
-                    _logger.MethodExit(LogLevel.Debug);
-                    return new EnrollmentResult
-                    {
-                        CARequestID   = string.Empty,
-                        Certificate   = null,
-                        Status        = (int)EndEntityStatus.FAILED,
-                        StatusMessage = $"V2 enrollment rejected: no productTypeID mapping is defined for " +
-                                        $"ProductID '{ep.ProductId}'. Set the ProductCode template parameter " +
-                                        "explicitly, or contact support to add a mapping for this product."
-                    };
-                }
-
-                // The live catalog can carry more than one entry with the same productTypeID
-                // (e.g. two type-13 DV SSL entries, "917 SSL DV 1 month" and "842 DV SSL
-                // Certificate"). Picking the catalog's first-listed match is not safe: CERTInext
-                // treats some of these entries (917) as PFX products that never issue (a separate
-                // CSR step was rejected 422 "PFX based certificate orders are not allowed"), which
-                // would fail every ProductId-only DV SSL enrollment that resolved to one. When more than one catalog entry shares the
-                // expected productTypeID, only resolve automatically if the connector's
-                // DefaultProductCode names one of them; otherwise reject with a clear message
-                // listing the candidates rather than guessing.
-                var matchingProducts = (catalog ?? new List<ProductDetail>())
-                    .Where(p => string.Equals(p.ProductTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-
-                ProductDetail matchedProduct = null;
-                if (matchingProducts.Count == 1)
-                {
-                    matchedProduct = matchingProducts[0];
-                }
-                else if (matchingProducts.Count > 1)
-                {
-                    matchedProduct = matchingProducts.FirstOrDefault(p =>
-                        !string.IsNullOrWhiteSpace(_config.DefaultProductCode) &&
-                        string.Equals(p.ProductCode, _config.DefaultProductCode, StringComparison.OrdinalIgnoreCase));
-
-                    if (matchedProduct == null)
-                    {
-                        string candidates = string.Join(", ",
-                            matchingProducts.Select(p => $"{p.ProductCode} ('{p.ProductName}')"));
-                        _logger.LogWarning(
-                            "EnrollV2Async rejected an order — multiple CERTInext V2 catalog entries share " +
-                            "productTypeID '{ExpectedTypeId}' for ProductId={ProductId}, and none match the " +
-                            "configured DefaultProductCode ('{DefaultProductCode}'). Candidates=[{Candidates}]",
-                            expectedTypeId, ep.ProductId,
-                            string.IsNullOrWhiteSpace(_config.DefaultProductCode) ? "(not set)" : _config.DefaultProductCode,
-                            candidates);
-                        _logger.MethodExit(LogLevel.Debug);
-                        return new EnrollmentResult
-                        {
-                            CARequestID   = string.Empty,
-                            Certificate   = null,
-                            Status        = (int)EndEntityStatus.FAILED,
-                            StatusMessage = $"V2 enrollment rejected: multiple CERTInext catalog products match " +
-                                            $"ProductID '{ep.ProductId}' (productTypeID '{expectedTypeId}'): " +
-                                            $"{candidates}. Set the ProductCode template parameter explicitly, " +
-                                            "or set the CA connector's DefaultProductCode to one of these codes, " +
-                                            "to disambiguate."
-                        };
-                    }
-                }
-
-                if (matchedProduct == null || string.IsNullOrWhiteSpace(matchedProduct.ProductCode))
-                {
-                    _logger.LogError(
-                        "EnrollV2Async: could not resolve a live V2 product code for ProductId={ProductId} " +
-                        "(expected catalog productTypeID='{ExpectedTypeId}'). CatalogFetchSucceeded={CatalogOk}",
-                        ep.ProductId, expectedTypeId, catalog != null);
-                    _logger.MethodExit(LogLevel.Debug);
-                    return new EnrollmentResult
-                    {
-                        CARequestID   = string.Empty,
-                        Certificate   = null,
-                        Status        = (int)EndEntityStatus.FAILED,
-                        StatusMessage = $"V2 enrollment rejected: could not resolve a live product code for " +
-                                        $"ProductID '{ep.ProductId}' from the CERTInext catalog (expected " +
-                                        $"productTypeID '{expectedTypeId}'). Verify the account is entitled to " +
-                                        "this product, or set the ProductCode template parameter explicitly."
-                    };
-                }
-
-                productCode = matchedProduct.ProductCode;
-                isUccProduct = Constants.ApiV2.UccProductTypeIds.Contains(expectedTypeId);
-                isWildcardProduct = Constants.ApiV2.WildcardProductTypeIds.Contains(expectedTypeId);
+                isWildcardProduct = domain.StartsWith("*.", StringComparison.Ordinal);
+                bool templateIsUccType = Constants.Products.ProductTypeIdsV2.TryGetValue(
+                        ep.ProductId ?? string.Empty, out string templateTypeId)
+                    && Constants.ApiV2.UccProductTypeIds.Contains(templateTypeId);
+                var extraDnsSans = FindExtraDnsSans(csr, san, domain, isWildcardProduct);
+                isUccProduct = templateIsUccType || extraDnsSans.Count > 0;
 
                 _logger.LogInformation(
-                    "EnrollV2Async: resolved V2 product code from live catalog. ProductId={ProductId}, " +
-                    "ProductTypeId={ProductTypeId}, ResolvedProductCode={ProductCode}",
-                    ep.ProductId, expectedTypeId, productCode);
+                    "EnrollV2Async: no explicit ProductCode — no X-Product-Code header will be sent; CERTInext " +
+                    "resolves the product from the variant, wildcard shape and additional domains. " +
+                    "ProductId={ProductId}, Wildcard={Wildcard}, Ucc={Ucc} (TemplateUccType={TemplateUccType}, " +
+                    "ExtraDnsSanCount={ExtraCount})",
+                    ep.ProductId, isWildcardProduct, isUccProduct, templateIsUccType, extraDnsSans.Count);
             }
 
             // Non-UCC V2 products support only a single domain plus autoSecureWww's www.<domain>
@@ -2146,9 +2039,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // names vanish with no order-side signal at all. UCC (multi-domain) products are
             // exempt — their extra SANs are the expected input and are carried into
             // additionalDomains below instead. This check necessarily runs after UCC detection
-            // above (which needs the live catalog lookup to know isUccProduct), not before it,
-            // but it still runs before PlaceOrderV2Async, so a rejected non-UCC request never
-            // places a CA order.
+            // above, not before it, but it still runs before PlaceOrderV2Async, so a rejected
+            // non-UCC request never places a CA order. It can only trigger for an explicit
+            // ProductCode whose catalog entry is not UCC: with no explicit code the wrapper picks
+            // the product from the request shape, so any extra DNS SAN makes the order UCC above
+            // (and goes out in additionalDomains) instead of being rejected here.
             //
             // Looking at the CSR alone misses the case where Command's SAN
             // dictionary carries the extras and the CSR itself carries only the primary domain —
@@ -2185,28 +2080,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // is unverified and should be confirmed against a live order before relying on it.
             if (!isPrivatePki && !isUccProduct)
             {
-                string wildcardApexDomain = isWildcardProduct && domain != null
-                    && domain.StartsWith("*.", StringComparison.Ordinal)
-                    ? StripWildcardPrefix(domain)
-                    : null;
-
-                var csrSanEntries = ExtractSanEntriesFromCsr(csr, out _);
-                // CollectRequestedSanEntries(san, csr: null, ...) yields exactly the SAN
-                // dictionary's own (MapSanType-normalized) entries: when san is non-null the
-                // CSR-fallback branch never runs, and when san is null there is nothing to
-                // collect (csr: null makes the fallback branch's own CSR read a no-op) — the
-                // real CSR is already covered by csrSanEntries above, so no double-count.
-                var dictSanEntries = CollectRequestedSanEntries(san, csr: null, out _, out _);
-                var extraSans = csrSanEntries
-                    .Concat(dictSanEntries)
-                    .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
-                    .Select(s => s.Value?.ToLowerInvariant())
-                    .Where(v => !string.IsNullOrWhiteSpace(v))
-                    .Where(v => !string.Equals(v, domain, StringComparison.OrdinalIgnoreCase))
-                    .Where(v => !string.Equals(v, "www." + domain, StringComparison.OrdinalIgnoreCase))
-                    .Where(v => wildcardApexDomain == null || !string.Equals(v, wildcardApexDomain, StringComparison.OrdinalIgnoreCase))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
+                var extraSans = FindExtraDnsSans(csr, san, domain, isWildcardProduct);
 
                 if (extraSans.Count > 0)
                 {
@@ -2362,25 +2236,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // order falls back to the account's default billing group.
             string groupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber;
 
-            // X-Product-Code must always be pinned: an unpinned create auto-resolves to a PFX product
-            // (live: 917) that never issues, and with the CSR inline there is no later step to
-            // catch it. Every resolution path above yields a non-blank code; this is the backstop.
-            if (string.IsNullOrWhiteSpace(productCode))
-            {
-                _logger.LogError(
-                    "EnrollV2Async rejected an order before the create call — no product code resolved " +
-                    "(an unpinned create would auto-resolve to a PFX product). ProductId={ProductId}", ep.ProductId);
-                _logger.MethodExit(LogLevel.Debug);
-                return new EnrollmentResult
-                {
-                    CARequestID   = string.Empty,
-                    Certificate   = null,
-                    Status        = (int)EndEntityStatus.FAILED,
-                    StatusMessage = $"V2 enrollment rejected: no product code could be resolved for ProductID " +
-                                    $"'{ep.ProductId}'; the create call must be pinned to a product. No order was placed."
-                };
-            }
-
             // CSR delivery mode. Default (V2InlineCsr=false): the two-call flow, create without `csr` and
             // then PUT .../csr. V2InlineCsr=true opts SSL/TLS into the single-call flow (CSR inline on
             // create, no PUT). Private PKI always stays two-call: the live sandbox rejects an inline `csr`
@@ -2447,8 +2302,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string orderId = createResp.OrderId;
 
             _logger.LogInformation(
-                "V2 order placed. OrderId={OrderId}, Status={Status}, EnrollmentType={EnrollmentType}",
-                orderId, createResp.Status, enrollmentType);
+                "V2 order placed. OrderId={OrderId}, Status={Status}, EnrollmentType={EnrollmentType}, " +
+                "XProductCodeSent={ProductCodeSent}, ResolvedProductCode={ResolvedProductCode}",
+                orderId, createResp.Status, enrollmentType,
+                string.IsNullOrWhiteSpace(productCode) ? "(none)" : productCode,
+                string.IsNullOrWhiteSpace(createResp.ResolvedProductCode) ? "(not reported)" : createResp.ResolvedProductCode);
             // Status bookkeeping shared by both flows below.
             V2OrderStatusResponse postCreateStatus = null;
             int disposition = 0;

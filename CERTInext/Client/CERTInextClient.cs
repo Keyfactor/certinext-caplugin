@@ -1419,10 +1419,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// Idempotency-Key headers. Request and response bodies are only ever logged (Trace)
         /// through <see cref="ApplyLoggingRedaction"/>, so credentials are always scrubbed and
         /// requestor/subject PII is scrubbed unless <c>LogSensitiveRequestData</c> is on.
-        /// X-Product-Code is the spec's "Optional override" on SSL create (and is sent the same
-        /// way for Private PKI / Document Signer): a null/blank
-        /// <paramref name="productCode"/> omits the header entirely rather than sending it empty,
-        /// which is not itself a valid override value.
+        /// X-Product-Code is the spec's "Optional override" on SSL, Private PKI and Document Signer
+        /// create: when it is absent the CERTInext wrapper resolves the catalog product itself
+        /// (from <c>productVariant</c>/<c>variant</c>, the wildcard shape of <c>certificate.domain</c>
+        /// and whether <c>additionalDomains</c> is non-empty). A null/blank
+        /// <paramref name="productCode"/> therefore omits the header entirely rather than sending it
+        /// empty, which is not itself a valid override value.
         /// </summary>
         private async Task<V2CreateOrderResponse> PlaceOrderV2CoreAsync<TRequest>(
             string path,
@@ -1432,18 +1434,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             Logger.MethodEntry(LogLevel.Trace);
             EnsureV2Client();
-            // Pin the product on SSL and Private PKI creates: an unpinned SSL create auto-resolves to a
-            // PFX product (live: 917) that never issues (and with V2InlineCsr there is no later step to
-            // catch it). Fail before any HTTP call.
-            if (string.IsNullOrWhiteSpace(productCode)
-                && (string.Equals(path, Constants.ApiV2.SslCertificatesPath, StringComparison.Ordinal)
-                    || string.Equals(path, Constants.ApiV2.PrivatePkiCertificatesPath, StringComparison.Ordinal)))
-            {
-                throw new ArgumentException(
-                    "A V2 SSL/Private PKI order create must be pinned to a product: productCode is blank, and an " +
-                    "unpinned create auto-resolves to a PFX product that never issues. No request was sent.",
-                    nameof(productCode));
-            }
             string idempotencyKey = Guid.NewGuid().ToString();
             var req = await BuildV2RequestAsync(path, Method.Post, ct, idempotencyKey);
             if (!string.IsNullOrWhiteSpace(productCode))

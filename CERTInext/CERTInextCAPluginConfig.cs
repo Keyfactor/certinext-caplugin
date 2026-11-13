@@ -206,9 +206,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 ["DefaultProductCode"] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Default numeric product code. V1: used for renewals when the template supplies " +
-                               "none. V2: disambiguates a ProductId-only template when the catalog has several matches. " +
-                               "Get codes via GetProductDetails.",
+                    Comments = "OPTIONAL: Default numeric product code. V1 only: used for renewals when the template " +
+                               "supplies none. Not used on V2, where the product is resolved by CERTInext (set the " +
+                               "template's ProductCode to override). Get codes via GetProductDetails.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -474,10 +474,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = "OPTIONAL: Override the numeric CERTInext product code for this template. When omitted: " +
                                "on V1, the default production code for the selected product is used (e.g. DV SSL → 838); " +
-                               "on V2, the code is resolved from the live CERTInext product catalog by matching the " +
-                               "selected product, so it stays correct even though V2 catalog numbering varies by " +
-                               "account. Required for ProductFamily 'private-pki'. Set this explicitly when targeting " +
-                               "sandbox or a non-standard code.",
+                               "on V2, no X-Product-Code header is sent and CERTInext resolves the product from the " +
+                               "variant, the wildcard shape of the domain and any additional domains. On V2 an explicit " +
+                               "value is an override, sent as X-Product-Code to choose between several matching " +
+                               "catalog products (for example different CA profiles for the same variant).",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -604,8 +604,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.EnrollmentParam.ProductFamily] = new PropertyConfigInfo
                 {
                     Comments = "V2 ONLY: Product family for this template. Accepted values: 'ssl' (default) or " +
-                               "'private-pki'. 'private-pki' requires an explicit ProductCode and a Private PKI " +
-                               "ProductVariant. 'signature' (Document Signer) is accepted by the parameter, but Document " +
+                               "'private-pki'. 'private-pki' requires a Private PKI ProductVariant. 'signature' " +
+                               "(Document Signer) is accepted by the parameter, but Document " +
                                "Signer enrollment is not supported.",
                     Hidden = false,
                     DefaultValue = "ssl",
@@ -756,7 +756,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public string SignerIp { get; set; } = string.Empty;
 
         /// <summary>
-        /// Default product code used when the template-level ProductCode is not specified.
+        /// Default product code used when the template-level ProductCode is not specified (V1 only:
+        /// renewals). Ignored on V2, which sends X-Product-Code only for an explicit template ProductCode.
         /// Product codes are numeric strings provided by eMudhra (e.g. "844" for DV SSL 1-year).
         /// </summary>
         [JsonPropertyName("DefaultProductCode")]

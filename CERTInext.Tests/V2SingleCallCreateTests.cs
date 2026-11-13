@@ -479,12 +479,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Ssl_WhitespaceProductCode_ResolvesFromCatalog_CreateStillPinned()
+        public async Task Ssl_WhitespaceProductCode_IsTreatedAsUnset_NoHeader_NoCatalogCall()
         {
-            // A whitespace ProductCode is treated as unset and resolved from the live catalog; the
-            // create must still carry X-Product-Code (never the unpinned 917 auto-resolution).
+            // A whitespace ProductCode is treated as unset: no X-Product-Code is sent (CERTInext's
+            // wrapper resolves the product) and the catalog is not consulted at all.
             StubToken();
-            StubCatalog();
             StubCreate(SslPath, 201,
                 $"{{\"orderId\":\"{OrderId}\",\"requestId\":\"r1\",\"status\":\"pending-approval\"}}");
             StubTrack(SslPath,
@@ -493,7 +492,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             await Enroll(BuildPlugin(), SslProductInfo(productCode: "   "));
 
             var create = Requests("POST").Single(e => e.RequestMessage.Path == SslPath);
-            create.RequestMessage.Headers.Should().ContainKey("X-Product-Code").WhoseValue.Should().Contain("842");
+            create.RequestMessage.Headers.Should().NotContainKey("X-Product-Code");
+            _server.LogEntries.Should().NotContain(e => e.RequestMessage.Path.Contains("/catalog/products"),
+                "with no explicit ProductCode there is nothing to look up in the catalog");
         }
     }
 }

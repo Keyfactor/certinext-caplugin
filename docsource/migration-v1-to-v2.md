@@ -90,7 +90,7 @@ New fields `UseV2Api` and `V2SyncLookbackHours` are documented in [V2 API](#v2-a
 | `OrganizationNumber` | Required for OV/EV, unused for DV. V2 OV/EV orders send `organization.organizationNumber` with `preVetted=true`. CERTInext rejects an OV/EV order without organization data (HTTP 422 `EMS-1180`), so the plugin fails the enrollment before any CA call if it is blank. |
 | `EmailNotifications` | `1` maps to `"all"` and `0` maps to `"0"`. Blank is omitted on V2, so the CA's default of `"all"` applies; V1 sends `"0"`. Set `0` explicitly for silent V2 orders. Any other value fails the enrollment before any CA call. |
 | `SubscriptionAutoRenew` / `SubscriptionRenewCriteriaDays` | `SubscriptionAutoRenew=1` sets `subscription.autoRenew=true`. `SubscriptionRenewCriteriaDays` sets `subscription.renewBeforeDays` (blank omits it, so the CA's default of 30 applies). An unparseable or negative value fails the enrollment before any CA call. |
-| `DefaultProductCode` | On V2 it also disambiguates a template that sets only `ProductId` when the catalog has several products at that assurance level (see [V2 Product Code Resolution](#v2-product-code-resolution)). Renewals don't need it. |
+| `DefaultProductCode` | Not used on V2: no product code is sent unless the template sets `ProductCode` (see [V2 Product Code Resolution](#v2-product-code-resolution)). Renewals don't need it. |
 | `IgnoreExpired` | Honored during V2 Synchronize: a report row with a parseable, past `certificateExpiryDate` is skipped, and a row with a missing or unparseable date is kept. Not applied on V1 yet. |
 | `SubmitNonDnsSans` | SSL family: not consulted. A UCC order's `additionalDomains` takes DNS names only, so non-DNS SANs are left off with a gateway-log warning. Private PKI: not consulted. `additionalHosts` takes DNS names and IPs, so IP SANs are always submitted, and email and URI SANs are left off with a warning. |
 
@@ -107,19 +107,17 @@ New fields `UseV2Api` and `V2SyncLookbackHours` are documented in [V2 API](#v2-a
 
 For each template you're migrating:
 
-1. **If the template sets only `ProductId` (no explicit `ProductCode`), check whether the live V2
-   catalog has more than one product at that assurance level.** The plugin resolves the numeric code
-   automatically from the catalog when exactly one entry matches; when the catalog has several (e.g.
-   two DV SSL entries with different billing terms), you must either set `ProductCode` explicitly on
-   the template or set the connector's `DefaultProductCode` to one of the candidates — otherwise every
-   enrollment against that template fails with an error listing the candidate codes. See
-   [V2 Product Code Resolution](#v2-product-code-resolution) for the full resolution order.
+1. **Leave `ProductCode` blank unless you need to force a catalog product.** On V2 the plugin sends no
+   `X-Product-Code` header and CERTInext resolves the product from the variant, the wildcard shape of the
+   domain and any additional domains, so a template with only `ProductId` works even when the catalog has
+   several products at that assurance level. Set `ProductCode` only to override that choice (for example
+   to pick one of several CA profiles). See [V2 Product Code Resolution](#v2-product-code-resolution).
 2. Add `ProductFamily` (default `ssl`) if not already present — this is a V2-only parameter with no
    V1 equivalent. `ProductVariant` (`dv`/`ov`/`ev`) is optional for `ssl`: if left unset, the plugin
    derives it from the selected product (an OV product sends `ov`, an EV product sends `ev`) instead
    of defaulting to `dv`; set it explicitly only to override. For a Private PKI template, set
    `ProductFamily=private-pki`, `ProductVariant` to `intranet-ssl` or `igtf-host` (required, no
-   default), and an explicit `ProductCode` (see [V2 Private PKI Orders](#v2-private-pki-orders)).
+   default); `ProductCode` is optional (see [V2 Private PKI Orders](#v2-private-pki-orders)).
    `ProductFamily=signature` (Document Signer) enrollment is not supported.
 3. Re-verify `ProductCode` (if set explicitly) against the V2 catalog. V1 and V2 product codes are not
    guaranteed to be the same numeric values on your account — check the V2 catalog
@@ -152,7 +150,7 @@ pointing a production template at the V2 connector. At minimum, confirm:
 ### Verification Checklist
 
 - [ ] **Connection test.** Save the connector. It succeeds after a token request to `{ApiUrl}/oauth/token` and `GET /api/certinext/v2/auth/me`; a 401 or 403 is explained in Step 1.
-- [ ] **Template save.** Each template saves. A "multiple catalog products match" error means the template needs `ProductCode` or the connector needs `DefaultProductCode`.
+- [ ] **Template save.** Each template saves. An explicit `ProductCode` that is missing from the catalog, or whose product type doesn't match the selected product, is rejected.
 - [ ] **DV enrollment.** Enroll a single-domain DV order. It returns the certificate, or returns pending and is imported by the next sync, and its TXT record is removed.
 - [ ] **UCC and wildcard.** Enroll each migrated template. One order carries every DNS SAN, and each domain reaches the validated state.
 - [ ] **OV/EV.** Set `OrganizationNumber` and enroll. The order is accepted, stays pending until organization verification completes, and the next sync imports it.

@@ -38,7 +38,6 @@ See [configuration.md](configuration.md#gateway-registration) for the full Gatew
 | `EMS-956 "Invalid Request for this API"` from `GetDcv` | [`EMS-956` from `GetDcv`](#ems-956-invalid-request-for-this-api-from-getdcv-v1) |
 | HTTP 500 and a `TypeLoadException` in the gateway log | [Plugin fails to load](#plugin-fails-to-load-with-could-not-load-type-keyfactoranygatewayextensionsidomainvalidatorfactory) |
 | Connector fails to start with an `https` error | [`ApiUrl` must use https](#connector-fails-to-start-apiurl--must-use-https) |
-| V2 enrollment lists several product codes | [Multiple catalog products match](#v2-multiple-certinext-catalog-products-match-productid-) |
 | Enrollment fails with `invalid custom extension or certificate policy OIDs` | [Enrollment fails with `invalid custom extension or certificate policy OIDs`](#enrollment-fails-with-invalid-custom-extension-or-certificate-policy-oids) |
 
 ### `"Inactive Account User."` returned from `GenerateOrderSSL` (V1)
@@ -136,20 +135,6 @@ The API key (V1) or OAuth client secret (V2) is sent to `ApiUrl` on every reques
 **Mitigation**
 
 Change the connector's `ApiUrl` to an `https` URL.
-
-### V2: `Multiple CERTInext catalog products match ProductID ...`
-
-**Symptom**
-
-A V2 template that sets only `ProductId` fails to save, or an enrollment against it fails, listing several product codes.
-
-**Root cause**
-
-The live V2 catalog carries more than one product at the same assurance level (for example two DV SSL products with different billing terms), and the plugin won't guess between them.
-
-**Mitigation**
-
-Set `ProductCode` on the template to one of the listed codes, or set the connector's `DefaultProductCode` to one of them. See [V2 Product Code Resolution](configuration.md#v2-product-code-resolution).
 
 ### Enrollment fails with `invalid custom extension or certificate policy OIDs`
 

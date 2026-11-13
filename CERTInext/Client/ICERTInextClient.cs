@@ -186,7 +186,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         /// <summary>
         /// Places a new SSL/TLS order via POST /api/certinext/v2/{productFamilySlug}.
-        /// The product code is sent as the X-Product-Code header.
+        /// A non-blank product code is sent as the X-Product-Code header (the spec's optional
+        /// override); null/blank omits it and CERTInext resolves the product itself.
         /// An Idempotency-Key is generated automatically.
         /// <paramref name="productFamilySlug"/> must be <c>ssl-certificates</c>: this body is the
         /// SSL/TLS shape, and sending it to another family's endpoint would send the wrong body

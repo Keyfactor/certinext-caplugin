@@ -437,18 +437,42 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Enroll_V2_PrivatePki_NoExplicitProductCode_FailsFastWithoutAnyCaCall()
+        public async Task Enroll_V2_PrivatePki_NoExplicitProductCode_PlacesOrderWithNoProductCode()
         {
-            // Without an override, the SSL ProductTypeIdsV2 table would resolve the attached SSL
-            // product (DV SSL) — i.e. send an SSL product code to the Private PKI endpoint.
+            // X-Product-Code is the spec's optional override: CERTInext resolves the Private PKI
+            // product from `variant`. The SSL ProductTypeIdsV2 table must never supply a code for
+            // the Private PKI endpoint, and the catalog is not consulted.
             var mock = NewMock();
+            string capturedCode = "sentinel";
+            StubPrivatePkiOrder(mock);
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<V2CreatePrivatePkiOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, V2CreatePrivatePkiOrderRequest, CancellationToken>((code, _, __) => capturedCode = code)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = OrderId, Status = "pending-csr" });
 
             var result = await EnrollAsync(BuildV2Plugin(mock.Object), MakePrivatePkiProductInfo(productCode: null),
                 new Dictionary<string, string[]> { ["dnsname"] = new[] { Hostname } });
 
-            result.Status.Should().Be((int)EndEntityStatus.FAILED);
-            result.StatusMessage.Should().Contain("ProductCode");
-            mock.Invocations.Should().BeEmpty("validation must happen before any CA call");
+            result.CARequestID.Should().Be(OrderId);
+            capturedCode.Should().BeNull("no ProductCode was set on the template, so no X-Product-Code override is sent");
+            mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Enroll_V2_PrivatePki_ExplicitProductCode_StillSentAsOverride()
+        {
+            var mock = NewMock();
+            string capturedCode = null;
+            StubPrivatePkiOrder(mock);
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<V2CreatePrivatePkiOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, V2CreatePrivatePkiOrderRequest, CancellationToken>((code, _, __) => capturedCode = code)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = OrderId, Status = "pending-csr" });
+
+            await EnrollAsync(BuildV2Plugin(mock.Object), MakePrivatePkiProductInfo(productCode: "149"),
+                new Dictionary<string, string[]> { ["dnsname"] = new[] { Hostname } });
+
+            capturedCode.Should().Be("149");
         }
 
         // ---------------------------------------------------------------------------
@@ -555,7 +579,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Theory]
         [InlineData(null, "149", "ProductVariant")]
         [InlineData("dv", "149", "ProductVariant")]
-        [InlineData("intranet-ssl", null, "ProductCode")]
         public async Task ValidateProductInfo_V2_PrivatePki_RejectsBadTemplateParams_BeforeAnyCatalogCall(
             string variant, string productCode, string expectedField)
         {
@@ -568,6 +591,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     V2ConnectionInfo(server.Urls[0]));
 
             await act.Should().ThrowAsync<AnyCAValidationException>().WithMessage($"*{expectedField}*");
+            server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/api/certinext/v2/catalog/products");
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_PrivatePki_NoProductCode_PassesWithoutCatalogCall()
+        {
+            using var server = WireMockServer.Start();
+            StubToken(server);
+            StubCatalog(server, "149", Constants.ApiV2.PrivatePkiProductTypeId);
+
+            Func<Task> act = () => BuildV2Plugin(NewMock().Object)
+                .ValidateProductInfo(MakePrivatePkiProductInfo(productCode: null), V2ConnectionInfo(server.Urls[0]));
+
+            await act.Should().NotThrowAsync("ProductCode is an optional override; CERTInext resolves the product from the variant");
             server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/api/certinext/v2/catalog/products");
         }
 

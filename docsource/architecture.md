@@ -61,7 +61,7 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 | Renewal | Renewal window (`RenewalWindowDays`), otherwise a new order | Every enrollment type places a new order |
 | DCV waits | `DcvWaitForChallengeSeconds`, `DcvWaitForIssuanceSeconds` | None; polls until the order leaves `pending-dcv`, bounded by `DcvTimeoutMinutes` |
 | Revoke reasons | Numeric `revokeReasonId`; unaccepted codes sent as key compromise | Kebab-case strings; four rejected values retried once with a substitute |
-| Product code | `ProductCode`, then `ProfileId`, then the built-in default for the selected product | `ProductCode`, then the live catalog, then `DefaultProductCode` among several matches |
+| Product code | `ProductCode`, then `ProfileId`, then the built-in default for the selected product | None sent by default: CERTInext resolves the product. An explicit template `ProductCode` is sent as the `X-Product-Code` override |
 
 ### Request Authentication
 
@@ -380,18 +380,19 @@ With `UseV2Api = true`, every enrollment type (New, Reissue, Renew, RenewOrReiss
 ```mermaid
 flowchart TD
     A([Enroll requested]) --> B["Log the enrollment intent"]
-    B --> C{"Request passes local checks?<br/>family is ssl or private-pki, CSR present, SignerPlace set for SSL,<br/>Private PKI variant and ProductCode set,<br/>OrganizationNumber set for OV or EV,<br/>valid subscription and notification settings"}
+    B --> C{"Request passes local checks?<br/>family is ssl or private-pki, CSR present, SignerPlace set for SSL,<br/>Private PKI variant set,<br/>OrganizationNumber set for OV or EV,<br/>valid subscription and notification settings"}
     C -- No --> X1(["Enrollment rejected, no order placed"])
     C -- Yes --> D{Private PKI?}
     D -- Yes --> G0
-    D -- No --> E["Fetch the product catalog<br/>and resolve the product code and product type"]
-    E --> F{"Code resolved?<br/>Explicit ProductCode, or exactly one catalog match,<br/>or DefaultProductCode among several"}
-    F -- No --> X2(["Failed result listing the candidates, no order placed"])
-    F -- Yes --> F2{"Single-domain product with extra DNS SANs<br/>in the CSR or SAN list?"}
+    D -- No --> E{"Explicit template ProductCode?"}
+    E -- Yes --> E1["Fetch the product catalog<br/>to recognize UCC and wildcard products"]
+    E -- No --> E2["Detect UCC and wildcard from the request:<br/>wildcard domain, UCC template product or extra DNS SANs"]
+    E1 --> F2{"Explicit non-UCC product with extra DNS SANs<br/>in the CSR or SAN list?"}
+    E2 --> G0
     F2 -- Yes --> X3(["Failed result, no order placed"])
     F2 -- No --> G0{"SSL/TLS with V2InlineCsr on?<br/>(Private PKI never)"}
-    G0 -- "No: two-call, the default" --> G["Create the order without a CSR<br/>(X-Product-Code and Idempotency-Key headers)"]
-    G0 -- "Yes: single call" --> GI["Create the order with the CSR inline, unchanged<br/>(X-Product-Code and Idempotency-Key headers)"]
+    G0 -- "No: two-call, the default" --> G["Create the order without a CSR<br/>(Idempotency-Key header, X-Product-Code only if the template sets ProductCode)"]
+    G0 -- "Yes: single call" --> GI["Create the order with the CSR inline, unchanged<br/>(Idempotency-Key header, X-Product-Code only if the template sets ProductCode)"]
     GI --> GI2{"Create call answered?"}
     GI2 -- "Rejected by the CA (HTTP 4xx)" --> X5a(["Enrollment fails, no order was created"])
     GI2 -- "5xx, timeout, or no response" --> X5b(["Enrollment fails with a do-not-resubmit message:<br/>the order may exist and may issue, the next sync imports it"])
@@ -426,14 +427,13 @@ flowchart TD
 
 Notes on the V2 flow:
 
-- **Product code.** For SSL/TLS, the plugin fetches the live catalog once per enrollment and resolves the code in this order:
-  1. An explicit `ProductCode` is used as given. The catalog is then used only to recognize multi-domain and wildcard products; if it can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted.
-  2. Otherwise the catalog entry whose product type matches the selected product is used, and the enrollment fails if none match.
-  3. If several entries match, `DefaultProductCode` must name one of them, or the enrollment fails and lists the candidates.
+- **Product code.** The spec makes `X-Product-Code` an optional override: CERTInext picks the catalog product itself from the variant, whether the domain is a wildcard (starts with `*.`), and whether `additionalDomains` is non-empty. So the plugin sends the header only when the template sets `ProductCode` (or the deprecated `ProfileId`), to choose between several matching catalog products. The connector's `DefaultProductCode` doesn't affect V2 orders. The create response's `resolvedProductCode` is logged at Information level.
+  - **With an explicit `ProductCode`,** the plugin fetches the live catalog once per enrollment, only to recognize multi-domain and wildcard products; if it can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted.
+  - **Without one,** there is no catalog call. The order is a wildcard when the domain starts with `*.`. It is multi-domain when the selected product is a UCC product, or when the CSR or SAN list has DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count); those names go out as `additionalDomains`, which is what makes CERTInext choose a UCC product.
 
-  Private PKI never fetches the catalog. Its `ProductCode` is required and was validated when the template was saved.
+  Private PKI never fetches the catalog. Its `ProductCode`, when set, was validated when the template was saved.
 - **Multi-domain products.** DNS SANs other than the primary domain are sent as `additionalDomains`, and non-DNS SANs are left off the order with a warning. Private PKI sends DNS and IP SANs as `additionalHosts`.
-- **CSR delivery (`V2InlineCsr`).** By default the plugin creates the order without a CSR and then submits it with `PUT .../csr`; if that submit is rejected, the plugin cancels the orphaned order once. With `V2InlineCsr = true` (SSL/TLS only), the CSR is sent inline in the create body exactly as Command supplied it, and there is no Submit CSR step (a `PUT .../csr` after an inline CSR is rejected with HTTP 422). The create call then often holds about 20 seconds until the certificate is issued, and the order ID is known only once it returns. If that call fails with a 5xx or times out, the order may still exist and issue: the failure message says so, the plugin doesn't cancel the order, and the next sync imports it. Private PKI ignores the setting and always uses two calls, because CERTInext rejects an inline CSR on the Private PKI create (HTTP 422). In both modes the create call is pinned with `X-Product-Code`, because an unpinned SSL create resolves to a CERTInext default product whose Submit CSR is rejected ("PFX based certificate orders are not allowed"). A blank CSR is rejected before any CA call.
+- **CSR delivery (`V2InlineCsr`).** By default the plugin creates the order without a CSR and then submits it with `PUT .../csr`; if that submit is rejected, the plugin cancels the orphaned order once. With `V2InlineCsr = true` (SSL/TLS only), the CSR is sent inline in the create body exactly as Command supplied it, and there is no Submit CSR step (a `PUT .../csr` after an inline CSR is rejected with HTTP 422). The create call then often holds about 20 seconds until the certificate is issued, and the order ID is known only once it returns. If that call fails with a 5xx or times out, the order may still exist and issue: the failure message says so, the plugin doesn't cancel the order, and the next sync imports it. Private PKI ignores the setting and always uses two calls, because CERTInext rejects an inline CSR on the Private PKI create (HTTP 422). A blank CSR is rejected before any CA call.
 - **Idempotency.** Order-create, revoke, and cancel calls carry a fresh `Idempotency-Key` UUID. The V2 spec documents that header only for Verify DCV and Domains, as parsed but not yet enforced. On order create, a same-key retry was observed to create a second order behind an HTTP 500, so the plugin never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
 - **Revoked before delivery.** An order CERTInext reports as revoked before any certificate was delivered is returned as failed, never as a revoked record with no certificate.
 - **Full certificate chain.** The V2 `/certificate` endpoint returns the leaf in `certificatePem` and intermediates in `chainPem[]`. The plugin concatenates them, leaf first, into one PEM.
@@ -538,12 +538,11 @@ The same https-or-loopback check runs again at gateway startup, so a connector s
 
 #### Template validation
 
-When an administrator saves a certificate template, the gateway asks the plugin to validate its product settings. The product code must be set (explicitly, or derived from the selected product on V1). On V1 it must appear in the CERTInext product list for the account. On V2:
+When an administrator saves a certificate template, the gateway asks the plugin to validate its product settings. On V1 the product code must be set (explicitly, or derived from the selected product) and appear in the CERTInext product list for the account. On V2:
 
-- an explicit `ProductCode` must exist in the live catalog and match the selected product's type;
-- without one, exactly one catalog entry must match the selected product, or `DefaultProductCode` must name one of several;
+- an explicit `ProductCode` is optional; if set, it must exist in the live catalog and match the selected product's type, and no catalog check runs without one;
 - an SSL template's `ProductVariant` must agree with the selected product;
-- a Private PKI template needs a Private PKI `ProductVariant` and an explicit `ProductCode` that is a Private PKI catalog product.
+- a Private PKI template needs a Private PKI `ProductVariant`, and its `ProductCode`, if set, must be a Private PKI catalog product.
 
 Any failure is shown to the administrator with the candidate codes or the field to fix.
 

@@ -218,11 +218,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // null/blank product code on SSL / Private PKI is rejected before any HTTP call.
         // ---------------------------------------------------------------------------
 
+        // X-Product-Code is the spec's optional override: a blank code is a normal, supported
+        // call that omits the header and lets CERTInext's wrapper resolve the product.
         [Theory]
         [InlineData(null)]
         [InlineData("")]
         [InlineData("   ")]
-        public async Task PlaceOrderV2Async_Ssl_NullOrBlankProductCode_ThrowsBeforeAnyRequest(string productCode)
+        public async Task PlaceOrderV2Async_Ssl_NullOrBlankProductCode_OmitsHeader_AndStillPlacesOrder(string productCode)
         {
             StubV2Token();
             _server
@@ -230,23 +232,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .RespondWith(Response.Create()
                     .WithStatusCode(201)
                     .WithHeader("Content-Type", "application/json")
-                    .WithBody(MockCertificateData.V2CreateOrderPendingJson()));
+                    .WithBody("{\"orderId\":\"ord_nohdr_001\",\"requestId\":\"req_9\",\"status\":\"pending-dcv\"," +
+                              "\"resolvedProductCode\":\"842\"}"));
 
             using var client = BuildV2Client();
-            Func<Task> act = () => client.PlaceOrderV2Async(
+            var response = await client.PlaceOrderV2Async(
                 Constants.ApiV2.FamilySsl, productCode,
                 new V2CreateSslOrderRequest
                 {
                     Requestor    = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
                     Certificate  = new V2CertificateParams { Domain = "example.com" },
                     Subscription = new V2SubscriptionParams(),
-                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true },
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerPlace = "NY", Accepted = true },
                     Csr          = MockCertificateData.FakeCsrPem
                 });
 
-            await act.Should().ThrowAsync<ArgumentException>().WithMessage("*pinned to a product*");
-            _server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates",
-                "an unpinned create must never reach the CA");
+            var entry = _server.LogEntries.Single(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates");
+            entry.RequestMessage.Headers.Should().NotContainKey("X-Product-Code",
+                "an unset ProductCode must not be sent, not even as an empty header");
+            response.OrderId.Should().Be("ord_nohdr_001");
+            response.ResolvedProductCode.Should().Be("842",
+                "the create response's resolvedProductCode is captured so the plugin can log it");
         }
 
         [Fact]
@@ -279,7 +285,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Theory]
         [InlineData(null)]
         [InlineData("")]
-        public async Task PlaceOrderV2Async_PrivatePki_NullOrBlankProductCode_ThrowsBeforeAnyRequest(string productCode)
+        public async Task PlaceOrderV2Async_PrivatePki_NullOrBlankProductCode_OmitsHeader_AndStillPlacesOrder(string productCode)
         {
             StubV2Token();
             _server
@@ -291,7 +297,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                               "\"variant\":\"intranet-ssl\",\"hostname\":\"intranet.example.com\"}"));
 
             using var client = BuildV2Client();
-            Func<Task> act = () => client.PlaceOrderV2Async(productCode, new V2CreatePrivatePkiOrderRequest
+            var response = await client.PlaceOrderV2Async(productCode, new V2CreatePrivatePkiOrderRequest
             {
                 Variant      = "intranet-ssl",
                 Hostname     = "intranet.example.com",
@@ -299,8 +305,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Subscription = new V2SubscriptionParams { ValidityYears = 1 }
             });
 
-            await act.Should().ThrowAsync<ArgumentException>().WithMessage("*pinned to a product*");
-            _server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/api/certinext/v2/private-pki-certificates");
+            response.OrderId.Should().Be("ord_pki_002");
+            var entry = _server.LogEntries.Single(e => e.RequestMessage.Path == "/api/certinext/v2/private-pki-certificates");
+            entry.RequestMessage.Headers.Should().NotContainKey("X-Product-Code");
         }
 
         [Fact]

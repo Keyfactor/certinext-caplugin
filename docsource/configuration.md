@@ -216,10 +216,9 @@ Calling `GetProductDetails` against your account lists the codes available to yo
 | Mode | When it applies |
 |---|---|
 | V1 | Renewals only, and only when the template supplies no `ProductCode`/`ProfileId`. CERTInext's `TrackOrder` does not return the prior order's product code. No effect on new enrollments. |
-| V2 | Also disambiguates a template that sets only `ProductId` when the live catalog has several products at the same assurance level. |
+| V2 | Not used. V2 orders send `X-Product-Code` only for an explicit template `ProductCode`; otherwise CERTInext resolves the product. |
 
 - If neither the template nor this field supplies a code on a V1 renewal, the renewal goes out with an empty product code.
-- On V2, a value that matches none of the candidate codes fails that enrollment, and template save-time validation, with an error listing them.
 
 #### EmailNotifications Values
 
@@ -306,7 +305,7 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductCode` | Optional | String | Overrides the numeric CERTInext product code. Get the right code from `GetProductDetails` for your account. Required for `ProductFamily=private-pki`. | DV SSL: `842` (sandbox) or `838` (production) |
+| `ProductCode` | Optional | String | Overrides the numeric CERTInext product code. Get the right code from `GetProductDetails` for your account. On V2 it is an override sent as `X-Product-Code`; leave it blank and CERTInext resolves the product. | DV SSL: `842` (sandbox) or `838` (production) |
 | `ProfileId` | Deprecated | String | Legacy alias for `ProductCode`. Accepted for backward compatibility — if `ProductCode` is not set, `ProfileId` is used in its place. New templates should use `ProductCode`. | `838` |
 | `ValidityYears` | Optional | Number | Subscription term in years: `1`, `2`, or `3`. Default: `1`. CERTInext certificates are issued within a subscription term at up to 390 days per certificate, with free renewals within the term. | `1` |
 | `ValidityDays` | Optional | Number | V1 only; ignored on V2. Requested validity in days, converted to whole subscription years and rounded up (365 days = 1 year), because the order API takes years. Default: `365`. See the note below the table. | `365` |
@@ -326,8 +325,8 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 When `ProductCode` is omitted:
 
 - **V1:** the plugin uses the built-in default code for the selected product name (see [Product Codes](#product-codes)).
-- **V2:** the plugin resolves the code from the live product catalog (see [V2 Product Code Resolution](#v2-product-code-resolution)).
-- **Sandbox or non-standard codes:** set `ProductCode` explicitly.
+- **V2:** no code is sent and CERTInext resolves the product itself (see [V2 Product Code Resolution](#v2-product-code-resolution)). Set `ProductCode` to override that choice.
+- **Sandbox or non-standard codes (V1):** set `ProductCode` explicitly.
 
 The V2-only template parameters `ProductFamily` and `ProductVariant` are described under [V2 Certificate Template Fields](#v2-certificate-template-fields).
 
@@ -529,26 +528,25 @@ When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
 - **`ProductVariant` default:** when omitted for `ssl`, the plugin derives it from the selected product (an OV product sends `ov`, an EV product sends `ev`). An explicit value that contradicts the product fails enrollment.
 - **`signature` (Document Signer):** the parameter accepts it, but enrollment is not supported and fails before any order is placed.
 - **Unrecognized family:** treated as `ssl`.
-- **`ProductCode`:** continues to carry the numeric product code, sent in the `X-Product-Code` header on V2 order placement.
+- **`ProductCode`:** optional on V2. When set, it is sent in the `X-Product-Code` header as an override; when blank, no header is sent and CERTInext resolves the product.
 
 ### V2 Product Code Resolution
 
-When `UseV2Api` is `true`, the numeric product code sent to CERTInext is resolved as follows:
+When `UseV2Api` is `true`, the plugin does not choose a numeric product code. The V2 spec treats the `X-Product-Code` header on order create as an optional override: CERTInext's wrapper picks the right catalog product from the variant (`productVariant` for SSL/TLS, `variant` for Private PKI), whether `certificate.domain` is a wildcard (it starts with `*.`), and whether `additionalDomains` is non-empty (multi-domain, UCC). The create response reports the product it chose as `resolvedProductCode`, which the plugin logs at Information level.
 
-1. **Explicit `ProductCode` (or the deprecated `ProfileId` alias) on the template** — sent as-is in the `X-Product-Code` header, after template save-time validation confirms it exists in the live V2 catalog.
-2. **No explicit code set** — the plugin maps the template's selected product to the catalog's expected `productTypeID` and looks for catalog entries sharing it:
-   - **Exactly one match** — used automatically.
-   - **No match** — enrollment (and template save-time validation) fails; the account may not be entitled to the product.
-   - **More than one match** — the catalog has several entries at the same assurance level (for example two DV SSL entries with different billing terms). Set `ProductCode` on the template or `DefaultProductCode` on the connector, or enrollment fails with an error listing every candidate.
+1. **No `ProductCode` on the template (the default)** — no `X-Product-Code` header is sent. The connector's `DefaultProductCode` is not used, and neither is the catalog: save-time validation does no catalog check, and enrollment makes no catalog call. The plugin decides whether the order is wildcard or multi-domain from the request itself:
+   - **Wildcard:** the primary domain starts with `*.`.
+   - **Multi-domain:** the selected product is a UCC product, or the CSR or gateway SAN list carries DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count). Those names are sent as `additionalDomains`, which makes CERTInext choose a UCC product.
+2. **Explicit `ProductCode` (or the deprecated `ProfileId` alias)** — the override. It is sent as-is in the `X-Product-Code` header, after template save-time validation confirms it exists in the live V2 catalog and matches the selected product. Use it when your account holds several matching products (for example different CA profiles for the same variant) and you want to force one. With an override, the plugin reads the catalog once per enrollment to recognize UCC and wildcard products, and rejects extra SANs on a single-domain product.
 
-This differs from V1, where `DefaultProductCode` only affects renewals (see [DefaultProductCode](#defaultproductcode)) — in V2 mode it also disambiguates new enrollments and template validation for a `ProductId`-only template.
+This differs from V1, where `DefaultProductCode` only affects renewals (see [DefaultProductCode](#defaultproductcode)).
 
 ### V2 Private PKI Orders
 
 With `ProductFamily=private-pki`, the plugin places the order against CERTInext's Private PKI endpoint using the Private PKI request body, which differs from the SSL/TLS one:
 
-- **Product code is required.** Set `ProductCode` to your account's Private PKI catalog code; codes vary per customer catalog, so the plugin can't look one up. Template validation checks that it is a Private PKI product (`productTypeID` `39`).
-- **Which `ProductID` to pick.** The plugin advertises SSL/TLS product names only, so the template still needs one from that list. It does not affect a `private-pki` order, which is built from `ProductCode` and `ProductVariant`, so any ProductID (for example `DV SSL`) works.
+- **Product code is optional.** CERTInext resolves the Private PKI product from `ProductVariant`. Set `ProductCode` to your account's Private PKI catalog code only to pick between several matching products; template validation then checks that it is a Private PKI product (`productTypeID` `39`).
+- **Which `ProductID` to pick.** The plugin advertises SSL/TLS product names only, so the template still needs one from that list. It does not affect a `private-pki` order, which is built from `ProductVariant` (and `ProductCode`, if set), so any ProductID (for example `DV SSL`) works.
 - **Variant is required.** Set `ProductVariant` to `intranet-ssl` or `igtf-host`.
 - **Hostname.** The order's primary `hostname` comes from `DomainName`, or from the CSR's CN when `DomainName` isn't set.
 - **SANs.** Sent in `additionalHosts`, which accepts DNS names and IPv4/IPv6 addresses. They come from the gateway's SAN list, or from the CSR when the gateway supplies none.

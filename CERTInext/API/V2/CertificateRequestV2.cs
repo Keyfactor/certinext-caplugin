@@ -22,7 +22,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     //
     // Auth: POST {ApiUrl}/oauth/token (form-encoded client_credentials; ApiUrl is the V2 base
     // URL when UseV2Api=true)
-    // Product code: X-Product-Code header (not in body)
+    // Product code: optional X-Product-Code override header (not in body); when omitted CERTInext's
+    // wrapper resolves the product from productVariant/variant, the wildcard shape and additionalDomains
     // Idempotency: Idempotency-Key header sent on order-create/revoke, but the spec doesn't
     // document it for those endpoints and only says "parsed today, enforced in a future release"
     // for the endpoints (Verify DCV, Domains) it does document it on.
@@ -183,7 +184,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
     /// <summary>
     /// Request body for POST /api/certinext/v2/ssl-certificates.
-    /// Product code is sent as the X-Product-Code header (not in this body).
+    /// The optional product-code override is sent as the X-Product-Code header (not in this body).
     /// </summary>
     public class V2CreateSslOrderRequest
     {
@@ -272,7 +273,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// <c>customFields</c>) are deliberately omitted, matching how the SSL DTO treats its own
     /// unused optional fields. The CSR is submitted by the separate Submit CSR call, per the
     /// spec's Private PKI workflow (Create -> Submit CSR -> Track -> Download).
-    /// Product code is sent as the X-Product-Code header (not in this body).
+    /// The optional product-code override is sent as the X-Product-Code header (not in this body).
     /// </summary>
     public class V2CreatePrivatePkiOrderRequest
     {
@@ -436,7 +437,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// <c>accepted</c>). Leave <see cref="V2AgreementParams.SignerIp"/> null for this family —
     /// the spec's signature Accept Agreement note says "Do not send <c>signerIp</c> in the body -
     /// it will be ignored", and the create field table does not list it.
-    /// Product code is sent as the X-Product-Code header (not in this body).
+    /// The optional product-code override is sent as the X-Product-Code header (not in this body).
     /// </summary>
     public class V2CreateSignatureOrderRequest
     {

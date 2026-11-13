@@ -5,6 +5,7 @@
 - feat(v2): Enroll, renew, reissue, revoke, and synchronize SSL/TLS and Private PKI products, selected with the `ProductFamily` and `ProductVariant` template parameters.
 - feat(v2): A template's `ProductCode` is validated against the V2 catalog when saved.
 - feat(v2): Multi-domain (UCC) and wildcard SSL/TLS enrollment, with extra SANs sent as `additionalDomains`.
+- feat(v2): The create call no longer sends `X-Product-Code` unless the template sets `ProductCode` (SSL/TLS and Private PKI): CERTInext resolves the product from the variant, wildcard shape and `additionalDomains`, and the response's `resolvedProductCode` is logged. An ambiguous catalog match is no longer an error, Private PKI no longer needs `ProductCode`, and without one a wildcard is detected from the `*.` domain and a UCC order from the template's product or extra DNS SANs.
 - feat(v2): Opt-in `V2InlineCsr` (default `false`) sends the CSR inline in one SSL/TLS create call instead of create + Submit CSR; Private PKI stays two-call.
 - feat(v2): Synchronize reads `/reports/orders` and honors `IgnoreExpired`.
 - feat(v2): Incremental syncs look back `V2SyncLookbackHours` (default 72).
@@ -35,7 +36,7 @@
 - AnyCA Gateway REST 25.5.x isn't supported; upgrade the gateway to 26.2.0 or later (Command 25.5 or later works with it).
 - `DcvEnabled` now defaults to `true`, so without a DNS provider plugin, orders needing validation stay pending; set it to `false` if you validate domains another way.
 - Connectors saved with an `http` `ApiUrl` fail to start until the URL uses https.
-- V2 templates with only `ProductId` need `ProductCode` or `DefaultProductCode` when the catalog has several matching products.
+- V2 no longer sends `X-Product-Code` unless the template sets `ProductCode`, and `DefaultProductCode` no longer applies to V2 orders. A template that needs a specific one of several matching catalog products must set `ProductCode`.
 - V2 connectors require `SignerPlace`, and V2 OV/EV orders require `OrganizationNumber`.
 - V2 `ProductVariant` is derived from the selected product when unset.
 - V2 revoke reasons CERTInext rejects are retried with a substitute (see Revocation Reason Codes in the README).
