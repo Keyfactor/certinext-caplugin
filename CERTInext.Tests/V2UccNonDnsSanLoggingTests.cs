@@ -51,7 +51,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// factory concurrently, so assertions only consider messages carrying this call's unique
     /// subject marker.
     /// </summary>
-    [Collection("LogHandlerFactory-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class V2UccNonDnsSanLoggingTests
     {
         private const string V1SubmittedWording = "submitted rather than dropped";

@@ -41,7 +41,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// <c>static readonly</c> and not swappable after first use — see that class's remarks for
     /// why client-level V2 log content isn't independently assertable in this harness).
     /// </summary>
-    [Collection("LogHandlerFactory-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class CERTInextCAPluginRevokeV2AuditLoggingTests
     {
         private sealed class CapturingLoggerProvider : ILoggerProvider

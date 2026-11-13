@@ -42,7 +42,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// carrying this test's unique order-id marker, except the summary line, which is checked
     /// positively only.
     /// </summary>
-    [Collection("LogHandlerFactory-NoParallel")]
+    [Collection(LoggingStateCollection.Name)]
     public class CERTInextCAPluginV2SyncRecentOrderTests
     {
         private static readonly int Margin = Constants.ApiV2.SyncRecentOrderClockMarginSeconds;
