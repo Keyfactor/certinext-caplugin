@@ -5,6 +5,7 @@
 - feat(v2): Enroll, renew, reissue, revoke, and synchronize SSL/TLS and Private PKI products, selected with the `ProductFamily` and `ProductVariant` template parameters.
 - feat(v2): A template's `ProductCode` is validated against the V2 catalog when saved.
 - feat(v2): Multi-domain (UCC) and wildcard SSL/TLS enrollment, with extra SANs sent as `additionalDomains`.
+- feat(v2): An SSL/TLS order that Track Order shows at `pending-agreement` gets the Subscriber Agreement accepted via `POST /ssl-certificates/{orderId}/agreement`, using the same signer values as create: at most once per order per enroll call or sync pass, audit-logged first, and a failure only warns.
 - feat(v2): The create call no longer sends `X-Product-Code` unless the template sets `ProductCode` (SSL/TLS and Private PKI): CERTInext resolves the product from the variant, wildcard shape and `additionalDomains`, and the response's `resolvedProductCode` is logged. An ambiguous catalog match is no longer an error, Private PKI no longer needs `ProductCode`, and without one a wildcard is detected from the `*.` domain and a UCC order from the template's product or extra DNS SANs.
 - feat(v2): Opt-in `V2InlineCsr` (default `false`) sends the CSR inline in one SSL/TLS create call instead of create + Submit CSR; Private PKI stays two-call.
 - feat(v2): Synchronize reads `/reports/orders` and honors `IgnoreExpired`.

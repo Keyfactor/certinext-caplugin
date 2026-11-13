@@ -527,6 +527,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
+    /// Request body for POST /api/certinext/v2/ssl-certificates/{orderId}/agreement ("Accept the
+    /// Subscriber Agreement", schema <c>AgreementAcceptRequest</c>): <c>{ "agreement": { signerName,
+    /// signerPlace, accepted } }</c>. Same <see cref="V2AgreementParams"/> block the create body carries.
+    /// </summary>
+    public class V2AcceptAgreementRequest
+    {
+        [JsonPropertyName("agreement")]
+        public V2AgreementParams Agreement { get; set; }
+    }
+
+    /// <summary>
     /// Outcome of a V2 Cancel Order call that did not throw.
     /// </summary>
     public enum V2CancelOrderOutcome

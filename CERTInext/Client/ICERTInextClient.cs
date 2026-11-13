@@ -268,6 +268,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             CancellationToken ct = default);
 
         /// <summary>
+        /// Accepts the Subscriber Agreement of an SSL/TLS order that is waiting at
+        /// <c>pending-agreement</c>, via POST /api/certinext/v2/ssl-certificates/{orderId}/agreement
+        /// with body <c>{ "agreement": { signerName, signerPlace, accepted } }</c> (spec: "the CA will
+        /// not release the certificate until this is done"). SSL/TLS only: any other
+        /// <paramref name="productFamilySlug"/> throws <see cref="ArgumentException"/> before a
+        /// request is made. Not an idempotent call as far as the spec says, so it is never retried.
+        /// </summary>
+        Task AcceptAgreementV2Async(
+            string productFamilySlug,
+            string orderId,
+            V2AgreementParams agreement,
+            CancellationToken ct = default);
+
+        /// <summary>
         /// Cancels a not-yet-issued V2 order via POST /api/certinext/v2/{family}/{orderId}/cancel
         /// with body <c>{ "reason": ... }</c>. An Idempotency-Key is generated
         /// automatically. Returns <see cref="V2CancelOrderOutcome.Cancelled"/> on 2xx (spec: 204)

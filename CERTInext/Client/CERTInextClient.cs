@@ -1631,6 +1631,35 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <inheritdoc/>
+        public async Task AcceptAgreementV2Async(
+            string productFamilySlug,
+            string orderId,
+            V2AgreementParams agreement,
+            CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            // The accept-agreement endpoint is documented for the SSL/TLS family only (Private PKI has
+            // "no Subscriber Agreement"); never send it to another family's path.
+            if (!string.Equals(productFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException(
+                    $"Accepting a Subscriber Agreement is only supported for the '{Constants.ApiV2.FamilySsl}' " +
+                    $"family, not '{productFamilySlug}'.", nameof(productFamilySlug));
+            if (agreement == null) throw new ArgumentNullException(nameof(agreement));
+            EnsureV2Client();
+            string path = BuildV2OrderPath(productFamilySlug, orderId) + "/agreement";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct);
+            req.AddJsonBody(JsonSerializer.Serialize(new V2AcceptAgreementRequest { Agreement = agreement }, GetJsonOptions()));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            sw.Stop();
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
+                path, (int)resp.StatusCode, sw.ElapsedMilliseconds);
+            ThrowOnV2Failure(resp, "V2 accept agreement");
+            Logger.MethodExit(LogLevel.Trace);
+        }
+
+        /// <inheritdoc/>
         public async Task<V2CancelOrderOutcome> CancelOrderV2Async(
             string productFamilySlug,
             string orderId,

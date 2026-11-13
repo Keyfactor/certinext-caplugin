@@ -566,7 +566,7 @@ V2 status strings map to Keyfactor enrollment statuses as follows:
 | `issued` | Issued | Certificate is immediately downloaded and returned to Command. CERTInext can report `issued` for a while before the certificate is generated (Download Certificate answers 422 `EMS-1165`); see [Issued but not generated yet](#issued-but-not-generated-yet). |
 | `pending-dcv` | Pending External Validation | Order is awaiting domain control validation. |
 | `pending-csr` | Pending External Validation | Order is awaiting CSR submission or processing. |
-| `pending-agreement` | Pending External Validation | Order requires subscriber agreement acceptance. |
+| `pending-agreement` | Pending External Validation | Order requires subscriber agreement acceptance. For SSL/TLS orders the plugin accepts it (see [Subscriber agreement fallback](#subscriber-agreement-fallback)). |
 | `pending-organization-verification` | Pending External Validation | OV/EV order is awaiting organization verification. |
 | `pending-documents` | Pending External Validation | Order is awaiting supporting document submission. |
 | `pending-approval` | Pending External Validation | Order is awaiting final CA/LRA approval before issuance. |
@@ -589,6 +589,15 @@ mapped to Failed — see the gateway trace log if certificates unexpectedly show
 - Otherwise a revoked order is reported as Failed (the gateway has a record without a body) or skipped (no record), so the gateway never stores a revoked record without a certificate.
 - `IgnoreExpired` is applied here: expired certificates are skipped.
 - An issued order whose download answers 422 `EMS-1165` is emitted without a certificate body and counted as `IssuedNotGeneratedYet` in the sync summary instead of logging a warning per order; a later pass picks it up.
+
+#### Subscriber agreement fallback
+
+The create body already carries the agreement (`signerName`, `signerPlace`, `accepted: true`), but if Track Order still shows an SSL/TLS order at `pending-agreement`, the CA won't release the certificate until the agreement is accepted. The plugin then calls `POST /api/certinext/v2/ssl-certificates/{orderId}/agreement` with the same signer values:
+
+- **Enrollment:** at most once per order per `Enroll` call, whether the status is seen right after create, after DCV, or during the pickup poll. The signer is the template's `SignerName` (else the requestor name) and `SignerPlace` (else the connector's), as on create.
+- **Synchronize:** at most once per order per pass, using the connector's `RequestorName` and `SignerPlace` (a sync has no template). A pending SSL/TLS order in the listing that wasn't already tracked costs one extra status call per pass; with no `SignerPlace` or `RequestorName` configured the step is skipped entirely.
+- **Audit and failures:** the intent is logged at Information before the call (the signer's name and place appear only when `LogSensitiveRequestData` is on). A failed call is logged as a warning and never fails the enrollment or the sync; the order stays pending.
+- **Not applicable:** Private PKI orders have no Subscriber Agreement, and `GetSingleRecord` doesn't accept agreements.
 
 #### Issued but not generated yet
 

@@ -2175,6 +2175,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string requestorName  = string.IsNullOrWhiteSpace(ep.RequesterName)  ? _config.RequestorName  : ep.RequesterName;
             string requestorEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? _config.RequestorEmail : ep.RequesterEmail;
             string signerName     = string.IsNullOrWhiteSpace(ep.SignerName)     ? requestorName          : ep.SignerName;
+            // The same resolved signer the create body carries, for the one-shot accept-agreement
+            // fallback below. SSL/TLS only: Private PKI has no Subscriber Agreement.
+            var agreementContext = isPrivatePki ? null : new V2AgreementAcceptContext(signerName, signerPlace);
             // signerPlace is resolved (and required for SSL) near the top of this method.
             int validityYears    = ep.ValidityYears > 0 ? ep.ValidityYears
                                   : (int.TryParse(_config.SubscriptionValidityYears, out int cfgYears) && cfgYears > 0 ? cfgYears : 1);
@@ -2439,6 +2442,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     orderId, postCreateStatus?.Status, ep.ProductFamilySlug);
             }
 
+            // pending-agreement: the CA will not release the certificate until the Subscriber
+            // Agreement is accepted. The create body already carried the agreement, so this is a
+            // fallback for an order that still lands here; at most once per enrollment call.
+            await TryAcceptV2AgreementAsync(postCreateStatus, ep.ProductFamilySlug, orderId, agreementContext);
+
             // Whether the inline DCV block below took ownership of the in-call issuance wait for
             // this order. Declared outside the #if so both build flavors compile the
             // pickup-gate call below the same way (it simply stays false on the no-DCV build).
@@ -2474,6 +2482,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         _logger.LogInformation(
                             "V2 DCV completed inline for order {OrderId}. Post-DCV status={Status}",
                             orderId, tracked.Status);
+                        await TryAcceptV2AgreementAsync(tracked, ep.ProductFamilySlug, orderId, agreementContext);
                     }
                 }
                 catch (Exception dcvEx)
@@ -2546,7 +2555,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 StatusMessage = $"V2 order placed. Status={createResp.Status}"
             };
             var (pickedUpResult, observedCaStatus) = await PickUpEnrolledCertificateV2Async(
-                pendingResult, orderId, ep.ProductFamilySlug, dcvV2Ran, lastKnownCaStatus);
+                pendingResult, orderId, ep.ProductFamilySlug, dcvV2Ran, lastKnownCaStatus,
+                agreementContext: agreementContext);
 
             // Normalize a body-less REVOKED disposition to FAILED once here, right
             // before returning — every path above that can surface REVOKED (the post-create
@@ -2585,6 +2595,88 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (!m.Success) return true;
             int status = int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
             return status < 400 || status >= 500;
+        }
+
+        /// <summary>
+        /// The signer values for, and the per-order "already attempted" memory of, the V2
+        /// accept-agreement fallback. One instance per enroll call or per sync pass, so an order is
+        /// attempted at most once in that scope.
+        /// </summary>
+        internal sealed class V2AgreementAcceptContext
+        {
+            public V2AgreementAcceptContext(string signerName, string signerPlace)
+            {
+                SignerName = signerName;
+                SignerPlace = signerPlace;
+            }
+
+            public string SignerName { get; }
+            public string SignerPlace { get; }
+            public bool HasSigner => !string.IsNullOrWhiteSpace(SignerName) && !string.IsNullOrWhiteSpace(SignerPlace);
+            public HashSet<string> AttemptedOrderIds { get; } = new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// When Track Order shows an SSL/TLS order at <c>pending-agreement</c> (the CA will not
+        /// release the certificate until the Subscriber Agreement is accepted), accepts it with
+        /// <c>POST /ssl-certificates/{orderId}/agreement</c> using the same signer values the create
+        /// body carried. At most once per order per <paramref name="context"/>; never throws (a
+        /// failure is logged at Warning and the order simply stays pending for a later pass);
+        /// does nothing for any other status or for a non-SSL family. The intent is audit-logged
+        /// before the call, in the style of the revocation audit line; the signer's name and place
+        /// are personal data and only appear when <c>LogSensitiveRequestData</c> is on. Returns true
+        /// when the CA accepted the call.
+        /// </summary>
+        private async Task<bool> TryAcceptV2AgreementAsync(
+            V2OrderStatusResponse tracked, string familySlug, string orderId,
+            V2AgreementAcceptContext context, CancellationToken ct = default)
+        {
+            if (context == null || tracked == null || string.IsNullOrWhiteSpace(orderId)) return false;
+            if (!string.Equals(tracked.Status, Constants.ApiV2.StatusPendingAgreement, StringComparison.OrdinalIgnoreCase)) return false;
+            if (!string.Equals(familySlug, Constants.ApiV2.FamilySsl, StringComparison.Ordinal)) return false;
+            if (!context.AttemptedOrderIds.Add(orderId)) return false;
+
+            if (string.IsNullOrWhiteSpace(context.SignerName) || string.IsNullOrWhiteSpace(context.SignerPlace))
+            {
+                _logger.LogWarning(
+                    "V2 order {OrderId} is waiting at pending-agreement but the Subscriber Agreement was not accepted: " +
+                    "the signer name or place is blank (set RequestorName/SignerName and SignerPlace). The order stays pending.",
+                    orderId);
+                return false;
+            }
+
+            // Audit trail: accepting the Subscriber Agreement is a legal act made on the signer's behalf,
+            // so the intent is recorded before the call, even if the call then fails.
+            _logger.LogInformation(
+                "V2 Subscriber Agreement acceptance attempt started. CARequestID={Id}, Family={Family}, " +
+                "Trigger=pending-agreement, SignerName={SignerName}, SignerPlace={SignerPlace}",
+                orderId, familySlug,
+                _config.LogSensitiveRequestData ? LogSanitizer.Strip(context.SignerName) : "(withheld)",
+                _config.LogSensitiveRequestData ? LogSanitizer.Strip(context.SignerPlace) : "(withheld)");
+
+            try
+            {
+                await _client.AcceptAgreementV2Async(familySlug, orderId, new V2AgreementParams
+                {
+                    SignerName  = context.SignerName,
+                    SignerPlace = context.SignerPlace,
+                    Accepted    = true
+                }, ct);
+                _logger.LogInformation(
+                    "V2 Subscriber Agreement accepted. CARequestID={Id}, Family={Family}", orderId, familySlug);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (ex is OperationCanceledException && ct.IsCancellationRequested) throw;
+                // Never fail the enrollment or the sync over this: the order stays pending and a
+                // later pass (or the CA's own processing) moves it on.
+                _logger.LogWarning(
+                    "V2 Subscriber Agreement acceptance failed; the order stays pending. CARequestID={Id}, " +
+                    "Family={Family}, Error={Error}",
+                    orderId, familySlug, RedactAndCapForLog(ex.Message));
+                return false;
+            }
         }
 
         /// <summary>
@@ -3021,6 +3113,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int deferredRecentOrders = 0; // pending/issued orders withheld because they are younger than the grace window
             int unresolvedStatusFallbacks = 0; // report rows whose display strings needed a live track call
             int issuedNotGeneratedYet = 0; // issued orders whose download answered 422 EMS-1165 (certificate not generated yet)
+            // Sync has no template, so the agreement signer is the connector's: RequestorName (the
+            // enroll default for SignerName) and SignerPlace. One context per pass: each order is
+            // attempted at most once per pass.
+            var agreementContext = new V2AgreementAcceptContext(_config.RequestorName, _config.SignerPlace);
 
             // Emit-side accounting (mirrors the V1 path).
             int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
@@ -3196,6 +3292,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             }
                         }
 #endif
+
+                        // pending-agreement: the CA holds the certificate until the Subscriber Agreement
+                        // is accepted. Only a live Track Order response shows that status (the report's
+                        // display strings are not mapped to it), so a still-pending SSL/TLS order (report
+                        // rows carry a domain name only for that family) is tracked here when no earlier
+                        // step already did, and accepted at most once per pass. Skipped without any call
+                        // when no signer is configured. Never fails the row.
+                        if (disposition == (int)EndEntityStatus.EXTERNALVALIDATION
+                            && agreementContext.HasSigner
+                            && !string.IsNullOrWhiteSpace(row.DomainName))
+                        {
+                            try
+                            {
+                                if (trackedStatus == null)
+                                {
+                                    (resolvedFamily, trackedStatus) = await _client.ResolveAndTrackOrderV2WithFamilyAsync(
+                                        row.OrderNumber, cancelToken);
+                                }
+                                await TryAcceptV2AgreementAsync(
+                                    trackedStatus, resolvedFamily, row.OrderNumber, agreementContext, cancelToken);
+                            }
+                            catch (Exception agrEx) when (!(agrEx is OperationCanceledException))
+                            {
+                                _logger.LogWarning(agrEx,
+                                    "V2 sync: could not check pending order '{Id}' for a Subscriber Agreement to accept; " +
+                                    "continuing.", row.OrderNumber);
+                            }
+                        }
 
                         // Report rows carry no revocation reason/date (OrderReportEntryV2 has no
                         // such fields) — only a live TrackOrder response's nested
@@ -5984,7 +6108,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         private async Task<(EnrollmentResult Result, string RawCaStatus)> PickUpEnrolledCertificateV2Async(
             EnrollmentResult pendingResult, string orderId, string productFamilySlug,
-            bool dcvV2Ran, string lastKnownCaStatus, CancellationToken ct = default)
+            bool dcvV2Ran, string lastKnownCaStatus, CancellationToken ct = default,
+            V2AgreementAcceptContext agreementContext = null)
         {
             // The inline V2 DCV path already owns the in-call issuance wait for this order —
             // running a second stacked poll here would double the wait budget (when
@@ -6070,6 +6195,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             "V2 pickup poll observed status. OrderId={OrderId}, Attempt={Attempt}/{Retries}, " +
                             "MappedDisposition={Disposition}, Status='{Status}'.",
                             orderId, attempt, retries, disposition, tracked.Status);
+
+                        // An order that reaches pending-agreement mid-poll gets the (at most one)
+                        // acceptance call; the poll then simply continues.
+                        await TryAcceptV2AgreementAsync(tracked, productFamilySlug, orderId, agreementContext, ct);
 
                         if (disposition == (int)EndEntityStatus.GENERATED)
                         {
