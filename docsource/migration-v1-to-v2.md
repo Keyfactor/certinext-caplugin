@@ -127,8 +127,9 @@ For each template you're migrating:
    (`ValidateProductInfo`) automatically checks `ProductCode` against the V2 catalog once
    `UseV2Api=true`, so an incorrect code will be caught at template save time, not silently at
    enrollment.
-4. The `SignerName`, `SignerPlace`, `SignerIp`, and `DomainName` template parameters take effect in
-   V2. `RenewalWindowDays` and `ValidityDays` are V1-only and are ignored.
+4. The `DomainName` template parameter takes effect in V2 only. The `SignerName`, `SignerPlace`, and
+   `SignerIp` template parameters take effect in both V1 and V2. `RenewalWindowDays` and `ValidityDays`
+   are V1-only and are ignored.
 5. If the template enrolls for a UCC (multi-domain) or wildcard product, test it on the sandbox first.
    The plugin runs DCV for each domain, but per-SAN, never-validated-domain, and wildcard DCV aren't
    validated end to end (see

@@ -156,8 +156,8 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **RequestorIsdCode** - International dialing code for the requestor phone number (e.g. '1' for US). Default: '1'.
         * **RequestorMobileNumber** - Requestor mobile number (digits only, no country code).
         * **RequestorDesignation** - OPTIONAL: Job title / role of the requestor (e.g. 'IT Administrator'). Sent as requestorInformation.requestorDesignation (V1) and requestor.designation (V2). Free text. Omitted when blank.
-        * **SignerPlace** - City or location of the subscriber agreement signer (e.g. 'San Francisco, CA'). REQUIRED when UseV2Api is on: the V2 Subscriber Agreement sent with every SSL order requires it, so the connector cannot be saved with it blank. A per-template SignerPlace enrollment parameter overrides it.
-        * **SignerIp** - IP address of the subscriber agreement signer. V1 sends 127.0.0.1 with a warning when blank; V2 omits it. A template-level SignerIp enrollment parameter overrides it on V2.
+        * **SignerPlace** - City or location of the subscriber agreement signer (e.g. 'San Francisco, CA'). REQUIRED when UseV2Api is on: the V2 Subscriber Agreement sent with every SSL order requires it, so the connector cannot be saved with it blank. A per-template SignerPlace enrollment parameter overrides it. On V1, if neither is set, the placeholder "Gateway" is sent and a Warning is logged; set it so the agreement audit record is accurate.
+        * **SignerIp** - IP address of the subscriber agreement signer. A template-level SignerIp enrollment parameter overrides it. On V1, if neither is set, the placeholder 127.0.0.1 is sent and a Warning is logged, and a value that is not an IP address is still sent unchanged, with a Warning; V2 omits a blank value.
         * **DefaultProductCode** - OPTIONAL: Default numeric product code. V1: used for renewals when the template supplies none. V2: disambiguates a ProductId-only template when the catalog has several matches. Get codes via GetProductDetails.
         * **AccountingModel** - OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel` on V1 orders. "2" = credit-based (most accounts, default). "1" = cash model. Not used by V2.
         * **EmailNotifications** - OPTIONAL: Lifecycle emails to the requestor. "1" = full set (V2: "all"), "0" = silent. Blank: silent on V1, omitted on V2 (CA default applies). Other values fail V2 enrollment. Default: "0".
@@ -203,9 +203,9 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 | `RenewalWindowDays` | Optional | Number | V1 only. Number of days before certificate expiration within which a renewal is attempted instead of a reissue. V2 places a new order for every renewal and reissue. Default: `90`. | `90` |
 | `KeyType` | Optional | String | Informational. The CSR decides the key algorithm. CERTInext accepts only RSA 2048/3072/4096 and ECC P-256/P-384. | `RSA2048`, `RSA3072`, `RSA4096`, `EC256`, `EC384` |
 | `DomainName` | Optional | String | V2 only: primary domain name for SSL/TLS orders (for Private PKI, the primary hostname). If omitted, the plugin uses the CSR subject `CN`. V1 always uses the CSR subject `CN`. | `example.com` |
-| `SignerName` | Optional | String | V2 only: per-template override for the subscriber agreement signer name. When omitted, defaults to the requestor name. V1 uses the connector-level `RequestorName`. | `Jane Smith` |
-| `SignerPlace` | Optional | String | V2 only: per-template override for the subscriber agreement signer location. When omitted, defaults to the connector-level `SignerPlace`. V1 uses the connector-level value. | `Austin` |
-| `SignerIp` | Optional | String | V2 only: per-template override for the subscriber agreement signer IP address. When omitted, defaults to the connector-level `SignerIp`. V1 uses the connector-level value. | `203.0.113.10` |
+| `SignerName` | Optional | String | Per-template override for the subscriber agreement signer name. When omitted, defaults to the connector-level `RequestorName` (V2: the requestor name). If no name resolves, V1 sends `Keyfactor Gateway` and logs a warning. | `Jane Smith` |
+| `SignerPlace` | Optional | String | Per-template override for the subscriber agreement signer location. When omitted, defaults to the connector-level `SignerPlace`. If neither is set, V1 sends `Gateway` and logs a warning. | `Austin` |
+| `SignerIp` | Optional | String | Per-template override for the subscriber agreement signer IP address. When omitted, defaults to the connector-level `SignerIp`. If neither is set, V1 sends `127.0.0.1` and logs a warning; a V1 value that is not an IP address is sent unchanged, with a warning. | `203.0.113.10` |
 
 - **Subscription term (V1):** the order's term is the larger of `ValidityYears` and `ValidityDays` rounded up to whole years (365 days = 1 year). Each field counts only when it is set, and a field left at its default (1 year) never overrides the other, so a template saved with only `ValidityDays` keeps its term. Because the larger value wins, a stale larger `ValidityDays` cannot be shortened with `ValidityYears` alone; set `ValidityDays` back to `365`. V2 uses only `ValidityYears`.
 - **Key types:** larger RSA, ECC P-521, and the Ed25519/Ed448 curves are rejected by the CA (`Invalid key size`).
@@ -232,9 +232,9 @@ The V2-only template parameters `ProductFamily` and `ProductVariant` are describ
     * **RenewalWindowDays** - OPTIONAL: V1 only. Number of days before certificate expiration within which a renewal is triggered. Certificates expiring further than this window are reissued instead. Certificates that have already expired also fall back to reissue. V2 places a new order for every renewal and reissue. Default: 90.
     * **KeyType** - OPTIONAL: Informational. The key algorithm is determined by the submitted CSR; CERTInext accepts RSA 2048/3072/4096 and ECC P-256/P-384 and rejects larger RSA, ECC P-521, and Ed25519/Ed448.
     * **DomainName** - OPTIONAL: Primary domain for SSL/TLS orders (for V2 private-pki orders, the primary hostname). Derived from the CSR CN if omitted.
-    * **SignerName** - OPTIONAL: V2 only. Per-template subscriber agreement signer name. Falls back to the requestor name if omitted. V1 uses the connector-level RequestorName.
-    * **SignerPlace** - OPTIONAL: V2 only. Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted. V1 uses the connector-level SignerPlace.
-    * **SignerIp** - OPTIONAL: V2 only. Per-template signer IP address. Falls back to the connector-level SignerIp if omitted. V1 uses the connector-level SignerIp.
+    * **SignerName** - OPTIONAL: Per-template subscriber agreement signer name. Falls back to the connector-level RequestorName if omitted (V2: the requestor name). If no name resolves, V1 sends the placeholder "Keyfactor Gateway" and logs a Warning.
+    * **SignerPlace** - OPTIONAL: Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted. If neither is set, V1 sends the placeholder "Gateway" and logs a Warning.
+    * **SignerIp** - OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted. If neither is set, V1 sends the placeholder 127.0.0.1 and logs a Warning; a V1 value that is not an IP address is sent unchanged, with a Warning.
     * **ProductFamily** - V2 ONLY: Product family for this template. Accepted values: 'ssl' (default) or 'private-pki'. 'private-pki' requires an explicit ProductCode and a Private PKI ProductVariant. 'signature' (Document Signer) is accepted by the parameter, but Document Signer enrollment is not supported.
     * **ProductVariant** - V2 ONLY: Product variant sent in the V2 order body. ProductFamily 'ssl': 'dv', 'ov', or 'ev' — if omitted, derived from the selected product; an explicit value that contradicts the product fails enrollment. ProductFamily 'private-pki': 'intranet-ssl' or 'igtf-host' (required; no default).
 
@@ -332,10 +332,11 @@ When the connector is saved (and `Enabled` is `true`), the plugin checks only th
 | `RequestorMobileNumber` | Both | Optional | Requestor mobile number, digits only, no country code. |
 | `RequestorDesignation` | Both | Optional | Job title of the requestor. Sent as `requestorInformation.requestorDesignation` (V1) and `requestor.designation` (V2). Omitted when blank. |
 | `TechnicalContactName`<br>`TechnicalContactEmail`<br>`TechnicalContactIsdCode`<br>`TechnicalContactMobileNumber` | Both | Optional | Technical point of contact on every SSL order. Each defaults to the matching `Requestor*` field. On V1 the name is sent as `pocFirstName` and `pocLastName`, split on the first whitespace (a single word goes in both). If no name or no email resolves, V1 omits the whole block and logs a warning, because CERTInext requires both inside it. |
-| `SignerPlace` | Both | Required | City of the person accepting the subscriber agreement. Required at save on V2; a template `SignerPlace` overrides it. Example: `Austin`. |
+| `SignerPlace` | Both | Required | City of the person accepting the subscriber agreement. Required at save on V2; a template `SignerPlace` overrides it on both. On V1, if neither is set, the plugin sends `Gateway` and logs a warning. Example: `Austin`. |
 | `SignerIp` | Both | Required | Public IP of the host accepting the subscriber agreement. See the bullets below. Example: `203.0.113.10`. |
 
-- **`SignerIp` blank:** on V1 the plugin sends `127.0.0.1` and logs a warning, which misstates the audit record CERTInext keeps. Set it to the gateway host's outbound IP. On V2 a blank value is omitted from the agreement.
+- **`SignerIp` blank:** on V1, when neither a template `SignerIp` nor this field is set, the plugin sends `127.0.0.1` and logs a warning, which misstates the audit record CERTInext keeps. Set it to the gateway host's outbound IP. A V1 value that is not an IP address is still sent unchanged, with a warning. On V2 a blank value is omitted from the agreement.
+- **Signer values per order:** the agreement signer is the template `SignerName`, `SignerPlace`, and `SignerIp` parameters first, then the connector's `RequestorName`, `SignerPlace`, and `SignerIp`, then the placeholders `Keyfactor Gateway`, `Gateway`, and `127.0.0.1` (each placeholder logs a warning on V1). Blank values fall through. This applies to new orders and renewals on both V1 and Vt.
 - **Where to find values:** the account number is under your name or avatar → **Account Settings** or **My Profile**. Use a monitored team inbox for `RequestorEmail`.
 
 ### Order Defaults
@@ -750,8 +751,9 @@ For each template you're migrating:
    (`ValidateProductInfo`) automatically checks `ProductCode` against the V2 catalog once
    `UseV2Api=true`, so an incorrect code will be caught at template save time, not silently at
    enrollment.
-4. The `SignerName`, `SignerPlace`, `SignerIp`, and `DomainName` template parameters take effect in
-   V2. `RenewalWindowDays` and `ValidityDays` are V1-only and are ignored.
+4. The `DomainName` template parameter takes effect in V2 only. The `SignerName`, `SignerPlace`, and
+   `SignerIp` template parameters take effect in both V1 and V2. `RenewalWindowDays` and `ValidityDays`
+   are V1-only and are ignored.
 5. If the template enrolls for a UCC (multi-domain) or wildcard product, test it on the sandbox first.
    The plugin runs DCV for each domain, but per-SAN, never-validated-domain, and wildcard DCV aren't
    validated end to end (see

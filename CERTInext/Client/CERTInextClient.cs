@@ -892,7 +892,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     validityDays: request.ValidityDays,
                     requesterName: request.RequesterName,
                     requesterEmail: request.RequesterEmail,
-                    comment: request.Comment)
+                    comment: request.Comment,
+                    signerName: request.SignerName,
+                    signerPlace: request.SignerPlace,
+                    signerIp: request.SignerIp)
             };
 
             var orderResp = await PlaceOrderAsync(orderReq, ct);
@@ -2445,7 +2448,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 // Meta will be set by PlaceOrderAsync
                 OrderDetails = BuildSslOrderDetails(
-                    productCode: request.ProfileId ?? _config.DefaultProductCode ?? string.Empty,
+                    // Blank (not just null) ProfileId must fall back: the template ProductCode
+                    // resolves to "" when unset, so a null-coalesce would never fire.
+                    productCode: string.IsNullOrWhiteSpace(request.ProfileId)
+                        ? (_config.DefaultProductCode ?? string.Empty)
+                        : request.ProfileId,
                     domainName: domainName,
                     sans: request.Sans,
                     csr: request.Csr,
@@ -2453,7 +2460,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     validityDays: request.ValidityDays,
                     requesterName: request.RequesterName,
                     requesterEmail: request.RequesterEmail,
-                    comment: request.Comment)
+                    comment: request.Comment,
+                    signerName: request.SignerName,
+                    signerPlace: request.SignerPlace,
+                    signerIp: request.SignerIp)
             };
         }
 
@@ -2475,7 +2485,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             int? validityDays,
             string requesterName,
             string requesterEmail,
-            string comment)
+            string comment,
+            string signerName,
+            string signerPlace,
+            string signerIp)
         {
             string requestorName  = requesterName  ?? _config.RequestorName  ?? "Keyfactor Gateway";
             string requestorEmail = requesterEmail ?? _config.RequestorEmail ?? string.Empty;
@@ -2534,7 +2547,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     requestorName, requestorEmail, requestorIsd, requestorMobile),
 
                 Csr = csr,
-                AgreementDetails = BuildDefaultAgreementDetails(),
+                AgreementDetails = BuildAgreementDetails(signerName, signerPlace, signerIp),
                 AdditionalInformation = new AdditionalInformation
                 {
                     Remarks = comment ?? "Issued via Keyfactor Command AnyCA REST Gateway."
@@ -2636,7 +2649,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return (first, last);
         }
 
-        private AgreementDetails BuildDefaultAgreementDetails()
+        /// <summary>
+        /// Builds <c>agreementDetails</c>. Each signer value resolves template value, then
+        /// connector value, then built-in default, using blank (not just null) checks because
+        /// both the template parameters and the connector config default to "".
+        /// </summary>
+        private AgreementDetails BuildAgreementDetails(
+            string templateSignerName, string templateSignerPlace, string templateSignerIp)
         {
             // SOC1 accuracy-of-processing: the subscriber agreement is a legal artefact
             // and the SignerIp it carries is part of the audit record CERTInext stores.
@@ -2644,24 +2663,67 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // don't break existing deployments (and our enrollment never fails just
             // because SignerIp is blank), but a missing value emits a Warning so an
             // auditor sees the misrepresentation as an actionable signal in the gateway log.
-            string signerIp = _config.SignerIp;
-            if (string.IsNullOrWhiteSpace(signerIp))
+            string signerIp = FirstNonBlank(templateSignerIp, _config.SignerIp);
+            WarnIfSignerIpNotAnAddress(signerIp, source: string.IsNullOrWhiteSpace(templateSignerIp) ? "connector" : "template");
+            if (signerIp == null)
             {
                 Logger.LogWarning(
-                    "Connector config SignerIp is empty — falling back to 127.0.0.1 for the " +
-                    "subscriber agreement. Set the SignerIp config field to the gateway host's " +
-                    "actual public-routable IP so the audit record is accurate.");
+                    "Neither the template SignerIp parameter nor the connector SignerIp config is set — " +
+                    "falling back to 127.0.0.1 for the subscriber agreement. Set SignerIp to the " +
+                    "gateway host's actual public-routable IP so the audit record is accurate.");
                 signerIp = "127.0.0.1";
+            }
+            // Same SOC1 rationale as SignerIp: placeholder SignerName/SignerPlace values land in
+            // the legal agreement record, so a fallback is surfaced as a Warning (values unchanged).
+            string signerName = FirstNonBlank(templateSignerName, _config.RequestorName);
+            if (signerName == null)
+            {
+                Logger.LogWarning(
+                    "Neither the template SignerName parameter nor the connector RequestorName config is set — " +
+                    "falling back to \"Keyfactor Gateway\" for the subscriber agreement. Set SignerName on the " +
+                    "template or RequestorName on the connector to the actual signer so the audit record is accurate.");
+                signerName = "Keyfactor Gateway";
+            }
+            string signerPlace = FirstNonBlank(templateSignerPlace, _config.SignerPlace);
+            if (signerPlace == null)
+            {
+                Logger.LogWarning(
+                    "Neither the template SignerPlace parameter nor the connector SignerPlace config is set — " +
+                    "falling back to \"Gateway\" for the subscriber agreement. Set SignerPlace on the " +
+                    "template or connector to the signer's actual location so the audit record is accurate.");
+                signerPlace = "Gateway";
             }
             return new AgreementDetails
             {
                 AcceptAgreement = "1",
-                SignerName = _config.RequestorName ?? "Keyfactor Gateway",
-                // Effectively dead fallback: SignerPlace defaults to "", not null, so a blank setting sends "" (only an explicit JSON null reaches "Gateway"). V1 wire behaviour intentionally unchanged.
-                SignerPlace = _config.SignerPlace ?? "Gateway",
+                SignerName = signerName,
+                SignerPlace = signerPlace,
                 SignerIp = signerIp
             };
         }
+
+        /// <summary>
+        /// Warn-only check: the resolved SignerIp is sent as <c>agreementDetails.signerIP</c> (part of
+        /// the subscriber-agreement audit record), so a value that is not an IP literal (for example
+        /// a host name) is flagged. The value is still sent unchanged; enrollment never fails here.
+        /// </summary>
+        private static void WarnIfSignerIpNotAnAddress(string signerIp, string source)
+        {
+            if (string.IsNullOrWhiteSpace(signerIp) || IPAddress.TryParse(signerIp, out _))
+                return;
+
+            string shown = LogSanitizer.Strip(signerIp.Length > 64 ? signerIp.Substring(0, 64) + "..." : signerIp);
+            Logger.LogWarning(
+                "The SignerIp value from the {Source} ('{SignerIp}') is not a valid IPv4/IPv6 address but is " +
+                "being sent unchanged as agreementDetails.signerIP in the subscriber agreement audit record. " +
+                "Set SignerIp to the gateway host's actual IP address.",
+                source, shown);
+        }
+
+        private static string FirstNonBlank(string first, string second)
+            => !string.IsNullOrWhiteSpace(first) ? first
+             : !string.IsNullOrWhiteSpace(second) ? second
+             : null;
 
         private static string ExtractCnFromSubject(string subject)
         {

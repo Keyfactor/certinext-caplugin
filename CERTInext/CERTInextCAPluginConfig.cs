@@ -187,15 +187,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Comments = "City or location of the subscriber agreement signer (e.g. 'San Francisco, CA'). " +
                                "REQUIRED when UseV2Api is on: the V2 Subscriber Agreement sent with every SSL order " +
                                "requires it, so the connector cannot be saved with it blank. A per-template " +
-                               "SignerPlace enrollment parameter overrides it.",
+                               "SignerPlace enrollment parameter overrides it. On V1, if neither is set, the " +
+                               "placeholder \"Gateway\" is sent and a Warning is logged; set it so the agreement audit " +
+                               "record is accurate.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.SignerIp] = new PropertyConfigInfo
                 {
-                    Comments = "IP address of the subscriber agreement signer. V1 sends 127.0.0.1 with a warning when " +
-                               "blank; V2 omits it. A template-level SignerIp enrollment parameter overrides it on V2.",
+                    Comments = "IP address of the subscriber agreement signer. A template-level SignerIp enrollment " +
+                               "parameter overrides it. On V1, if neither is set, the placeholder 127.0.0.1 is sent and a " +
+                               "Warning is logged, and a value that is not an IP address is still sent unchanged, with a " +
+                               "Warning; V2 omits a blank value.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -567,24 +571,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.SignerName] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: V2 only. Per-template subscriber agreement signer name. Falls back to the " +
-                               "requestor name if omitted. V1 uses the connector-level RequestorName.",
+                    Comments = "OPTIONAL: Per-template subscriber agreement signer name. Falls back to the " +
+                               "connector-level RequestorName if omitted (V2: the requestor name). If no name resolves, " +
+                               "V1 sends the placeholder \"Keyfactor Gateway\" and logs a Warning.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.SignerPlace] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: V2 only. Per-template signer city/location. Falls back to the connector-level " +
-                               "SignerPlace if omitted. V1 uses the connector-level SignerPlace.",
+                    Comments = "OPTIONAL: Per-template signer city/location. Falls back to the connector-level " +
+                               "SignerPlace if omitted. If neither is set, V1 sends the placeholder \"Gateway\" and logs " +
+                               "a Warning.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.SignerIp] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: V2 only. Per-template signer IP address. Falls back to the connector-level " +
-                               "SignerIp if omitted. V1 uses the connector-level SignerIp.",
+                    Comments = "OPTIONAL: Per-template signer IP address. Falls back to the connector-level " +
+                               "SignerIp if omitted. If neither is set, V1 sends the placeholder 127.0.0.1 and logs a " +
+                               "Warning; a V1 value that is not an IP address is sent unchanged, with a Warning.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"

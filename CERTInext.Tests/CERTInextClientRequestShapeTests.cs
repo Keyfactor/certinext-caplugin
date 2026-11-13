@@ -475,6 +475,207 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         // -----------------------------------------------------------------------
+        // New enrollment — blank-value fallbacks (local issues/0071). Config/template
+        // strings default to "", so null-coalesce fallbacks never fired.
+        // -----------------------------------------------------------------------
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task Enroll_ProfileIdBlank_FallsBackToConnectorDefaultProductCode(string blankProfileId)
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.DefaultProductCode = "connector-default-code";
+            var req = BasicEnrollRequest();
+            req.ProfileId = blankProfileId;
+
+            await BuildClient(cfg).EnrollCertificateAsync(req);
+
+            CapturedOrderBody().GetProperty("productCode").GetString().Should().Be("connector-default-code",
+                "a blank template ProductCode must fall back to the connector's DefaultProductCode");
+        }
+
+        [Fact]
+        public async Task Enroll_ProfileIdSet_UsesTemplateProductCodeOverConnectorDefault()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.DefaultProductCode = "connector-default-code";
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            CapturedOrderBody().GetProperty("productCode").GetString().Should().Be("842");
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task Enroll_SignerNameAndPlaceBlank_FallBackToDefaults(string blank)
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.RequestorName = blank;
+            cfg.SignerPlace = blank;
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Keyfactor Gateway");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Gateway");
+        }
+
+        [Fact]
+        public async Task Enroll_SignerNameAndPlaceConfigured_AreSentVerbatim()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig(); // RequestorName "Default Requestor", SignerPlace "Austin"
+
+            await BuildClient(cfg).EnrollCertificateAsync(BasicEnrollRequest());
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Default Requestor");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Austin");
+        }
+
+        // -----------------------------------------------------------------------
+        // agreementDetails precedence: template value -> connector value -> default.
+        // Blank (null/""/whitespace) at either level falls through.
+        // -----------------------------------------------------------------------
+
+        [Fact]
+        public async Task Enroll_TemplateSignerValues_WinOverConnectorValues()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig(); // connector: "Default Requestor" / "Austin" / 203.0.113.10
+            var req = BasicEnrollRequest();
+            req.SignerName = "Template Signer";
+            req.SignerPlace = "Template Place";
+            req.SignerIp = "198.51.100.7";
+
+            await BuildClient(cfg).EnrollCertificateAsync(req);
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Template Signer");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Template Place");
+            agreement.GetProperty("signerIP").GetString().Should().Be("198.51.100.7");
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task Enroll_BlankTemplateSignerValues_FallBackToConnectorValues(string blank)
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            var req = BasicEnrollRequest();
+            req.SignerName = blank;
+            req.SignerPlace = blank;
+            req.SignerIp = blank;
+
+            await BuildClient(cfg).EnrollCertificateAsync(req);
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Default Requestor");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Austin");
+            agreement.GetProperty("signerIP").GetString().Should().Be("203.0.113.10");
+        }
+
+        [Fact]
+        public async Task Enroll_TemplateAndConnectorSignerBlank_UseBuiltInDefaults()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.RequestorName = "";
+            cfg.SignerPlace = "  ";
+            cfg.SignerIp = "";
+            var req = BasicEnrollRequest();
+            req.SignerName = " ";
+
+            await BuildClient(cfg).EnrollCertificateAsync(req);
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Keyfactor Gateway");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Gateway");
+            agreement.GetProperty("signerIP").GetString().Should().Be("127.0.0.1");
+        }
+
+        [Fact]
+        public async Task Renewal_TemplateSignerValues_WinOverConnectorValues()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                ProfileId = "842",
+                Comment = "Renewal test",
+                SignerName = "Template Signer",
+                SignerPlace = "Template Place",
+                SignerIp = "198.51.100.7"
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Template Signer");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Template Place");
+            agreement.GetProperty("signerIP").GetString().Should().Be("198.51.100.7");
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task Renewal_BlankTemplateSignerValues_FallBackToConnectorThenDefaults(string blank)
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                ProfileId = "842",
+                Comment = "Renewal test",
+                SignerName = blank,
+                SignerPlace = blank,
+                SignerIp = blank
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Default Requestor");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Austin");
+            agreement.GetProperty("signerIP").GetString().Should().Be("203.0.113.10");
+        }
+
+        [Fact]
+        public async Task Renewal_TemplateAndConnectorSignerBlank_UseBuiltInDefaults()
+        {
+            StubHappyEnroll();
+            var cfg = MinimalConfig();
+            cfg.RequestorName = "";
+            cfg.SignerPlace = "";
+            cfg.SignerIp = "";
+            var renewReq = new RenewCertificateRequest
+            {
+                Csr = MockCertificateData.FakeCsrPem,
+                ProfileId = "842",
+                Comment = "Renewal test"
+            };
+
+            await BuildClient(cfg).RenewCertificateAsync(MockCertificateData.OrderNumber1, renewReq);
+
+            var agreement = CapturedOrderBody().GetProperty("agreementDetails");
+            agreement.GetProperty("signerName").GetString().Should().Be("Keyfactor Gateway");
+            agreement.GetProperty("signerPlace").GetString().Should().Be("Gateway");
+            agreement.GetProperty("signerIP").GetString().Should().Be("127.0.0.1");
+        }
+
+        // -----------------------------------------------------------------------
         // RenewCertificateAsync — productCode resolution
         // Renewals go out as a fresh GenerateOrderSSL order; the product code must
         // come from the template (RenewCertificateRequest.ProfileId) when supplied,

@@ -602,6 +602,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string Comment { get; set; }
 
+        /// <summary>Per-template agreement signer name; blank falls back to the connector value.</summary>
+        [JsonPropertyName("signerName")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string SignerName { get; set; }
+
+        /// <summary>Per-template agreement signer place; blank falls back to the connector value.</summary>
+        [JsonPropertyName("signerPlace")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string SignerPlace { get; set; }
+
+        /// <summary>Per-template agreement signer IP; blank falls back to the connector value.</summary>
+        [JsonPropertyName("signerIp")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string SignerIp { get; set; }
+
         [JsonPropertyName("keyType")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string KeyType { get; set; }
@@ -675,6 +690,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API
         [JsonPropertyName("comment")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string Comment { get; set; }
+
+        /// <summary>Per-template agreement signer name; blank falls back to the connector value.</summary>
+        [JsonPropertyName("signerName")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string SignerName { get; set; }
+
+        /// <summary>Per-template agreement signer place; blank falls back to the connector value.</summary>
+        [JsonPropertyName("signerPlace")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string SignerPlace { get; set; }
+
+        /// <summary>Per-template agreement signer IP; blank falls back to the connector value.</summary>
+        [JsonPropertyName("signerIp")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string SignerIp { get; set; }
     }
 
     /// <summary>
