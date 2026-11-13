@@ -188,6 +188,11 @@ xUnit buffers test output until the test ends, so read the per-pass report at th
 Run only one full-history synchronization at a time against a shared account; full syncs are
 slow.
 
+`CompleteAllPendingDvOrders` builds a **V1** plugin (`UseV2Api` defaults to `false`), so it syncs and
+runs DCV through V1, and it sweeps every pending DV order in the account. For one **V2** order, use
+`V2DcvLifecycleTests.GetSingleRecord_V2_DrivesDcvForPendingOrder` with
+`CERTINEXT_V2_PENDING_ORDER_ID=<orderId>`. That test writes the plugin's log to the test output.
+
 ---
 
 ## Authentication
@@ -220,3 +225,28 @@ V2 tests authenticate with OAuth2 `client_credentials` using `CERTINEXT_CLIENT_I
 | `Enroll` fails with "Invalid Organization Number" (EMS-1073) | OV/EV order with an unregistered organization | Use a DV product for automated tests, or register and approve the organization |
 | Revoke step skips with "not GENERATED" | A sandbox DV order needs domain validation before it is issued | Expected without DCV; run the DCV tests with Cloudflare configured, or approve the order in the portal |
 | `OrderReportTests` skip | The account has no orders | Run `LifecycleTests` first to place one |
+
+## Triaging live V2 failures
+
+Sandbox behaviour changes without notice, and several CERTInext errors look like plugin bugs. Check
+these before changing code.
+
+**Get the plugin's own log first.** `TestOutputLogging.RouteTo(_output)` routes `LogHandler` to the test
+output; `V2LifecycleTests.Enroll_V2_ReturnsCARequestID` and
+`V2DcvLifecycleTests.GetSingleRecord_V2_DrivesDcvForPendingOrder` already do. Set
+`CERTINEXT_TEST_LOG_LEVEL=Trace` to add the redacted request and response payloads. Without this, a
+test that "passes" with the order still pending tells you nothing.
+
+| Symptom | Likely cause | How to confirm |
+|---|---|---|
+| Order `issued` but Download Certificate returns 422 `EMS-1165`, and stays that way | The CA approved the order but hasn't generated the certificate (`certificateState: "Approved by System"`). This normally clears in about 20 s; on the sandbox it stalled from 2026-10-13. | Track Order shows `certificateState`. `GET /reports/orders?status=issued` lists only orders whose certificate was actually generated ("Certificate Downloaded"); if the newest is old, generation has stopped CA-side. |
+| No `X-Product-Code`: two-call CSR submit returns 422 "PFX based certificate orders are not allowed" | CERTInext resolved the product to one that doesn't take a client CSR (on the sandbox, DV resolves to `917`, not `842`) | The create response's `resolvedProductCode` (logged as `ResolvedProductCode=`). Pin `ProductCode` on the template. |
+| No `X-Product-Code`: `GET .../dcv` returns 422 `EMS-1164 Domain Name is not matching`, and `certificateState` is "System Error" | Same product resolution as the row above. It isn't the domain or its letter case. | Pin 842 on the same domain shape; the order issues. |
+| Two-call, pinned: `PUT .../csr` returns 422 "Something went Wrong." | The domain is already validated, so the create came back `issued` with `csrSubmitted: false` and the order won't accept a CSR | Trace payloads show the create response. Use `V2InlineCsr=true`, the default since 2.0. |
+| `V2 OAuth2 token acquisition failed ... HttpStatus=0` (enroll, sync, or config save returns 500 "could not connect to CERTInext") | A transient transport failure to the token endpoint. The plugin currently logs no transport detail and doesn't retry the token request; a fix is planned. | Retry once. From a gateway pod, test with `curl --cacert /etc/pki/tls/certs/ca-bundle.crt` (the lab pod's `SSL_CERT_FILE` trusts only the lab CA, so plain curl fails TLS even when .NET works). |
+| Unpinned (`V2Template`) rows fail while pinned rows pass | Expected on the sandbox until CERTInext changes how it resolves DV | See the 917 rows above. |
+
+Before blaming the plugin, separate CA-side from plugin-side failures: run the same request **pinned**,
+on a **fresh** name under the validated parent zone, and with the CSR **inline**. Change one variable
+at a time. Record confirmed spec-vs-live discrepancies as dated Findings in the CERTInext
+support-questions list kept with the maintainers.
