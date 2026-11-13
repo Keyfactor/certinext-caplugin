@@ -261,15 +261,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
             V2ProductPinning.Log(_output, Constants.Products.DvSsl, mode);
 
-            var plugin = BuildV2Plugin();
+            // Plugin logs to the test output, so a CA rejection (e.g. at Submit CSR) shows the call
+            // sequence; CERTINEXT_TEST_LOG_LEVEL=Trace adds the redacted request payloads.
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
+            EnrollmentResult result;
+            try
+            {
+                var plugin = BuildV2Plugin();
 
-            var result = await plugin.Enroll(
-                csr:            GenerateCsrPem(_v2Domain),
-                subject:        $"CN={_v2Domain}",
-                san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
-                productInfo:    BuildV2ProductInfo(mode),
-                requestFormat:  RequestFormat.PKCS10,
-                enrollmentType: EnrollmentType.New);
+                result = await plugin.Enroll(
+                    csr:            GenerateCsrPem(_v2Domain),
+                    subject:        $"CN={_v2Domain}",
+                    san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
+                    productInfo:    BuildV2ProductInfo(mode),
+                    requestFormat:  RequestFormat.PKCS10,
+                    enrollmentType: EnrollmentType.New);
+            }
+            finally
+            {
+                restoreLogging();
+            }
 
             result.Should().NotBeNull();
             result.CARequestID.Should().NotBeNullOrWhiteSpace(

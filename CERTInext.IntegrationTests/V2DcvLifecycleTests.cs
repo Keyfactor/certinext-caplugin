@@ -186,55 +186,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         /// <summary>
-        /// Points <c>LogHandler.Factory</c> at this test's output (Debug and above) and returns an
-        /// action that restores the null factory. Plugin logs keep their default redaction
-        /// (<c>LogSensitiveRequestData</c> off).
-        /// </summary>
-        private Action RouteLogsToOutput()
-        {
-            Keyfactor.Logging.LogHandler.Factory = new TestOutputLoggerFactory(_output);
-            return () => Keyfactor.Logging.LogHandler.Factory =
-                Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
-        }
-
-        private sealed class TestOutputLoggerFactory : Microsoft.Extensions.Logging.ILoggerFactory
-        {
-            private readonly ITestOutputHelper _out;
-            public TestOutputLoggerFactory(ITestOutputHelper output) => _out = output;
-            public Microsoft.Extensions.Logging.ILogger CreateLogger(string categoryName) => new Logger(_out, categoryName);
-            public void AddProvider(Microsoft.Extensions.Logging.ILoggerProvider provider) { }
-            public void Dispose() { }
-
-            private sealed class Logger : Microsoft.Extensions.Logging.ILogger
-            {
-                private readonly ITestOutputHelper _out;
-                private readonly string _category;
-                public Logger(ITestOutputHelper output, string category)
-                {
-                    _out = output;
-                    _category = category.Substring(category.LastIndexOf('.') + 1);
-                }
-                public IDisposable BeginScope<TState>(TState state) => null;
-                public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) =>
-                    logLevel >= Microsoft.Extensions.Logging.LogLevel.Debug;
-                public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
-                    TState state, Exception exception, Func<TState, Exception, string> formatter)
-                {
-                    if (!IsEnabled(logLevel)) return;
-                    try
-                    {
-                        _out.WriteLine($"[{logLevel}] {_category}: {formatter(state, exception)}" +
-                                       (exception == null ? string.Empty : $" | {exception.GetType().Name}: {exception.Message}"));
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        // ITestOutputHelper throws once the test has finished (background continuations).
-                    }
-                }
-            }
-        }
-
-        /// <summary>
         /// Product info for the "DV SSL" gateway template in <paramref name="mode"/>: pinned
         /// (<c>ProductCode</c> set, e.g. 842) or the unpinned "V2 template" (no <c>ProductCode</c>, so
         /// CERTInext resolves the product). See <see cref="V2ProductPinning"/>.
@@ -390,7 +341,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             // Route plugin/client logs to the test output: the V2 DCV path has many quiet early exits
             // (no challenge, no validator, stage failure...) that are otherwise invisible from a test.
             // Must be set before the plugin is constructed — its logger is created in the field initializer.
-            var restoreLogging = RouteLogsToOutput();
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
             AnyCAPluginCertificate record;
             try
             {
