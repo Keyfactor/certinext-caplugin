@@ -204,6 +204,7 @@ The following V2 limitations are known. None of them is a show-stopper for a sin
 deployment, but decide with these in mind rather than discovering them after cutting over:
 
 - **DCV isn't validated end to end** for per-SAN domains on UCC orders, for a domain that has never been validated, or for wildcards. The plugin runs the flow for each of these, but the paths haven't been confirmed against the CA. See [Before You Begin](#before-you-begin-confirm-v2-will-work-for-your-templates).
+- **DCV for SSL.com-validated domains isn't validated live.** The plugin detects `validatedBy: SSLCOM` and publishes SSL.com's own `dns-txt` record, but the sandbox has no such domains. A domain that SSL.com offers only `dns-cname` or `http-url` for stays pending.
 - **Document Signer (`ProductFamily=signature`) enrollment isn't supported.** It fails before any
   order is placed.
 - **Every renewal/reissue places a new order.** See [Renewals and Reissuance](#renewals-and-reissuance)

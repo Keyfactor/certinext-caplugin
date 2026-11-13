@@ -1870,6 +1870,161 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <inheritdoc/>
+        public async Task<V2DomainRecord> FindDomainV2Async(string domainName, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            if (string.IsNullOrWhiteSpace(domainName))
+                throw new ArgumentException("A domain name is required.", nameof(domainName));
+            EnsureV2Client();
+            string path = Constants.ApiV2.DomainsPath + "?search=" + Uri.EscapeDataString(domainName) + "&exactMatch=true";
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                Constants.ApiV2.DomainsPath, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 find domain");
+            var result = ParseDomainListRow(resp.Content, domainName);
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2DomainDcvDetails> GetDomainDcvV2Async(string domainId, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = $"{Constants.ApiV2.DomainsPath}/{Uri.EscapeDataString(domainId)}/dcv";
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 get domain DCV");
+            var result = DeserializeV2OrThrow<V2DomainDcvDetails>(resp, "V2 get domain DCV");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2DomainDcvVerifyResult> VerifyDomainDcvV2Async(
+            string domainId, string optionId, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = $"{Constants.ApiV2.DomainsPath}/{Uri.EscapeDataString(domainId)}/dcv/verify";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct);
+            req.AddJsonBody(JsonSerializer.Serialize(
+                new V2DomainDcvVerifyRequest { OptionId = string.IsNullOrWhiteSpace(optionId) ? null : optionId },
+                GetJsonOptions()));
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+
+            if (resp.StatusCode == (HttpStatusCode)422)
+            {
+                // Spec: "otherwise 422 with diagnostics.caStatus (PENDING, FAILED, UNDER_REVIEW,
+                // EXPIRED) and diagnostics.caMessage (SSL.com's reason)". Not an exception: the caller
+                // leaves the order pending and the next sync retries.
+                LogV2ApiFailure("V2 verify domain DCV", resp, LogLevel.Warning);
+                var (caStatus, caMessage) = ReadDomainVerifyDiagnostics(resp.Content);
+                Logger.MethodExit(LogLevel.Trace);
+                return new V2DomainDcvVerifyResult
+                {
+                    Verified  = false,
+                    CaStatus  = caStatus,
+                    CaMessage = caMessage == null
+                        ? null
+                        : LogSanitizer.SanitizeCaText(caMessage, _config.LogSensitiveRequestData)
+                };
+            }
+
+            ThrowOnV2Failure(resp, "V2 verify domain DCV");
+            string validTill = null;
+            if (!string.IsNullOrWhiteSpace(resp.Content))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(resp.Content);
+                    validTill = TryReadString(doc.RootElement, "validTill");
+                }
+                catch (JsonException)
+                {
+                    // A 200 is the success signal; validTill is informational only.
+                }
+            }
+            Logger.MethodExit(LogLevel.Trace);
+            return new V2DomainDcvVerifyResult { Verified = true, ValidTill = validTill };
+        }
+
+        /// <summary>
+        /// Parses a <c>GET /domains</c> body into the row for <paramref name="domainName"/>, or null.
+        /// Rows come under <c>content</c> (seen live, same envelope as <c>/reports/orders</c>); a bare
+        /// array is accepted too. Rows are matched on <c>domainName</c> case-insensitively, as a guard in
+        /// case <c>exactMatch</c> is ignored and the substring search returns sibling hosts.
+        /// </summary>
+        internal static V2DomainRecord ParseDomainListRow(string content, string domainName)
+        {
+            if (string.IsNullOrWhiteSpace(content)) return null;
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+            JsonElement rows;
+            if (root.ValueKind == JsonValueKind.Array)
+                rows = root;
+            else if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.Array)
+                rows = c;
+            else
+                throw new InvalidOperationException(
+                    "V2 GET /domains returned an unrecognised body (no 'content' array).");
+
+            foreach (var row in rows.EnumerateArray())
+            {
+                if (row.ValueKind != JsonValueKind.Object) continue;
+                string name = TryReadString(row, "domainName") ?? TryReadString(row, "domain");
+                if (!string.Equals(name, domainName, StringComparison.OrdinalIgnoreCase)) continue;
+                return new V2DomainRecord
+                {
+                    DomainId    = TryReadString(row, "domainId") ?? TryReadString(row, "id"),
+                    DomainName  = name,
+                    DcvStatus   = TryReadString(row, "dcvStatus"),
+                    ValidatedBy = TryReadString(row, "validatedBy")
+                };
+            }
+            return null;
+        }
+
+        private static (string caStatus, string caMessage) ReadDomainVerifyDiagnostics(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content)) return (null, null);
+            try
+            {
+                using var doc = JsonDocument.Parse(content);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("diagnostics", out var diag)
+                    && diag.ValueKind == JsonValueKind.Object)
+                    return (TryReadString(diag, "caStatus"), TryReadString(diag, "caMessage"));
+            }
+            catch (JsonException)
+            {
+                // Not JSON — no diagnostics to report.
+            }
+            return (null, null);
+        }
+
+        /// <summary>Reads a string or number property as a string; null when absent or another kind.</summary>
+        private static string TryReadString(JsonElement obj, string name)
+        {
+            if (!obj.TryGetProperty(name, out var v)) return null;
+            return v.ValueKind switch
+            {
+                JsonValueKind.String => v.GetString(),
+                JsonValueKind.Number => v.GetRawText(),
+                _ => null
+            };
+        }
+
+        /// <inheritdoc/>
         public async Task<List<ProductDetail>> GetProductDetailsV2Async(CancellationToken ct = default)
         {
             Logger.MethodEntry(LogLevel.Trace);

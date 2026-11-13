@@ -492,6 +492,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string OrganizationsPath          = "/api/certinext/v2/organizations";
             public const string SslComValidationSuffix     = "ca-validations/sslcom";
 
+            // Domain-level DCV, used for domains SSL.com validates: GET {DomainsPath}?search=&exactMatch=true,
+            // GET {DomainsPath}/{domainId}/dcv, POST {DomainsPath}/{domainId}/dcv/verify.
+            public const string DomainsPath                = "/api/certinext/v2/domains";
+            // DcvDetails/domain-row validatedBy value for SSL.com; absent means emSign.
+            public const string ValidatedBySslCom          = "SSLCOM";
+            public const string DcvMethodDnsTxt            = "dns-txt";
+            // SSL.com caStatus on GET .../dcv once the domain is validated.
+            public const string SslComCaStatusValidated    = "VALIDATED";
+
             // Order status strings (V2 REST — NOT numeric IDs)
             public const string StatusPendingDcv                     = "pending-dcv";
             public const string StatusPendingCsr                     = "pending-csr";

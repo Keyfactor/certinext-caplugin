@@ -12,6 +12,7 @@
 - feat(v2): Synchronize reads `/reports/orders` and honors `IgnoreExpired`.
 - feat(v2): Incremental syncs look back `V2SyncLookbackHours` (default 72).
 - feat(dcv): DNS-01 domain validation for V2 SSL/TLS orders, including every SAN on a UCC order.
+- feat(dcv): V2 DCV for domains SSL.com validates: the plugin looks each pending domain up (`GET /domains`) and, for `validatedBy: SSLCOM`, publishes SSL.com's own `dns-txt` record from `GET /domains/{id}/dcv` (not `DcvTxtRecordTemplate`) and verifies it with `POST /domains/{id}/dcv/verify`. SSL.com outages (502), `UNDER_REVIEW`/`PENDING` results, and domains with no `dns-txt` option leave the order pending for the next sync; emSign domains keep the order-level flow.
 - feat(dcv): `DcvEnabled` now defaults to `true`; it needs a DNS provider plugin, or set it to `false`.
 - feat(enroll): V2 orders also return a quickly issued certificate in the same `Enroll` call, using the `PickupRetries` and `PickupDelay` settings V1 gained in 1.0.1.
 - feat(config): New settings `RequestorDesignation` and `V2SyncLookbackHours`.
@@ -49,6 +50,7 @@
 - V2 revoke reasons CERTInext rejects are retried with a substitute (see Revocation Reason Codes in the README).
 - V2 `expired` orders are reported as issued, and revoking one is sent to the CA.
 - V2 renew and reissue place a new order and don't revoke the original.
+- On V2 accounts whose domains SSL.com validates, DCV now publishes SSL.com's record name and value, not `DcvTxtRecordTemplate`. The DNS provider plugin must be able to write those names (for example `_pki-validation.<domain>`).
 - Upgrading from 1.0.0 also brings the changes in 1.0.1 and 1.0.2 above. For example, V1 now submits non-DNS SANs; set `SubmitNonDnsSans` to `false` to drop them.
 
 ## Known Limitations
@@ -61,7 +63,7 @@
 - V1 `AuthMode=OAuth` isn't supported: the live V1 API ignores the bearer token, so V1 needs an access key.
 - The V2 incremental sync doesn't yet skip orders the gateway already holds unchanged, as the V1 incremental sync does from 1.0.2, so it re-reads each order listed.
 - Without a template `ProductCode`, the product CERTInext resolves depends on the account's catalog. Where several products match a variant, CERTInext may pick one that rejects a client CSR. On the sandbox, plain DV resolves to `917` "SSL DV 1 month" instead of `842`. Set `ProductCode` on the template to choose the product.
-- DCV for domains validated by SSL.com (after the issuing-CA change) isn't supported yet: SSL.com supplies the record name and value through the domain-level DCV endpoints, and the plugin still publishes `DcvTxtRecordTemplate` records through the order-level endpoint.
+- DCV for domains validated by SSL.com is built from the V2 spec and unit-tested but not verified live (the sandbox has no SSL.com-validated domains). Only SSL.com's `dns-txt` option can be published, because the DNS provider interface publishes TXT records only; a domain offered only `dns-cname` or `http-url` stays pending.
 - Command's enrollment workflow can give up at 60 s, before the 75 s pickup ceiling. When it does, Command records the enrollment as failed even though the order continues at CERTInext, so the certificate can only arrive through a later sync.
 
 # 1.0.2

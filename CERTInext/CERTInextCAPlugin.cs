@@ -5290,6 +5290,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// treated as DCV already satisfied: publishing is skipped and
         /// the flow proceeds straight to step 4.
         ///
+        /// A domain whose account row says <c>validatedBy: SSLCOM</c> takes
+        /// <see cref="PerformDcvV2SslComSingleDomainAsync"/> instead (SSL.com's own record, domain-level
+        /// endpoints).
+        ///
         /// Returns <c>true</c> when DCV steps were executed, <c>false</c> when skipped.
         /// </summary>
         private async Task<bool> PerformDcvV2SingleDomainAsync(
@@ -5300,6 +5304,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             _logger.LogInformation(
                 "V2 DCV starting for order {OrderId}, domain {Domain}.", orderId, LogSanitizer.Strip(domain));
+
+            // A domain SSL.com validates takes the domain-level flow with SSL.com's own record.
+            var sslComDomain = await FindSslComDomainAsync(orderId, domain, ct);
+            if (sslComDomain != null)
+                return await PerformDcvV2SslComSingleDomainAsync(orderId, domain, sslComDomain, productFamilySlug, ct);
 
             // 1. Fetch challenge
             V2DcvChallengeResponse challenge = null;
@@ -5440,31 +5449,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
 
                 // 4. Poll TrackOrderV2 until status leaves pending-dcv
-                int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
-                var deadline = DateTime.UtcNow.AddMinutes(timeoutMinutes);
-                // Fixed short cadence — decoupled from DcvPropagationDelaySeconds (one-shot
-                // DNS wait), not a poll interval. Reusing it here would yield only ~2 polls
-                // before the 5-minute timeout.
-                int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
-
-                while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
-                    try
-                    {
-                        var trackResp = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
-                        _logger.LogDebug(
-                            "V2 DCV poll. OrderId={OrderId}, Status={Status}", orderId, trackResp.Status);
-                        if (!string.Equals(trackResp.Status, "pending-dcv", StringComparison.OrdinalIgnoreCase))
-                            break;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "V2 DCV: TrackOrderV2 poll failed for order {OrderId}.", orderId);
-                        break;
-                    }
-                }
-
+                await PollV2UntilLeavesPendingDcvAsync(orderId, productFamilySlug, ct);
                 return true;
             }
             finally
@@ -5562,6 +5547,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // already-staged record instead of publishing (and later cleaning up) a duplicate.
             var stagedHostnames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+            // Domains SSL.com validates, keyed by domain: verified in Phase 2 through
+            // POST /domains/{id}/dcv/verify instead of the order-level verify.
+            var sslComPlans = new Dictionary<string, SslComDcvPlan>(StringComparer.OrdinalIgnoreCase);
+
             async Task CleanupStagedAsync()
             {
                 // Concurrent, not sequential — mirrors the V1 multi-SAN cleanup rationale
@@ -5579,6 +5568,48 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 foreach (var d in pendingDomains)
                 {
                     ct.ThrowIfCancellationRequested();
+
+                    var sslComDomain = await FindSslComDomainAsync(orderId, d, ct);
+                    if (sslComDomain != null)
+                    {
+                        var (plan, skipReason) = await PrepareSslComDcvAsync(orderId, d, sslComDomain, ct);
+                        if (plan == null)
+                        {
+                            failedDomains.Add((d, skipReason));
+                            continue;
+                        }
+                        sslComPlans[d] = plan;
+                        if (plan.AlreadyValidated)
+                        {
+                            // Nothing to publish; Phase 2 still asks CERTInext to verify.
+                            verifyCandidates.Add(d);
+                            continue;
+                        }
+
+                        string sslComKey = plan.RecordName + "|" + plan.RecordValue;
+                        if (stagedHostnames.TryGetValue(sslComKey, out string sslComSharedWith))
+                        {
+                            _logger.LogInformation(
+                                "V2 DCV (SSL.com) record {Hostname} for domain {Domain} on order {OrderId} is " +
+                                "already staged (shared with {SharedWith}); reusing it.",
+                                LogSanitizer.Strip(plan.RecordName), LogSanitizer.Strip(d), orderId,
+                                LogSanitizer.Strip(sslComSharedWith));
+                            verifyCandidates.Add(d);
+                            continue;
+                        }
+
+                        string stageError = await StageSslComRecordAsync(orderId, plan, ct);
+                        if (stageError != null)
+                        {
+                            sslComPlans.Remove(d);
+                            failedDomains.Add((d, stageError));
+                            continue;
+                        }
+                        stagedHostnames[sslComKey] = d;
+                        staged.Add((d, plan.RecordName, plan.Validator));
+                        verifyCandidates.Add(d);
+                        continue;
+                    }
 
                     V2DcvChallengeResponse challenge = null;
                     bool alreadySatisfied = false;
@@ -5734,6 +5765,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     // share one TXT record.
                     foreach (var d in verifyCandidates)
                     {
+                        if (sslComPlans.TryGetValue(d, out var sslComPlan))
+                        {
+                            var (sslComVerified, sslComReason) = await VerifySslComDomainAsync(orderId, sslComPlan, ct);
+                            if (sslComVerified)
+                                verifiedDomains.Add(d);
+                            else
+                                failedDomains.Add((d, sslComReason));
+                            continue;
+                        }
+
                         try
                         {
                             _logger.LogInformation(
@@ -5815,6 +5856,285 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 orderId, pendingDomains.Count, verifiedDomains.Count, failedDomains.Count);
 
             return true;
+        }
+
+        /// <summary>
+        /// Polls <see cref="ICERTInextClient.TrackOrderV2Async"/> until the order leaves
+        /// <c>pending-dcv</c>, a poll fails, or the DCV timeout / <paramref name="ct"/> ends it.
+        /// </summary>
+        private async Task PollV2UntilLeavesPendingDcvAsync(string orderId, string productFamilySlug, CancellationToken ct)
+        {
+            int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+            var deadline = DateTime.UtcNow.AddMinutes(timeoutMinutes);
+            // Fixed short cadence — decoupled from DcvPropagationDelaySeconds (one-shot
+            // DNS wait), not a poll interval. Reusing it here would yield only ~2 polls
+            // before the 5-minute timeout.
+            int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
+
+            while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
+                try
+                {
+                    var trackResp = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
+                    _logger.LogDebug(
+                        "V2 DCV poll. OrderId={OrderId}, Status={Status}", orderId, trackResp.Status);
+                    if (!string.Equals(trackResp.Status, "pending-dcv", StringComparison.OrdinalIgnoreCase))
+                        break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "V2 DCV: TrackOrderV2 poll failed for order {OrderId}.", orderId);
+                    break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// What the SSL.com DCV path publishes and verifies for one domain: SSL.com's own record
+        /// from <c>GET /domains/{id}/dcv</c>, never <c>DcvTxtRecordTemplate</c>.
+        /// </summary>
+        private sealed class SslComDcvPlan
+        {
+            public string Domain { get; init; }
+            public string DomainId { get; init; }
+            public string OptionId { get; init; }
+            public string RecordName { get; init; }
+            /// <summary>Never logged.</summary>
+            public string RecordValue { get; init; }
+            /// <summary>SSL.com already reports <c>VALIDATED</c>: verify without publishing.</summary>
+            public bool AlreadyValidated { get; init; }
+            public Keyfactor.AnyGateway.Extensions.IDomainValidator Validator { get; init; }
+        }
+
+        /// <summary>
+        /// Returns the account's domain row when SSL.com validates <paramref name="domain"/>, else null.
+        /// A failed lookup also returns null, so the order takes the emSign path it took before the
+        /// SSL.com path existed, with a warning; cancellation propagates.
+        /// </summary>
+        private async Task<V2DomainRecord> FindSslComDomainAsync(string orderId, string domain, CancellationToken ct)
+        {
+            try
+            {
+                var row = await _client.FindDomainV2Async(domain, ct);
+                if (row?.IsValidatedBySslCom != true)
+                    return null;
+                _logger.LogInformation(
+                    "V2 DCV: domain {Domain} on order {OrderId} is validated by SSL.com; using the domain-level " +
+                    "DCV flow with SSL.com's record.", LogSanitizer.Strip(domain), orderId);
+                return row;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 DCV: could not look up domain {Domain} for order {OrderId} (GET /domains); continuing " +
+                    "with the emSign DCV flow.", LogSanitizer.Strip(domain), orderId);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Reads SSL.com's DCV instructions for one domain and picks the <c>dns-txt</c> option to publish.
+        /// Returns a null plan with a reason when DCV can't proceed this pass (SSL.com unreachable,
+        /// unknown shape, no <c>dns-txt</c> option, no DNS provider); the order stays pending and a later
+        /// sync retries. Never cancels the order.
+        /// </summary>
+        private async Task<(SslComDcvPlan plan, string skipReason)> PrepareSslComDcvAsync(
+            string orderId, string domain, V2DomainRecord record, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(record.DomainId))
+            {
+                _logger.LogWarning(
+                    "V2 DCV (SSL.com): the domain row for {Domain} on order {OrderId} has no id; cannot read " +
+                    "SSL.com's DCV record. The order stays pending.", LogSanitizer.Strip(domain), orderId);
+                return (null, "SSL.com domain row has no id");
+            }
+
+            V2DomainDcvDetails details;
+            try
+            {
+                details = await _client.GetDomainDcvV2Async(record.DomainId, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Spec: 502 when SSL.com can't be reached.
+                _logger.LogWarning(ex,
+                    "V2 DCV (SSL.com): GET /domains/{DomainId}/dcv failed for {Domain} on order {OrderId}; the " +
+                    "order stays pending and a later sync retries.",
+                    record.DomainId, LogSanitizer.Strip(domain), orderId);
+                return (null, "SSL.com DCV details unavailable");
+            }
+
+            var validator = DomainValidatorFactory.ResolveDomainValidator(StripWildcardPrefix(domain), "dns-01");
+            if (validator == null)
+            {
+                _logger.LogError(
+                    "No DNS provider plugin resolved for domain '{Domain}' on V2 order {OrderId}. " +
+                    "Ensure the appropriate DNS provider plugin is deployed and configured.",
+                    LogSanitizer.Strip(domain), orderId);
+                return (null, "no DNS provider resolved");
+            }
+
+            if (details == null)
+            {
+                _logger.LogWarning(
+                    "V2 DCV (SSL.com): GET /domains/{DomainId}/dcv returned no body for {Domain} on order {OrderId}; " +
+                    "the order stays pending.", record.DomainId, LogSanitizer.Strip(domain), orderId);
+                return (null, "SSL.com DCV details unavailable");
+            }
+
+            if (string.Equals(details.CaStatus, Constants.ApiV2.SslComCaStatusValidated, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation(
+                    "V2 DCV (SSL.com): {Domain} on order {OrderId} is already VALIDATED at SSL.com; verifying " +
+                    "without publishing a record.", LogSanitizer.Strip(domain), orderId);
+                return (new SslComDcvPlan
+                {
+                    Domain = domain, DomainId = record.DomainId, OptionId = details.OptionId,
+                    AlreadyValidated = true, Validator = validator
+                }, null);
+            }
+
+            var option = details.SelectDnsTxtOption();
+            if (option == null)
+            {
+                _logger.LogWarning(
+                    "V2 DCV (SSL.com): no dns-txt option for {Domain} on order {OrderId} (offered: {Methods}). " +
+                    "The DNS provider interface can only publish TXT records, so dns-cname and http-url can't be " +
+                    "used. The order stays pending; validate the domain in the CERTInext portal.",
+                    LogSanitizer.Strip(domain), orderId, details.DescribeOfferedMethods());
+                return (null, "no SSL.com dns-txt option");
+            }
+
+            return (new SslComDcvPlan
+            {
+                Domain = domain, DomainId = record.DomainId, OptionId = option.OptionId,
+                RecordName = option.RecordName.Trim().TrimEnd('.'), RecordValue = option.RecordValue,
+                Validator = validator
+            }, null);
+        }
+
+        /// <summary>Publishes SSL.com's TXT record. Returns null on success, else the failure reason.</summary>
+        private async Task<string> StageSslComRecordAsync(string orderId, SslComDcvPlan plan, CancellationToken ct)
+        {
+            _logger.LogInformation(
+                "Staging V2 DNS TXT record for SSL.com DCV. OrderId={OrderId}, Domain={Domain}, Hostname={Hostname}",
+                orderId, LogSanitizer.Strip(plan.Domain), LogSanitizer.Strip(plan.RecordName));
+            DomainValidationResult stageResult;
+            try
+            {
+                stageResult = await plan.Validator.StageValidation(plan.RecordName, plan.RecordValue, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "V2 DCV (SSL.com): DNS provider threw while staging '{Domain}' for order {OrderId}.",
+                    LogSanitizer.Strip(plan.Domain), orderId);
+                return "DNS provider plugin threw";
+            }
+            if (!stageResult.Success)
+            {
+                _logger.LogError(
+                    "V2 DCV (SSL.com): Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}.",
+                    LogSanitizer.Strip(plan.Domain), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
+                return $"stage failed: {stageResult.ErrorMessage}";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Calls <c>POST /domains/{id}/dcv/verify</c> for SSL.com's option. Returns false with a reason
+        /// when SSL.com reports PENDING / UNDER_REVIEW / FAILED / EXPIRED (422) or can't be reached
+        /// (502 or any other failure); the order stays pending either way.
+        /// </summary>
+        private async Task<(bool verified, string reason)> VerifySslComDomainAsync(
+            string orderId, SslComDcvPlan plan, CancellationToken ct)
+        {
+            _logger.LogInformation(
+                "Triggering V2 domain DCV verification (SSL.com). OrderId={OrderId}, Domain={Domain}, DomainId={DomainId}",
+                orderId, LogSanitizer.Strip(plan.Domain), plan.DomainId);
+            try
+            {
+                var result = await _client.VerifyDomainDcvV2Async(plan.DomainId, plan.OptionId, ct);
+                if (result?.Verified == true)
+                {
+                    _logger.LogInformation(
+                        "V2 DCV (SSL.com) verified. OrderId={OrderId}, Domain={Domain}, ValidTill={ValidTill}",
+                        orderId, LogSanitizer.Strip(plan.Domain), result.ValidTill ?? "(not returned)");
+                    return (true, null);
+                }
+                _logger.LogWarning(
+                    "V2 DCV (SSL.com) not verified yet for {Domain} on order {OrderId}. CaStatus={CaStatus}, " +
+                    "CaMessage={CaMessage}. The order stays pending and a later sync retries.",
+                    LogSanitizer.Strip(plan.Domain), orderId, result?.CaStatus ?? "(none)",
+                    LogSanitizer.Strip(result?.CaMessage) ?? "(none)");
+                return (false, $"SSL.com caStatus={result?.CaStatus ?? "(none)"}");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 DCV (SSL.com): verify failed for {Domain} on order {OrderId}; the order stays pending and " +
+                    "a later sync retries.", LogSanitizer.Strip(plan.Domain), orderId);
+                return (false, "SSL.com verify failed");
+            }
+        }
+
+        /// <summary>
+        /// Single-domain DCV for a domain SSL.com validates: read SSL.com's record, publish it, wait for
+        /// propagation, verify through the domain-level endpoint, poll Track Order, clean up.
+        /// <c>DcvTxtRecordTemplate</c> is not used. Returns <c>true</c> when the domain verified.
+        /// </summary>
+        private async Task<bool> PerformDcvV2SslComSingleDomainAsync(
+            string orderId, string domain, V2DomainRecord record, string productFamilySlug, CancellationToken ct)
+        {
+            var (plan, _) = await PrepareSslComDcvAsync(orderId, domain, record, ct);
+            if (plan == null)
+                return false;
+
+            bool staged = false;
+            try
+            {
+                if (!plan.AlreadyValidated)
+                {
+                    if (await StageSslComRecordAsync(orderId, plan, ct) != null)
+                        return false;
+                    staged = true;
+
+                    int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
+                    _logger.LogInformation(
+                        "Waiting {Delay}s for DNS propagation before V2 SSL.com DCV verify. OrderId={OrderId}",
+                        delaySeconds, orderId);
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+                }
+
+                var (verified, _) = await VerifySslComDomainAsync(orderId, plan, ct);
+                if (!verified)
+                    return false;
+
+                await PollV2UntilLeavesPendingDcvAsync(orderId, productFamilySlug, ct);
+                return true;
+            }
+            finally
+            {
+                if (staged)
+                    await CleanupOneV2StagedRecordAsync(orderId, (domain, plan.RecordName, plan.Validator));
+            }
         }
 
         /// <summary>

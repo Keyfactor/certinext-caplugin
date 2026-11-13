@@ -218,7 +218,7 @@ DNS-01 domain control validation (DCV) proves control of each domain on an order
 
 - **Where DCV runs.** Inline during `Enroll`, during `Synchronize` for pending orders, and during `GetSingleRecord` for a pending order.
 - **Where it never runs.** For an order that is already issued, revoked, cancelled, or rejected. V2 also skips Private PKI and Document Signer orders, which have no DCV step.
-- **Record name.** The TXT record is published at `DcvTxtRecordTemplate` (default `_emsign-validation.{0}`), with `{0}` replaced by the domain.
+- **Record name.** The TXT record is published at `DcvTxtRecordTemplate` (default `_emsign-validation.{0}`), with `{0}` replaced by the domain. V2 domains that SSL.com validates are the exception: the plugin publishes SSL.com's own record name and value (see [SSL.com-validated domains](#sslcom-validated-domains-v2)).
 - **Wildcards.** The `*.` label is stripped, so the record is published at the base domain, and a wildcard and its apex on the same order share one record.
 - **Which domains.** V1 processes only domains CERTInext lists as pending that are unassigned or assigned to the DNS TXT method. V2 processes every domain that is not yet verified.
 - **Skip and continue.** A domain that can't be staged (no DNS provider resolves it, the provider fails, or CERTInext returns no token) is logged and skipped so the other domains can still be validated. The order stays pending until the skipped domain is resolved.
@@ -295,6 +295,19 @@ sequenceDiagram
 ```
 
 For an order that lists per-domain verification state (a multi-domain order, for example), every domain that is not yet `VERIFIED` is staged, with one propagation wait for the whole batch, and the poll waits until each verified domain shows `VERIFIED` (or `REJECTED`). For a single-domain order the poll waits for the status to leave `pending-dcv`, and if `verify` doesn't report `VERIFIED` the plugin removes the record and leaves the order pending. Either way, the next sync or `GetSingleRecord` call retries only the domains that are still unverified.
+
+##### SSL.com-validated domains (V2)
+
+Before it requests a challenge for a pending domain, the V2 flow looks the domain up (`GET /domains?search={domain}&exactMatch=true`). A domain whose row says `validatedBy: SSLCOM` uses the domain-level DCV endpoints instead of the order-level ones:
+
+1. `GET /domains/{domainId}/dcv` returns SSL.com's record. If SSL.com reports the domain `VALIDATED`, step 2 is skipped.
+2. The plugin picks a `dns-txt` option, preferring the selected one, then one for exactly this name. It publishes that `recordName` and `recordValue` through the DNS provider plugin and ignores `DcvTxtRecordTemplate`. `dns-cname` and `http-url` options are not used, because the DNS provider interface (`IAnyCAPlugin` 3.3) can only publish TXT records.
+3. After `DcvPropagationDelaySeconds`, `POST /domains/{domainId}/dcv/verify` is sent with that option's `optionId`. SSL.com waits about 15 seconds before answering.
+4. The record is removed.
+
+If no `dns-txt` option is offered, the plugin can't publish anything. If SSL.com can't be reached (502 on either call), or verify answers 422 with `caStatus` `PENDING`, `UNDER_REVIEW`, `FAILED` or `EXPIRED`, the plugin logs a warning with SSL.com's status and reason. In every one of these cases the order stays pending, the next sync or `GetSingleRecord` call retries, and the order is never cancelled. Record values are never logged.
+
+A failed lookup, or a domain with no row, takes the order-level flow above, as before. On a multi-domain order, each domain takes the flow its own row selects. **This path is built from the V2 spec and unit-tested, but has not been verified live:** the sandbox account has no SSL.com-validated domains.
 
 ### Certificate Enrollment
 
