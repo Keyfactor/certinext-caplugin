@@ -995,7 +995,9 @@ flowchart TD
     D -- Yes --> C
     D -- No --> D2{"Order is pending or issued and younger than<br/>SyncRecentOrderGraceSeconds?"}
     D2 -- Yes --> C
-    D2 -- No --> E{"Order is pending, DCV is enabled, a DNS provider is<br/>available, and it is inside the age window and<br/>per-pass cap?"}
+    D2 -- No --> D3{"Incremental sync, order is issued or revoked, and the<br/>gateway already holds it with the same status and a body?"}
+    D3 -- Yes --> C
+    D3 -- No --> E{"Order is pending, DCV is enabled, a DNS provider is<br/>available, and it is inside the age window and<br/>per-pass cap?"}
     E -- Yes --> F["Run DNS-01 DCV for the order<br/>then refetch it if DCV ran"]
     E -- No --> G
     F --> G{Order failed, rejected,<br/>or cancelled?}
@@ -1015,6 +1017,7 @@ flowchart TD
 
 - **Errors.** If processing an order throws, the plugin logs and counts the error and moves on to the next order. After at least 50 records, if more than 25 percent have errored, the sync aborts and is retried on the next cycle instead of completing with mostly failed records. V2 synchronization applies the same rule.
 - **Recent-order hold-back.** A pending or issued order created less than `SyncRecentOrderGraceSeconds` (default 120, plus a 5-second clock margin) ago is not emitted, and issued ones are not downloaded, so a sync cannot insert the gateway row an in-flight enrollment is about to save and make that enrollment fail with a duplicate key. The next incremental pass imports the order. To keep a held order created just before UTC midnight in that next listing, the incremental start date is moved back by the grace window, the 5-second margin, and 5 minutes of slack. Revoked and failed orders, and orders with no usable order date, are never held. `0` disables the hold.
+- **Unchanged orders.** The listing filter is a calendar day, so an incremental sync re-lists every order placed that day. On an incremental sync, an order listed as issued or revoked is skipped, with no `TrackOrder` or certificate download, when the gateway already holds it with the same status and a stored certificate body. New orders, status changes (pending to issued, issued to revoked), rows stored without a body, and a failed or unavailable lookup are processed as before. Pending orders and full syncs are unchanged. The sync summary reports `UnchangedInGateway`. V2 does not do this yet.
 - **Revoked orders without a certificate body.** The V1 client never downloads a revoked order's certificate, so a revoked order is emitted as revoked only if the gateway already holds the certificate body. If the gateway has the order's row but no body it is emitted as failed, and if the gateway has no row for it (or the check cannot be made) the order is skipped. See [Single-Record Retrieval](#single-record-retrieval).
 - **Expired certificates.** `IgnoreExpired` is applied on V2 only. On V1 the order report never populates a certificate expiry date, so the setting has no effect yet and expired certificates are imported.
 - **DCV during sync.** Pending orders go through DNS-01 validation only while younger than `DcvSyncMaxOrderAgeHours` (older orders are reported as pending and left alone) and only up to `DcvSyncMaxPerPass` orders per pass, so a backlog of stalled orders can't slow every sync.
