@@ -85,7 +85,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 ApiUrl            = _v2ApiUrl,
                 UseV2Api          = true,
-                V2InlineCsr       = V2EnvHelper.InlineCsrFromEnv, // CERTINEXT_V2_INLINE_CSR=1 selects the single-call mode
+                V2InlineCsr       = V2EnvHelper.InlineCsrFromEnv, // default single-call; CERTINEXT_V2_INLINE_CSR=0 selects two-call
                 OAuthClientId     = _v2ClientId,
                 OAuthClientSecret = _v2ClientSecret,
 
@@ -698,13 +698,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     internal static class V2EnvHelper
     {
         /// <summary>
-        /// <c>CERTINEXT_V2_INLINE_CSR=1</c> in the real process environment runs the V2 enrollment tests
-        /// with the connector's <c>V2InlineCsr</c> setting on (SSL/TLS single-call create); unset or any
-        /// other value runs the default two-call flow. Read from the process environment only (it is an
+        /// The V2 enrollment tests run with the connector's default <c>V2InlineCsr=true</c> (SSL/TLS
+        /// single-call create). <c>CERTINEXT_V2_INLINE_CSR=0</c> in the real process environment selects
+        /// the two-call flow instead; unset or any other value keeps the default. Read from the process environment only (it is an
         /// opt-in-only flag, never promoted from an env file).
         /// </summary>
         public static bool InlineCsrFromEnv =>
-            Environment.GetEnvironmentVariable("CERTINEXT_V2_INLINE_CSR")?.Trim() == "1";
+            Environment.GetEnvironmentVariable("CERTINEXT_V2_INLINE_CSR")?.Trim() != "0";
 
         /// <summary>
         /// Loads <c>~/.env_certinext_v2</c> and returns the merged environment dictionary (V2 file

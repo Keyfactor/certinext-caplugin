@@ -8,7 +8,7 @@
 - feat(v2): V2 OV and EV SSL/TLS orders check the organization's SSL.com validation first (status read, one refresh, and an optional submission). New settings `SslComSubmitOrganization` (default `false`; enabling it accepts SSL.com's subscriber agreement on the organization's behalf, audit-logged) and `SslComAdminEmail`. A not-validated organization or a failed SSL.com call only warns, and the order is placed anyway.
 - feat(v2): An SSL/TLS order that Track Order shows at `pending-agreement` gets the Subscriber Agreement accepted via `POST /ssl-certificates/{orderId}/agreement`, using the same signer values as create: at most once per order per enroll call or sync pass, audit-logged first, and a failure only warns.
 - feat(v2): The create call no longer sends `X-Product-Code` unless the template sets `ProductCode` (SSL/TLS and Private PKI): CERTInext resolves the product from the variant, wildcard shape and `additionalDomains`, and the response's `resolvedProductCode` is logged. An ambiguous catalog match is no longer an error, Private PKI no longer needs `ProductCode`, and without one a wildcard is detected from the `*.` domain and a UCC order from the template's product or extra DNS SANs.
-- feat(v2): Opt-in `V2InlineCsr` (default `false`) sends the CSR inline in one SSL/TLS create call instead of create + Submit CSR; Private PKI stays two-call.
+- feat(v2): V2 SSL/TLS enrollment sends the CSR inline in one create call (`V2InlineCsr`, default `true`). Setting it to `false` selects create + Submit CSR, which fails for a domain the account has already validated; Private PKI stays two-call.
 - feat(v2): Synchronize reads `/reports/orders` and honors `IgnoreExpired`.
 - feat(v2): Incremental syncs look back `V2SyncLookbackHours` (default 72).
 - feat(dcv): DNS-01 domain validation for V2 SSL/TLS orders, including every SAN on a UCC order.
@@ -43,6 +43,7 @@
 - Connectors saved with an `http` `ApiUrl` fail to start until the URL uses https.
 - V2 no longer sends `X-Product-Code` unless the template sets `ProductCode`, and `DefaultProductCode` no longer applies to V2 orders. A template that needs a specific one of several matching catalog products must set `ProductCode`.
 - V2 connectors require `SignerPlace`, and V2 OV/EV orders require `OrganizationNumber`.
+- `V2InlineCsr` now defaults to `true`. A connector that already has `V2InlineCsr = false` saved, as connectors created with an earlier 2.0 build do, keeps the two-call flow, which fails for already-validated domains. Set it to `true` on those connectors.
 - `SignerIp` (connector and template) is V1 only: V2 no longer sends `agreement.signerIp`, which the V2 spec's agreement schema doesn't define.
 - V2 `ProductVariant` is derived from the selected product when unset.
 - V2 revoke reasons CERTInext rejects are retried with a substitute (see Revocation Reason Codes in the README).

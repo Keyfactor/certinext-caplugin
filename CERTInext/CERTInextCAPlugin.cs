@@ -2278,9 +2278,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // order falls back to the account's default billing group.
             string groupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber;
 
-            // CSR delivery mode. Default (V2InlineCsr=false): the two-call flow, create without `csr` and
-            // then PUT .../csr. V2InlineCsr=true opts SSL/TLS into the single-call flow (CSR inline on
-            // create, no PUT). Private PKI always stays two-call: the live sandbox rejects an inline `csr`
+            // CSR delivery mode. Default (V2InlineCsr=true): SSL/TLS sends the CSR inline on create (single
+            // call, no PUT). V2InlineCsr=false selects the two-call flow (create without `csr`, then PUT
+            // .../csr), which fails for an already-validated domain: CERTInext approves the order at create
+            // and then rejects the CSR (Finding 32). Private PKI always stays two-call: the live sandbox rejects an inline `csr`
             // on the Private PKI create with HTTP 422.
             bool inlineCsr = _config.V2InlineCsr && !isPrivatePki;
             if (isPrivatePki && _config.V2InlineCsr

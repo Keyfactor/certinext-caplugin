@@ -1,16 +1,9 @@
 // Copyright 2026 Keyfactor
-// 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-// 
-//     http://www.apache.org/licenses/LICENSE-2.0
-// 
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions
+// and limitations under the License.
 
 using System;
 using System.Collections.Generic;
@@ -25,15 +18,16 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// <c>V2InlineCsr</c> is an opt-in CA connector setting (V2 only, default false): when true,
-    /// SSL/TLS enrollment sends the CSR inline in the create call instead of create + Submit CSR.
+    /// <c>V2InlineCsr</c> is a CA connector setting (V2 only, default true): when true, SSL/TLS
+    /// enrollment sends the CSR inline in the create call; false selects create + Submit CSR.
     /// </summary>
     public class V2InlineCsrConfigTests
     {
         [Fact]
-        public void CERTInextConfig_DefaultsToFalse_TwoCallIsTheDefault()
+        public void CERTInextConfig_DefaultsToTrue_SingleCallIsTheDefault()
         {
-            new CERTInextConfig().V2InlineCsr.Should().BeFalse("the single-call create is opt-in");
+            new CERTInextConfig().V2InlineCsr.Should().BeTrue(
+                "the two-call flow fails for an already-validated domain (CERTInext approves at create, then rejects the CSR)");
         }
 
         [Fact]
@@ -52,16 +46,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public void GetCAConnectorAnnotations_ContainsV2InlineCsr_BooleanDefaultFalse_WithClearDescription()
+        public void GetCAConnectorAnnotations_ContainsV2InlineCsr_BooleanDefaultTrue_WithClearDescription()
         {
             var annotations = CERTInextCAPluginConfig.GetCAConnectorAnnotations();
 
             annotations.Should().ContainKey(Constants.Config.V2InlineCsr);
             var a = annotations[Constants.Config.V2InlineCsr];
             a.Type.Should().Be("Boolean");
-            a.DefaultValue.Should().Be(false);
+            a.DefaultValue.Should().Be(true);
             a.Hidden.Should().BeFalse();
-            a.Comments.Should().ContainAll("V2", "inline", "SSL/TLS", "Private PKI", "two-call", "do not resubmit", "Default: false");
+            a.Comments.Should().ContainAll("V2", "inline", "SSL/TLS", "Private PKI", "two-call", "do not resubmit", "Default: true");
         }
 
         private static CERTInextCAPlugin NewPlugin() =>

@@ -91,6 +91,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var config = new CERTInextConfig
             {
                 UseV2Api                      = true,
+                V2InlineCsr                   = false, // body without csr; the inline body has its own golden test
                 ApiUrl                        = "https://v2.certinext.io",
                 OAuthClientId                 = "my-client",
                 OAuthClientSecret             = "my-secret",
@@ -150,6 +151,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var config = new CERTInextConfig
             {
                 UseV2Api          = true,
+                V2InlineCsr       = false, // body without csr; the inline body has its own golden test
                 ApiUrl            = "https://v2.certinext.io",
                 OAuthClientId     = "my-client",
                 OAuthClientSecret = "my-secret",

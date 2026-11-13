@@ -228,8 +228,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         /// <summary>
         /// PKCS#10 CSR, sent inline on the create call exactly as received from Command (PEM), only
-        /// when the connector's <c>V2InlineCsr</c> setting is on (default: null, omitted, and the CSR
-        /// is submitted with <c>PUT .../csr</c> after create). Live-verified on SSL: a create carrying
+        /// when the connector's <c>V2InlineCsr</c> setting is on (the default; when off it is null, omitted,
+        /// and the CSR is submitted with <c>PUT .../csr</c> after create). Live-verified on SSL: a create carrying
         /// <c>csr</c> issues with no follow-up PUT (a PUT after an inline CSR is rejected 422). Covered by
         /// the body-log redaction (<c>CERTInextClient.ApplyLoggingRedaction</c>).
         /// </summary>
