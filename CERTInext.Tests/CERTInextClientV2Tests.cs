@@ -620,6 +620,71 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.OrderId.Should().Be(MockCertificateData.V2OrderId1);
         }
 
+        [Fact]
+        public async Task DownloadCertificateV2Async_422Ems1165_ThrowsNotGeneratedException_WithTheUsualMessage()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/certificate")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(422)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody("{\"type\":\"https://api.certinext.io/errors/unprocessable-entity\"," +
+                              "\"title\":\"Unprocessable Entity\",\"status\":422,\"detail\":\"EMS-1165 Invalid request status.\"}"));
+
+            using var client = BuildV2Client();
+            Func<Task> act = () => client.DownloadCertificateV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            var ex = (await act.Should().ThrowAsync<V2CertificateNotGeneratedException>()).Which;
+            ex.Message.Should().Contain("HTTP 422").And.Contain("EMS-1165").And.Contain("V2 download certificate");
+            CERTInextCAPlugin.IsCertificateNotGeneratedYet(ex).Should().BeTrue();
+        }
+
+        [Fact]
+        public async Task DownloadCertificateV2Async_Other422_StaysAGenericFailure()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}/certificate")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(422)
+                    .WithHeader("Content-Type", "application/problem+json")
+                    .WithBody("{\"title\":\"Unprocessable Entity\",\"status\":422,\"detail\":\"EMS-1164 Domain Name is not matching.\"}"));
+
+            using var client = BuildV2Client();
+            Func<Task> act = () => client.DownloadCertificateV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            var ex = (await act.Should().ThrowAsync<Exception>()).Which;
+            ex.Should().NotBeOfType<V2CertificateNotGeneratedException>();
+            CERTInextCAPlugin.IsCertificateNotGeneratedYet(ex).Should().BeFalse();
+        }
+
+        [Fact]
+        public async Task TrackOrderV2Async_CapturesOrderStateAndCertificateState()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create()
+                    .WithPath($"/api/certinext/v2/ssl-certificates/{MockCertificateData.V2OrderId1}")
+                    .UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody("{\"orderId\":\"" + MockCertificateData.V2OrderId1 + "\",\"status\":\"issued\"," +
+                              "\"orderState\":\"Order Accepted\",\"certificateState\":\"Approved by System\"}"));
+
+            using var client = BuildV2Client();
+            var status = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1);
+
+            status.Status.Should().Be("issued");
+            status.OrderState.Should().Be("Order Accepted");
+            status.CertificateState.Should().Be("Approved by System");
+        }
+
         // ---------------------------------------------------------------------------
         // RevokeOrderV2Async
         // ---------------------------------------------------------------------------

@@ -563,7 +563,7 @@ V2 status strings map to Keyfactor enrollment statuses as follows:
 
 | V2 Status | Keyfactor Status | Notes |
 |---|---|---|
-| `issued` | Issued | Certificate is immediately downloaded and returned to Command. |
+| `issued` | Issued | Certificate is immediately downloaded and returned to Command. CERTInext can report `issued` for a while before the certificate is generated (Download Certificate answers 422 `EMS-1165`); see [Issued but not generated yet](#issued-but-not-generated-yet). |
 | `pending-dcv` | Pending External Validation | Order is awaiting domain control validation. |
 | `pending-csr` | Pending External Validation | Order is awaiting CSR submission or processing. |
 | `pending-agreement` | Pending External Validation | Order requires subscriber agreement acceptance. |
@@ -588,6 +588,16 @@ mapped to Failed — see the gateway trace log if certificates unexpectedly show
 - CERTInext does not serve the certificate body of a revoked order. A revoked order is propagated as revoked only when the gateway already holds that certificate (the revocation date and reason come from a live status call).
 - Otherwise a revoked order is reported as Failed (the gateway has a record without a body) or skipped (no record), so the gateway never stores a revoked record without a certificate.
 - `IgnoreExpired` is applied here: expired certificates are skipped.
+- An issued order whose download answers 422 `EMS-1165` is emitted without a certificate body and counted as `IssuedNotGeneratedYet` in the sync summary instead of logging a warning per order; a later pass picks it up.
+
+#### Issued but not generated yet
+
+CERTInext can report an order as `issued` before the certificate exists: Download Certificate then answers HTTP 422 `EMS-1165 Invalid request status.` Normally the certificate is generated about 20 seconds later, but the sandbox has been seen to take far longer. The plugin treats this as an expected state, not an error:
+
+- **Enrollment:** the pickup poll keeps waiting (within `PickupRetries` x `PickupDelay`), logging each attempt at Debug level and writing one Information summary if the budget runs out. The enrollment returns pending, and a later synchronization imports the certificate.
+- **`GetSingleRecord` and Synchronize:** logged at Information (single record) or Debug with a count in the sync summary, rather than a warning. The record is returned without a certificate body, as for any failed download.
+- **Log fields:** the lines include CERTInext's `orderState` and `certificateState` text (for example `Approved by System` versus `Certificate Generated`) for diagnosis. Their vocabulary isn't documented, so the plugin never acts on it.
+- **Any other download error** is still logged as a warning.
 
 V2 has no *renew* endpoint. CERTInext does document a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious`/`revokeReason`), but the plugin does not use it — every enrollment type (New, Reissue, Renew, RenewOrReissue) places a fresh V2 order, and the prior order/certificate is left issued rather than auto-revoked.
 

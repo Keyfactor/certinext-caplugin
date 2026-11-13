@@ -1555,6 +1555,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 Logger.MethodExit(LogLevel.Trace);
                 throw new KeyNotFoundException($"V2 certificate for order '{orderId}' not found in family '{productFamilySlug}'.");
             }
+            if (resp.StatusCode == (HttpStatusCode)422
+                && resp.Content != null
+                && resp.Content.IndexOf("EMS-1165", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                // 422 EMS-1165 ("Invalid request status") right after Track Order reports `issued` is
+                // the "issued at the CA, certificate not generated yet" window (normally ~20 s), and
+                // callers poll through it, so it is logged at Debug here (one line per attempt) instead
+                // of the Warning every other failure gets. The same code also means "never
+                // downloadable" for a revoked order; whether it is transient is the caller's call.
+                LogV2ApiFailure("V2 download certificate", resp, LogLevel.Debug);
+                string detail = ExtractV2ErrorMessage(resp.Content, "V2 download certificate", _config.LogSensitiveRequestData);
+                Logger.MethodExit(LogLevel.Trace);
+                throw new V2CertificateNotGeneratedException(
+                    $"CERTInext V2 API error during 'V2 download certificate'. HTTP 422. {detail}");
+            }
             ThrowOnV2Failure(resp, "V2 download certificate");
             var result = DeserializeV2OrThrow<V2CertificateDownloadResponse>(resp, "V2 download certificate");
             Logger.MethodExit(LogLevel.Trace);

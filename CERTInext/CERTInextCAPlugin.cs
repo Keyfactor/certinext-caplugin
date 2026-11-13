@@ -2514,9 +2514,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
                 catch (Exception dlEx)
                 {
-                    _logger.LogWarning(dlEx,
-                        "V2 order is 'issued' but certificate download failed — returning pending. OrderId={OrderId}",
-                        orderId);
+                    if (IsCertificateNotGeneratedYet(dlEx))
+                    {
+                        // Issued at the CA but the certificate is not generated yet (422 EMS-1165):
+                        // expected, not an error. The pickup poll below keeps waiting for it.
+                        _logger.LogDebug(
+                            "V2 order {OrderId} is issued at CERTInext but its certificate is not generated yet " +
+                            "(Download Certificate 422 EMS-1165). {States}. Returning pending; pickup polling continues.",
+                            orderId, DescribeV2States(postCreateStatus));
+                    }
+                    else
+                    {
+                        _logger.LogWarning(dlEx,
+                            "V2 order is 'issued' but certificate download failed — returning pending. OrderId={OrderId}",
+                            orderId);
+                    }
                 }
             }
 
@@ -2573,6 +2585,38 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (!m.Success) return true;
             int status = int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
             return status < 400 || status >= 500;
+        }
+
+        /// <summary>
+        /// True when a V2 Download Certificate failure is CERTInext's 422 <c>EMS-1165</c>
+        /// ("Invalid request status"). Callers only ask this for an order the CA already reports as
+        /// <c>issued</c>; there it means "issued at the CA, certificate not generated yet" (normally
+        /// about 20 s, though the sandbox has been seen to take far longer) rather than a real
+        /// failure. The same code also means "never downloadable" for a revoked order, but those
+        /// orders are not downloaded. The client throws <see cref="V2CertificateNotGeneratedException"/>;
+        /// the message check covers any other <see cref="ICERTInextClient"/> that surfaces the same
+        /// 422 as a plain exception.
+        /// </summary>
+        internal static bool IsCertificateNotGeneratedYet(Exception ex)
+        {
+            if (ex is V2CertificateNotGeneratedException) return true;
+            string m = ex?.Message;
+            return m != null
+                && m.IndexOf("EMS-1165", StringComparison.OrdinalIgnoreCase) >= 0
+                && m.IndexOf("HTTP 422", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
+        /// CERTInext's free-text <c>orderState</c>/<c>certificateState</c> for a log line (masked and
+        /// stripped like other CA text). Diagnostic only: the vocabulary is undocumented, so no logic
+        /// branches on it.
+        /// </summary>
+        private string DescribeV2States(V2OrderStatusResponse status)
+        {
+            string Show(string v) => string.IsNullOrWhiteSpace(v)
+                ? "(not reported)"
+                : LogSanitizer.SanitizeCaText(v, _config?.LogSensitiveRequestData ?? false);
+            return $"OrderState='{Show(status?.OrderState)}', CertificateState='{Show(status?.CertificateState)}'";
         }
 
         /// <summary>
@@ -2867,9 +2911,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                     catch (Exception dlEx)
                     {
-                        _logger.LogWarning(dlEx,
-                            "V2 GetSingleRecord: order is issued but certificate download failed. CARequestID={Id}",
-                            caRequestID);
+                        if (IsCertificateNotGeneratedYet(dlEx))
+                        {
+                            _logger.LogInformation(
+                                "V2 GetSingleRecord: order is issued at CERTInext but its certificate is not generated " +
+                                "yet (Download Certificate 422 EMS-1165); returning the record without a certificate " +
+                                "body. CARequestID={Id}, {States}", caRequestID, DescribeV2States(statusResp));
+                        }
+                        else
+                        {
+                            _logger.LogWarning(dlEx,
+                                "V2 GetSingleRecord: order is issued but certificate download failed. CARequestID={Id}",
+                                caRequestID);
+                        }
                     }
                 }
 
@@ -2966,6 +3020,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int errors = 0;
             int deferredRecentOrders = 0; // pending/issued orders withheld because they are younger than the grace window
             int unresolvedStatusFallbacks = 0; // report rows whose display strings needed a live track call
+            int issuedNotGeneratedYet = 0; // issued orders whose download answered 422 EMS-1165 (certificate not generated yet)
 
             // Emit-side accounting (mirrors the V1 path).
             int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
@@ -3174,9 +3229,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             }
                             catch (Exception dlEx)
                             {
-                                _logger.LogWarning(dlEx,
-                                    "V2 sync: order '{Id}' is issued but certificate download failed — emitting " +
-                                    "metadata-only record.", row.OrderNumber);
+                                if (IsCertificateNotGeneratedYet(dlEx))
+                                {
+                                    // Not a failure: issued at the CA, certificate not generated yet.
+                                    // Per-order line at Debug; the count is in the pass summary below.
+                                    issuedNotGeneratedYet++;
+                                    _logger.LogDebug(
+                                        "V2 sync: order '{Id}' is issued at CERTInext but its certificate is not generated " +
+                                        "yet (Download Certificate 422 EMS-1165) — emitting metadata-only record. {States}",
+                                        row.OrderNumber, DescribeV2States(trackedStatus));
+                                }
+                                else
+                                {
+                                    _logger.LogWarning(dlEx,
+                                        "V2 sync: order '{Id}' is issued but certificate download failed — emitting " +
+                                        "metadata-only record.", row.OrderNumber);
+                                }
                             }
                         }
 
@@ -3295,11 +3363,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
                     "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
                     "BodylessRevokedSkipped={BodylessRevokedSkipped} (bodyless-revoked guard). " +
-                    "RecentOrdersDeferred={RecentOrdersDeferred} (pending/issued, younger than {Grace}s, imported next pass). {DcvClause}",
+                    "RecentOrdersDeferred={RecentOrdersDeferred} (pending/issued, younger than {Grace}s, imported next pass). " +
+                    "IssuedNotGeneratedYet={IssuedNotGeneratedYet} (issued at the CA, certificate not downloadable yet, " +
+                    "422 EMS-1165; picked up by a later pass). {DcvClause}",
                     synced, skipped, errors, unresolvedStatusFallbacks,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
                     deferredRecentOrders, recentOrderGraceSeconds,
+                    issuedNotGeneratedYet,
                     dcvClause);
             }
             catch (OperationCanceledException)
@@ -5974,6 +6045,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Constants.Pickup.InitialDelaySeconds + retries * delaySeconds, Constants.Pickup.InitialDelaySeconds);
 
             int pollErrors = 0;
+            // Attempts where the order was `issued` but Download Certificate answered 422 EMS-1165
+            // ("issued at the CA, certificate not generated yet"). Logged per attempt at Debug and
+            // summarized once at Info below — not a Warning per attempt, and not a poll error.
+            int notGeneratedYet = 0;
+            string lastStates = null;
             try
             {
                 // Small static delay before the first poll — mirrors the V1 method's attempt to
@@ -6030,13 +6106,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             }
                             catch (Exception dlEx)
                             {
-                                // Issued but the download itself failed — consume the attempt and
-                                // keep polling rather than aborting; a later attempt (or the next
-                                // sync) may succeed.
-                                pollErrors++;
-                                _logger.LogWarning(dlEx,
-                                    "V2 pickup: order {OrderId} is issued but certificate download failed " +
-                                    "(attempt {Attempt}/{Retries}).", orderId, attempt, retries);
+                                if (IsCertificateNotGeneratedYet(dlEx))
+                                {
+                                    // Issued at the CA, certificate not generated yet: keep polling
+                                    // (normal generation takes ~20 s), quietly.
+                                    notGeneratedYet++;
+                                    lastStates = DescribeV2States(tracked);
+                                    _logger.LogDebug(
+                                        "V2 pickup: order {OrderId} is issued at CERTInext but its certificate is not " +
+                                        "generated yet (Download Certificate 422 EMS-1165; attempt {Attempt}/{Retries}). {States}",
+                                        orderId, attempt, retries, lastStates);
+                                }
+                                else
+                                {
+                                    // Issued but the download itself failed — consume the attempt and
+                                    // keep polling rather than aborting; a later attempt (or the next
+                                    // sync) may succeed.
+                                    pollErrors++;
+                                    _logger.LogWarning(dlEx,
+                                        "V2 pickup: order {OrderId} is issued but certificate download failed " +
+                                        "(attempt {Attempt}/{Retries}).", orderId, attempt, retries);
+                                }
                             }
                         }
                         else if (disposition == (int)EndEntityStatus.REVOKED
@@ -6092,15 +6182,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "errored (see preceding warnings). Returning pending result; the next synchronization " +
                         "will re-attempt retrieval.",
                         retries, orderId);
+                else if (notGeneratedYet > 0)
+                    _logger.LogInformation(
+                        "V2 order {OrderId} is issued at CERTInext but its certificate was not generated yet after " +
+                        "{NotGenerated} of {Retries} pickup attempt(s) (Download Certificate answered 422 EMS-1165 each " +
+                        "time; normal generation takes about 20 s). {States}. Returning pending result; the " +
+                        "certificate will be imported by the next synchronization.",
+                        orderId, notGeneratedYet, retries, lastStates);
                 else
                     _logger.LogInformation(
                         "V2 synchronous pickup did not complete within {Retries} attempts for order {OrderId} " +
                         "({Errors} poll error(s); remainder still pending). Returning pending result; the " +
                         "certificate will be imported by the next synchronization.",
                         retries, orderId, pollErrors);
-                pendingResult.StatusMessage =
-                    $"{pendingResult.StatusMessage} The certificate was not issued within the enrollment-pickup " +
-                    "window; it will be imported by a later synchronization.";
+                pendingResult.StatusMessage = notGeneratedYet > 0
+                    ? $"{pendingResult.StatusMessage} The order is issued at CERTInext but its certificate was not " +
+                      "generated yet within the enrollment-pickup window; it will be imported by a later synchronization."
+                    : $"{pendingResult.StatusMessage} The certificate was not issued within the enrollment-pickup " +
+                      "window; it will be imported by a later synchronization.";
             }
             catch (Exception ex)
             {

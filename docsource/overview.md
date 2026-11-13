@@ -87,6 +87,7 @@ This is the expected result in any of these cases:
 - **`Enroll()` budget elapsed:** the plugin's bounded wait ended before CERTInext finished issuing. The budget is:
     - `PickupRetries` × `PickupDelay` for the certificate pickup poll, capped at 75 s in total (inside Command's roughly 100 s enrollment-call timeout);
     - on V1, `DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds` (default 60 s each) around DCV. When DCV engages for an order, these waits replace the pickup wait; they do not stack.
+- **Issued but certificate not generated yet (V2):** CERTInext reports the order `issued` while Download Certificate still answers 422 `EMS-1165`. Normal generation takes about 20 s; the pickup poll waits for it, logging at Debug level and writing one Information summary. If the budget runs out the next sync imports the certificate.
 - **DCV could not validate every domain:** for example an IP or email SAN with no DNS provider. V1 still validates the other domains but returns pending without waiting for issuance.
 - **V1 renewal still pending DNS-01 validation:** with DCV enabled, a renewal waiting on DNS-01 validation returns pending at once instead of holding a worker for the pickup wait; the next sync completes the validation.
 

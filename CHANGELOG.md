@@ -16,6 +16,7 @@
 - feat(config): V2 orders honor `GroupNumber`, `OrganizationNumber`, `TechnicalContact*`, `EmailNotifications`, and the subscription renewal settings.
 
 ## Bug Fixes
+- fix(v2): A 422 `EMS-1165` from Download Certificate on an order CERTInext reports as `issued` is treated as "certificate not generated yet": the enrollment pickup keeps polling and returns pending, logging per attempt at Debug and one Information summary instead of a warning each time. `GetSingleRecord` and Synchronize log it quietly too (the sync summary gains `IssuedNotGeneratedYet`), and the log lines include CERTInext's `orderState` and `certificateState`. Other download errors still warn.
 - fix(v2): `EmailNotifications=0` (silent) is sent as `consent-only` on V2 order create, the quietest value in the spec's `consent-only | all` enum; the old `"0"` isn't a member of it.
 - fix(v2): Order create no longer sends `agreement.signerIp`, which isn't in the V2 spec's `Agreement` schema; the `SignerIp` settings now apply to V1 only.
 - fix(enroll): V2 UCC and renewal orders keep their SANs and primary domain, and renewals use the template's product code, as V1 does from 1.0.1.

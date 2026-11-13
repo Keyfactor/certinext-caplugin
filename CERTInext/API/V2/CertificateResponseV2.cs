@@ -145,6 +145,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("revocation")]
         public V2RevocationDetails Revocation { get; set; }
 
+        /// <summary>
+        /// CERTInext's free-text order state (e.g. "Order Accepted"), as returned on Track Order.
+        /// Undocumented vocabulary: for diagnostics and log lines only, never branch logic on it.
+        /// </summary>
+        [JsonPropertyName("orderState")]
+        public string OrderState { get; set; }
+
+        /// <summary>
+        /// CERTInext's free-text certificate state (live values seen: "Approved by System",
+        /// "Certificate Generated", "System Error"). Undocumented vocabulary: for diagnostics and
+        /// log lines only, never branch logic on it. Notably an order can report
+        /// <see cref="Status"/> "issued" while this still reads "Approved by System" and the
+        /// certificate cannot be downloaded yet (Download Certificate answers 422 EMS-1165).
+        /// </summary>
+        [JsonPropertyName("certificateState")]
+        public string CertificateState { get; set; }
+
         /// <summary>ISO 8601 timestamp when the certificate was issued. Present when status = "issued".</summary>
         [JsonPropertyName("issuedAt")]
         public string IssuedAt { get; set; }
