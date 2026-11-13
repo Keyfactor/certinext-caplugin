@@ -5605,8 +5605,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // independently, but their product can still reach ~30 min at the extremes — enough to push
             // Enroll() past Command's own enrollment timeout. If the configured budget would exceed the
             // ceiling, cap the retry count to fit; the remainder is imported by the next synchronization.
-            int maxPollRetries = Math.Max(1,
-                (Constants.Pickup.MaxTotalWaitSeconds - Constants.Pickup.InitialDelaySeconds) / delaySeconds);
+            int maxPollRetries = ComputeMaxPollRetries(delaySeconds);
             if (retries > maxPollRetries)
             {
                 _logger.LogInformation(
@@ -5739,6 +5738,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// Computes the maximum number of pickup poll attempts that fit inside
+        /// <see cref="Constants.Pickup.MaxTotalWaitSeconds"/>, given the fixed initial delay and a
+        /// per-attempt delay. Shared by the V1 and V2 pickup paths and kept as a pure, synchronous
+        /// function so the ceiling clamp can be unit-tested without waiting out real
+        /// <c>Task.Delay</c> calls.
+        /// </summary>
+        internal static int ComputeMaxPollRetries(int delaySeconds) =>
+            Math.Max(1,
+                (Constants.Pickup.MaxTotalWaitSeconds - Constants.Pickup.InitialDelaySeconds) / delaySeconds);
+
+        /// <summary>
         /// Synchronous certificate pickup for the V2 API — parity with
         /// <see cref="PickUpEnrolledCertificateAsync"/> above: without this poll, a DV order
         /// that CERTInext issues within seconds of CSR submission would only ever reach Command
@@ -5804,8 +5814,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // PickupRetries and PickupDelay are each clamped independently, but their product can
             // still reach ~30 min at the extremes. Cap the retry count to fit; the remainder is
             // imported by the next synchronization.
-            int maxPollRetries = Math.Max(1,
-                (Constants.Pickup.MaxTotalWaitSeconds - Constants.Pickup.InitialDelaySeconds) / delaySeconds);
+            int maxPollRetries = ComputeMaxPollRetries(delaySeconds);
             if (retries > maxPollRetries)
             {
                 _logger.LogInformation(

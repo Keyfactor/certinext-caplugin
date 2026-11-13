@@ -8,6 +8,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -677,6 +678,96 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
             mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
                 Times.AtLeastOnce, "an enabled pickup must actually poll before giving up");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Pickup in-call ceiling clamp (issue 0014)
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Regression for issue 0014: the old <c>Constants.Pickup.MaxTotalWaitSeconds</c> of 180s
+        /// exceeded Command's observed ~100s enrollment-call timeout, so a pickup that used its
+        /// allowed budget outlived the caller entirely. Now 75s. This pins the clamp arithmetic extracted
+        /// to <see cref="CERTInextCAPlugin.ComputeMaxPollRetries"/> against the current 75s ceiling
+        /// and 5s initial delay, independent of real polling delays.
+        /// </summary>
+        [Theory]
+        [InlineData(1, 70)]   // (75-5)/1  = 70
+        [InlineData(10, 7)]   // (75-5)/10 = 7  - the documented default delay
+        [InlineData(36, 1)]   // (75-5)/36 = 1 (floors below 2)
+        [InlineData(60, 1)]   // (75-5)/60 = 1 (max delay clamp)
+        [InlineData(1000, 1)] // Math.Max(1, ...) floor - never returns 0 or negative
+        public void ComputeMaxPollRetries_MatchesCeilingArithmetic(int delaySeconds, int expectedMaxRetries)
+        {
+            CERTInextCAPlugin.ComputeMaxPollRetries(delaySeconds).Should().Be(expectedMaxRetries);
+        }
+
+        /// <summary>
+        /// The unclamped defaults (5s initial + 5 retries x 10s = 55s) must keep fitting comfortably
+        /// under the 75s ceiling without ever being reduced - this is what every non-pathological
+        /// deployment actually runs with.
+        /// </summary>
+        [Fact]
+        public void ComputeMaxPollRetries_DefaultConfig_NeverClampsDefaultRetries()
+        {
+            int maxPollRetries = CERTInextCAPlugin.ComputeMaxPollRetries(Constants.Pickup.DefaultDelaySeconds);
+
+            maxPollRetries.Should().BeGreaterOrEqualTo(Constants.Pickup.DefaultRetries,
+                "the documented default pickup budget must never be clamped by the in-call ceiling");
+        }
+
+        /// <summary>
+        /// The ceiling must leave headroom inside Command's enrollment-call budget for the order
+        /// submission and per-poll round trips that the ceiling does not count.
+        /// </summary>
+        [Fact]
+        public void PickupCeiling_FitsInsideCommandEnrollmentBudget()
+        {
+            Constants.Pickup.MaxTotalWaitSeconds.Should().BeLessThan(Constants.Pickup.CommandEnrollmentBudgetSeconds);
+        }
+
+        /// <summary>
+        /// Regression for issue 0014: a configured pickup budget that would blow the 75s in-call
+        /// ceiling (PickupRetries=30, PickupDelay=60 - both at their individual per-factor clamps,
+        /// product ~1805s) must be capped so the plugin only ever polls
+        /// <see cref="CERTInextCAPlugin.ComputeMaxPollRetries"/>'s worth of attempts, not the full
+        /// configured count, and total in-call occupancy must stay under the ceiling. This is an
+        /// end-to-end exercise of the real <c>Task.Delay</c>-based pickup loop (not the pure-math
+        /// tests above), so it necessarily runs for real time - bounded well under the 75s ceiling
+        /// itself since the clamp is exactly what keeps it there.
+        /// </summary>
+        [Fact]
+        public async Task Pickup_ClampsToInCallCeiling_WhenConfiguredBudgetExceedsBound()
+        {
+            const int configuredRetries = 30;
+            const int configuredDelaySeconds = 60;
+            int expectedCappedRetries = CERTInextCAPlugin.ComputeMaxPollRetries(configuredDelaySeconds);
+            expectedCappedRetries.Should().Be(1, "sanity check on the scenario this test exercises");
+
+            var mock = NewMock();
+            mock.Setup(c => c.EnrollCertificateAsync(
+                    It.IsAny<EnrollCertificateRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingEnrollResponse());
+            // Every poll reports pending, so the loop only stops when its (capped) retry count
+            // is exhausted - proving the configured 30 retries never actually ran.
+            mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(MockCertificateData.PendingCertRecord());
+
+            var plugin = BuildPluginWithPickup(mock.Object, retries: configuredRetries, delaySeconds: configuredDelaySeconds);
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem, subject: "CN=test.example.com", san: null,
+                productInfo: MakeProductInfo(), requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+            stopwatch.Stop();
+
+            result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
+            mock.Verify(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Exactly(expectedCappedRetries),
+                "PickupRetries=30 must be capped to the in-call ceiling's worth of attempts, not run in full");
+            stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(Constants.Pickup.MaxTotalWaitSeconds),
+                "total in-call pickup occupancy must stay under the ceiling it is clamped to");
         }
 
         [Fact]

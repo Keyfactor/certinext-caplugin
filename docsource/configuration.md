@@ -250,11 +250,11 @@ Calling `GetProductDetails` against your account lists the codes available to yo
 |---|---|---|---|---|
 | `PickupRetries` | 0 (disabled) | 30 | 5 | Negative becomes 0; above 30 becomes 30 |
 | `PickupDelay` (seconds) | 1 | 60 | 10 | Zero or negative becomes 10; above 60 becomes 60 |
-| Total wait | — | 180 s | ~55 s | The retry count is reduced to fit the cap |
+| Total wait | — | 75 s | ~55 s | The retry count is reduced to fit the cap |
 
 > **Pickup timing detail:** after a successful order placement, the plugin waits a fixed 5-second initial delay before the first poll, then polls CERTInext every `PickupDelay` seconds up to `PickupRetries` times. Each poll calls `GetCertificate` to check whether the certificate has been issued. The total time budget is **5 s + (`PickupRetries` × `PickupDelay`) + about 1 s API round trip per poll**. With the defaults this is 5 + (5 × 10) = **~55 s plus round trips**.
 >
-> **Tuning for faster pickup:** if CERTInext typically issues certificates within a few seconds of order placement (as is typical for DV and auto-approved orders), lower `PickupDelay` and raise `PickupRetries` to compensate. This polls more often without changing the total budget. Keep the total well under about 90 s so the call does not trip Command's own enrollment timeout.
+> **Tuning for faster pickup:** if CERTInext typically issues certificates within a few seconds of order placement (as is typical for DV and auto-approved orders), lower `PickupDelay` and raise `PickupRetries` to compensate. This polls more often without changing the total budget. Command's own enrollment call into the gateway is bounded at about 100 s, and order submission and each poll's round trip also use that budget, so keep the total well under the 75 s ceiling.
 >
 > | Configuration | PickupRetries | PickupDelay | Total budget | Poll cadence |
 > |---------------|:---:|:---:|---|---|
@@ -263,7 +263,7 @@ Calling `GetProductDetails` against your account lists the codes available to yo
 > | Aggressive | `30` | `2` | ~65 s | Every 2 s |
 > | Minimal wait | `0` | — | 0 s | No polling; defers to sync |
 >
-> The 5-second initial delay is not configurable, and the 180-second ceiling applies regardless of configuration. When the DCV flow ran for the order inside the same `Enroll` call, the pickup poll is skipped, because the DCV flow already waited for issuance.
+> The 5-second initial delay is not configurable, and the 75-second ceiling applies regardless of configuration. It sits inside Command's roughly 100-second enrollment-call timeout, which leaves headroom for order submission and per-poll round trips. When the DCV flow ran for the order inside the same `Enroll` call, the pickup poll is skipped, because the DCV flow already waited for issuance.
 
 ### Domain Control Validation (DCV)
 

@@ -159,7 +159,7 @@
                 },
                 {
                     "name": "PickupDelay",
-                    "description": "OPTIONAL: Seconds between certificate-pickup polls (1-60). Total wait is 5 s + PickupRetries x this value, capped at 180 s. Default: 10 (~55 s with default retries)."
+                    "description": "OPTIONAL: Seconds between certificate-pickup polls (1-60). Total wait is 5 s + PickupRetries x this value. Command's own enrollment call into the gateway is bounded at roughly 100 s, so the plugin caps the total at 75 s regardless of how PickupRetries/PickupDelay are set, reducing the retry count to fit. Keep your configured total well under that ceiling. Default: 10 (~55 s with default retries)."
                 },
                 {
                     "name": "DcvEnabled",

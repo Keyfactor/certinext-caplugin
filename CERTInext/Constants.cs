@@ -384,12 +384,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const int MaxRetries = 30;
             public const int MaxDelaySeconds = 60;
 
+            // Command's observed enrollment-call timeout: the stock .NET HttpClient default of 100
+            // seconds, confirmed in the field (Command_API_Log.txt: EJBCAWebClient.CertificateRequestEnroll
+            // aborted with "HttpClient.Timeout of 100 seconds elapsing"). Enroll() is called synchronously
+            // on this budget, so any in-call pickup wait must fit comfortably inside it.
+            public const int CommandEnrollmentBudgetSeconds = 100;
+
             // Hard ceiling on total in-call pickup occupancy (initial delay + retries * delay).
-            // The per-factor clamps above still permit a ~1805s product at the extremes, which could
-            // push Enroll() past Command's enrollment timeout; PickUpEnrolledCertificateAsync caps the
-            // effective retry count so the total never exceeds this. Kept comfortably under a typical
-            // enrollment timeout while leaving room for the documented ~90s default guidance.
-            public const int MaxTotalWaitSeconds = 180;
+            // The per-factor clamps above still permit a ~1805s product at the extremes, which would
+            // push Enroll() past CommandEnrollmentBudgetSeconds; the pickup paths cap the effective
+            // retry count (ComputeMaxPollRetries) so the total never exceeds this. Set to 75s - 25s of
+            // headroom inside the 100s Command budget for the order submit (plus DCV/CSR calls on V2)
+            // and per-poll round-trips, which also consume that budget but aren't counted in this ceiling.
+            public const int MaxTotalWaitSeconds = 75;
         }
 
         public static class Dcv

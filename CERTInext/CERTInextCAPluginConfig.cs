@@ -312,9 +312,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     Comments = $"OPTIONAL: Seconds between certificate-pickup polls " +
                                $"(1-{Constants.Pickup.MaxDelaySeconds}). Total wait is " +
-                               $"{Constants.Pickup.InitialDelaySeconds} s + PickupRetries x this value, capped at " +
-                               $"{Constants.Pickup.MaxTotalWaitSeconds} s. Default: " +
-                               $"{Constants.Pickup.DefaultDelaySeconds} " +
+                               $"{Constants.Pickup.InitialDelaySeconds} s + PickupRetries x this value. Command's own " +
+                               $"enrollment call into the gateway is bounded at roughly " +
+                               $"{Constants.Pickup.CommandEnrollmentBudgetSeconds} s, so the plugin caps the total at " +
+                               $"{Constants.Pickup.MaxTotalWaitSeconds} s regardless of how PickupRetries/PickupDelay " +
+                               $"are set, reducing the retry count to fit. Keep your configured total well under that " +
+                               $"ceiling. Default: {Constants.Pickup.DefaultDelaySeconds} " +
                                $"(~{Constants.Pickup.InitialDelaySeconds + Constants.Pickup.DefaultRetries * Constants.Pickup.DefaultDelaySeconds} " +
                                $"s with default retries).",
                     Hidden = false,
