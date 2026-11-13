@@ -342,5 +342,138 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
             }
         }
+        // ---------------------------------------------------------------------------
+        // 0094 item 5: reissue via POST /ssl-certificates/{orderId}/reissue
+        // ---------------------------------------------------------------------------
+
+        // Orders the user keeps for manual tests (issue 0094 plan) and the plan's example order.
+        private static readonly string[] ProtectedOrders =
+        {
+            "7494553568", "9179852756", "7856523635", "8389474417", "3974245235", "6753965312", "8916985882",
+            "3793212921", "5461336494", "2431278382", "1663545354", "5948124826", "2669121252", "2519635936"
+        };
+
+        /// <summary>
+        /// Reissues one sandbox-generated SSL/TLS order through the plugin (<c>EnrollmentType.Reissue</c>,
+        /// <c>V2ReissueRevokePrevious=false</c>, so the source order is left valid) and reports the HTTP
+        /// outcome, the derived order id shape, its status and certificate state, and whether Track Order and
+        /// <c>/reports/orders</c> see it. The derived order is cleaned up (revoked or cancelled) afterwards.
+        /// Run once, only with the maintainer's approval: it creates a derived order.
+        /// Opt-in: <c>CERTINEXT_V2_LIFECYCLE_REISSUE_ENDPOINT=1</c> and
+        /// <c>CERTINEXT_V2_REISSUE_SOURCE_ORDER_ID=&lt;issued, downloadable order&gt;</c>.
+        /// </summary>
+        [SkippableFact]
+        public async Task Reissue_V2_ReissueEndpoint_DerivedOrder_Report()
+        {
+            string sourceId = V2EnvHelper.GetEnv(_env, "CERTINEXT_V2_REISSUE_SOURCE_ORDER_ID");
+            Skip.If(!_v2Enabled || !Flag("CERTINEXT_V2_LIFECYCLE_REISSUE_ENDPOINT") || string.IsNullOrWhiteSpace(sourceId),
+                "Requires CERTINEXT_USE_V2_API + V2 credentials, CERTINEXT_V2_LIFECYCLE_REISSUE_ENDPOINT=1 and " +
+                "CERTINEXT_V2_REISSUE_SOURCE_ORDER_ID.");
+            ProtectedOrders.Should().NotContain(sourceId, "that order is reserved for manual tests");
+
+            using var client = BuildV2Client();
+            var source = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, sourceId);
+            _output.WriteLine($"Source {sourceId}: status={source.Status}, certificateState={source.CertificateState}, " +
+                              $"domain={source.Domain}, expiresAt={source.ExpiresAt}");
+            Skip.If(source.Status != Constants.ApiV2.StatusIssued, $"Source order is '{source.Status}', not issued.");
+            var cert = await client.DownloadCertificateV2Async(Constants.ApiV2.FamilySsl, sourceId);
+            _output.WriteLine($"Source certificate serial={cert.SerialNumber}");
+
+            var config = BuildV2Config();
+            config.V2ReissueRevokePrevious = false;
+            var reader = new SingleCertificateDataReader(cert.SerialNumber, sourceId,
+                DateTime.TryParse(source.ExpiresAt, out var exp) ? exp.ToUniversalTime() : DateTime.UtcNow.AddDays(60));
+            var plugin = new CERTInextCAPlugin(new CERTInextClient(config), reader, config);
+            var info = V2ProductPinning.Info(Constants.Products.DvSsl, V2PinMode.Pinned,
+                new Dictionary<string, string> { ["PriorCertSN"] = cert.SerialNumber });
+
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
+            EnrollmentResult result = null;
+            try
+            {
+                result = await plugin.Enroll(
+                    csr:            GenerateCsrPem(source.Domain),
+                    subject:        $"CN={source.Domain}",
+                    san:            new Dictionary<string, string[]> { ["dns"] = new[] { source.Domain } },
+                    productInfo:    info,
+                    requestFormat:  RequestFormat.PKCS10,
+                    enrollmentType: EnrollmentType.Reissue);
+            }
+            catch (Exception ex)
+            {
+                _output.WriteLine($"RESULT: Enroll(Reissue) threw: {ex.GetType().Name}: {ex.Message}");
+                throw;
+            }
+            finally
+            {
+                restoreLogging();
+            }
+
+            _output.WriteLine($"RESULT: CARequestID={result.CARequestID}, Status={result.Status}, Message={result.StatusMessage}");
+            string newId = result.CARequestID ?? string.Empty;
+            bool derived = newId.StartsWith(sourceId, StringComparison.Ordinal) && newId.Length > sourceId.Length;
+            _output.WriteLine(derived
+                ? $"Derived id shape: source id + '{newId.Substring(sourceId.Length)}' suffix"
+                : "Derived id shape: NOT derived from the source (fallback new order?)");
+
+            try
+            {
+                var tracked = await client.ResolveAndTrackOrderV2WithFamilyAsync(result.CARequestID);
+                _output.WriteLine($"Track {result.CARequestID}: family={tracked.family}, status={tracked.status.Status}, " +
+                                  $"certificateState={tracked.status.CertificateState}");
+
+                string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+                bool listed = false;
+                await foreach (var row in client.ListOrdersV2Async(today, today))
+                {
+                    if (row.OrderNumber == result.CARequestID)
+                    {
+                        listed = true;
+                        _output.WriteLine($"/reports/orders lists it: orderStatus={row.OrderStatus}, " +
+                                          $"certificateStatus={row.CertificateStatus}, productCode={row.ProductCode}");
+                    }
+                }
+                if (!listed) _output.WriteLine("/reports/orders (today) does not list the derived order.");
+
+                var sourceAfter = await client.TrackOrderV2Async(Constants.ApiV2.FamilySsl, sourceId);
+                _output.WriteLine($"Source after reissue: status={sourceAfter.Status} (expected unchanged: issued)");
+            }
+            finally
+            {
+                if (!string.IsNullOrWhiteSpace(result.CARequestID) && result.CARequestID != sourceId)
+                    await V2OrderCleanup.RevokeOrCancelAsync(client, result.CARequestID, "V2 integration test cleanup", _output.WriteLine);
+            }
+
+            result.Status.Should().NotBe((int)EndEntityStatus.FAILED, result.StatusMessage);
+        }
+    }
+
+    /// <summary>
+    /// Gateway database stand-in for the live reissue test: maps one serial to one order id, as the
+    /// gateway does for <c>PriorCertSN</c>.
+    /// </summary>
+    internal sealed class SingleCertificateDataReader : ICertificateDataReader
+    {
+        private readonly string _serial;
+        private readonly string _orderId;
+        private readonly DateTime? _expiry;
+
+        public SingleCertificateDataReader(string serial, string orderId, DateTime? expiry)
+        {
+            _serial = serial;
+            _orderId = orderId;
+            _expiry = expiry;
+        }
+
+        public Task<string> GetRequestIDBySerialNumber(string serialNumber) =>
+            Task.FromResult(string.Equals(serialNumber, _serial, StringComparison.OrdinalIgnoreCase) ? _orderId : null);
+
+        public DateTime? GetExpirationDateByRequestId(string requestId) =>
+            string.Equals(requestId, _orderId, StringComparison.Ordinal) ? _expiry : null;
+
+        public Task<int> GetStatusByRequestID(string requestId) => Task.FromResult(0);
+
+        public Task<bool> DoesCertExistForRequestID(string requestId) =>
+            Task.FromResult(string.Equals(requestId, _orderId, StringComparison.Ordinal));
     }
 }

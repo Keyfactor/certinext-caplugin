@@ -424,5 +424,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// </summary>
         Task<V2DomainDcvVerifyResult> VerifyDomainDcvV2Async(
             string domainId, string optionId, CancellationToken ct = default);
+
+        /// <summary>
+        /// Reissues an SSL/TLS certificate via POST /api/certinext/v2/ssl-certificates/{orderId}/reissue,
+        /// which creates a new order derived from <paramref name="orderId"/>. A 404 or 422 is returned as
+        /// <c>Created=false</c> with the CA's reason. A 5xx, no response, or an unreadable 2xx body throws
+        /// with a do-not-resubmit message (the derived order may exist); 400/401/403 throw as other V2
+        /// calls do. Never retried.
+        /// </summary>
+        Task<V2ReissueOutcome> ReissueOrderV2Async(
+            string orderId, V2ReissueRequest request, CancellationToken ct = default);
     }
 }

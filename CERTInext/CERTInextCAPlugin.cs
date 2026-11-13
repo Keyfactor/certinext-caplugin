@@ -610,6 +610,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Constants.Config.V2InlineCsr);
             }
 
+            // V2ReissueRevokePrevious is a Boolean (V2 only): a malformed value must not silently decide
+            // whether a reissue revokes the previous certificate.
+            if (connectionInfo.TryGetValue(Constants.Config.V2ReissueRevokePrevious, out object reissueRevokeObj)
+                && reissueRevokeObj != null && !IsBooleanSettingValue(reissueRevokeObj))
+            {
+                errors.Add($"'{Constants.Config.V2ReissueRevokePrevious}' must be true or false. Got: '{reissueRevokeObj}'.");
+            }
+
             // SslComSubmitOrganization is a Boolean (V2 only), validated like V2InlineCsr. It accepts a
             // third party's subscriber agreement on the organization's behalf, so a malformed value must
             // not silently fall back to anything.
@@ -1745,6 +1753,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             EnrollmentParams ep,
             EnrollmentType enrollmentType)
         {
+            var reissue = new V2ReissueContext();
+            var result = await EnrollV2CoreAsync(csr, subject, san, ep, enrollmentType, reissue);
+            // A reissue (or a reissue that fell back to a new order) says so in Command's result.
+            if (result != null && !string.IsNullOrWhiteSpace(reissue.Note))
+                result.StatusMessage = string.IsNullOrWhiteSpace(result.StatusMessage)
+                    ? reissue.Note
+                    : result.StatusMessage.TrimEnd() + " " + reissue.Note;
+            return result;
+        }
+
+        /// <summary>What the V2 reissue step decided, for the result message.</summary>
+        private sealed class V2ReissueContext
+        {
+            public string Note { get; set; }
+        }
+
+        private async Task<EnrollmentResult> EnrollV2CoreAsync(
+            string csr,
+            string subject,
+            Dictionary<string, string[]> san,
+            EnrollmentParams ep,
+            EnrollmentType enrollmentType,
+            V2ReissueContext reissue)
+        {
             _logger.MethodEntry(LogLevel.Debug);
             _logger.LogInformation(
                 "EnrollV2Async started. EnrollmentType={EnrollmentType}, ProductFamily={Family}, ProductVariant={Variant}, " +
@@ -2302,8 +2334,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     _config.OrganizationNumber, sslProductVariant.ToUpperInvariant());
             }
 
-            V2CreateOrderResponse createResp;
-            if (isPrivatePki)
+            // V2 SSL/TLS reissue: POST /ssl-certificates/{prior}/reissue creates a derived order that
+            // carries the CSR; the post-create flow below (track, agreement, DCV, pickup) then runs on
+            // that order exactly as on a new one. No prior order, or a 404/422 from CERTInext, places a
+            // new order instead (said so in the result). A 5xx or lost response throws from the client
+            // with a do-not-resubmit message: the derived order may exist, so nothing is placed.
+            V2CreateOrderResponse createResp = null;
+            if (!isPrivatePki)
+            {
+                string priorOrderId = await ResolveV2ReissueSourceOrderAsync(enrollmentType, ep, subject, reissue);
+                if (priorOrderId != null)
+                {
+                    createResp = await TryReissueV2Async(priorOrderId, csr, additionalDomains, reissue);
+                    if (createResp != null)
+                        inlineCsr = true; // the reissue body carried the CSR
+                }
+            }
+
+            if (createResp != null)
+            {
+                // Reissued; nothing to place.
+            }
+            else if (isPrivatePki)
             {
                 // Spec "Private PKI Certificates" body: no productVariant / organization /
                 // certificate / agreement blocks — "Private PKI has no DCV, no organization
@@ -2644,6 +2696,131 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (!m.Success) return true;
             int status = int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
             return status < 400 || status >= 500;
+        }
+
+        /// <summary>
+        /// Decides whether a V2 SSL/TLS enrollment is a reissue and, if so, returns the prior order's
+        /// CARequestID. A reissue is <see cref="EnrollmentType.Reissue"/>, or
+        /// <see cref="EnrollmentType.RenewOrReissue"/> whose prior certificate is unexpired and expires
+        /// after <c>RenewalWindowDays</c> (V1's reissue branch; inside the window it is a renewal, which
+        /// V2 places as a new order). Returns null when this is not a reissue or the prior order can't
+        /// be resolved from <c>PriorCertSN</c>; the latter records a note for the result message.
+        /// </summary>
+        private async Task<string> ResolveV2ReissueSourceOrderAsync(
+            EnrollmentType enrollmentType, EnrollmentParams ep, string subject, V2ReissueContext reissue)
+        {
+            if (enrollmentType != EnrollmentType.Reissue && enrollmentType != EnrollmentType.RenewOrReissue)
+                return null;
+
+            string priorCertSn = ep.PriorCertSn;
+            // SOC2 CC6.1: a read against the gateway's certificate inventory is logged at Information.
+            _logger.LogInformation(
+                "V2 reissue probe — read PriorCertSN from EnrollmentProductInfo. EnrollmentType={EnrollmentType}, " +
+                "Subject={Subject}, PriorCertSN={PriorCertSN}, RenewalWindowDays={WindowDays}",
+                enrollmentType, LogSanitizer.Strip(subject), priorCertSn ?? "(none)", ep.RenewalWindowDays);
+
+            const string fallback = "a new order was placed instead of a reissue";
+            if (string.IsNullOrWhiteSpace(priorCertSn) || _certificateDataReader == null)
+            {
+                if (enrollmentType == EnrollmentType.Reissue)
+                    reissue.Note = $"No prior certificate serial number was supplied, so {fallback}.";
+                return null;
+            }
+
+            string priorOrderId;
+            try
+            {
+                priorOrderId = await _certificateDataReader.GetRequestIDBySerialNumber(priorCertSn);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 reissue: could not resolve the CARequestID for serial '{SN}'; placing a new order.", priorCertSn);
+                priorOrderId = null;
+            }
+            if (string.IsNullOrWhiteSpace(priorOrderId))
+            {
+                reissue.Note = $"The prior certificate's order could not be found, so {fallback}.";
+                return null;
+            }
+
+            if (enrollmentType == EnrollmentType.RenewOrReissue)
+            {
+                DateTime? expiry = null;
+                try
+                {
+                    expiry = _certificateDataReader.GetExpirationDateByRequestId(priorOrderId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "V2 reissue: could not read the expiry of '{Id}'; placing a new order.", priorOrderId);
+                }
+                DateTime now = DateTime.UtcNow;
+                bool isReissue = expiry.HasValue && expiry.Value > now.AddDays(ep.RenewalWindowDays);
+                // SOX CC6.2 / SOC2 CC7.2: the decision that reuses an existing CA record.
+                _logger.LogInformation(
+                    "V2 renew-or-reissue evaluation complete. PriorCARequestID={PriorId}, CertExpiry={Expiry}, " +
+                    "RenewalWindowDays={Window}, Reissue={Reissue}",
+                    priorOrderId, expiry.HasValue ? expiry.Value.ToString("O") : "(unknown)", ep.RenewalWindowDays, isReissue);
+                if (!isReissue)
+                    return null;
+            }
+
+            return priorOrderId;
+        }
+
+        /// <summary>
+        /// Calls the SSL/TLS reissue endpoint in <c>rekey</c> mode for <paramref name="priorOrderId"/>.
+        /// Returns the derived order, or null (with a note) when CERTInext answers 404/422 so the caller
+        /// places a new order. With <c>V2ReissueRevokePrevious</c> on, the revoke intent is audit-logged
+        /// before the call. Exceptions (5xx, no response, auth) propagate: the derived order may exist.
+        /// </summary>
+        private async Task<V2CreateOrderResponse> TryReissueV2Async(
+            string priorOrderId, string csr, List<string> additionalDomains, V2ReissueContext reissue)
+        {
+            bool revokePrevious = _config.V2ReissueRevokePrevious;
+            var request = new V2ReissueRequest
+            {
+                Mode              = Constants.ApiV2.ReissueModeRekey,
+                Reason            = Constants.ApiV2.ReissueReason,
+                Csr               = csr,
+                AdditionalDomains = additionalDomains,
+                RevokePrevious    = revokePrevious,
+                RevokeReason      = revokePrevious ? Constants.RevocationReasonV2.Superseded : null
+            };
+
+            if (revokePrevious)
+            {
+                // SOX / SOC2 CC7.3: the revoke intent is recorded before the call, as RevokeV2Async does.
+                _logger.LogInformation(
+                    "Revocation V2 attempt started (via reissue revokePrevious). CARequestID={Id}, " +
+                    "V2Reason={V2Reason}, Setting={Setting}=true",
+                    priorOrderId, Constants.RevocationReasonV2.Superseded, Constants.Config.V2ReissueRevokePrevious);
+            }
+            _logger.LogInformation(
+                "V2 reissue started. PriorCARequestID={PriorId}, Mode={Mode}, RevokePrevious={RevokePrevious}, " +
+                "AdditionalDomainCount={Count}",
+                priorOrderId, request.Mode, revokePrevious, additionalDomains?.Count ?? 0);
+
+            var outcome = await _client.ReissueOrderV2Async(priorOrderId, request);
+            if (outcome?.Created == true)
+            {
+                _logger.LogInformation(
+                    "V2 reissue created a derived order. PriorCARequestID={PriorId}, NewOrderId={NewId}, " +
+                    "Status={Status}, PreviousRevocationRequested={RevokePrevious}",
+                    priorOrderId, outcome.Order.OrderId, outcome.Order.Status, revokePrevious);
+                reissue.Note = $"Reissued from CERTInext order {priorOrderId}" +
+                               (revokePrevious ? "; revocation of the previous certificate (superseded) was requested." : ".");
+                return outcome.Order;
+            }
+
+            _logger.LogWarning(
+                "V2 reissue of order {PriorId} was rejected (HttpStatus={Status}): {Detail}. Placing a new order instead.",
+                priorOrderId, outcome?.HttpStatus ?? 0, outcome?.Detail ?? "(no detail)");
+            reissue.Note = $"CERTInext rejected the reissue of order {priorOrderId} " +
+                           $"(HTTP {outcome?.HttpStatus ?? 0}: {outcome?.Detail ?? "no detail"}), so a new order was placed " +
+                           (revokePrevious ? "and the previous certificate was not revoked." : "instead.");
+            return null;
         }
 
         /// <summary>

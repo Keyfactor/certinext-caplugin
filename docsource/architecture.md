@@ -311,7 +311,7 @@ A failed lookup, or a domain with no row, takes the order-level flow above, as b
 
 ### Certificate Enrollment
 
-When a requester submits a certificate request through Keyfactor Command, the plugin translates the request into a CERTInext order and returns the result. V1 and V2 follow different flows. V1 handles renewals specially (see [V1 renewal and RenewOrReissue](#v1-renewal-and-reneworreissue)), while V2 places a new order for every enrollment type.
+When a requester submits a certificate request through Keyfactor Command, the plugin translates the request into a CERTInext order and returns the result. V1 and V2 follow different flows. V1 handles renewals specially (see [V1 renewal and RenewOrReissue](#v1-renewal-and-reneworreissue)). V2 places a new order for every enrollment type except an SSL/TLS reissue, which uses the reissue endpoint ([V2 reissue](#v2-reissue)).
 
 #### V1 enrollment (New or Reissue)
 
@@ -388,7 +388,7 @@ flowchart TD
 
 #### V2 enrollment flow
 
-With `UseV2Api = true`, every enrollment type (New, Reissue, Renew, RenewOrReissue) takes the same path and places a new order. The plugin checks the request locally first, so a template or request that can never succeed is rejected before any order is placed.
+With `UseV2Api = true`, every enrollment type takes the same path. The one exception is an SSL/TLS reissue, which calls the reissue endpoint in place of the create call ([V2 reissue](#v2-reissue)); everything else places a new order. The plugin checks the request locally first, so a template or request that can never succeed is rejected before any order is placed.
 
 ```mermaid
 flowchart TD

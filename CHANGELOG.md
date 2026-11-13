@@ -9,6 +9,7 @@
 - feat(v2): An SSL/TLS order that Track Order shows at `pending-agreement` gets the Subscriber Agreement accepted via `POST /ssl-certificates/{orderId}/agreement`, using the same signer values as create: at most once per order per enroll call or sync pass, audit-logged first, and a failure only warns.
 - feat(v2): The create call no longer sends `X-Product-Code` unless the template sets `ProductCode` (SSL/TLS and Private PKI): CERTInext resolves the product from the variant, wildcard shape and `additionalDomains`, and the response's `resolvedProductCode` is logged. An ambiguous catalog match is no longer an error, Private PKI no longer needs `ProductCode`, and without one a wildcard is detected from the `*.` domain and a UCC order from the template's product or extra DNS SANs.
 - feat(v2): V2 SSL/TLS enrollment sends the CSR inline in one create call (`V2InlineCsr`, default `true`). Setting it to `false` selects create + Submit CSR, which fails for a domain the account has already validated; Private PKI stays two-call.
+- feat(v2): An SSL/TLS reissue (`Reissue`, or `RenewOrReissue` outside `RenewalWindowDays`) calls `POST /ssl-certificates/{orderId}/reissue` in `rekey` mode with the new CSR, and the derived order (for example `1984857369R001`) becomes the new `CARequestID`. New setting `V2ReissueRevokePrevious` (default `false`) also revokes the previous certificate as `superseded`, audit-logged first. A missing prior order or a 404/422 places a new order instead and says so; a 5xx or lost response fails with "do not resubmit". Not verified live: the sandbox no longer generates certificates.
 - feat(v2): Synchronize reads `/reports/orders` and honors `IgnoreExpired`.
 - feat(v2): Incremental syncs look back `V2SyncLookbackHours` (default 72).
 - feat(dcv): DNS-01 domain validation for V2 SSL/TLS orders, including every SAN on a UCC order.
@@ -50,7 +51,7 @@
 - V2 `ProductVariant` is derived from the selected product when unset.
 - V2 revoke reasons CERTInext rejects are retried with a substitute (see Revocation Reason Codes in the README). `privilege-withdrawn`, which the 2.0.0 V2 spec dropped from the SSL/TLS enum and CERTInext rejected live on 2026-11-13, is still sent first and now falls back to `cessation-of-operation`. The retry also recognizes CERTInext's newer 422 wording, "Revocation reason {reason} is not allowed."
 - V2 `expired` orders are reported as issued, and revoking one is sent to the CA.
-- V2 renew and reissue place a new order and don't revoke the original.
+- V2 renewals place a new order and don't revoke the original. V2 SSL/TLS reissues now go through the reissue endpoint and produce derived order ids such as `1984857369R001`, which aren't numeric. Scripts or reports that assume numeric `CARequestID`s need updating. Set `V2ReissueRevokePrevious` to `true` if a reissue should revoke the previous certificate.
 - On V2 accounts whose domains SSL.com validates, DCV now publishes SSL.com's record name and value, not `DcvTxtRecordTemplate`. The DNS provider plugin must be able to write those names (for example `_pki-validation.<domain>`).
 - Upgrading from 1.0.0 also brings the changes in 1.0.1 and 1.0.2 above. For example, V1 now submits non-DNS SANs; set `SubmitNonDnsSans` to `false` to drop them.
 
@@ -60,6 +61,7 @@
 - Document Signer (`ProductFamily=signature`) enrollment isn't supported under V2.
 - Per-SAN DCV on UCC orders, DCV for a never-validated domain, and wildcard DCV aren't validated end to end against the CA.
 - Rolling a connector back to V1 after it has issued V2 certificates isn't validated.
+- V2 SSL/TLS reissue through the reissue endpoint isn't verified live (the sandbox stopped generating certificates), and it always uses `rekey`, never `update-sans`.
 - V1 `IgnoreExpired` isn't applied yet; it works on V2.
 - V1 `AuthMode=OAuth` isn't supported: the live V1 API ignores the bearer token, so V1 needs an access key.
 - The V2 incremental sync doesn't yet skip orders the gateway already holds unchanged, as the V1 incremental sync does from 1.0.2, so it re-reads each order listed.

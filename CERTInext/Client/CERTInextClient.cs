@@ -1957,6 +1957,76 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             return new V2DomainDcvVerifyResult { Verified = true, ValidTill = validTill };
         }
 
+        /// <inheritdoc/>
+        public async Task<V2ReissueOutcome> ReissueOrderV2Async(
+            string orderId, V2ReissueRequest request, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            EnsureV2Client();
+            string path = BuildV2OrderPath(Constants.ApiV2.FamilySsl, orderId) + "/reissue";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct, Guid.NewGuid().ToString());
+            string json = JsonSerializer.Serialize(request, GetJsonOptions());
+            if (Logger.IsEnabled(LogLevel.Trace))
+                Logger.LogTrace("ReissueOrderV2Async request payload: {Payload}",
+                    ApplyLoggingRedaction(json, _config.LogSensitiveRequestData));
+            req.AddJsonBody(json);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            sw.Stop();
+            int status = (int)resp.StatusCode;
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
+                path, status, sw.ElapsedMilliseconds);
+            if (Logger.IsEnabled(LogLevel.Trace))
+                Logger.LogTrace("ReissueOrderV2Async response: {Body}",
+                    ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
+
+            // Same rule as the inline-CSR create: the reissue carries the CSR and creates an order, so
+            // a lost response may hide a derived order that issues. Never retried or replaced.
+            if (!resp.IsSuccessful && (status == 0 || status >= 500))
+            {
+                LogV2ApiFailure("V2 reissue order", resp, LogLevel.Warning);
+                throw new Exception(
+                    $"CERTInext did not return a usable response to the V2 reissue of order '{orderId}' " +
+                    (status == 0 ? "(no HTTP response)" : $"(HTTP {status})") +
+                    ". If the reissue was created it will be imported by the next synchronization — do not " +
+                    "resubmit immediately. See gateway logs for details.");
+            }
+
+            if (status == 404 || status == 422)
+            {
+                LogV2ApiFailure("V2 reissue order", resp, LogLevel.Warning);
+                Logger.MethodExit(LogLevel.Trace);
+                return new V2ReissueOutcome
+                {
+                    Created    = false,
+                    HttpStatus = status,
+                    Detail     = ExtractV2ErrorMessage(resp.Content, "V2 reissue order", _config.LogSensitiveRequestData)
+                };
+            }
+
+            ThrowOnV2Failure(resp, "V2 reissue order");
+            V2CreateOrderResponse order = null;
+            try
+            {
+                order = DeserializeV2OrThrow<V2CreateOrderResponse>(resp, "V2 reissue order");
+            }
+            catch (Exception deserEx)
+            {
+                Logger.LogWarning(deserEx,
+                    "V2 reissue returned HTTP {Status} but the body could not be read; the derived order may exist.",
+                    status);
+            }
+            if (string.IsNullOrWhiteSpace(order?.OrderId))
+                throw new Exception(
+                    $"CERTInext accepted the V2 reissue of order '{orderId}' but returned no readable order id. " +
+                    "The derived order was most likely created and will be imported by the next synchronization — " +
+                    "do not resubmit immediately. See gateway logs for details.");
+            Logger.MethodExit(LogLevel.Trace);
+            return new V2ReissueOutcome { Created = true, HttpStatus = status, Order = order };
+        }
+
         /// <summary>
         /// Parses a <c>GET /domains</c> body into the row for <paramref name="domainName"/>, or null.
         /// Rows come under <c>content</c> (seen live, same envelope as <c>/reports/orders</c>); a bare

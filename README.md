@@ -223,7 +223,7 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 | `AutoApprove` | Optional | Boolean | **Currently has no effect** — reserved for future use. The plugin does not call any approval endpoint against CERTInext regardless of this setting. | `false` |
 | `RequesterName` | Optional | String | Overrides the connector `RequestorName` for this template when non-blank. Never derived from the certificate subject. | `Keyfactor Automation` |
 | `RequesterEmail` | Optional | String | Overrides the connector `RequestorEmail` for this template when non-blank. Never derived from the certificate subject. | `pki-admin@example.com` |
-| `RenewalWindowDays` | Optional | Number | V1 only. Number of days before certificate expiration within which a renewal is attempted instead of a reissue. V2 places a new order for every renewal and reissue. Default: `90`. | `90` |
+| `RenewalWindowDays` | Optional | Number | Number of days before certificate expiration within which a renewal is attempted instead of a reissue. On V2 it decides only whether `RenewOrReissue` uses the SSL/TLS reissue endpoint (outside the window) or places a new order (inside it). Default: `90`. | `90` |
 | `KeyType` | Optional | String | Informational. The CSR decides the key algorithm. CERTInext accepts only RSA 2048/3072/4096 and ECC P-256/P-384. | `RSA2048`, `RSA3072`, `RSA4096`, `EC256`, `EC384` |
 | `DomainName` | Optional | String | V2 only: primary domain name for SSL/TLS orders (for Private PKI, the primary hostname). If omitted, the plugin uses the CSR subject `CN`. V1 always uses the CSR subject `CN`. | `example.com` |
 | `SignerName` | Optional | String | Per-template override for the subscriber agreement signer name. When omitted, defaults to the connector-level `RequestorName` (V2: the requestor name). If no name resolves, V1 sends `Keyfactor Gateway` and logs a warning. | `Jane Smith` |
@@ -561,6 +561,7 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 | `SslComSubmitOrganization` | Optional | OV/EV on V2. `true` lets the plugin submit an unvalidated organization to SSL.com, which **accepts SSL.com's subscriber agreement on the organization's behalf**; see [SSL.com organization validation](#sslcom-organization-validation). Default: `false`. |
 | `SslComAdminEmail` | Optional | Administrator email sent as `adminEmail` on that submission. Blank omits it. Example: `pki-admin@example.com`. |
 | `V2InlineCsr` | Optional | SSL/TLS only. `true` (the default) sends the CSR inline in the create call (a single `POST /ssl-certificates`), as a direct API integration does. `false` creates the order and then submits the CSR; that two-call flow fails for a domain the account has already validated, because CERTInext approves the order at create and then rejects the CSR. A create that times out or returns a 5xx can leave an order that issues and is imported by the next sync rather than cancelled, and the create call can hold about 20 seconds until issuance. Private PKI always uses two calls. Default: `true`. |
+| `V2ReissueRevokePrevious` | Optional | SSL/TLS reissue only. `true` makes the reissue call also revoke the previous certificate with reason `superseded`; the intent is audit-logged first. `false` leaves the previous certificate valid. See [V2 reissue](#v2-reissue). Default: `false`. |
 
 - **Why a lookback:** the API's `from`/`to` filter may bracket either the order-placement date or the issuance date. The window keeps an order created before the last sync but issued afterward (for example a slow DCV order) from being missed.
 
@@ -682,7 +683,22 @@ CERTInext can report an order as `issued` before the certificate exists: Downloa
 - **Log fields:** the lines include CERTInext's `orderState` and `certificateState` text (for example `Approved by System` versus `Certificate Generated`) for diagnosis. Their vocabulary isn't documented, so the plugin never acts on it.
 - **Any other download error** is still logged as a warning.
 
-V2 has no *renew* endpoint. CERTInext does document a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious`/`revokeReason`), but the plugin does not use it — every enrollment type (New, Reissue, Renew, RenewOrReissue) places a fresh V2 order, and the prior order/certificate is left issued rather than auto-revoked.
+#### V2 reissue
+
+V2 has no *renew* endpoint, so `New`, `Renew`, and a `RenewOrReissue` inside the renewal window place a new order. An SSL/TLS reissue uses `POST /ssl-certificates/{orderId}/reissue` instead:
+
+1. **When.** The enrollment type is `Reissue`, or `RenewOrReissue` with a prior certificate that hasn't expired and expires after `RenewalWindowDays` (the same boundary V1 uses).
+2. **Which order.** The plugin finds the prior order from `PriorCertSN` in the gateway database.
+3. **What it sends.** `mode: rekey` with the new CSR, plus `additionalDomains` for a UCC order (the same SAN rules as create), and the reason "Reissued via Keyfactor Command AnyCA REST Gateway." The plugin always rekeys, because Command supplies a new CSR and gives no signal that only the SANs changed. It never uses `update-sans`.
+4. **What comes back.** CERTInext creates a new order derived from the original, for example `1984857369R001`. That id is not numeric. It becomes the new certificate's `CARequestID`, and the usual post-create steps run on it: track, Subscriber Agreement, DCV, and pickup. The original order is left as it is.
+5. **The previous certificate.** It stays valid unless `V2ReissueRevokePrevious` is `true`. Then the reissue also asks CERTInext to revoke it with reason `superseded`, and the intent is audit-logged before the call.
+
+**Fallbacks:**
+- **A new order is placed instead,** and the enrollment result says so, in three cases: no `PriorCertSN`, no matching order in the gateway, or a 404 or 422 from the reissue call (for example, the original is not `issued`).
+- **Nothing is placed on a 5xx or a lost response.** The derived order may already exist. The enrollment fails with a "do not resubmit" message, as an order create does, and the next sync imports the order if it was created.
+- **Private PKI and Document Signer** have no reissue endpoint in the spec, so they keep placing a new order.
+
+**Not verified live:** the 2026-11 sandbox no longer generates certificates. Only its unit and WireMock tests cover this path.
 
 ### V2 Revocation Reason Handling
 
@@ -878,10 +894,11 @@ pointing a production template at the V2 connector. At minimum, confirm:
 
 ### Renewals and Reissuance
 
-CERTInext V2 has no *renew* endpoint. It documents a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious` and `revokeReason`), which the plugin does not use.
+CERTInext V2 has no *renew* endpoint, but SSL/TLS certificates have a `/reissue` endpoint, which the plugin uses for reissues (see [V2 reissue](#v2-reissue)).
 
-- **Every enrollment type places a new order.** `New`, `Renew`, `Reissue`, and `RenewOrReissue` all take the same path as a new enrollment, without V1's renewal-window logic.
-- **The prior order is untouched.** The old order and certificate stay issued and are not auto-revoked. Command links the old and new certificates through history only.
+- **Reissue uses the reissue endpoint.** An SSL/TLS `Reissue`, or a `RenewOrReissue` outside `RenewalWindowDays`, creates a derived order (`…R001`) from the original. If CERTInext refuses (404 or 422), or the prior order can't be found, a new order is placed instead.
+- **Renewals still place a new order.** This applies to `New`, `Renew`, a `RenewOrReissue` inside the window, and every Private PKI enrollment.
+- **The prior order is untouched by default.** Set `V2ReissueRevokePrevious` to `true` to have a reissue revoke the previous certificate (`superseded`). Renewals never revoke it. Command links the old and new certificates through history only.
 - **Each renewal is billed as a new order.** Confirm with eMudhra how your account treats renewals before you rely on free renewals within a subscription term.
 
 ### Revocation Reasons After Migrating
@@ -897,8 +914,7 @@ deployment, but decide with these in mind rather than discovering them after cut
 - **DCV for SSL.com-validated domains isn't validated live.** The plugin detects `validatedBy: SSLCOM` and publishes SSL.com's own `dns-txt` record, but the sandbox has no such domains. A domain that SSL.com offers only `dns-cname` or `http-url` for stays pending.
 - **Document Signer (`ProductFamily=signature`) enrollment isn't supported.** It fails before any
   order is placed.
-- **Every renewal/reissue places a new order.** See [Renewals and Reissuance](#renewals-and-reissuance)
-  above.
+- **Renewals place a new order; reissue is unverified live.** SSL/TLS reissues use the reissue endpoint, but the sandbox stopped generating certificates before it could be tested end to end. See [Renewals and Reissuance](#renewals-and-reissuance) above.
 - **`OrganizationNumber` is required to enroll OV/EV via V2.** V2 OV/EV orders send
   `organization.organizationNumber` with `preVetted=true` (mirroring V1's
   `organizationDetails.preVetting`); omitting it fails the enrollment. If your account relies on
@@ -1235,7 +1251,7 @@ A failed lookup, or a domain with no row, takes the order-level flow above, as b
 
 ### Certificate Enrollment
 
-When a requester submits a certificate request through Keyfactor Command, the plugin translates the request into a CERTInext order and returns the result. V1 and V2 follow different flows. V1 handles renewals specially (see [V1 renewal and RenewOrReissue](#v1-renewal-and-reneworreissue)), while V2 places a new order for every enrollment type.
+When a requester submits a certificate request through Keyfactor Command, the plugin translates the request into a CERTInext order and returns the result. V1 and V2 follow different flows. V1 handles renewals specially (see [V1 renewal and RenewOrReissue](#v1-renewal-and-reneworreissue)). V2 places a new order for every enrollment type except an SSL/TLS reissue, which uses the reissue endpoint ([V2 reissue](#v2-reissue)).
 
 #### V1 enrollment (New or Reissue)
 
@@ -1312,7 +1328,7 @@ flowchart TD
 
 #### V2 enrollment flow
 
-With `UseV2Api = true`, every enrollment type (New, Reissue, Renew, RenewOrReissue) takes the same path and places a new order. The plugin checks the request locally first, so a template or request that can never succeed is rejected before any order is placed.
+With `UseV2Api = true`, every enrollment type takes the same path. The one exception is an SSL/TLS reissue, which calls the reissue endpoint in place of the create call ([V2 reissue](#v2-reissue)); everything else places a new order. The plugin checks the request locally first, so a template or request that can never succeed is rejected before any order is placed.
 
 ```mermaid
 flowchart TD

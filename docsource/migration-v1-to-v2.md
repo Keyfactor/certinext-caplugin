@@ -188,10 +188,11 @@ pointing a production template at the V2 connector. At minimum, confirm:
 
 ### Renewals and Reissuance
 
-CERTInext V2 has no *renew* endpoint. It documents a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious` and `revokeReason`), which the plugin does not use.
+CERTInext V2 has no *renew* endpoint, but SSL/TLS certificates have a `/reissue` endpoint, which the plugin uses for reissues (see [V2 reissue](#v2-reissue)).
 
-- **Every enrollment type places a new order.** `New`, `Renew`, `Reissue`, and `RenewOrReissue` all take the same path as a new enrollment, without V1's renewal-window logic.
-- **The prior order is untouched.** The old order and certificate stay issued and are not auto-revoked. Command links the old and new certificates through history only.
+- **Reissue uses the reissue endpoint.** An SSL/TLS `Reissue`, or a `RenewOrReissue` outside `RenewalWindowDays`, creates a derived order (`…R001`) from the original. If CERTInext refuses (404 or 422), or the prior order can't be found, a new order is placed instead.
+- **Renewals still place a new order.** This applies to `New`, `Renew`, a `RenewOrReissue` inside the window, and every Private PKI enrollment.
+- **The prior order is untouched by default.** Set `V2ReissueRevokePrevious` to `true` to have a reissue revoke the previous certificate (`superseded`). Renewals never revoke it. Command links the old and new certificates through history only.
 - **Each renewal is billed as a new order.** Confirm with eMudhra how your account treats renewals before you rely on free renewals within a subscription term.
 
 ### Revocation Reasons After Migrating
@@ -207,8 +208,7 @@ deployment, but decide with these in mind rather than discovering them after cut
 - **DCV for SSL.com-validated domains isn't validated live.** The plugin detects `validatedBy: SSLCOM` and publishes SSL.com's own `dns-txt` record, but the sandbox has no such domains. A domain that SSL.com offers only `dns-cname` or `http-url` for stays pending.
 - **Document Signer (`ProductFamily=signature`) enrollment isn't supported.** It fails before any
   order is placed.
-- **Every renewal/reissue places a new order.** See [Renewals and Reissuance](#renewals-and-reissuance)
-  above.
+- **Renewals place a new order; reissue is unverified live.** SSL/TLS reissues use the reissue endpoint, but the sandbox stopped generating certificates before it could be tested end to end. See [Renewals and Reissuance](#renewals-and-reissuance) above.
 - **`OrganizationNumber` is required to enroll OV/EV via V2.** V2 OV/EV orders send
   `organization.organizationNumber` with `preVetted=true` (mirroring V1's
   `organizationDetails.preVetting`); omitting it fails the enrollment. If your account relies on

@@ -91,6 +91,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // V1 and V2: sync does not emit pending or issued orders younger than this (issue 0090).
             public const string SyncRecentOrderGraceSeconds = "SyncRecentOrderGraceSeconds";
             public const string V2InlineCsr = "V2InlineCsr"; // opt-in: SSL/TLS sends the CSR inline on create (V2 only)
+            // V2 SSL/TLS reissue via POST /ssl-certificates/{id}/reissue: also revoke the prior certificate (default off).
+            public const string V2ReissueRevokePrevious = "V2ReissueRevokePrevious";
             // V2 OV/EV orders: opt-in submission of the organization to SSL.com for validation, which
             // accepts SSL.com's subscriber agreement on the organization's behalf (default off).
             public const string SslComSubmitOrganization = "SslComSubmitOrganization";
@@ -498,6 +500,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // DcvDetails/domain-row validatedBy value for SSL.com; absent means emSign.
             public const string ValidatedBySslCom          = "SSLCOM";
             public const string DcvMethodDnsTxt            = "dns-txt";
+
+            // POST /ssl-certificates/{orderId}/reissue (ReissueRequest.mode). The plugin always rekeys:
+            // Command sends a new CSR and gives no signal that only the SANs changed.
+            public const string ReissueModeRekey           = "rekey";
+            public const string ReissueReason              = "Reissued via Keyfactor Command AnyCA REST Gateway.";
             // SSL.com caStatus on GET .../dcv once the domain is validated.
             public const string SslComCaStatusValidated    = "VALIDATED";
 
