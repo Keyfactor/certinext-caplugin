@@ -59,6 +59,9 @@
 - V1 `IgnoreExpired` isn't applied yet; it works on V2.
 - V1 `AuthMode=OAuth` isn't supported: the live V1 API ignores the bearer token, so V1 needs an access key.
 - The V2 incremental sync doesn't yet skip orders the gateway already holds unchanged, as the V1 incremental sync does from 1.0.2, so it re-reads each order listed.
+- Without a template `ProductCode`, the product CERTInext resolves depends on the account's catalog. Where several products match a variant, CERTInext may pick one that rejects a client CSR. On the sandbox, plain DV resolves to `917` "SSL DV 1 month" instead of `842`. Set `ProductCode` on the template to choose the product.
+- DCV for domains validated by SSL.com (after the issuing-CA change) isn't supported yet: SSL.com supplies the record name and value through the domain-level DCV endpoints, and the plugin still publishes `DcvTxtRecordTemplate` records through the order-level endpoint.
+- Command's enrollment workflow can give up at 60 s, before the 75 s pickup ceiling. When it does, Command records the enrollment as failed even though the order continues at CERTInext, so the certificate can only arrive through a later sync.
 
 # 1.0.2
 
