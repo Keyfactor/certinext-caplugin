@@ -177,7 +177,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Requestor      = new V2Requestor { Name = "Test", Email = "t@t.com", Phone = "555", Designation = "IT" },
                     Certificate    = new V2CertificateParams { Domain = "example.com" },
                     Subscription   = new V2SubscriptionParams { ValidityYears = 1 },
-                    Agreement      = new V2AgreementParams { SignerName = "Test", SignerIp = "1.2.3.4", SignerPlace = "NY", Accepted = true }
+                    Agreement      = new V2AgreementParams { SignerName = "Test", SignerPlace = "NY", Accepted = true }
                 });
 
             result.OrderId.Should().Be(MockCertificateData.V2OrderId1);
@@ -206,7 +206,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Requestor    = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
                     Certificate  = new V2CertificateParams { Domain = "example.com" },
                     Subscription = new V2SubscriptionParams(),
-                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerPlace = "NY", Accepted = true }
                 });
 
             result.Should().NotBeNull();
@@ -274,7 +274,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Requestor    = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
                     Certificate  = new V2CertificateParams { Domain = "example.com" },
                     Subscription = new V2SubscriptionParams(),
-                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerPlace = "NY", Accepted = true }
                 });
 
             var entry = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates");
@@ -362,7 +362,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                         AdditionalDomains = new List<string> { "san1.example.com", "san2.example.com" }
                     },
                     Subscription = new V2SubscriptionParams(),
-                    Agreement    = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                    Agreement    = new V2AgreementParams { SignerName = "T", SignerPlace = "NY", Accepted = true }
                 });
 
             string requestBody = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates")
@@ -392,7 +392,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     Requestor      = new V2Requestor { Name = "T", Email = "t@t.com", Phone = "1", Designation = "IT" },
                     Certificate    = new V2CertificateParams { Domain = "example.com" }, // AdditionalDomains left null
                     Subscription   = new V2SubscriptionParams(),
-                    Agreement      = new V2AgreementParams { SignerName = "T", SignerIp = "1.1.1.1", SignerPlace = "NY", Accepted = true }
+                    Agreement      = new V2AgreementParams { SignerName = "T", SignerPlace = "NY", Accepted = true }
                 });
 
             string requestBody = _server.LogEntries.Last(e => e.RequestMessage.Path == "/api/certinext/v2/ssl-certificates")

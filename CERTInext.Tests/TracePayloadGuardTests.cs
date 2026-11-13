@@ -217,7 +217,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             Requestor = new V2Requestor { Name = RequestorName, Email = RequestorEmail, Phone = "555", Designation = "IT" },
             Certificate = new V2CertificateParams { Domain = domain },
             Subscription = new V2SubscriptionParams { ValidityYears = 1 },
-            Agreement = new V2AgreementParams { SignerName = "Test", SignerIp = "1.2.3.4", SignerPlace = "NY", Accepted = true }
+            Agreement = new V2AgreementParams { SignerName = "Test", SignerPlace = "NY", Accepted = true }
         };
 
         private void StubV2PlaceOrder()

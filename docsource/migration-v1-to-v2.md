@@ -73,7 +73,7 @@ New fields `UseV2Api` and `V2SyncLookbackHours` are documented in [V2 API](#v2-a
 | `SubscriptionValidityYears` | Fallback validity when the template's `ValidityYears` is not set. |
 | `TechnicalContactName` / `Email` / `IsdCode` / `MobileNumber` | Sent as the order's `technicalPointOfContact` on SSL/TLS and Private PKI orders. A blank field falls back to the matching `Requestor*` value, as on V1. `designation` is always `Technical Contact`. |
 | `RequestorName` / `RequestorEmail` / `RequestorIsdCode` / `RequestorMobileNumber` / `RequestorDesignation` | Carried into the order's `requestor` block. The phone number is sent as `+<ISD code><number>`, and a blank `RequestorDesignation` is omitted. |
-| `SignerPlace` / `SignerIp` | Carried into the order's `agreement` block. `SignerPlace` is required in V2 mode. |
+| `SignerPlace` / `SignerIp` | `SignerPlace` is carried into the order's `agreement` block and is required in V2 mode. `SignerIp` is V1 only: the V2 agreement block has no IP field, so it is never sent. |
 | `AutoSecureWww` | Controls whether V2 adds the `www.` variant. |
 | `PageSize` | Applies to V2 `/reports/orders` paging, capped at 100 per page. |
 | `PickupRetries` / `PickupDelay` | V2 enrollment polls for a quickly issued certificate the same way V1 does. |
@@ -125,8 +125,8 @@ For each template you're migrating:
    (`ValidateProductInfo`) automatically checks `ProductCode` against the V2 catalog once
    `UseV2Api=true`, so an incorrect code will be caught at template save time, not silently at
    enrollment.
-4. The `DomainName` template parameter takes effect in V2 only. The `SignerName`, `SignerPlace`, and
-   `SignerIp` template parameters take effect in both V1 and V2. `RenewalWindowDays` and `ValidityDays`
+4. The `DomainName` template parameter takes effect in V2 only. The `SignerName` and `SignerPlace`
+   template parameters take effect in both V1 and V2 (`SignerIp` is V1 only). `RenewalWindowDays` and `ValidityDays`
    are V1-only and are ignored.
 5. If the template enrolls for a UCC (multi-domain) or wildcard product, test it on the sandbox first.
    The plugin runs DCV for each domain, but per-SAN, never-validated-domain, and wildcard DCV aren't

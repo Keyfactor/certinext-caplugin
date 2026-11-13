@@ -16,6 +16,7 @@
 - feat(config): V2 orders honor `GroupNumber`, `OrganizationNumber`, `TechnicalContact*`, `EmailNotifications`, and the subscription renewal settings.
 
 ## Bug Fixes
+- fix(v2): Order create no longer sends `agreement.signerIp`, which isn't in the V2 spec's `Agreement` schema; the `SignerIp` settings now apply to V1 only.
 - fix(enroll): V2 UCC and renewal orders keep their SANs and primary domain, and renewals use the template's product code, as V1 does from 1.0.1.
 - fix(enroll): A V2 order auto-approved before it finishes issuing returns pending, not an issued result with no certificate.
 - fix(dcv): Wildcard TXT records are published at the base domain and shared with the apex.
@@ -38,6 +39,7 @@
 - Connectors saved with an `http` `ApiUrl` fail to start until the URL uses https.
 - V2 no longer sends `X-Product-Code` unless the template sets `ProductCode`, and `DefaultProductCode` no longer applies to V2 orders. A template that needs a specific one of several matching catalog products must set `ProductCode`.
 - V2 connectors require `SignerPlace`, and V2 OV/EV orders require `OrganizationNumber`.
+- `SignerIp` (connector and template) is V1 only: V2 no longer sends `agreement.signerIp`, which the V2 spec's agreement schema doesn't define.
 - V2 `ProductVariant` is derived from the selected product when unset.
 - V2 revoke reasons CERTInext rejects are retried with a substitute (see Revocation Reason Codes in the README).
 - V2 `expired` orders are reported as issued, and revoking one is sent to the CA.

@@ -259,7 +259,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 Agreement = new V2AgreementParams
                 {
                     SignerName = "John Signer",
-                    SignerIp = "203.0.113.10",
                     SignerPlace = "Austin"
                 },
                 TechnicalPointOfContact = new V2TechnicalPointOfContact
@@ -286,7 +285,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             output.Should().NotContain("IT Administrator");
             output.Should().NotContain("John Signer");
             output.Should().NotContain("Austin");
-            output.Should().NotContain("203.0.113.10");
             output.Should().NotContain("Tech Contact");
             output.Should().NotContain("tech.contact@example.com");
             output.Should().NotContain("+15559876543");
@@ -331,7 +329,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             output.Should().Contain("\"phone\":\"***REDACTED***\"");
             output.Should().Contain("\"designation\":\"***REDACTED***\"");
             output.Should().Contain("\"signerName\":\"***REDACTED***\"");
-            output.Should().Contain("\"signerIp\":\"***REDACTED***\"");
             output.Should().Contain("\"signerPlace\":\"***REDACTED***\"");
         }
 

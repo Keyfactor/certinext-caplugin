@@ -215,8 +215,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     CountryCode          = "US"
                 },
                 Subscription = new V2SubscriptionParams { ValidityYears = 1, AutoRenew = false },
-                // signerIp deliberately null: not in the signature field table, and the spec's
-                // Accept Agreement note says it "will be ignored" if sent.
+                // No signerIp: the spec's Agreement schema (shared by SSL and signature) has none.
                 Agreement = new V2AgreementParams { SignerName = "Sarah Johnson", SignerPlace = "Washington, DC", Accepted = true },
                 Remarks   = "Document Signer - Natural Person, US"
             };

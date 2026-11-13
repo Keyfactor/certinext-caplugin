@@ -161,17 +161,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
-    /// Subscriber agreement block required for V2 SSL orders.
+    /// Subscriber agreement block required for V2 SSL orders. Mirrors the spec's <c>Agreement</c>
+    /// schema exactly (<c>signerName</c>, <c>signerPlace</c>, <c>accepted</c>), which the SSL and
+    /// Document Signer create bodies share. There is deliberately no <c>signerIp</c>: the schema
+    /// has none (the CA records the signer's IP itself, from the request), so the connector/template
+    /// <c>SignerIp</c> settings are V1-only. The same shape is the body of
+    /// <c>POST .../ssl-certificates/{orderId}/agreement</c> (<c>AgreementAcceptRequest</c>).
     /// </summary>
     public class V2AgreementParams
     {
         [JsonPropertyName("signerName")]
         public string SignerName { get; set; }
-
-        /// <summary>Optional in V2. Omitted from serialisation when null or empty.</summary>
-        [JsonPropertyName("signerIp")]
-        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public string SignerIp { get; set; }
 
         /// <summary>Optional in V2. Omitted from serialisation when null or empty.</summary>
         [JsonPropertyName("signerPlace")]
@@ -433,10 +433,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     /// source-mapping change.
     ///
     /// <see cref="Agreement"/> reuses <see cref="V2AgreementParams"/> (the spec's signature and
-    /// SSL agreement tables are identical: <c>signerName</c>, <c>signerPlace</c>,
-    /// <c>accepted</c>). Leave <see cref="V2AgreementParams.SignerIp"/> null for this family —
-    /// the spec's signature Accept Agreement note says "Do not send <c>signerIp</c> in the body -
-    /// it will be ignored", and the create field table does not list it.
+    /// SSL agreement schemas are identical: <c>signerName</c>, <c>signerPlace</c>,
+    /// <c>accepted</c>; neither has a <c>signerIp</c>).
     /// The optional product-code override is sent as the X-Product-Code header (not in this body).
     /// </summary>
     public class V2CreateSignatureOrderRequest

@@ -196,10 +196,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.SignerIp] = new PropertyConfigInfo
                 {
-                    Comments = "IP address of the subscriber agreement signer. A template-level SignerIp enrollment " +
-                               "parameter overrides it. On V1, if neither is set, the placeholder 127.0.0.1 is sent and a " +
-                               "Warning is logged, and a value that is not an IP address is still sent unchanged, with a " +
-                               "Warning; V2 omits a blank value.",
+                    Comments = "V1 ONLY: IP address of the subscriber agreement signer. A template-level SignerIp " +
+                               "enrollment parameter overrides it. If neither is set, the placeholder 127.0.0.1 is sent " +
+                               "and a Warning is logged, and a value that is not an IP address is still sent unchanged, " +
+                               "with a Warning. Ignored on V2: the V2 agreement block has no signer IP field, so it is " +
+                               "never sent.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -589,9 +590,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.SignerIp] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Per-template signer IP address. Falls back to the connector-level " +
+                    Comments = "V1 ONLY, OPTIONAL: Per-template signer IP address. Falls back to the connector-level " +
                                "SignerIp if omitted. If neither is set, V1 sends the placeholder 127.0.0.1 and logs a " +
-                               "Warning; a V1 value that is not an IP address is sent unchanged, with a Warning.",
+                               "Warning; a V1 value that is not an IP address is sent unchanged, with a Warning. " +
+                               "Ignored on V2 (the V2 agreement block has no signer IP field).",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -751,7 +753,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("SignerPlace")]
         public string SignerPlace { get; set; } = string.Empty;
 
-        /// <summary>Subscriber agreement signer IP address. Required by CERTInext.</summary>
+        /// <summary>Subscriber agreement signer IP address (V1 only; the V2 agreement block has no such field).</summary>
         [JsonPropertyName("SignerIp")]
         public string SignerIp { get; set; } = string.Empty;
 

@@ -634,7 +634,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 Agreement = new V2AgreementParams
                 {
                     SignerName  = _fixture.Config?.RequestorName ?? "Keyfactor Test",
-                    SignerIp    = "127.0.0.1",
                     SignerPlace = "Gateway Lab",
                     Accepted    = true
                 },

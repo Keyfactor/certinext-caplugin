@@ -146,7 +146,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 "\"organization\":{\"organizationNumber\":\"ORG-001\",\"preVetted\":true}," +
                 "\"certificate\":{\"domain\":\"example.com\",\"autoSecureWww\":true,\"additionalDomains\":[\"san1.example.com\",\"san2.example.com\"]}," +
                 "\"subscription\":{\"validityYears\":2,\"autoRenew\":true,\"renewBeforeDays\":15}," +
-                "\"agreement\":{\"signerName\":\"Test User\",\"signerIp\":\"1.2.3.4\",\"signerPlace\":\"New York\",\"accepted\":true}," +
+                "\"agreement\":{\"signerName\":\"Test User\",\"signerPlace\":\"New York\",\"accepted\":true}," +
                 "\"technicalPointOfContact\":{\"name\":\"Tech Person\",\"email\":\"tech@example.com\",\"phone\":\"\\u002B447700900000\",\"designation\":\"Technical Contact\"}," +
                 "\"remarks\":\"Issued via Keyfactor Command AnyCA REST Gateway.\",\"groupNumber\":\"GRP-9\"}");
         }

@@ -2174,7 +2174,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string requestorName  = string.IsNullOrWhiteSpace(ep.RequesterName)  ? _config.RequestorName  : ep.RequesterName;
             string requestorEmail = string.IsNullOrWhiteSpace(ep.RequesterEmail) ? _config.RequestorEmail : ep.RequesterEmail;
             string signerName     = string.IsNullOrWhiteSpace(ep.SignerName)     ? requestorName          : ep.SignerName;
-            string signerIp       = string.IsNullOrWhiteSpace(ep.SignerIp)       ? _config.SignerIp       : ep.SignerIp;
             // signerPlace is resolved (and required for SSL) near the top of this method.
             int validityYears    = ep.ValidityYears > 0 ? ep.ValidityYears
                                   : (int.TryParse(_config.SubscriptionValidityYears, out int cfgYears) && cfgYears > 0 ? cfgYears : 1);
@@ -2289,7 +2288,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Agreement = new V2AgreementParams
                     {
                         SignerName  = signerName,
-                        SignerIp    = string.IsNullOrWhiteSpace(signerIp)    ? null : signerIp,
                         SignerPlace = string.IsNullOrWhiteSpace(signerPlace)  ? null : signerPlace,
                         Accepted    = true
                     },

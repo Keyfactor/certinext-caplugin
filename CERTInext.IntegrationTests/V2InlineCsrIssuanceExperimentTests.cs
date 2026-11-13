@@ -556,7 +556,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 Requestor = new V2Requestor { Name = _requestorName, Email = _requestorEmail, Phone = requestorPhone },
                 Certificate = new V2CertificateParams { Domain = t.Domain, AutoSecureWww = false },
                 Subscription = new V2SubscriptionParams { ValidityYears = 1, AutoRenew = false },
-                Agreement = new V2AgreementParams { SignerName = _requestorName, SignerIp = "127.0.0.1", SignerPlace = "Gateway Lab", Accepted = true },
+                Agreement = new V2AgreementParams { SignerName = _requestorName, SignerPlace = "Gateway Lab", Accepted = true },
                 TechnicalPointOfContact = new V2TechnicalPointOfContact
                 {
                     Name = _requestorName, Email = _requestorEmail, Phone = requestorPhone,
