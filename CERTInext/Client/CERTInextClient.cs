@@ -218,7 +218,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     result.Meta.ErrorCode, result.Meta.ErrorMessage,
                     level: LogLevel.Error);
                 throw new Exception(
-                    $"CERTInext credential validation failed: {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}. " +
+                    $"CERTInext credential validation failed: {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}. " +
                     "See gateway logs for details.");
             }
 
@@ -336,7 +336,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         Logger.LogWarning(
                             "PlaceOrder hit rate-limit-shaped error \"{ErrorMessage}\" (attempt {Attempt}/{Max}). " +
                             "Backing off {WaitSeconds:F1}s before retrying. See Troubleshooting in README for context.",
-                            result.Meta.ErrorMessage, attempt, RateLimitMaxAttempts, waitSeconds);
+                            MaskCaText(result.Meta.ErrorMessage), attempt, RateLimitMaxAttempts, waitSeconds);
                         try
                         {
                             await Task.Delay(TimeSpan.FromSeconds(waitSeconds), ct);
@@ -374,7 +374,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     }
 
                     throw new Exception(
-                        $"CERTInext order failed: {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}. " +
+                        $"CERTInext order failed: {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}. " +
                         "See gateway logs for details.");
                 }
 
@@ -498,10 +498,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 if (result.Meta.ErrorCode != null &&
                     (result.Meta.ErrorCode.StartsWith("EMS-9") || result.Meta.ErrorMessage?.Contains("not found", StringComparison.OrdinalIgnoreCase) == true))
                 {
-                    throw new KeyNotFoundException($"Order '{orderNumber}' was not found in CERTInext. Error: {result.Meta.ErrorMessage}");
+                    throw new KeyNotFoundException($"Order '{orderNumber}' was not found in CERTInext. Error: {MaskCaText(result.Meta.ErrorMessage)}");
                 }
                 throw new Exception(
-                    $"CERTInext TrackOrder failed for order '{orderNumber}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
+                    $"CERTInext TrackOrder failed for order '{orderNumber}': {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}.");
             }
 
             Logger.MethodExit(LogLevel.Trace);
@@ -550,7 +550,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 LogApiFailure($"{Constants.Api.GetCertificatePath} {orderNumber}", resp,
                     result.Meta.ErrorCode, result.Meta.ErrorMessage);
                 throw new Exception(
-                    $"CERTInext GetCertificate failed for order '{orderNumber}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
+                    $"CERTInext GetCertificate failed for order '{orderNumber}': {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}.");
             }
 
             Logger.MethodExit(LogLevel.Trace);
@@ -593,7 +593,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 }
 
                 string errMsg = ExtractErrorMessage(resp.Content,
-                    $"revoke order {request.RevocationDetails?.OrderNumber}");
+                    $"revoke order {request.RevocationDetails?.OrderNumber}",
+                    logSensitiveRequestData: _config.LogSensitiveRequestData);
                 Logger.LogError(
                     "RevokeOrder API call failed. OrderNumber={OrderNumber}, HttpStatus={Status}, Error={Error}",
                     request.RevocationDetails?.OrderNumber, (int)resp.StatusCode, errMsg);
@@ -613,7 +614,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             resp, revResp.Meta.ErrorCode, revResp.Meta.ErrorMessage);
                         throw new Exception(
                             $"CERTInext RevokeOrder returned failure for order " +
-                            $"'{request.RevocationDetails?.OrderNumber}': {revResp.Meta.ErrorMessage ?? revResp.Meta.ErrorCode}.");
+                            $"'{request.RevocationDetails?.OrderNumber}': {MaskCaText(revResp.Meta.ErrorMessage) ?? revResp.Meta.ErrorCode}.");
                     }
                 }
                 catch (JsonException)
@@ -1171,7 +1172,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     $"{Constants.Api.GetDcvPath} {orderNumber}/{domainName}",
                     resp, result.Meta.ErrorCode, result.Meta.ErrorMessage);
                 throw new Exception(
-                    $"CERTInext GetDcv failed for order '{orderNumber}' domain '{domainName}': {result.Meta.ErrorMessage ?? result.Meta.ErrorCode}.");
+                    $"CERTInext GetDcv failed for order '{orderNumber}' domain '{domainName}': {MaskCaText(result.Meta.ErrorMessage) ?? result.Meta.ErrorCode}.");
             }
 
             // SOX CC7.3: log token presence (never value) so each DCV step is independently
@@ -1244,7 +1245,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             $"{Constants.Api.VerifyDcvPath} {orderNumber}/{domainName}",
                             resp, verifyResp.Meta.ErrorCode, verifyResp.Meta.ErrorMessage);
                         throw new Exception(
-                            $"CERTInext VerifyDcv returned failure for order '{orderNumber}' domain '{domainName}': {verifyResp.Meta.ErrorMessage ?? verifyResp.Meta.ErrorCode}.");
+                            $"CERTInext VerifyDcv returned failure for order '{orderNumber}' domain '{domainName}': {MaskCaText(verifyResp.Meta.ErrorMessage) ?? verifyResp.Meta.ErrorCode}.");
                     }
                 }
                 catch (JsonException) { /* non-JSON 200 body is acceptable */ }
@@ -1604,7 +1605,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 // than presuming "not in issued state" — 422s here cover multiple
                 // distinct conditions (EMS-969 revoke reason ID missing, sandbox-timing
                 // "Certificate Request still being processed", etc.).
-                string detail = ExtractV2ErrorMessage(resp.Content, "V2 revoke");
+                string detail = ExtractV2ErrorMessage(resp.Content, "V2 revoke", _config.LogSensitiveRequestData);
                 // Compliance finding: same audit-trail requirement as the 404 branch above —
                 // this also returns before ThrowOnV2Failure would otherwise log it.
                 Logger.LogWarning(
@@ -1739,7 +1740,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
             if (resp.StatusCode == (HttpStatusCode)422)
             {
-                string detail = ExtractV2ErrorMessage(resp.Content, "V2 verify DCV");
+                string detail = ExtractV2ErrorMessage(resp.Content, "V2 verify DCV", _config.LogSensitiveRequestData);
                 throw new InvalidOperationException(
                     $"V2 DCV verification failed for order '{orderId}', domain '{domain}'. {detail}");
             }
@@ -2168,14 +2169,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             if (resp.StatusCode == HttpStatusCode.Forbidden)
             {
                 LogV2ApiFailure(operation, resp, LogLevel.Error);
-                string hint = ExtractV2ErrorMessage(resp.Content, operation);
+                string hint = ExtractV2ErrorMessage(resp.Content, operation, _config.LogSensitiveRequestData);
                 throw new Exception(
                     $"V2 access denied during '{operation}'. HTTP 403. {hint} " +
                     "If error code is EMS-2022, ensure OAuth2 is enabled in the CERTInext portal.");
             }
 
             LogV2ApiFailure(operation, resp, LogLevel.Warning);
-            string msg = ExtractV2ErrorMessage(resp.Content, operation);
+            string msg = ExtractV2ErrorMessage(resp.Content, operation, _config.LogSensitiveRequestData);
             throw new Exception($"CERTInext V2 API error during '{operation}'. HTTP {(int)resp.StatusCode}. {msg}");
         }
 
@@ -2204,9 +2205,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
 
         /// <summary>
         /// Parses an RFC 7807 problem+json body and returns a human-readable message.
-        /// Falls back to a generic message on parse failure.
+        /// Falls back to a generic message on parse failure. The CA-supplied text (<c>title</c>,
+        /// <c>detail</c>, per-field <c>errors[]</c>) goes through <see cref="LogSanitizer.SanitizeCaText"/>
+        /// because it can echo a submitted value such as an email address;
+        /// <paramref name="logSensitiveRequestData"/> defaults to <c>false</c> so a caller that omits
+        /// it fails closed.
         /// </summary>
-        private static string ExtractV2ErrorMessage(string content, string operation)
+        private static string ExtractV2ErrorMessage(string content, string operation, bool logSensitiveRequestData = false)
         {
             if (string.IsNullOrWhiteSpace(content))
                 return $"CERTInext V2 returned no body for '{operation}'.";
@@ -2237,7 +2242,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     }
 
                     if (!string.IsNullOrWhiteSpace(msg))
-                        return msg;
+                        return LogSanitizer.SanitizeCaText(msg, logSensitiveRequestData);
                 }
             }
             catch
@@ -2846,7 +2851,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 // body here is usually not from the V1 application at all (e.g. ApiUrl missing the
                 // /emSignHub-API/ segment). Log the redacted body and put the HTTP status in the
                 // message so "See gateway logs for details" has something to point at.
-                string errMsg = ExtractErrorMessage(resp.Content, operation, (int)resp.StatusCode);
+                string errMsg = ExtractErrorMessage(
+                    resp.Content, operation, (int)resp.StatusCode, _config.LogSensitiveRequestData);
                 LogApiFailure(operation, resp, errorMessage: errMsg, level: LogLevel.Error);
                 throw new Exception(errMsg);
             }
@@ -3286,6 +3292,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         /// the SIEM-alert level convention.
         /// </summary>
         // Instance (not static) so it can read _config.LogSensitiveRequestData.
+        // The errorMessage argument is CA-supplied text and is masked here (idempotently), so callers
+        // may pass it raw or already masked.
         private void LogApiFailure(
             string operationContext,
             RestResponse resp,
@@ -3301,11 +3309,25 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 operationContext,
                 (int?)resp?.StatusCode ?? 0,
                 errorCode ?? "(none)",
-                errorMessage ?? "(none)",
+                MaskCaText(errorMessage) ?? "(none)",
                 Truncate(sanitizedBody, LoggedResponseBodyCapBytes));
         }
 
-        internal static string ExtractErrorMessage(string content, string operation, int? httpStatus = null)
+        /// <summary>
+        /// Masks email-shaped tokens in, and strips CR/LF from, CA-supplied error text unless
+        /// <c>LogSensitiveRequestData</c> is on. Use for every CA message that reaches a log line or
+        /// an exception message; feed <see cref="IsRateLimitSurface"/> the raw text instead.
+        /// </summary>
+        private string MaskCaText(string text) => LogSanitizer.SanitizeCaText(text, _config.LogSensitiveRequestData);
+
+        /// <summary>
+        /// Builds the exception/log message for a non-success CERTInext body. CA-supplied text
+        /// (<c>meta.errorMessage</c>, <c>meta.errorCode</c>, legacy <c>message</c>) goes through
+        /// <see cref="LogSanitizer.SanitizeCaText"/>; <paramref name="logSensitiveRequestData"/>
+        /// defaults to <c>false</c> so a caller that omits it fails closed.
+        /// </summary>
+        internal static string ExtractErrorMessage(
+            string content, string operation, int? httpStatus = null, bool logSensitiveRequestData = false)
         {
             string status = httpStatus.HasValue ? $" (HTTP {httpStatus.Value})" : string.Empty;
 
@@ -3329,15 +3351,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 {
                     string errMsg = null;
                     string errCode = null;
-                    if (meta.TryGetProperty("errorMessage", out var em)) errMsg = em.GetString();
-                    if (meta.TryGetProperty("errorCode", out var ec)) errCode = ec.GetString();
+                    if (meta.TryGetProperty("errorMessage", out var em))
+                        errMsg = LogSanitizer.SanitizeCaText(em.GetString(), logSensitiveRequestData);
+                    if (meta.TryGetProperty("errorCode", out var ec))
+                        errCode = LogSanitizer.SanitizeCaText(ec.GetString(), logSensitiveRequestData);
                     if (!string.IsNullOrWhiteSpace(errMsg) || !string.IsNullOrWhiteSpace(errCode))
                         return $"CERTInext error during '{operation}'{status}: {errMsg ?? errCode} [{errCode}]";
                 }
 
                 // Fall back to legacy ApiErrorResponse shape
                 if (doc.RootElement.TryGetProperty("message", out var legacyMsg))
-                    return $"CERTInext error during '{operation}'{status}: {legacyMsg.GetString()}";
+                    return $"CERTInext error during '{operation}'{status}: {LogSanitizer.SanitizeCaText(legacyMsg.GetString(), logSensitiveRequestData)}";
             }
             catch
             {
