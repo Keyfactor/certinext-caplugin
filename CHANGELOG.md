@@ -37,6 +37,7 @@
 ## Chores
 - chore(compat): Requires AnyCA Gateway REST 26.2.0 or later; built against `IAnyCAPlugin` 3.3.0 with DNS-01 DCV included.
 - chore(compat): The plugin targets both `net8.0` and `net10.0`.
+- chore(v2): The V2 organization block's optional pre-vetting token serializes as the spec's `prevettingToken` (was `preVettingToken`). Nothing sets it yet, so requests are unchanged.
 
 ## Upgrade Notes
 - AnyCA Gateway REST 25.5.x isn't supported; upgrade the gateway to 26.2.0 or later (Command 25.5 or later works with it).

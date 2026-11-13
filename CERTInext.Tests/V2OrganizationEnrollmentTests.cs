@@ -1,16 +1,9 @@
 // Copyright 2026 Keyfactor
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions
+// and limitations under the License.
 
 using System;
 using System.Collections.Generic;
@@ -234,8 +227,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             json.Should().Contain("\"organization\"");
             json.Should().Contain("\"organizationNumber\":\"ORG-999\"");
             json.Should().Contain("\"preVetted\":true");
-            // preVettingToken is optional and unset here — must be omitted, not sent as null.
-            json.Should().NotContain("preVettingToken");
+            // prevettingToken is optional and unset here — must be omitted, not sent as null.
+            json.Should().NotContainEquivalentOf("prevettingToken");
+        }
+
+        [Fact]
+        public void V2OrganizationParams_Serialization_UsesSpecSpellingPrevettingToken()
+        {
+            var org = new V2OrganizationParams { OrganizationNumber = "ORG-999", PreVettingToken = "tok-123" };
+
+            string json = JsonSerializer.Serialize(org);
+
+            json.Should().Be("{\"organizationNumber\":\"ORG-999\",\"preVetted\":true,\"prevettingToken\":\"tok-123\"}",
+                "the spec's SslOrganizationRef names the field prevettingToken (lower-case v)");
         }
 
         [Fact]

@@ -90,9 +90,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         /// <summary>
         /// Optional per spec (re-vetting flow token). Not currently surfaced as plugin config;
-        /// omitted from the wire body when null/empty.
+        /// omitted from the wire body when null/empty. The wire name is the spec schema's
+        /// <c>SslOrganizationRef.prevettingToken</c> (lower-case "v"); an older spec example spelled
+        /// it <c>preVettingToken</c>.
         /// </summary>
-        [JsonPropertyName("preVettingToken")]
+        [JsonPropertyName("prevettingToken")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string PreVettingToken { get; set; }
     }
