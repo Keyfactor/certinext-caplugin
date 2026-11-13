@@ -5,6 +5,11 @@ the Keyfactor AnyCA REST Gateway. Walks an operator from "plugin DLL is
 on the gateway pod" to "Keyfactor Command can enroll an end-entity
 certificate through the plugin" with copy-pasteable scripts.
 
+> **This is a V1 / AccessKey guide.** The V1 API authenticates with an
+> access key only. The V2 API authenticates with OAuth2 only; for V2
+> connector settings, see the
+> [V1 to V2 migration guide](docsource/migration-v1-to-v2.md).
+
 Each step is shown twice: a Bash + curl block and a PowerShell block.
 Use whichever fits your shell. Variables flow forward through the doc,
 so set them once and reuse them.
@@ -24,8 +29,10 @@ so set them once and reuse them.
 6. **Enroll a test certificate** end-to-end
 
 The CERTInext sandbox returns orders in `EXTERNAL_VALIDATION` status
-(pending DCV or manual review), so the final enrollment test reports a
-pending result by design — that's success.
+(pending DCV or manual review), so the final enrollment test normally
+reports a pending result by design — that's success. If DCV is operational
+(see [Prerequisites](#prerequisites)), a DV order can instead be issued
+within the same enrollment call.
 
 ### Data model & dependency order
 
@@ -63,7 +70,7 @@ again inline in each step's intro:
 | Step | Reference file |
 |---|---|
 | 2 — gateway profiles | [`docs/reference/gateway/certificate-profiles.json`](docs/reference/gateway/certificate-profiles.json) |
-| 3 — gateway CA config | not GET-able (HTTP 405); see [`docs/reference/gateway/claims.json`](docs/reference/gateway/claims.json) for the authz table this step seeds |
+| 3 — gateway CA config | not GET-able (HTTP 405); see [`docs/reference/gateway/claims.json`](docs/reference/gateway/claims.json) for the related authorization table |
 | 4 — Command CA | [`docs/reference/command/certificate-authority.json`](docs/reference/command/certificate-authority.json) |
 | 5 — Command templates | [`docs/reference/command/templates-certinext.json`](docs/reference/command/templates-certinext.json) |
 
@@ -73,8 +80,9 @@ again inline in each step's intro:
 
 | Component | Required state |
 |---|---|
-| Keyfactor Command | Deployed and reachable at `${COMMAND_URL}` |
-| AnyCA REST Gateway | Deployed and reachable at `${GATEWAY_URL}` |
+| Keyfactor Command | 25.5 or later, deployed and reachable at `${COMMAND_URL}` |
+| AnyCA Gateway REST | 26.2.0 or later (provides `IAnyCAPlugin` 3.3.0), deployed and reachable at `${GATEWAY_URL}` |
+| DNS provider plugin | Required for DV auto-issuance. DCV is on by default (`DcvEnabled` defaults to `true`), so a DNS provider plugin must be deployed on the gateway for DV orders to complete |
 | CERTInext plugin DLL | Already staged at `/app/Extensions/certinext-caplugin/` on the gateway pod; gateway has been restarted since |
 | Identity Provider | OIDC client credentials issued for both the gateway and Command (Authentik, Keycloak, Entra, etc.) |
 | CERTInext sandbox account | AccessKey, AccountNumber, GroupNumber, OrganizationNumber, registered requestor email |
@@ -216,9 +224,11 @@ if (-not $CmdToken) { throw "command token mint failed" }
 
 > **Reference state after this step:** see
 > [`docs/reference/gateway/certificate-profiles.json`](docs/reference/gateway/certificate-profiles.json)
-> for the final 8-profile shape (one per sandbox product) the gateway
-> returns from `GET /AnyGatewayREST/config/certificateprofile` after
-> all profiles are in place.
+> for the final 8-profile shape (eight of the ten advertised products;
+> the two EV products are not included) the gateway returns from
+> `GET /AnyGatewayREST/config/certificateprofile` after all profiles are
+> in place. That capture is deliberately broader than the policy used
+> below; see [Key algorithm policy](#key-algorithm-policy).
 
 A **certificate profile** on the gateway is a top-level resource: a
 named key-algorithm policy that's independent of any CA. CA
@@ -228,22 +238,22 @@ through their `Templates[]` array, so the profile must exist first.
 The profile sets the key constraints (allowed algorithms, sizes,
 curves) the gateway enforces on incoming CSRs / key generations for any
 ProductID bound to it. One profile can be shared by many CA configs;
-in this guide we use a 1-to-1 profile-per-ProductID convention because
-the `WirePlugin` code path in `kfclab` does the same.
+in this guide we use a 1-to-1 profile-per-ProductID convention, which is
+also what `scripts/register/01-gateway-profiles.sh` does.
 
 Without an explicit `key_algs` block the gateway uses an empty default
 that Command interprets as "no key types allowed" — PFX enrollment then
 fails with `0xA0110004` ("Key type 'RSA' is unsupported or disallowed by
-policy"). The body below is the canonical "permit everything we care
-about" payload.
+policy"). This cause is reported from the field; it is not verified in
+this repo. The body below permits exactly the key types CERTInext accepts
+(see [Key algorithm policy](#key-algorithm-policy)).
 
 ### Bash
 
 ```bash
 KEY_ALGS='{
-  "rsa":     {"bit_lengths":[2048,3072,4096]},
-  "ecdsa":   {"curves":["1.2.840.10045.3.1.7","1.3.132.0.34","1.3.132.0.35"]},
-  "ed25519": {"bit_lengths":[255]}
+  "rsa":   {"bit_lengths":[2048,3072,4096]},
+  "ecdsa": {"curves":["1.2.840.10045.3.1.7","1.3.132.0.34"]}
 }'
 
 PROFILE_BODY=$(jq -n \
@@ -279,13 +289,11 @@ curl -sk -X PUT "${GATEWAY_URL}/AnyGatewayREST/config/certificateprofile" \
 
 ```powershell
 $KeyAlgs = @{
-    rsa     = @{ bit_lengths = @(2048, 3072, 4096) }
-    ecdsa   = @{ curves = @(
+    rsa   = @{ bit_lengths = @(2048, 3072, 4096) }
+    ecdsa = @{ curves = @(
         "1.2.840.10045.3.1.7",   # secp256r1 (P-256)
-        "1.3.132.0.34",          # secp384r1 (P-384)
-        "1.3.132.0.35"           # secp521r1 (P-521)
+        "1.3.132.0.34"           # secp384r1 (P-384)
     ) }
-    ed25519 = @{ bit_lengths = @(255) }
 }
 
 $ProfileBody = @{
@@ -322,15 +330,45 @@ try {
 }
 ```
 
-> **Note on CERTInext key algorithm restrictions:** The gateway profile's `key_algs` block defines what Command *allows* — it does not reflect what CERTInext will accept. CERTInext additionally restricts enrollments to RSA 2048/3072/4096 and ECC P-256/P-384. Orders submitted with P-521, Ed25519, Ed448, or RSA larger than 4096 bits are accepted by Command and the gateway but rejected by CERTInext with `Invalid key size`. Configure your profiles and templates to only permit the key types CERTInext supports.
+### Key algorithm policy
 
-> **Doing this for all 8 non-EV sandbox products?** Wrap Steps 2 and 3 in a
-> loop over the (ProductID, ProductCode) pairs. The sandbox non-EV product
-> codes are 842 (DV SSL), 843 (DV Wildcard), 844 (DV UCC), 845 (DV
-> Wildcard UCC), 846 (OV SSL), 847 (OV Wildcard), 848 (OV UCC), 849
-> (OV Wildcard UCC). EV SSL (850) and EV UCC (851) require additional
-> `contractSignerInfo`, `certificateApproverInfo`, and org/contract fields
-> beyond the base product set.
+The gateway profile's `key_algs` block defines what Command *allows*. It
+does not reflect what CERTInext accepts. CERTInext rejects unsupported
+keys with `Invalid key size` even though Command and the gateway accept
+them, so permit only the supported types in your profiles:
+
+| Key type | CERTInext |
+|---|---|
+| RSA 2048, 3072, 4096 | Accepted |
+| ECC P-256, P-384 | Accepted |
+| RSA 6144 / 8192 | Rejected (`Invalid key size`) |
+| ECC P-521 | Rejected |
+| Ed25519, Ed448 | Rejected |
+
+The reference capture in [`docs/reference/`](docs/reference/README.md)
+permits all of the rejected types too; it records one lab's state and is
+not a recommended policy.
+
+### All eight non-EV products
+
+To register all eight non-EV sandbox products, loop Steps 2 and 3 over the
+(ProductID, ProductCode) pairs:
+
+| ProductID | Sandbox ProductCode |
+|---|---|
+| `DV SSL` | 842 |
+| `DV SSL Wildcard` | 843 |
+| `DV SSL Multi-Domain (UCC)` | 844 |
+| `DV SSL Wildcard Multi-Domain (UCC)` | 845 |
+| `OV SSL` | 846 |
+| `OV SSL Wildcard` | 847 |
+| `OV SSL Multi-Domain (UCC)` | 848 |
+| `OV SSL Wildcard Multi-Domain (UCC)` | 849 |
+
+The plugin also advertises `EV SSL` (850) and `EV SSL Multi-Domain (UCC)`
+(851). They need extra `contractSignerInfo`, `certificateApproverInfo`, and
+organization/contract fields beyond the base product set, so they are not
+covered here.
 
 ---
 
@@ -338,9 +376,10 @@ try {
 
 > **Reference state after this step:**
 > [`docs/reference/gateway/claims.json`](docs/reference/gateway/claims.json)
-> shows the gateway authz table — the `akadmin` admin claim is added
-> as part of this step on the kfclab path, so authenticated human users
-> can hit the gateway UI without being denied.
+> shows the gateway authorization (claims) table, which maps OAuth
+> subjects to gateway roles. This step's request body doesn't create
+> claims; `scripts/register/03-gateway-claims.sh` seeds them. Add a claim
+> for every human operator who needs the gateway UI.
 >
 > The CA configuration itself is **not GET-able** (the gateway returns
 > HTTP 405 on `GET /config/configuration` — POST/PUT only), so there's
@@ -367,13 +406,17 @@ The shape uses four top-level keys:
 
 | Key | Purpose |
 |---|---|
-| `CAConnection` | The CERTInext plugin's connection config (auth + identifying numbers). All `RequestorIsdCode`, `RequestorMobileNumber`, `SignerPlace`, `Enabled` etc. live here. |
+| `CAConnection` | The CERTInext plugin's connection config (auth + identifying numbers). Also includes `RequestorIsdCode`, `RequestorMobileNumber`, `SignerPlace`, and `Enabled`. |
 | `GatewayRegistration` | `LogicalName` (what Command will see) + `GatewayCertificate.ImportedCertificate` (PEM blob, base64-of-PEM is also accepted). |
 | `ServiceSettings` | Scan intervals; tune for your environment. |
 | `Templates[]` | The (ProductID → CertificateProfile) mapping. Parameters carry per-product config like `ProductCode` and `ValidityYears`. |
 
 `POST` creates; `PUT` updates an existing config. Most operators end up
 using `PUT` after the first run.
+
+The `CAConnection` body below does not set `DcvEnabled`, so it takes the
+default of `true`. DV orders then need a DNS provider plugin on the gateway
+(see [Prerequisites](#prerequisites)); add `"DcvEnabled": false` to opt out.
 
 ### Bash
 
@@ -503,17 +546,10 @@ try {
 }
 ```
 
-After this completes, the gateway is fully wired to CERTInext. Confirm
-by GETting the configuration back:
-
-```bash
-curl -sk "${GATEWAY_URL}/AnyGatewayREST/config/configuration" \
-  -H "Authorization: Bearer ${GW_TOKEN}" \
-  -H "x-keyfactor-requested-with: APIClient" | jq '.Templates'
-```
-
-You should see your `Templates[]` array with the (ProductID,
-CertificateProfile) entries from above.
+After this completes, the gateway is wired to CERTInext. The configuration
+endpoint is not GET-able (see the note at the top of this step), so confirm
+the POST/PUT returned a 2xx status, then check the result in Step 4 (Command
+registers the CA) and Step 5 (Command imports your `Templates[]`).
 
 ---
 
@@ -530,16 +566,17 @@ CertificateProfile) entries from above.
 Command needs to know the gateway exists and what auth to use when
 talking to it. The CA registration carries the OAuth client used for
 Command-to-gateway calls (the same gateway OAuth client from Step 1) and
-the `ConfigurationTenant` that ties this registration to the gateway's
-plugin (the plugin name — by convention `certinext-caplugin`).
+the `ConfigurationTenant` that ties this registration to the gateway CA
+configuration (the `GatewayRegistration.LogicalName` from Step 3 — by
+convention `certinext-caplugin`).
 
 Important fields:
 
 | Field | Value | Why |
 |---|---|---|
-| `HostName` | `${GATEWAY_URL}/AnyGatewayREST/ejbca/ejbca-rest-api` | All AnyCA REST Gateway plugins are served behind the EJBCA-compatible prefix; Command speaks EJBCA REST to the gateway. |
+| `HostName` | `${GATEWAY_URL}/AnyGatewayREST/ejbca` | The gateway serves plugins behind an EJBCA-compatible prefix; Command speaks EJBCA REST to it. |
 | `CAType` | `1` | HTTPS (AnyCA REST). `0` is DCOM (legacy Windows). |
-| `ConfigurationTenant` | `certinext-caplugin` | Must match the LogicalName the plugin uses; also the value you'll pass to `/Templates/Import` in Step 5. |
+| `ConfigurationTenant` | `certinext-caplugin` | Must match the `GatewayRegistration.LogicalName` from Step 3; also the value you pass to `/Templates/Import` in Step 5. |
 | `Scope` | `keyfactor-anyca-gateway` | The OAuth scope the gateway's token introspection allows. |
 | `ClientSecret` | `{"SecretValue": "..."}` | Command's `KeyfactorSecret` shape; raw strings are rejected with `"Invalid JSON schema. Expected: 'StartObject' Received: 'String'"`. |
 
@@ -548,7 +585,7 @@ Important fields:
 ```bash
 CA_BODY=$(jq -n \
   --arg logical    "${CA_LOGICAL_NAME}" \
-  --arg host       "${GATEWAY_URL}/AnyGatewayREST/ejbca/ejbca-rest-api" \
+  --arg host       "${GATEWAY_URL}/AnyGatewayREST/ejbca" \
   --arg tenant     "${CA_LOGICAL_NAME}" \
   --arg token_url  "${TOKEN_URL}" \
   --arg client_id  "${GW_CLIENT_ID}" \
@@ -561,7 +598,7 @@ CA_BODY=$(jq -n \
   "NewEndEntityOnRenewAndReissue":  true,
   "AllowOneClickRenewals":          true,
   "UseForEnrollment":               true,
-  "KeyRetention":                   "Indefinite",
+  "KeyRetention":                   1,
   "AllowedEnrollmentTypes":         3,
   "FullScan":                       {"Interval": {"Minutes": 720}},
   "IncrementalScan":                {"Interval": {"Minutes": 5}},
@@ -584,13 +621,13 @@ curl -sk -X POST "${COMMAND_URL}/KeyfactorAPI/CertificateAuthorities" \
 ```powershell
 $CaBody = @{
     LogicalName                   = $CaLogicalName
-    HostName                      = "$GatewayUrl/AnyGatewayREST/ejbca/ejbca-rest-api"
+    HostName                      = "$GatewayUrl/AnyGatewayREST/ejbca"
     CAType                        = 1
     ConfigurationTenant           = $CaLogicalName
     NewEndEntityOnRenewAndReissue = $true
     AllowOneClickRenewals         = $true
     UseForEnrollment              = $true
-    KeyRetention                  = "Indefinite"
+    KeyRetention                  = 1
     AllowedEnrollmentTypes        = 3
     FullScan                      = @{ Interval = @{ Minutes = 720 } }
     IncrementalScan               = @{ Interval = @{ Minutes = 5   } }
@@ -627,8 +664,8 @@ curl -sk "${COMMAND_URL}/KeyfactorAPI/CertificateAuthorities" \
 
 > **Reference state after this step:** see
 > [`docs/reference/command/templates-certinext.json`](docs/reference/command/templates-certinext.json)
-> for the 8 templates Command creates from the 8 ProductIDs registered
-> in Step 3 (filtered from `GET /KeyfactorAPI/Templates` by
+> for the 8 templates Command creates from the 8 non-EV ProductIDs
+> registered in Step 3 (filtered from `GET /KeyfactorAPI/Templates` by
 > `ConfigurationTenant=certinext-caplugin`). Confirms the
 > `AnyCA_<ProductID>` naming convention, the `ExtendedKeyUsages` set,
 > the `KeyTypes` list synced from the gateway profile's `key_algs`,
@@ -636,7 +673,8 @@ curl -sk "${COMMAND_URL}/KeyfactorAPI/CertificateAuthorities" \
 
 Command's `/Templates/Import` endpoint asks the registered gateway CA
 for its template list and creates corresponding Command-side templates
-named `AnyCA_<ProductID>` (e.g. `AnyCA_DV SSL`). One call covers every
+with `CommonName` `AnyCA_<ProductID>` (e.g. `AnyCA_DV SSL`). The
+`TemplateName` and `DisplayName` are `AnyCA (<ProductID>)`. One call covers every
 template you defined under `Templates[]` in Step 3.
 
 ### Bash
@@ -654,7 +692,7 @@ curl -sk -X POST "${COMMAND_URL}/KeyfactorAPI/Templates/Import" \
 curl -sk "${COMMAND_URL}/KeyfactorAPI/Templates" \
   -H "Authorization: Bearer ${CMD_TOKEN}" \
   -H "x-keyfactor-requested-with: APIClient" \
-  | jq '[.[] | select(.ShortName | startswith("AnyCA_"))] | map({Id, ShortName, DisplayName})'
+  | jq '[.[] | select(.CommonName | startswith("AnyCA_"))] | map({Id, CommonName, DisplayName})'
 ```
 
 ### PowerShell
@@ -672,8 +710,8 @@ $AllTemplates = Invoke-RestMethod -Method Get `
     -Headers $CmdHeaders -SkipCertificateCheck
 
 $AllTemplates `
-    | Where-Object { $_.ShortName -like "AnyCA_*" } `
-    | Select-Object Id, ShortName, DisplayName
+    | Where-Object { $_.CommonName -like "AnyCA_*" } `
+    | Select-Object Id, CommonName, DisplayName
 ```
 
 > **Re-run after gateway profile changes.** Any time you update the
@@ -681,7 +719,8 @@ $AllTemplates `
 > call — Command caches the allowed key types per-template in
 > `dbo.KeyAlgorithms` and only refreshes them through this endpoint. If
 > you skip the re-import, PFX enrollment continues to fail with
-> `0xA0110004` despite the gateway being correct.
+> `0xA0110004` despite the gateway being correct. (Reported from the
+> field; the Command internals are not verified in this repo.)
 
 ---
 
@@ -789,18 +828,18 @@ sync pulls down the actual certificate.
   Useful when the requesting system already has a keypair it doesn't
   want to surface to Command.
 - **Sandbox quota.** The CERTInext sandbox enforces a burst rate limit
-  that surfaces as the misleading error string `"Inactive Account
-  User."`. If you're submitting many test orders in tight succession
-  and start seeing that error, throttle to one order every 1-2 seconds
-  and wait ~5-25 minutes for the cooldown. Tracking issue:
-  [Keyfactor/certinext-caplugin#8](https://github.com/Keyfactor/certinext-caplugin/issues/8).
+  that surfaces as the misleading error `"Inactive Account User."`.
+  - Rule: submit at most one test order every 1-2 seconds.
+  - Wait: 30-60 seconds after hitting the error, then retry one order.
+  - Details: [Troubleshooting in overview.md](docsource/overview.md#inactive-account-user-returned-from-generateorderssl)
+    and issue [Keyfactor/certinext-caplugin#8](https://github.com/Keyfactor/certinext-caplugin/issues/8).
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Step 5 returns 0 templates imported | `ConfigurationTenant` doesn't match between Steps 3 and 4 | Re-check both call to make sure the LogicalName / ConfigurationTenant agree. |
+| Step 5 returns 0 templates imported | `ConfigurationTenant` doesn't match the gateway `LogicalName` from Step 3 | Re-check both calls to make sure `ConfigurationTenant` (Steps 4 and 5) equals `GatewayRegistration.LogicalName` (Step 3). |
 | Step 6 returns `0xA0110004` "Key type 'RSA' disallowed by policy" | Gateway `key_algs` are empty or wrong, or Command hasn't re-imported templates after a profile change | Update `key_algs` (Step 2), re-run `/Templates/Import` (Step 5). |
-| Step 6 returns `0xA0010023` "external validation" with HTTP 400 | The gateway returned a pending response and Command's exception filter translated it — Command 25.x bug | The plugin DID accept the order. Confirm via `GET ${GATEWAY_URL}/AnyGatewayREST/.../v1/certificate/<id>`. Fixed in newer Command builds; rewrite as 200 with disposition `EXTERNAL_VALIDATION`. |
-| Step 6 returns `"Inactive Account User."` from the gateway log | CERTInext sandbox rate limit | Wait 5-25 minutes; retry a single order to confirm the account is alive. See [#8](https://github.com/Keyfactor/certinext-caplugin/issues/8). |
-| Step 6 returns `TypeLoadException IDomainValidatorFactory` in the gateway pod log | The plugin is deployed on a gateway older than AnyCA Gateway REST 26.2.0 (IAnyCAPlugin before 3.3) | Upgrade the gateway to 26.2.0 or later. The plugin requires it. |
+| Step 6 returns `0xA0010023` "external validation" with HTTP 400 | The gateway returned a pending response and Command translated it into an error (reported from the field; not verified in this repo) | The plugin accepted the order. Confirm it in the gateway or Command certificate list. Reportedly fixed in newer Command builds, which return 200 with disposition `EXTERNAL_VALIDATION`. |
+| Step 6 returns `"Inactive Account User."` from the gateway log | CERTInext sandbox rate limit | Wait 30-60 seconds, then retry one order. See [overview.md](docsource/overview.md#inactive-account-user-returned-from-generateorderssl) and [#8](https://github.com/Keyfactor/certinext-caplugin/issues/8). |
+| Step 6 returns `TypeLoadException IDomainValidatorFactory` in the gateway pod log | The plugin is deployed on a gateway older than AnyCA Gateway REST 26.2.0 (IAnyCAPlugin before 3.3) | Upgrade the gateway to 26.2.0 or later (see [Prerequisites](#prerequisites)). |

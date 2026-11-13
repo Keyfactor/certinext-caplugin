@@ -2,9 +2,9 @@
 
 This document describes how the CERTInext AnyCA Gateway REST plugin integrates with Keyfactor Command and the CERTInext certificate authority. It covers the primary certificate lifecycle operations — synchronization, enrollment, domain control validation, and revocation — for both CERTInext API generations (V1 and V2), and how the plugin routes each one.
 
-## Component Overview
+### Component Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                  Keyfactor Command                      │
 │                                                         │
@@ -47,21 +47,34 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 
 `{family}` is `ssl-certificates`, `private-pki-certificates`, or `signature-certificates` (see the [API Endpoint Reference](#api-endpoint-reference)).
 
-## Request Authentication
+### V1 and V2 at a Glance
 
-**V1, AccessKey mode.** Every call carries a `meta` block whose `authKey` is a SHA-256 digest of the access key, a timestamp, and a transaction ID. The access key itself is never transmitted — only the derived hash is sent:
+`UseV2Api` selects one API generation for the whole connector; the two cannot be mixed.
 
-```
-authKey = SHA256(accessKey + requestTs + requestTxnId)
-```
+| Aspect | V1 (default) | V2 (`UseV2Api` = `true`) |
+|---|---|---|
+| Authentication | Access key, sent as `meta.authKey` | OAuth2 `client_credentials` bearer token |
+| `ApiUrl` | Includes the `/emSignHub-API/` path | Bare host, no path |
+| Order ID (`CARequestID`) | Order number (a request number comes first) | Single `orderId`, stored unchanged |
+| Sync source | `GetOrderReport`, filtered by order date (`yyyy-MM-dd`), no lookback | `/reports/orders`, from `V2SyncLookbackHours` (default 72) before the last sync |
+| `IgnoreExpired` | Not applied yet | Applied |
+| Renewal | Renewal window (`RenewalWindowDays`), otherwise a new order | Every enrollment type places a new order |
+| DCV waits | `DcvWaitForChallengeSeconds`, `DcvWaitForIssuanceSeconds` | None; polls until the order leaves `pending-dcv`, bounded by `DcvTimeoutMinutes` |
+| Revoke reasons | Numeric `revokeReasonId`; unaccepted codes sent as key compromise | Kebab-case strings; four rejected values retried once with a substitute |
+| Product code | `ProductCode`, then `ProfileId`, then the built-in default for the selected product | `ProductCode`, then the live catalog, then `DefaultProductCode` among several matches |
 
-A random numeric transaction ID (`requestTxnId`) is generated for each request. The timestamp (`requestTs`) and transaction ID travel alongside the `authKey` so the CERTInext server can reproduce and verify the hash. The plugin handles this automatically; no manual signing is required during normal operation.
+### Request Authentication
 
-**V1, OAuth mode.** When `AuthMode` is `OAuth`, the plugin exchanges a client ID and secret at `OAuthTokenUrl` for a bearer token, sends it in an `Authorization: Bearer` header, and refreshes it before expiry. The `meta` block is still sent, with an empty `authKey`.
+| Mode | Credential | Sent as | `meta.authKey` |
+|---|---|---|---|
+| V1 | Access key (`ApiKey`) and `AccountNumber` | A `meta` block in every JSON request body (`ver`, `ts`, `txn`, `accountNumber`, `authKey`) | `SHA256(accessKey + ts + txn)` as lowercase hex |
+| V2 (`UseV2Api` = `true`) | OAuth2 client ID and secret (`OAuthClientId`, `OAuthClientSecret`) | `Authorization: Bearer` header; the token comes from `POST {ApiUrl}/oauth/token` (`client_credentials`, form-encoded) | Not used |
 
-**V2.** When `UseV2Api` is enabled, the plugin uses an OAuth2 `client_credentials` flow, reusing the connector's `OAuthClientId`/`OAuthClientSecret` fields regardless of the V1 `AuthMode` setting. The plugin posts `client_id` and `client_secret` (form-encoded) to `{ApiUrl}/oauth/token` (the same `ApiUrl` field, which becomes the V2 host in this mode) and caches the resulting bearer token until 60 seconds before the expiry the token endpoint reports (minimum 30 seconds). Token refresh is thread-safe.
+- **V1 `authKey`.** A plain SHA-256 digest, not an HMAC. The access key is never transmitted; only the digest is sent. `ts` is a timestamp and `txn` is a random numeric transaction ID generated for each request, and both travel in `meta` so CERTInext can recompute the digest. The plugin does this automatically.
+- **V2 tokens.** The plugin caches the bearer token until 60 seconds before the expiry the token endpoint reports (minimum 30 seconds), and refreshes it thread-safely.
+- **V1 OAuth is unsupported.** The `AuthMode=OAuth` and `OAuthTokenUrl` settings are legacy: the live V1 API ignores a bearer token and rejects the call with 401 "clientAccessKey is not active". The code still accepts them for connectors that were already saved with that mode.
 
-## Certificate Identifiers
+### Certificate Identifiers
 
 V1 assigns two different reference numbers to each order. Understanding the difference matters when tracing certificates across systems:
 
@@ -70,11 +83,9 @@ V1 assigns two different reference numbers to each order. Understanding the diff
 | **Request Number** | Immediately when an order is created | Tracking a draft order before it is formally submitted; attaching a CSR to a pending order |
 | **Order Number** | After the order is formally submitted and accepted | All post-issuance operations: checking status, downloading the certificate, revoking — **this is the identifier stored in Keyfactor Command** |
 
-V2 returns a single `orderId` when the order is created; the plugin stores it unchanged as the `CARequestID`.
+V2 returns a single `orderId` when the order is created, and the plugin stores it unchanged as the `CARequestID`. V2 order IDs are numeric, in the same format as V1 order numbers; see [Behavioral Differences After Migrating](#behavioral-differences-after-migrating).
 
----
-
-## Gateway Startup
+### Gateway Startup
 
 When the AnyCA Gateway process starts, it loads each configured CA connector. For CERTInext, this step reads the connector settings, checks that the API URLs are acceptable, and builds the API client. Credentials are validated separately, when an administrator saves the connector (see [Connector Validation](#connector-validation)).
 
@@ -85,8 +96,8 @@ sequenceDiagram
     participant API as CERTInext API
 
     GW->>Plugin: Initialize with the CA connector configuration
-    Plugin->>Plugin: Require ApiUrl and reject http unless the host is loopback<br/>(also OAuthTokenUrl for V1 OAuth)
-    Plugin->>Plugin: Build the API client<br/>for the configured API generation and auth mode
+    Plugin->>Plugin: Require ApiUrl and reject http unless the host is loopback
+    Plugin->>Plugin: Build the API client<br/>for the configured API generation
     Plugin->>Plugin: Log which credential fields are populated<br/>(values are never logged)
     opt DcvEnabled is true but no DNS provider factory was injected
         Plugin->>Plugin: Log a warning: DCV will be skipped
@@ -108,22 +119,20 @@ sequenceDiagram
     end
 ```
 
----
-
-## Synchronization
+### Synchronization
 
 Keyfactor Command periodically synchronizes its certificate inventory with CERTInext. The plugin retrieves orders page by page and feeds them into Command's database. Synchronization can be a full refresh or incremental. V1 and V2 differ in the report they read and in how they classify each order.
 
-### V1 synchronization
+#### V1 synchronization
 
-A full sync reads every order in the account. An incremental sync requests only orders placed on or after the date of the previous sync.
+A full sync reads every order in the account. An incremental sync requests only orders placed on or after the date of the previous sync. The filter is a date only (`yyyy-MM-dd`) on the order date, with no lookback, so an older order that is slow to issue is missed by incremental syncs; run a full sync to import it. V2 avoids this with `V2SyncLookbackHours`.
 
 ```mermaid
 flowchart TD
     A([Command starts a sync]) --> B["Request the next page of orders from GetOrderReport<br/>(PageSize per page, date filter when incremental)"]
     B --> C{More orders on this page?}
     C -- No more pages --> Z["Log totals and signal completion to the gateway"]
-    C -- Next order --> D{"IgnoreExpired is on and<br/>the certificate has expired?"}
+    C -- Next order --> D{"IgnoreExpired is on and the expiry date<br/>is known and past? (V1 never sets the<br/>expiry date yet)"}
     D -- Yes --> C
     D -- No --> E{"Order is pending, DCV is enabled, a DNS provider is<br/>available, and it is inside the age window and<br/>per-pass cap?"}
     E -- Yes --> F["Run DNS-01 DCV for the order<br/>then refetch it if DCV ran"]
@@ -137,13 +146,12 @@ flowchart TD
     J --> C
 ```
 
-**Errors:** if processing an individual order throws, the error is logged and counted and the sync moves on to the next order. Once at least 50 records have been seen and more than 25 percent of them errored, the sync aborts with an error and is retried on the next cycle, rather than completing with mostly failed records. V2 synchronization applies the same rule.
+- **Errors.** If processing an order throws, the plugin logs and counts the error and moves on to the next order. After at least 50 records, if more than 25 percent have errored, the sync aborts and is retried on the next cycle instead of completing with mostly failed records. V2 synchronization applies the same rule.
+- **Expired certificates.** `IgnoreExpired` is applied on V2 only. On V1 the order report never populates a certificate expiry date, so the setting has no effect yet and expired certificates are imported.
+- **DCV during sync.** Pending orders go through DNS-01 validation only while younger than `DcvSyncMaxOrderAgeHours` (older orders are reported as pending and left alone) and only up to `DcvSyncMaxPerPass` orders per pass, so a backlog of stalled orders can't slow every sync.
+- **DCV timing.** The V1 sync path uses a short fixed propagation delay and a single-shot challenge check rather than the longer `Enroll` waits. See [Domain Control Validation](#domain-control-validation).
 
-**Expired certificates:** the `IgnoreExpired` connector setting controls whether expired certificates are included. When enabled, expired certificates are skipped and never appear in the Command inventory.
-
-**DCV during sync:** pending orders are driven through DNS-01 validation while they are younger than `DcvSyncMaxOrderAgeHours` (older orders are reported as pending and left alone) and only up to `DcvSyncMaxPerPass` orders per pass, so a large backlog of stalled pending orders can't slow every sync. The V1 sync path uses a short fixed propagation delay and a single-shot challenge check rather than the longer `Enroll` waits. See [Domain Control Validation](#domain-control-validation).
-
-### V2 synchronization
+#### V2 synchronization
 
 With `UseV2Api = true`, Synchronize pages through V2 `/reports/orders` (at most 100 rows per page, scoped to `GroupNumber` when set). An incremental sync asks for orders from `V2SyncLookbackHours` (default 72) before the last sync date, because the report's date filter may bracket either the order date or the issuance date and a slow order must not be missed.
 
@@ -178,15 +186,32 @@ flowchart TD
     P --> D
 ```
 
----
+### Single-Record Retrieval
 
-## Domain Control Validation
+When Command asks for one order (`GetSingleRecord`), for example to refresh a pending certificate, the plugin looks the order up and, if it is still pending, tries to advance it through DNS-01 DCV first.
 
-DNS-01 domain control validation (DCV) proves control of each domain on an order by publishing a TXT record that CERTInext then checks. The plugin publishes and removes the record through whichever DNS provider plugin the gateway resolves for the domain (`DcvEnabled`, on by default). DCV runs in three places: inline during `Enroll`, during `Synchronize` for pending orders, and during `GetSingleRecord` for a pending order. It never runs for an order that is already issued, revoked, cancelled, or rejected, and V2 skips it for Private PKI and Document Signer orders, which have no DCV step.
+| Step | V1 | V2 |
+|---|---|---|
+| Look up the order | `TrackOrder`, then `GetCertificate` when the order is downloadable | Find the product family that owns the order, then track it |
+| Pending order | Run DCV, then refetch the certificate if DCV ran (a failed refetch is logged and the earlier result is returned) | Run DCV when the order lists a domain, bounded by `DcvTimeoutMinutes`, then track again (a DCV failure is logged and ignored) |
+| Issued order | Certificate PEM from `GetCertificate` | Download the chain, leaf first (a failed download is logged and the record is returned without a body) |
+| Revoked order with no certificate body | Status, date, and reason come from `TrackOrder` | Returned as revoked only if the gateway already holds the certificate body; otherwise returned as failed |
 
-The TXT record is published at `DcvTxtRecordTemplate` (default `_emsign-validation.{0}`) with `{0}` replaced by the domain. A wildcard domain's `*.` label is stripped for the DNS side (the record is published at the base domain), and a wildcard and its apex on the same order share one record. On V1, only domains that CERTInext lists as pending, and that are unassigned or assigned to the DNS TXT method, are processed; on V2, every domain that is not yet verified is. A domain that can't be staged (no DNS provider resolves it, the provider fails, CERTInext returns no token) is logged and skipped so the other domains on the order can still be validated; the order stays pending until the skipped domain is resolved. The whole flow for one order is bounded by `DcvTimeoutMinutes`, and TXT records are always removed afterward, with a separate 60-second bound on each removal.
+The last V2 row is the body-less revoked guard. CERTInext does not serve the body of a revoked order, and a body-less revoked record would break Command's revoked-certificate scans for the whole CA. `Synchronize` applies the same guard but skips the order when the gateway has no row for it, whereas `GetSingleRecord` must return something and so returns failed.
 
-### V1 DCV
+### Domain Control Validation
+
+DNS-01 domain control validation (DCV) proves control of each domain on an order by publishing a TXT record that CERTInext then checks. The plugin publishes and removes the record through the DNS provider plugin the gateway resolves for the domain (`DcvEnabled`, on by default).
+
+- **Where DCV runs.** Inline during `Enroll`, during `Synchronize` for pending orders, and during `GetSingleRecord` for a pending order.
+- **Where it never runs.** For an order that is already issued, revoked, cancelled, or rejected. V2 also skips Private PKI and Document Signer orders, which have no DCV step.
+- **Record name.** The TXT record is published at `DcvTxtRecordTemplate` (default `_emsign-validation.{0}`), with `{0}` replaced by the domain.
+- **Wildcards.** The `*.` label is stripped, so the record is published at the base domain, and a wildcard and its apex on the same order share one record.
+- **Which domains.** V1 processes only domains CERTInext lists as pending that are unassigned or assigned to the DNS TXT method. V2 processes every domain that is not yet verified.
+- **Skip and continue.** A domain that can't be staged (no DNS provider resolves it, the provider fails, or CERTInext returns no token) is logged and skipped so the other domains can still be validated. The order stays pending until the skipped domain is resolved.
+- **Time bounds.** The whole flow for one order is bounded by `DcvTimeoutMinutes`. TXT records are always removed afterward, each removal bounded separately at 60 seconds.
+
+#### V1 DCV
 
 ```mermaid
 sequenceDiagram
@@ -230,7 +255,7 @@ sequenceDiagram
 
 If `GetDcv` returns `EMS-956` (CERTInext lists the challenge before it accepts calls for the order), the whole pass is deferred to the next sync. On the sync and single-record paths the plugin refetches the certificate after DCV instead of running the issuance wait.
 
-### V2 DCV
+#### V2 DCV
 
 ```mermaid
 sequenceDiagram
@@ -258,13 +283,11 @@ sequenceDiagram
 
 For an order that lists per-domain verification state (a multi-domain order, for example), every domain that is not yet `VERIFIED` is staged, with one propagation wait for the whole batch, and the poll waits until each verified domain shows `VERIFIED` (or `REJECTED`). For a single-domain order the poll waits for the status to leave `pending-dcv`, and if `verify` doesn't report `VERIFIED` the plugin removes the record and leaves the order pending. Either way, the next sync or `GetSingleRecord` call retries only the domains that are still unverified.
 
----
+### Certificate Enrollment
 
-## Certificate Enrollment
+When a requester submits a certificate request through Keyfactor Command, the plugin translates the request into a CERTInext order and returns the result. V1 and V2 follow different flows. V1 handles renewals specially (see [V1 renewal and RenewOrReissue](#v1-renewal-and-reneworreissue)), while V2 places a new order for every enrollment type.
 
-When a requester submits a certificate request through Keyfactor Command, the plugin translates the request into a CERTInext order and returns the result. V1 and V2 follow different flows; see [Enrollment Decision Logic](#enrollment-decision-logic) for how the enrollment type is handled in each.
-
-### V1 enrollment (New or Reissue)
+#### V1 enrollment (New or Reissue)
 
 ```mermaid
 sequenceDiagram
@@ -304,11 +327,12 @@ sequenceDiagram
     Plugin->>Plugin: Log the outcome (order number, serial number, status)
 ```
 
-An order CERTInext reports as issued before the certificate is downloadable is returned as pending rather than as an issued result with no certificate. OV and EV orders are issued after organization verification (minutes to hours) and almost always exhaust the pickup window; the next synchronization imports them. A rate-limit rejection (`Inactive Account User.`) on order placement is retried with backoff before the failure is surfaced.
+- **Issued but not yet downloadable.** An order CERTInext reports as issued before the certificate can be downloaded is returned as pending, not as an issued result with no certificate.
+- **OV and EV.** These orders issue after organization verification (minutes to hours) and almost always exhaust the pickup window, so the next synchronization imports them.
+- **Rate limiting.** A rate-limit rejection (`Inactive Account User.`) on order placement is retried with backoff before the failure is surfaced.
+- **Synchronous pickup.** After placing an order, the plugin polls CERTInext up to `PickupRetries` times (default 5), `PickupDelay` seconds apart (default 10), after a fixed 5-second initial delay and within a hard ceiling of 180 seconds. This lets fast-issuing DV certificates come back in the same enrollment call; only a result with a certificate body counts as issued.
 
-**Synchronous certificate pickup:** after placing an order, the plugin polls CERTInext a bounded number of times — `PickupRetries` attempts (default 5) spaced `PickupDelay` seconds (default 10) apart after a fixed 5-second initial delay, with a hard ceiling of 180 seconds in total — before returning a pending result to Command. This lets fast-issuing DV certificates come back in the same enrollment call. Only a result with a certificate body counts as issued.
-
-### V1 renewal and RenewOrReissue
+#### V1 renewal and RenewOrReissue
 
 When Command initiates a renewal, the plugin checks whether the prior certificate is within the configured renewal window. Inside the window it places a renewal order; outside the window, or when the prior certificate can't be found, it places a new order.
 
@@ -332,7 +356,7 @@ flowchart TD
     I --> J
 ```
 
-### V2 enrollment flow
+#### V2 enrollment flow
 
 With `UseV2Api = true`, every enrollment type (New, Reissue, Renew, RenewOrReissue) takes the same path and places a new order. The plugin checks the request locally first, so a template or request that can never succeed is rejected before any order is placed.
 
@@ -385,17 +409,21 @@ flowchart TD
 
 Notes on the V2 flow:
 
-- **Product code.** For SSL/TLS, the plugin fetches the live catalog once per enrollment. With an explicit `ProductCode`, the catalog is used only to recognize multi-domain and wildcard products; if the catalog can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted. Without an explicit code, the plugin selects the catalog entry whose product type matches the selected product and fails if none or several match (unless `DefaultProductCode` names one). Private PKI never fetches the catalog; its `ProductCode` is required and was validated when the template was saved.
-- **Multi-domain products.** DNS SANs other than the primary domain are sent as `additionalDomains`; non-DNS SANs are left off the order with a warning. Private PKI sends DNS and IP SANs as `additionalHosts`.
-- **CSR delivery (`V2InlineCsr`).** By default the plugin creates the order without a CSR and then submits it with `PUT .../csr`; if that submit is rejected the plugin cancels the orphaned order once. With `V2InlineCsr = true` (SSL/TLS only), the CSR is sent inline in the create body, exactly as Command supplied it, and there is no Submit CSR step: a `PUT .../csr` after an inline CSR is rejected with HTTP 422. The create call then often holds about 20 seconds until the certificate is issued, and the order ID is only known once it returns. If that call fails with a 5xx or times out, the order may still exist and issue; the failure message says so, the plugin doesn't cancel it, and the next sync imports it. Private PKI ignores the setting and always uses two calls, because CERTInext rejects an inline CSR on the Private PKI create (HTTP 422). Either way the create call is pinned with `X-Product-Code` (an unpinned create auto-resolves to a PFX product that never issues) and a blank CSR is rejected before any CA call.
-- **Idempotency.** V2 order-create and revoke calls carry a fresh `Idempotency-Key` UUID on every call. CERTInext's V2 spec describes the header as parsed but not yet enforced, so the plugin does not rely on it to prevent duplicates: it never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
-- **Revoked before delivery.** An order that CERTInext reports as revoked before any certificate was delivered is returned as failed, never as a revoked record with no certificate.
-- **Full certificate chain.** The V2 `/certificate` endpoint returns the leaf in `certificatePem` and intermediates in `chainPem[]`. The plugin concatenates them, leaf first, into a single PEM before returning it to Command.
-- **Order IDs.** The V2 spec's examples show `ord_`-prefixed IDs, but V2 returns numeric order numbers in the same format as V1 (for example `6625262451`), and V1 order numbers resolve through V2 Track Order unchanged. The plugin stores the ID unchanged as the `CARequestID`.
+- **Product code.** For SSL/TLS, the plugin fetches the live catalog once per enrollment and resolves the code in this order:
+  1. An explicit `ProductCode` is used as given. The catalog is then used only to recognize multi-domain and wildcard products; if it can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted.
+  2. Otherwise the catalog entry whose product type matches the selected product is used, and the enrollment fails if none match.
+  3. If several entries match, `DefaultProductCode` must name one of them, or the enrollment fails and lists the candidates.
 
-### Status mapping
+  Private PKI never fetches the catalog. Its `ProductCode` is required and was validated when the template was saved.
+- **Multi-domain products.** DNS SANs other than the primary domain are sent as `additionalDomains`, and non-DNS SANs are left off the order with a warning. Private PKI sends DNS and IP SANs as `additionalHosts`.
+- **CSR delivery (`V2InlineCsr`).** By default the plugin creates the order without a CSR and then submits it with `PUT .../csr`; if that submit is rejected, the plugin cancels the orphaned order once. With `V2InlineCsr = true` (SSL/TLS only), the CSR is sent inline in the create body exactly as Command supplied it, and there is no Submit CSR step (a `PUT .../csr` after an inline CSR is rejected with HTTP 422). The create call then often holds about 20 seconds until the certificate is issued, and the order ID is known only once it returns. If that call fails with a 5xx or times out, the order may still exist and issue: the failure message says so, the plugin doesn't cancel the order, and the next sync imports it. Private PKI ignores the setting and always uses two calls, because CERTInext rejects an inline CSR on the Private PKI create (HTTP 422). In both modes the create call is pinned with `X-Product-Code`, because an unpinned SSL create resolves to a CERTInext default product whose Submit CSR is rejected ("PFX based certificate orders are not allowed"). A blank CSR is rejected before any CA call.
+- **Idempotency.** Order-create, revoke, and cancel calls carry a fresh `Idempotency-Key` UUID. The V2 spec documents that header only for Verify DCV and Domains, as parsed but not yet enforced. On order create, a same-key retry was observed to create a second order behind an HTTP 500, so the plugin never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
+- **Revoked before delivery.** An order CERTInext reports as revoked before any certificate was delivered is returned as failed, never as a revoked record with no certificate.
+- **Full certificate chain.** The V2 `/certificate` endpoint returns the leaf in `certificatePem` and intermediates in `chainPem[]`. The plugin concatenates them, leaf first, into one PEM.
 
-CERTInext statuses map to the Keyfactor statuses Command understands as follows. The full V1 status-code list and the V2 status table are under [Order Lifecycle and Pending Approval](#order-lifecycle-and-pending-approval) and [V2 Order Lifecycle](#v2-order-lifecycle).
+### Status Mapping
+
+CERTInext statuses map to the Keyfactor statuses Command understands as follows. This applies to enrollment, synchronization, single-record retrieval, and revocation pre-checks. The V2 status strings are listed under [V2 Order Lifecycle](#v2-order-lifecycle); V1 uses CERTInext's numeric certificate status codes.
 
 | CERTInext | Command status |
 |---|---|
@@ -404,11 +432,9 @@ CERTInext statuses map to the Keyfactor statuses Command understands as follows.
 | Revoked | Revoked |
 | Rejected, cancelled, or an unrecognized status | Failed |
 
----
+### Revocation
 
-## Revocation
-
-When a certificate is revoked in Keyfactor Command, the plugin verifies the certificate's current state before calling the CERTInext revocation endpoint. This prevents unnecessary API calls for certificates that are already revoked or in a non-revocable state.
+When a certificate is revoked in Keyfactor Command, the plugin verifies the certificate's current state before calling the CERTInext revocation endpoint. This prevents unnecessary API calls for certificates that are already revoked or in a non-revokable state.
 
 ```mermaid
 sequenceDiagram
@@ -427,7 +453,7 @@ sequenceDiagram
         Plugin-->>CMD: Confirmed revoked, no request sent
     else Certificate is not in an issued state
         Plugin->>Plugin: Log an error, cannot revoke
-        Plugin-->>CMD: Error, certificate is not revocable
+        Plugin-->>CMD: Error, certificate is not revokable
     else Certificate is issued
         Plugin->>API: Revoke (order number, reason, remarks)
         opt V2 only, reason in the rejected set and CERTInext replies 422 Invalid Revoke Reason ID
@@ -439,23 +465,34 @@ sequenceDiagram
     end
 ```
 
-**Idempotency:** if Command retries a revocation request (for example after a timeout), the plugin detects that the certificate is already revoked and returns success without submitting a duplicate request to CERTInext.
+- **Idempotency.** If Command retries a revocation (for example after a timeout), the plugin sees the certificate is already revoked and returns success without a duplicate request to CERTInext.
+- **Audit trail.** The revocation intent is written to the gateway log *before* the API call, so it is recorded even if the call fails.
+- **V2 not revokable.** A 404 from the V2 revoke endpoint means the order was not found or is not in a revokable state. The plugin has already located the order's product family, so it reports that plainly instead of probing the other families.
+- **Note field.** CERTInext rejects a semicolon (`;`) in the revoke `note` (audit remarks) with a separate 422, "Invalid Revoke Remarks." Commas, periods, slashes, and parentheses are accepted. The plugin's generated notes avoid semicolons.
 
-**Audit trail:** the revocation intent is written to the gateway log *before* the API call is made, so it is recorded even if the API call subsequently fails.
+#### Revocation Reason Codes
 
-**V1 reason codes:** CERTInext's V1 revoke endpoint accepts only key compromise (1), affiliation changed (3), superseded (4), cessation of operation (5), and privilege withdrawn (9). Every other RFC 5280 reason code, including unspecified (0), is sent as key compromise (1).
+V1 sends a numeric `revokeReasonId`; V2 sends a kebab-case `reason` string. The plugin translates the RFC 5280 code Command supplies.
 
-**V2 reason code substitution:** the V2 spec documents 8 RFC 5280 reason values for the SSL/TLS revoke endpoint (`aa-compromise` is listed only for the Document Signer and Private PKI endpoints, which document 9). On SSL/TLS orders CERTInext accepts only 5: `key-compromise`, `affiliation-changed`, `superseded`, `cessation-of-operation`, and `privilege-withdrawn`. Three documented values, `unspecified`, `ca-compromise`, and `certificate-hold`, return a 422 "Invalid Revoke Reason ID", as does `aa-compromise`.
+| Command reason (CRL code) | V1 sends | V2 sends | If CERTInext rejects it |
+|---|---|---|---|
+| Unspecified (0) | Key compromise (1) | `unspecified` | Rejected on V2; retried once as `cessation-of-operation` |
+| Key compromise (1) | 1 | `key-compromise` | Accepted |
+| CA compromise (2) | Key compromise (1) | `ca-compromise` | Rejected on V2; retried once as `key-compromise` |
+| Affiliation changed (3) | 3 | `affiliation-changed` | Accepted |
+| Superseded (4) | 4 | `superseded` | Accepted |
+| Cessation of operation (5) | 5 | `cessation-of-operation` | Accepted |
+| Certificate hold (6) | Key compromise (1) | `certificate-hold` | Rejected on V2; retried once as `cessation-of-operation` |
+| Privilege withdrawn (9) | 9 | `privilege-withdrawn` | Accepted |
+| AA compromise (10) | Key compromise (1) | `aa-compromise` | Rejected on V2; retried once as `key-compromise` |
+| Any other code (for example 8, `removeFromCRL`) | Key compromise (1) | `unspecified` | Same as Unspecified |
 
-Rather than surface any of these four rejections to the caller, the plugin retries each once with a close accepted substitute: `unspecified` (CRL reason 0, Command's default when no explicit reason is given — by far the most common revoke case) and `certificate-hold` (CRL reason 6) retry as `cessation-of-operation`; `ca-compromise` (CRL reason 2) and `aa-compromise` (CRL reason 10) retry as `key-compromise`. `cessation-of-operation` was chosen over `key-compromise` for the first pair because neither `unspecified` nor `certificate-hold` implies an actual key compromise, and `key-compromise` carries the V2 spec's Baseline Requirements §4.9.1.1 24-hour CRL-turnaround obligation, which would misrepresent the revoke. Only these four specific rejections trigger a retry; any other revoke failure is surfaced as-is.
+- **What CERTInext accepts.** Only key compromise (1), affiliation changed (3), superseded (4), cessation of operation (5), and privilege withdrawn (9), on both API generations. V1 never sends anything else, so it needs no retry.
+- **V2 spec versus live behavior.** The V2 spec documents 8 reason values for the SSL/TLS revoke endpoint (`aa-compromise` is listed only for the Private PKI and Document Signer endpoints). Live, SSL/TLS orders reject four of the values, `unspecified`, `ca-compromise`, `certificate-hold`, and `aa-compromise`, with 422 "Invalid Revoke Reason ID".
+- **Retry rule.** The plugin retries a rejected reason once with the substitute in the table; any other revoke failure is surfaced as-is.
+- **Why `cessation-of-operation`.** It substitutes for `unspecified` and `certificate-hold` because neither implies a key compromise, and `key-compromise` carries the V2 spec's Baseline Requirements §4.9.1.1 24-hour CRL-turnaround obligation, which would misrepresent the revoke. `unspecified` is Command's default reason, so it is the most common revoke case.
 
-**V2 not revokable:** a 404 from the V2 revoke endpoint means the order was not found or is not in a revokable state. Because the plugin has already located the order's product family, it reports that plainly instead of probing the other families.
-
-**Note field:** CERTInext's revoke `note` (audit remarks) field rejects a semicolon (`;`) with a separate 422, "Invalid Revoke Remarks." Commas, periods, slashes, and parentheses are accepted. The plugin's own generated notes avoid semicolons for this reason.
-
----
-
-## Connector Validation
+### Connector Validation
 
 When an administrator saves or edits a CERTInext CA connector in the Keyfactor Command Management Portal, the gateway validates the configuration and performs a live connectivity check.
 
@@ -467,7 +504,7 @@ flowchart TD
     D -- No --> E(["Validation error shown to administrator"])
     D -- Yes --> F{UseV2Api?}
     F -- "Yes (V2)" --> G{"OAuthClientId, OAuthClientSecret,<br/>and SignerPlace present?"}
-    F -- "No (V1)" --> H{"AccountNumber present and the<br/>credentials for AuthMode present?<br/>AccessKey needs ApiKey<br/>OAuth needs an https OAuthTokenUrl,<br/>OAuthClientId, OAuthClientSecret"}
+    F -- "No (V1)" --> H{"AccountNumber and ApiKey present?<br/>(connectors saved with the legacy OAuth<br/>AuthMode are checked for OAuth fields instead)"}
     G -- No --> E
     H -- No --> E
     G -- Yes --> I["Build a temporary API client<br/>from the supplied settings"]
@@ -482,7 +519,7 @@ flowchart TD
 
 The same https-or-loopback check runs again at gateway startup, so a connector saved with an `http` URL before the check existed fails to start until its URL is corrected.
 
-### Template validation
+#### Template validation
 
 When an administrator saves a certificate template, the gateway asks the plugin to validate its product settings. The product code must be set (explicitly, or derived from the selected product on V1). On V1 it must appear in the CERTInext product list for the account. On V2:
 
@@ -493,9 +530,7 @@ When an administrator saves a certificate template, the gateway asks the plugin 
 
 Any failure is shown to the administrator with the candidate codes or the field to fix.
 
----
-
-## API Endpoint Reference
+### API Endpoint Reference
 
 The table below maps each Keyfactor Command operation to the CERTInext API endpoint it calls.
 
