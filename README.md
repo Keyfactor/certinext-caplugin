@@ -133,6 +133,27 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         2. On the Keyfactor Command server, import those certificates into the appropriate Windows certificate store — **Trusted Root Certification Authorities** for the root CA and **Intermediate Certification Authorities** for any subordinate CAs.
         3. In the Keyfactor Command Management Portal, navigate to **CA Connectors** and add a new CA using the **CERTInext AnyCA REST Gateway Plugin**.
         4. Complete the CA connector configuration fields described in the next section, then save and test the connection. The gateway performs a live connectivity test during validation: the V1 `ValidateCredentials` endpoint, or `GET /api/certinext/v2/auth/me` when `UseV2Api` is `true`.
+        
+        ### Change of issuing CA (eMudhra exit from public TLS)
+        
+        eMudhra, CERTInext's parent company, is withdrawing from the public SSL/TLS certificate business, and browser root programs are phasing out the emSign roots that CERTInext public TLS certificates have chained to. Public TLS certificates ordered through CERTInext will be issued under a different CA. Which CA depends on your service: InCommon members are moving to [SSL.com](https://incommon.org/about/news/incommon-certificate-service-update), and eMudhra offers [Sectigo](https://emudhra.com/en/post/certificate-security-incident) certificates to its customers. Confirm the new chain for your account with CERTInext.
+        
+        Dates published by eMudhra for the emSign G1 root (check the [eMudhra statement](https://emudhra.com/en/post/certificate-security-incident) for changes):
+        
+        | Root program | Effect |
+        |---|---|
+        | Chrome, Mozilla Firefox | Certificates logged after November 16, 2026 are not trusted. Certificates issued before then stay trusted until they expire. |
+        | Apple | The root is removed on November 30, 2026. Every certificate issued under it stops being trusted on Apple platforms, including existing ones. |
+        | Microsoft | No date announced. |
+        
+        The plugin does not need to change. It stores only the issued certificate and never reads or checks the issuer. Repeat the trust and registration steps above with the new chain:
+        
+        1. Get the new root and intermediate certificates for your account from CERTInext.
+        2. Import them on the Keyfactor Command server and the AnyCA Gateway REST host, and on any orchestrator or client that builds or validates certificate chains. Use **Trusted Root Certification Authorities** for the root and **Intermediate Certification Authorities** for subordinates.
+        3. Replace the CA certificate in this CA's **Gateway Registration** with the new issuing chain.
+        4. Replace certificates that chain to the emSign G1 root before November 30, 2026 if Apple clients rely on them. Keep the emSign certificates in your trust stores until you have replaced every certificate issued under them.
+        
+        Also confirm with CERTInext whether your account's product codes change. If they do, update the `ProductCode` mapping on each template.
 
     * **CA Connection**
 
@@ -157,10 +178,10 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **RequestorMobileNumber** - Requestor mobile number (digits only, no country code).
         * **RequestorDesignation** - OPTIONAL: Job title / role of the requestor (e.g. 'IT Administrator'). Sent as requestorInformation.requestorDesignation (V1) and requestor.designation (V2). Free text. Omitted when blank.
         * **SignerPlace** - City or location of the subscriber agreement signer (e.g. 'San Francisco, CA'). REQUIRED when UseV2Api is on: the V2 Subscriber Agreement sent with every SSL order requires it, so the connector cannot be saved with it blank. A per-template SignerPlace enrollment parameter overrides it. On V1, if neither is set, the placeholder "Gateway" is sent and a Warning is logged; set it so the agreement audit record is accurate.
-        * **SignerIp** - IP address of the subscriber agreement signer. A template-level SignerIp enrollment parameter overrides it. On V1, if neither is set, the placeholder 127.0.0.1 is sent and a Warning is logged, and a value that is not an IP address is still sent unchanged, with a Warning; V2 omits a blank value.
-        * **DefaultProductCode** - OPTIONAL: Default numeric product code. V1: used for renewals when the template supplies none. V2: disambiguates a ProductId-only template when the catalog has several matches. Get codes via GetProductDetails.
+        * **SignerIp** - V1 ONLY: IP address of the subscriber agreement signer. A template-level SignerIp enrollment parameter overrides it. If neither is set, the placeholder 127.0.0.1 is sent and a Warning is logged, and a value that is not an IP address is still sent unchanged, with a Warning. Ignored on V2: the V2 agreement block has no signer IP field, so it is never sent.
+        * **DefaultProductCode** - OPTIONAL: Default numeric product code. V1 only: used for renewals when the template supplies none. Not used on V2, where the product is resolved by CERTInext (set the template's ProductCode to override). Get codes via GetProductDetails.
         * **AccountingModel** - OPTIONAL: CERTInext billing model sent in `orderDetails.accountingModel` on V1 orders. "2" = credit-based (most accounts, default). "1" = cash model. Not used by V2.
-        * **EmailNotifications** - OPTIONAL: Lifecycle emails to the requestor. "1" = full set (V2: "all"), "0" = silent. Blank: silent on V1, omitted on V2 (CA default applies). Other values fail V2 enrollment. Default: "0".
+        * **EmailNotifications** - OPTIONAL: Lifecycle emails to the requestor. "1" = full set (V2: "all"), "0" = silent (V1: "0"; V2: "consent-only", the quietest value the V2 API accepts). Blank: silent on V1, omitted on V2 (CA default applies). Other values fail V2 enrollment. Default: "0".
         * **SubscriptionValidityYears** - OPTIONAL: Default validity in years for SSL orders. "1", "2", or "3". Used when the template sets no ValidityYears (and, on V1, no ValidityDays); a template term (on V1 the larger of ValidityYears and ValidityDays in years) overrides it. Default: "1".
         * **SubscriptionAutoRenew** - OPTIONAL: Whether CERTInext should auto-renew certificates issued through this connector. "0" = disabled (recommended — renewal is driven by Keyfactor Command), "1" = enabled. Default: "0".
         * **SubscriptionRenewCriteriaDays** - OPTIONAL: Days before expiry at which CERTInext auto-renews (only honored when SubscriptionAutoRenew = "1"). Typical values: "30" or "60". Default: "30".
@@ -183,17 +204,19 @@ CERTInext operates three separate environments. Use the sandbox environment for 
         * **UseV2Api** - OPTIONAL: When true, the plugin routes Ping / Enroll / GetSingleRecord / Revoke / Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 /reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode), OAuthClientId, OAuthClientSecret, and SignerPlace. V1 credentials (ApiKey/AccountNumber/AuthMode) are not required when this is true. Default: false (V1 API).
         * **V2SyncLookbackHours** - OPTIONAL (V2 only): Hours subtracted from the last-sync time on incremental sync, so an order created earlier but issued later is not missed. Default: 72.
         * **SyncRecentOrderGraceSeconds** - OPTIONAL: during a Synchronize (full or incremental, in both V1 and V2 modes), a pending or issued order created less than this many seconds ago (plus a small clock margin) is not emitted to the gateway (an issued one is not downloaded); the next incremental pass imports it. This stops the sync from inserting a gateway row for an order whose enrollment is still in flight, which would make the enrollment's own save fail with a duplicate key. Revoked and failed orders are never held back. 0 disables the hold; a negative value uses the default. Default: 120.
-        * **V2InlineCsr** - OPTIONAL (V2 mode only): when true, SSL/TLS enrollment sends the CSR inline in the order create call (a single POST /ssl-certificates) instead of the default two-call flow (create the order, then PUT .../csr). This matches a direct single-call API integration and is about 4-5 seconds faster, but the create call then often holds about 20 seconds until the certificate is issued, and a create that times out or returns a 5xx can leave an order that still issues; it is not cancelled and the next synchronization imports it, so do not resubmit. Private PKI orders ignore this setting and always use the two-call flow (the CA rejects an inline CSR on Private PKI create). Ignored when UseV2Api is false. Default: false (two-call).
+        * **V2InlineCsr** - OPTIONAL (V2 mode only): when true (the default), SSL/TLS enrollment sends the CSR inline in the order create call (a single POST /ssl-certificates), as a direct API integration does. When false, the plugin creates the order and then submits the CSR (PUT .../csr); that two-call flow fails for a domain the account has already validated, because CERTInext approves the order at create and then rejects the CSR. A create that times out or returns a 5xx can leave an order that still issues; it is not cancelled and the next synchronization imports it, so do not resubmit. Private PKI orders ignore this setting and always use the two-call flow (the CA rejects an inline CSR on Private PKI create). Ignored when UseV2Api is false. Default: true (single call).
+        * **SslComSubmitOrganization** - OPTIONAL (V2 mode only): before an OV or EV SSL/TLS order, the plugin checks whether SSL.com has validated the organization (OrganizationNumber) at that level, refreshing the status once if not. When this is true and the organization is still unvalidated and ready to submit, the plugin also SUBMITS it to SSL.com for validation. WARNING: enabling this ACCEPTS SSL.COM'S SUBSCRIBER AGREEMENT ON THE ORGANIZATION'S BEHALF; each acceptance is audit-logged. Leave false unless you are authorized to do that. Whatever the outcome, the order is placed anyway and a not-validated organization only logs a warning. Default: false.
+        * **SslComAdminEmail** - OPTIONAL (V2 mode only): administrator email sent as adminEmail when the plugin submits an organization to SSL.com (only used when SslComSubmitOrganization is true). Blank omits it and SSL.com uses the organization's own contact.
 
 2. A Keyfactor Command certificate template maps an enrollment request to a specific CERTInext product. Create one template per CERTInext product that you want to make available to requesters.
 
-The AnyCA Gateway REST portal also needs one certificate profile per product before Command templates can be created against it. Create the profiles by hand in the gateway portal, or with the helper script this repository ships (`make register-profiles`; set `DRY_RUN=1` to preview). See [scripts/register/README.md](https://github.com/Keyfactor/certinext-caplugin/blob/main/scripts/register/README.md) for authentication and options.
+The AnyCA Gateway REST portal also needs one certificate profile per product before Command templates can be created against it. Create the profiles by hand in the gateway portal, or with the helper script this repository ships (`make register-profiles`; set `DRY_RUN=1` to preview). By default the script also registers a `<ProductID> V2` profile per product, for a second set of templates that carry no `ProductCode` (see [V2 Product Code Resolution](#v2-product-code-resolution)); set `V2_TEMPLATES=0` to skip them. See [scripts/register/README.md](https://github.com/Keyfactor/certinext-caplugin/blob/main/scripts/register/README.md) for authentication and options.
 
 In the Keyfactor Command Management Portal, navigate to **Certificate Templates** and create a new template associated with the CERTInext CA connector. The following enrollment parameters are available:
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductCode` | Optional | String | Overrides the numeric CERTInext product code. Get the right code from `GetProductDetails` for your account. Required for `ProductFamily=private-pki`. | DV SSL: `842` (sandbox) or `838` (production) |
+| `ProductCode` | Optional | String | Overrides the numeric CERTInext product code. Get the right code from `GetProductDetails` for your account. On V2 it is an override sent as `X-Product-Code`; leave it blank and CERTInext resolves the product. | DV SSL: `842` (sandbox) or `838` (production) |
 | `ProfileId` | Deprecated | String | Legacy alias for `ProductCode`. Accepted for backward compatibility — if `ProductCode` is not set, `ProfileId` is used in its place. New templates should use `ProductCode`. | `838` |
 | `ValidityYears` | Optional | Number | Subscription term in years: `1`, `2`, or `3`. Default: `1`. CERTInext certificates are issued within a subscription term at up to 390 days per certificate, with free renewals within the term. | `1` |
 | `ValidityDays` | Optional | Number | V1 only; ignored on V2. Requested validity in days, converted to whole subscription years and rounded up (365 days = 1 year), because the order API takes years. Default: `365`. See the note below the table. | `365` |
@@ -205,7 +228,7 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 | `DomainName` | Optional | String | V2 only: primary domain name for SSL/TLS orders (for Private PKI, the primary hostname). If omitted, the plugin uses the CSR subject `CN`. V1 always uses the CSR subject `CN`. | `example.com` |
 | `SignerName` | Optional | String | Per-template override for the subscriber agreement signer name. When omitted, defaults to the connector-level `RequestorName` (V2: the requestor name). If no name resolves, V1 sends `Keyfactor Gateway` and logs a warning. | `Jane Smith` |
 | `SignerPlace` | Optional | String | Per-template override for the subscriber agreement signer location. When omitted, defaults to the connector-level `SignerPlace`. If neither is set, V1 sends `Gateway` and logs a warning. | `Austin` |
-| `SignerIp` | Optional | String | Per-template override for the subscriber agreement signer IP address. When omitted, defaults to the connector-level `SignerIp`. If neither is set, V1 sends `127.0.0.1` and logs a warning; a V1 value that is not an IP address is sent unchanged, with a warning. | `203.0.113.10` |
+| `SignerIp` | Optional (V1 only) | String | Per-template override for the subscriber agreement signer IP address. Ignored on V2. When omitted, defaults to the connector-level `SignerIp`. If neither is set, V1 sends `127.0.0.1` and logs a warning; a V1 value that is not an IP address is sent unchanged, with a warning. | `203.0.113.10` |
 
 - **Subscription term (V1):** the order's term is the larger of `ValidityYears` and `ValidityDays` rounded up to whole years (365 days = 1 year). Each field counts only when it is set, and a field left at its default (1 year) never overrides the other, so a template saved with only `ValidityDays` keeps its term. Because the larger value wins, a stale larger `ValidityDays` cannot be shortened with `ValidityYears` alone; set `ValidityDays` back to `365`. V2 uses only `ValidityYears`.
 - **Key types:** larger RSA, ECC P-521, and the Ed25519/Ed448 curves are rejected by the CA (`Invalid key size`).
@@ -213,8 +236,8 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 When `ProductCode` is omitted:
 
 - **V1:** the plugin uses the built-in default code for the selected product name (see [Product Codes](#product-codes)).
-- **V2:** the plugin resolves the code from the live product catalog (see [V2 Product Code Resolution](#v2-product-code-resolution)).
-- **Sandbox or non-standard codes:** set `ProductCode` explicitly.
+- **V2:** no code is sent and CERTInext resolves the product itself (see [V2 Product Code Resolution](#v2-product-code-resolution)). Set `ProductCode` to override that choice.
+- **Sandbox or non-standard codes (V1):** set `ProductCode` explicitly.
 
 The V2-only template parameters `ProductFamily` and `ProductVariant` are described under [V2 Certificate Template Fields](#v2-certificate-template-fields).
 
@@ -222,7 +245,7 @@ The V2-only template parameters `ProductFamily` and `ProductVariant` are describ
 
 4. In Keyfactor Command (v12.3+), for each imported Certificate Template, follow the [official documentation](https://software.keyfactor.com/Core-OnPrem/Current/Content/ReferenceGuide/Configuring%20Template%20Options.htm) to define enrollment fields for each of the following parameters:
 
-    * **ProductCode** - OPTIONAL: Override the numeric CERTInext product code for this template. When omitted: on V1, the default production code for the selected product is used (e.g. DV SSL → 838); on V2, the code is resolved from the live CERTInext product catalog by matching the selected product, so it stays correct even though V2 catalog numbering varies by account. Required for ProductFamily 'private-pki'. Set this explicitly when targeting sandbox or a non-standard code.
+    * **ProductCode** - OPTIONAL: Override the numeric CERTInext product code for this template. When omitted: on V1, the default production code for the selected product is used (e.g. DV SSL → 838); on V2, no X-Product-Code header is sent and CERTInext resolves the product from the variant, the wildcard shape of the domain and any additional domains. On V2 an explicit value is an override, sent as X-Product-Code to choose between several matching catalog products (for example different CA profiles for the same variant).
     * **ProfileId** - DEPRECATED: Use ProductCode instead. Kept for backward compatibility — mapped to ProductCode if ProductCode is not set.
     * **ValidityYears** - OPTIONAL: Subscription term in years: 1, 2, or 3. On V1 the order's term is the larger of ValidityYears and ValidityDays rounded up to whole years (365 days = 1 year); a field left at its default (1 year) never overrides the other. On V2 only ValidityYears is used. A template value overrides the connector's SubscriptionValidityYears. Because the larger value wins on V1, a stale larger ValidityDays cannot be shortened with ValidityYears alone; set ValidityDays back to 365. Default: 1. Note: CERTInext validates per 390-day certificate within the subscription; the 'validity' field in the order is the subscription term, not certificate lifetime.
     * **ValidityDays** - OPTIONAL: V1 only (ignored on V2, which uses ValidityYears). Requested validity in days. CERTInext's order API takes whole subscription years, so days are converted to years, rounded up (365 days = 1 year). The order's term is the larger of this and ValidityYears; a field left at its default (365 days = 1 year) never overrides the other. Kept because certificate lifetimes are shrinking and days is the unit that will matter if CERTInext adds a lifetime field. To shorten a template with a larger value, set this back to 365. Default: 365.
@@ -234,8 +257,8 @@ The V2-only template parameters `ProductFamily` and `ProductVariant` are describ
     * **DomainName** - OPTIONAL: Primary domain for SSL/TLS orders (for V2 private-pki orders, the primary hostname). Derived from the CSR CN if omitted.
     * **SignerName** - OPTIONAL: Per-template subscriber agreement signer name. Falls back to the connector-level RequestorName if omitted (V2: the requestor name). If no name resolves, V1 sends the placeholder "Keyfactor Gateway" and logs a Warning.
     * **SignerPlace** - OPTIONAL: Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted. If neither is set, V1 sends the placeholder "Gateway" and logs a Warning.
-    * **SignerIp** - OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted. If neither is set, V1 sends the placeholder 127.0.0.1 and logs a Warning; a V1 value that is not an IP address is sent unchanged, with a Warning.
-    * **ProductFamily** - V2 ONLY: Product family for this template. Accepted values: 'ssl' (default) or 'private-pki'. 'private-pki' requires an explicit ProductCode and a Private PKI ProductVariant. 'signature' (Document Signer) is accepted by the parameter, but Document Signer enrollment is not supported.
+    * **SignerIp** - V1 ONLY, OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted. If neither is set, V1 sends the placeholder 127.0.0.1 and logs a Warning; a V1 value that is not an IP address is sent unchanged, with a Warning. Ignored on V2 (the V2 agreement block has no signer IP field).
+    * **ProductFamily** - V2 ONLY: Product family for this template. Accepted values: 'ssl' (default) or 'private-pki'. 'private-pki' requires a Private PKI ProductVariant. 'signature' (Document Signer) is accepted by the parameter, but Document Signer enrollment is not supported.
     * **ProductVariant** - V2 ONLY: Product variant sent in the V2 order body. ProductFamily 'ssl': 'dv', 'ov', or 'ev' — if omitted, derived from the selected product; an explicit value that contradicts the product fails enrollment. ProductFamily 'private-pki': 'intranet-ssl' or 'igtf-host' (required; no default).
 
 ## CERTInext API Setup
@@ -333,10 +356,10 @@ When the connector is saved (and `Enabled` is `true`), the plugin checks only th
 | `RequestorDesignation` | Both | Optional | Job title of the requestor. Sent as `requestorInformation.requestorDesignation` (V1) and `requestor.designation` (V2). Omitted when blank. |
 | `TechnicalContactName`<br>`TechnicalContactEmail`<br>`TechnicalContactIsdCode`<br>`TechnicalContactMobileNumber` | Both | Optional | Technical point of contact on every SSL order. Each defaults to the matching `Requestor*` field. On V1 the name is sent as `pocFirstName` and `pocLastName`, split on the first whitespace (a single word goes in both). If no name or no email resolves, V1 omits the whole block and logs a warning, because CERTInext requires both inside it. |
 | `SignerPlace` | Both | Required | City of the person accepting the subscriber agreement. Required at save on V2; a template `SignerPlace` overrides it on both. On V1, if neither is set, the plugin sends `Gateway` and logs a warning. Example: `Austin`. |
-| `SignerIp` | Both | Required | Public IP of the host accepting the subscriber agreement. See the bullets below. Example: `203.0.113.10`. |
+| `SignerIp` | V1 | Required on V1 | Public IP of the host accepting the subscriber agreement. Not sent on V2, whose agreement block has no IP field. See the bullets below. Example: `203.0.113.10`. |
 
-- **`SignerIp` blank:** on V1, when neither a template `SignerIp` nor this field is set, the plugin sends `127.0.0.1` and logs a warning, which misstates the audit record CERTInext keeps. Set it to the gateway host's outbound IP. A V1 value that is not an IP address is still sent unchanged, with a warning. On V2 a blank value is omitted from the agreement.
-- **Signer values per order:** the agreement signer is the template `SignerName`, `SignerPlace`, and `SignerIp` parameters first, then the connector's `RequestorName`, `SignerPlace`, and `SignerIp`, then the placeholders `Keyfactor Gateway`, `Gateway`, and `127.0.0.1` (each placeholder logs a warning on V1). Blank values fall through. This applies to new orders and renewals on both V1 and Vt.
+- **`SignerIp` blank:** on V1, when neither a template `SignerIp` nor this field is set, the plugin sends `127.0.0.1` and logs a warning, which misstates the audit record CERTInext keeps. Set it to the gateway host's outbound IP. A V1 value that is not an IP address is still sent unchanged, with a warning. On V2 the setting is ignored: the V2 agreement block has no signer IP field (the CA records the signer's IP itself), so it is never sent and never warned about.
+- **Signer values per order:** the agreement signer is the template `SignerName`, `SignerPlace`, and `SignerIp` parameters first, then the connector's `RequestorName`, `SignerPlace`, and `SignerIp`, then the placeholders `Keyfactor Gateway`, `Gateway`, and `127.0.0.1` (each placeholder logs a warning on V1). `SignerIp` is V1 only. Blank values fall through. This applies to new orders and renewals on both V1 and Vt.
 - **Where to find values:** the account number is under your name or avatar → **Account Settings** or **My Profile**. Use a monitored team inbox for `RequestorEmail`.
 
 ### Order Defaults
@@ -366,17 +389,16 @@ Calling `GetProductDetails` against your account lists the codes available to yo
 | Mode | When it applies |
 |---|---|
 | V1 | Renewals only, and only when the template supplies no `ProductCode`/`ProfileId`. CERTInext's `TrackOrder` does not return the prior order's product code. No effect on new enrollments. |
-| V2 | Also disambiguates a template that sets only `ProductId` when the live catalog has several products at the same assurance level. |
+| V2 | Not used. V2 orders send `X-Product-Code` only for an explicit template `ProductCode`; otherwise CERTInext resolves the product. |
 
 - If neither the template nor this field supplies a code on a V1 renewal, the renewal goes out with an empty product code.
-- On V2, a value that matches none of the candidate codes fails that enrollment, and template save-time validation, with an error listing them.
 
 #### EmailNotifications Values
 
 | Value | V1 | V2 |
 |---|---|---|
 | `1` | Full notification set (sent as `1`) | Sent as `all` |
-| `0` | Silent | Silent |
+| `0` | Silent (sent as `0`) | Silent: sent as `consent-only`, the quietest value the V2 spec allows (its enum is `consent-only` or `all`) |
 | Blank | Silent (sent as `0`) | Omitted, so the CA default (`all`, not silent) applies |
 | Anything else | Sent unchanged, not validated | Enrollment fails before any CA call |
 
@@ -525,7 +547,9 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 |---|---|---|
 | `UseV2Api` | Optional | Enables the V2 code path for connection tests, enrollment, revocation, status checks, and synchronization. Default: `false`. |
 | `V2SyncLookbackHours` | Optional | Hours subtracted from the last-sync time on incremental sync. Default: `72`. |
-| `V2InlineCsr` | Optional | SSL/TLS only. `true` sends the CSR inline in the create call (a single `POST /ssl-certificates`) instead of creating the order and then submitting the CSR. It is about 4-5 seconds faster, but the create call can hold about 20 seconds until issuance, and a create that times out or returns a 5xx can leave an order that issues and is imported by the next sync rather than cancelled. Private PKI always uses two calls. Default: `false`. |
+| `SslComSubmitOrganization` | Optional | OV/EV on V2. `true` lets the plugin submit an unvalidated organization to SSL.com, which **accepts SSL.com's subscriber agreement on the organization's behalf**; see [SSL.com organization validation](#sslcom-organization-validation). Default: `false`. |
+| `SslComAdminEmail` | Optional | Administrator email sent as `adminEmail` on that submission. Blank omits it. Example: `pki-admin@example.com`. |
+| `V2InlineCsr` | Optional | SSL/TLS only. `true` (the default) sends the CSR inline in the create call (a single `POST /ssl-certificates`), as a direct API integration does. `false` creates the order and then submits the CSR; that two-call flow fails for a domain the account has already validated, because CERTInext approves the order at create and then rejects the CSR. A create that times out or returns a 5xx can leave an order that issues and is imported by the next sync rather than cancelled, and the create call can hold about 20 seconds until issuance. Private PKI always uses two calls. Default: `true`. |
 
 - **Why a lookback:** the API's `from`/`to` filter may bracket either the order-placement date or the issuance date. The window keeps an order created before the last sync but issued afterward (for example a slow DCV order) from being missed.
 
@@ -554,26 +578,25 @@ When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
 - **`ProductVariant` default:** when omitted for `ssl`, the plugin derives it from the selected product (an OV product sends `ov`, an EV product sends `ev`). An explicit value that contradicts the product fails enrollment.
 - **`signature` (Document Signer):** the parameter accepts it, but enrollment is not supported and fails before any order is placed.
 - **Unrecognized family:** treated as `ssl`.
-- **`ProductCode`:** continues to carry the numeric product code, sent in the `X-Product-Code` header on V2 order placement.
+- **`ProductCode`:** optional on V2. When set, it is sent in the `X-Product-Code` header as an override; when blank, no header is sent and CERTInext resolves the product.
 
 ### V2 Product Code Resolution
 
-When `UseV2Api` is `true`, the numeric product code sent to CERTInext is resolved as follows:
+When `UseV2Api` is `true`, the plugin does not choose a numeric product code. The V2 spec treats the `X-Product-Code` header on order create as an optional override: CERTInext's wrapper picks the right catalog product from the variant (`productVariant` for SSL/TLS, `variant` for Private PKI), whether `certificate.domain` is a wildcard (it starts with `*.`), and whether `additionalDomains` is non-empty (multi-domain, UCC). The create response reports the product it chose as `resolvedProductCode`, which the plugin logs at Information level.
 
-1. **Explicit `ProductCode` (or the deprecated `ProfileId` alias) on the template** — sent as-is in the `X-Product-Code` header, after template save-time validation confirms it exists in the live V2 catalog.
-2. **No explicit code set** — the plugin maps the template's selected product to the catalog's expected `productTypeID` and looks for catalog entries sharing it:
-   - **Exactly one match** — used automatically.
-   - **No match** — enrollment (and template save-time validation) fails; the account may not be entitled to the product.
-   - **More than one match** — the catalog has several entries at the same assurance level (for example two DV SSL entries with different billing terms). Set `ProductCode` on the template or `DefaultProductCode` on the connector, or enrollment fails with an error listing every candidate.
+1. **No `ProductCode` on the template (the default)** — no `X-Product-Code` header is sent. The connector's `DefaultProductCode` is not used, and neither is the catalog: save-time validation does no catalog check, and enrollment makes no catalog call. The plugin decides whether the order is wildcard or multi-domain from the request itself:
+   - **Wildcard:** the primary domain starts with `*.`.
+   - **Multi-domain:** the selected product is a UCC product, or the CSR or gateway SAN list carries DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count). Those names are sent as `additionalDomains`, which makes CERTInext choose a UCC product.
+2. **Explicit `ProductCode` (or the deprecated `ProfileId` alias)** — the override. It is sent as-is in the `X-Product-Code` header, after template save-time validation confirms it exists in the live V2 catalog and matches the selected product. Use it when your account holds several matching products (for example different CA profiles for the same variant) and you want to force one. With an override, the plugin reads the catalog once per enrollment to recognize UCC and wildcard products, and rejects extra SANs on a single-domain product.
 
-This differs from V1, where `DefaultProductCode` only affects renewals (see [DefaultProductCode](#defaultproductcode)) — in V2 mode it also disambiguates new enrollments and template validation for a `ProductId`-only template.
+This differs from V1, where `DefaultProductCode` only affects renewals (see [DefaultProductCode](#defaultproductcode)).
 
 ### V2 Private PKI Orders
 
 With `ProductFamily=private-pki`, the plugin places the order against CERTInext's Private PKI endpoint using the Private PKI request body, which differs from the SSL/TLS one:
 
-- **Product code is required.** Set `ProductCode` to your account's Private PKI catalog code; codes vary per customer catalog, so the plugin can't look one up. Template validation checks that it is a Private PKI product (`productTypeID` `39`).
-- **Which `ProductID` to pick.** The plugin advertises SSL/TLS product names only, so the template still needs one from that list. It does not affect a `private-pki` order, which is built from `ProductCode` and `ProductVariant`, so any ProductID (for example `DV SSL`) works.
+- **Product code is optional.** CERTInext resolves the Private PKI product from `ProductVariant`. Set `ProductCode` to your account's Private PKI catalog code only to pick between several matching products; template validation then checks that it is a Private PKI product (`productTypeID` `39`).
+- **Which `ProductID` to pick.** The plugin advertises SSL/TLS product names only, so the template still needs one from that list. It does not affect a `private-pki` order, which is built from `ProductVariant` (and `ProductCode`, if set), so any ProductID (for example `DV SSL`) works.
 - **Variant is required.** Set `ProductVariant` to `intranet-ssl` or `igtf-host`.
 - **Hostname.** The order's primary `hostname` comes from `DomainName`, or from the CSR's CN when `DomainName` isn't set.
 - **SANs.** Sent in `additionalHosts`, which accepts DNS names and IPv4/IPv6 addresses. They come from the gateway's SAN list, or from the CSR when the gateway supplies none.
@@ -590,10 +613,10 @@ V2 status strings map to Keyfactor enrollment statuses as follows:
 
 | V2 Status | Keyfactor Status | Notes |
 |---|---|---|
-| `issued` | Issued | Certificate is immediately downloaded and returned to Command. |
+| `issued` | Issued | Certificate is immediately downloaded and returned to Command. CERTInext can report `issued` for a while before the certificate is generated (Download Certificate answers 422 `EMS-1165`); see [Issued but not generated yet](#issued-but-not-generated-yet). |
 | `pending-dcv` | Pending External Validation | Order is awaiting domain control validation. |
 | `pending-csr` | Pending External Validation | Order is awaiting CSR submission or processing. |
-| `pending-agreement` | Pending External Validation | Order requires subscriber agreement acceptance. |
+| `pending-agreement` | Pending External Validation | Order requires subscriber agreement acceptance. For SSL/TLS orders the plugin accepts it (see [Subscriber agreement fallback](#subscriber-agreement-fallback)). |
 | `pending-organization-verification` | Pending External Validation | OV/EV order is awaiting organization verification. |
 | `pending-documents` | Pending External Validation | Order is awaiting supporting document submission. |
 | `pending-approval` | Pending External Validation | Order is awaiting final CA/LRA approval before issuance. |
@@ -615,6 +638,38 @@ mapped to Failed — see the gateway trace log if certificates unexpectedly show
 - CERTInext does not serve the certificate body of a revoked order. A revoked order is propagated as revoked only when the gateway already holds that certificate (the revocation date and reason come from a live status call).
 - Otherwise a revoked order is reported as Failed (the gateway has a record without a body) or skipped (no record), so the gateway never stores a revoked record without a certificate.
 - `IgnoreExpired` is applied here: expired certificates are skipped.
+- An issued order whose download answers 422 `EMS-1165` is emitted without a certificate body and counted as `IssuedNotGeneratedYet` in the sync summary instead of logging a warning per order; a later pass picks it up.
+
+#### SSL.com organization validation
+
+OV and EV certificates are issued under an organization that SSL.com must have validated. Before placing a V2 OV or EV SSL/TLS order for the connector's `OrganizationNumber`, the plugin reads that organization's SSL.com validation status (`GET /organizations/{orgNumber}/ca-validations/sslcom`):
+
+1. **Validated at the order's level (OV or EV):** nothing more is done.
+2. **Not validated:** the plugin asks SSL.com to refresh the status once (`POST .../sslcom/sync`) and checks again.
+3. **Still not validated, and `SslComSubmitOrganization` is `true`,** the level isn't already requested, and SSL.com's readiness block says the organization is ready for that level (`ready` for OV, `evReady` for EV, with nothing missing): the plugin submits it (`POST .../sslcom` with `levels` set to the order's level, `subscriberAgreementAccepted: true`, and `adminEmail` when `SslComAdminEmail` is set). **This accepts SSL.com's subscriber agreement on the organization's behalf.** The intent is logged at Information level before the call, and the connector start-up log warns that the setting is on. Leave it `false` (the default) unless you are authorized to accept that agreement; the plugin then only reads and refreshes the status.
+4. **Whatever happens, the order is still placed.** A not-validated organization, a not-ready organization, or any failed SSL.com call logs one warning and never blocks or fails the enrollment (a not-validated organization's OV/EV order simply stays pending until SSL.com validates it). The warning includes SSL.com's status, `lastError`, and the fields it reports missing; email addresses are masked unless `LogSensitiveRequestData` is on.
+
+DV and Private PKI orders skip this check entirely.
+
+**How "validated" is decided.** The spec describes the response only in prose ("status per level (OV, EV) with validTill"), so the plugin reads it defensively. A level counts as validated when its entry in `levels` carries a validated status word (`VALIDATED`, `VALID`, `APPROVED`, `ACTIVE`, `COMPLETE`, `COMPLETED`, or `ISSUED`) or a true `validated` flag, or has no status but a `validTill` in the future; an entry whose `validTill` has passed is not validated. A bare level name in `levels` counts only when the overall `status` is itself a validated word. The overall `status` and `validatedAt` alone never count, since they aren't per level. Any shape the plugin doesn't recognize is treated as not validated; because that only produces a warning, the cost of a false "not validated" is a log line.
+
+#### Subscriber agreement fallback
+
+The create body already carries the agreement (`signerName`, `signerPlace`, `accepted: true`), but if Track Order still shows an SSL/TLS order at `pending-agreement`, the CA won't release the certificate until the agreement is accepted. The plugin then calls `POST /api/certinext/v2/ssl-certificates/{orderId}/agreement` with the same signer values:
+
+- **Enrollment:** at most once per order per `Enroll` call, whether the status is seen right after create, after DCV, or during the pickup poll. The signer is the template's `SignerName` (else the requestor name) and `SignerPlace` (else the connector's), as on create.
+- **Synchronize:** at most once per order per pass, using the connector's `RequestorName` and `SignerPlace` (a sync has no template). A pending SSL/TLS order in the listing that wasn't already tracked costs one extra status call per pass; with no `SignerPlace` or `RequestorName` configured the step is skipped entirely.
+- **Audit and failures:** the intent is logged at Information before the call (the signer's name and place appear only when `LogSensitiveRequestData` is on). A failed call is logged as a warning and never fails the enrollment or the sync; the order stays pending.
+- **Not applicable:** Private PKI orders have no Subscriber Agreement, and `GetSingleRecord` doesn't accept agreements.
+
+#### Issued but not generated yet
+
+CERTInext can report an order as `issued` before the certificate exists: Download Certificate then answers HTTP 422 `EMS-1165 Invalid request status.` Normally the certificate is generated about 20 seconds later, but the sandbox has been seen to take far longer. The plugin treats this as an expected state, not an error:
+
+- **Enrollment:** the pickup poll keeps waiting (within `PickupRetries` x `PickupDelay`), logging each attempt at Debug level and writing one Information summary if the budget runs out. The enrollment returns pending, and a later synchronization imports the certificate.
+- **`GetSingleRecord` and Synchronize:** logged at Information (single record) or Debug with a count in the sync summary, rather than a warning. The record is returned without a certificate body, as for any failed download.
+- **Log fields:** the lines include CERTInext's `orderState` and `certificateState` text (for example `Approved by System` versus `Certificate Generated`) for diagnosis. Their vocabulary isn't documented, so the plugin never acts on it.
+- **Any other download error** is still logged as a warning.
 
 V2 has no *renew* endpoint. CERTInext does document a `/reissue` endpoint (`mode: rekey|update-sans`, with optional `revokePrevious`/`revokeReason`), but the plugin does not use it — every enrollment type (New, Reissue, Renew, RenewOrReissue) places a fresh V2 order, and the prior order/certificate is left issued rather than auto-revoked.
 
@@ -697,7 +752,7 @@ New fields `UseV2Api` and `V2SyncLookbackHours` are documented in [V2 API](#v2-a
 | `SubscriptionValidityYears` | Fallback validity when the template's `ValidityYears` is not set. |
 | `TechnicalContactName` / `Email` / `IsdCode` / `MobileNumber` | Sent as the order's `technicalPointOfContact` on SSL/TLS and Private PKI orders. A blank field falls back to the matching `Requestor*` value, as on V1. `designation` is always `Technical Contact`. |
 | `RequestorName` / `RequestorEmail` / `RequestorIsdCode` / `RequestorMobileNumber` / `RequestorDesignation` | Carried into the order's `requestor` block. The phone number is sent as `+<ISD code><number>`, and a blank `RequestorDesignation` is omitted. |
-| `SignerPlace` / `SignerIp` | Carried into the order's `agreement` block. `SignerPlace` is required in V2 mode. |
+| `SignerPlace` / `SignerIp` | `SignerPlace` is carried into the order's `agreement` block and is required in V2 mode. `SignerIp` is V1 only: the V2 agreement block has no IP field, so it is never sent. |
 | `AutoSecureWww` | Controls whether V2 adds the `www.` variant. |
 | `PageSize` | Applies to V2 `/reports/orders` paging, capped at 100 per page. |
 | `PickupRetries` / `PickupDelay` | V2 enrollment polls for a quickly issued certificate the same way V1 does. |
@@ -712,9 +767,9 @@ New fields `UseV2Api` and `V2SyncLookbackHours` are documented in [V2 API](#v2-a
 | `OAuthClientId` / `OAuthClientSecret` | Set them to the OAuth-mode credential from Step 1. |
 | `GroupNumber` | Sent as `groupNumber` on SSL/TLS and Private PKI order create, and as a query parameter on catalog and orders-report calls. Omitted when blank, so the account's default group applies. |
 | `OrganizationNumber` | Required for OV/EV, unused for DV. V2 OV/EV orders send `organization.organizationNumber` with `preVetted=true`. CERTInext rejects an OV/EV order without organization data (HTTP 422 `EMS-1180`), so the plugin fails the enrollment before any CA call if it is blank. |
-| `EmailNotifications` | `1` maps to `"all"` and `0` maps to `"0"`. Blank is omitted on V2, so the CA's default of `"all"` applies; V1 sends `"0"`. Set `0` explicitly for silent V2 orders. Any other value fails the enrollment before any CA call. |
+| `EmailNotifications` | `1` maps to `"all"` and `0` maps to `"consent-only"` (the V2 spec's enum is `consent-only` or `all`, so the V1 value `"0"` is no longer sent). Blank is omitted on V2, so the CA's default of `"all"` applies; V1 sends `"0"`. Set `0` explicitly for silent V2 orders. Any other value fails the enrollment before any CA call. |
 | `SubscriptionAutoRenew` / `SubscriptionRenewCriteriaDays` | `SubscriptionAutoRenew=1` sets `subscription.autoRenew=true`. `SubscriptionRenewCriteriaDays` sets `subscription.renewBeforeDays` (blank omits it, so the CA's default of 30 applies). An unparseable or negative value fails the enrollment before any CA call. |
-| `DefaultProductCode` | On V2 it also disambiguates a template that sets only `ProductId` when the catalog has several products at that assurance level (see [V2 Product Code Resolution](#v2-product-code-resolution)). Renewals don't need it. |
+| `DefaultProductCode` | Not used on V2: no product code is sent unless the template sets `ProductCode` (see [V2 Product Code Resolution](#v2-product-code-resolution)). Renewals don't need it. |
 | `IgnoreExpired` | Honored during V2 Synchronize: a report row with a parseable, past `certificateExpiryDate` is skipped, and a row with a missing or unparseable date is kept. Not applied on V1 yet. |
 | `SubmitNonDnsSans` | SSL family: not consulted. A UCC order's `additionalDomains` takes DNS names only, so non-DNS SANs are left off with a gateway-log warning. Private PKI: not consulted. `additionalHosts` takes DNS names and IPs, so IP SANs are always submitted, and email and URI SANs are left off with a warning. |
 
@@ -731,19 +786,17 @@ New fields `UseV2Api` and `V2SyncLookbackHours` are documented in [V2 API](#v2-a
 
 For each template you're migrating:
 
-1. **If the template sets only `ProductId` (no explicit `ProductCode`), check whether the live V2
-   catalog has more than one product at that assurance level.** The plugin resolves the numeric code
-   automatically from the catalog when exactly one entry matches; when the catalog has several (e.g.
-   two DV SSL entries with different billing terms), you must either set `ProductCode` explicitly on
-   the template or set the connector's `DefaultProductCode` to one of the candidates — otherwise every
-   enrollment against that template fails with an error listing the candidate codes. See
-   [V2 Product Code Resolution](#v2-product-code-resolution) for the full resolution order.
+1. **Leave `ProductCode` blank unless you need to force a catalog product.** On V2 the plugin sends no
+   `X-Product-Code` header and CERTInext resolves the product from the variant, the wildcard shape of the
+   domain and any additional domains, so a template with only `ProductId` works even when the catalog has
+   several products at that assurance level. Set `ProductCode` only to override that choice (for example
+   to pick one of several CA profiles). See [V2 Product Code Resolution](#v2-product-code-resolution).
 2. Add `ProductFamily` (default `ssl`) if not already present — this is a V2-only parameter with no
    V1 equivalent. `ProductVariant` (`dv`/`ov`/`ev`) is optional for `ssl`: if left unset, the plugin
    derives it from the selected product (an OV product sends `ov`, an EV product sends `ev`) instead
    of defaulting to `dv`; set it explicitly only to override. For a Private PKI template, set
    `ProductFamily=private-pki`, `ProductVariant` to `intranet-ssl` or `igtf-host` (required, no
-   default), and an explicit `ProductCode` (see [V2 Private PKI Orders](#v2-private-pki-orders)).
+   default); `ProductCode` is optional (see [V2 Private PKI Orders](#v2-private-pki-orders)).
    `ProductFamily=signature` (Document Signer) enrollment is not supported.
 3. Re-verify `ProductCode` (if set explicitly) against the V2 catalog. V1 and V2 product codes are not
    guaranteed to be the same numeric values on your account — check the V2 catalog
@@ -751,8 +804,8 @@ For each template you're migrating:
    (`ValidateProductInfo`) automatically checks `ProductCode` against the V2 catalog once
    `UseV2Api=true`, so an incorrect code will be caught at template save time, not silently at
    enrollment.
-4. The `DomainName` template parameter takes effect in V2 only. The `SignerName`, `SignerPlace`, and
-   `SignerIp` template parameters take effect in both V1 and V2. `RenewalWindowDays` and `ValidityDays`
+4. The `DomainName` template parameter takes effect in V2 only. The `SignerName` and `SignerPlace`
+   template parameters take effect in both V1 and V2 (`SignerIp` is V1 only). `RenewalWindowDays` and `ValidityDays`
    are V1-only and are ignored.
 5. If the template enrolls for a UCC (multi-domain) or wildcard product, test it on the sandbox first.
    The plugin runs DCV for each domain, but per-SAN, never-validated-domain, and wildcard DCV aren't
@@ -776,7 +829,7 @@ pointing a production template at the V2 connector. At minimum, confirm:
 ### Verification Checklist
 
 - [ ] **Connection test.** Save the connector. It succeeds after a token request to `{ApiUrl}/oauth/token` and `GET /api/certinext/v2/auth/me`; a 401 or 403 is explained in Step 1.
-- [ ] **Template save.** Each template saves. A "multiple catalog products match" error means the template needs `ProductCode` or the connector needs `DefaultProductCode`.
+- [ ] **Template save.** Each template saves. An explicit `ProductCode` that is missing from the catalog, or whose product type doesn't match the selected product, is rejected.
 - [ ] **DV enrollment.** Enroll a single-domain DV order. It returns the certificate, or returns pending and is imported by the next sync, and its TXT record is removed.
 - [ ] **UCC and wildcard.** Enroll each migrated template. One order carries every DNS SAN, and each domain reaches the validated state.
 - [ ] **OV/EV.** Set `OrganizationNumber` and enroll. The order is accepted, stays pending until organization verification completes, and the next sync imports it.
@@ -805,12 +858,12 @@ pointing a production template at the V2 connector. At minimum, confirm:
   the order once and returns a failed result carrying the order ID. After a timeout, the plugin
   checks the order before deciding: it cancels the order only if the CSR never arrived.
 
-- **CSR delivery.** By default V2 enrollment creates the order and then submits the CSR, as above. The
-  optional `V2InlineCsr` connector setting (SSL/TLS only, default `false`) sends the CSR inline in the
-  create call instead: about 4-5 seconds faster and the same call shape as a direct single-call API
-  integration, but the create call can hold about 20 seconds until issuance, and a create that times
-  out or returns a 5xx can leave an order that issues and is imported by the next sync rather than
-  cancelled. Private PKI always uses the two-call flow.
+- **CSR delivery.** By default V2 SSL/TLS enrollment sends the CSR inline in the create call
+  (`V2InlineCsr`, default `true`), the same call shape as a direct single-call API integration. The
+  create call can hold about 20 seconds until issuance, and a create that times out or returns a 5xx
+  can leave an order that issues and is imported by the next sync rather than cancelled. Setting
+  `V2InlineCsr` to `false` creates the order and then submits the CSR, as above; that two-call flow
+  fails for a domain the account has already validated. Private PKI always uses the two-call flow.
 
 ### Renewals and Reissuance
 
@@ -895,7 +948,7 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 │ V2  POST /oauth/token · GET /auth/me                    │
 │     GET  /catalog/products · GET /reports/orders        │
 │     POST /{family}                 create order         │
-│     PUT  /{family}/{id}/csr   (two-call, the default)   │
+│     PUT  /{family}/{id}/csr   (two-call; Private PKI)   │
 │     GET  /{family}/{id}            track order          │
 │     GET  /{family}/{id}/certificate                     │
 │     GET  /ssl-certificates/{id}/dcv                     │
@@ -920,7 +973,7 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 | Renewal | Renewal window (`RenewalWindowDays`), otherwise a new order | Every enrollment type places a new order |
 | DCV waits | `DcvWaitForChallengeSeconds`, `DcvWaitForIssuanceSeconds` | None; polls until the order leaves `pending-dcv`, bounded by `DcvTimeoutMinutes` |
 | Revoke reasons | Numeric `revokeReasonId`; unaccepted codes sent as key compromise | Kebab-case strings; four rejected values retried once with a substitute |
-| Product code | `ProductCode`, then `ProfileId`, then the built-in default for the selected product | `ProductCode`, then the live catalog, then `DefaultProductCode` among several matches |
+| Product code | `ProductCode`, then `ProfileId`, then the built-in default for the selected product | None sent by default: CERTInext resolves the product. An explicit template `ProductCode` is sent as the `X-Product-Code` override |
 
 ### Request Authentication
 
@@ -1066,7 +1119,7 @@ When Command asks for one order (`GetSingleRecord`), for example to refresh a pe
 |---|---|---|
 | Look up the order | `TrackOrder`, then `GetCertificate` when the order is downloadable | Find the product family that owns the order, then track it |
 | Pending order | Run DCV, then refetch the certificate if DCV ran (a failed refetch is logged and the earlier result is returned) | Run DCV when the order lists a domain, bounded by `DcvTimeoutMinutes`, then track again (a DCV failure is logged and ignored) |
-| Issued order | Certificate PEM from `GetCertificate` | Download the chain, leaf first (a failed download is logged and the record is returned without a body) |
+| Issued order | Certificate PEM from `GetCertificate` | Download the chain, leaf first (a failed download is logged and the record is returned without a body; a 422 `EMS-1165` right after `issued` means "not generated yet" and is logged at Information, not as a warning) |
 | Revoked order with no certificate body | Status, date, and reason come from `TrackOrder`. Returned as revoked only if the gateway already holds the certificate body; otherwise returned as failed | Returned as revoked only if the gateway already holds the certificate body; otherwise returned as failed |
 
 The last row is the body-less revoked guard, which applies to both V1 and V2. CERTInext does not serve the body of a revoked order, and a body-less revoked record would break Command's revoked-certificate scans for the whole CA. `Synchronize` applies the same guard but skips the order when the gateway has no row for it, whereas `GetSingleRecord` must return something and so returns failed.
@@ -1239,18 +1292,19 @@ With `UseV2Api = true`, every enrollment type (New, Reissue, Renew, RenewOrReiss
 ```mermaid
 flowchart TD
     A([Enroll requested]) --> B["Log the enrollment intent"]
-    B --> C{"Request passes local checks?<br/>family is ssl or private-pki, CSR present, SignerPlace set for SSL,<br/>Private PKI variant and ProductCode set,<br/>OrganizationNumber set for OV or EV,<br/>valid subscription and notification settings"}
+    B --> C{"Request passes local checks?<br/>family is ssl or private-pki, CSR present, SignerPlace set for SSL,<br/>Private PKI variant set,<br/>OrganizationNumber set for OV or EV,<br/>valid subscription and notification settings"}
     C -- No --> X1(["Enrollment rejected, no order placed"])
     C -- Yes --> D{Private PKI?}
     D -- Yes --> G0
-    D -- No --> E["Fetch the product catalog<br/>and resolve the product code and product type"]
-    E --> F{"Code resolved?<br/>Explicit ProductCode, or exactly one catalog match,<br/>or DefaultProductCode among several"}
-    F -- No --> X2(["Failed result listing the candidates, no order placed"])
-    F -- Yes --> F2{"Single-domain product with extra DNS SANs<br/>in the CSR or SAN list?"}
+    D -- No --> E{"Explicit template ProductCode?"}
+    E -- Yes --> E1["Fetch the product catalog<br/>to recognize UCC and wildcard products"]
+    E -- No --> E2["Detect UCC and wildcard from the request:<br/>wildcard domain, UCC template product or extra DNS SANs"]
+    E1 --> F2{"Explicit non-UCC product with extra DNS SANs<br/>in the CSR or SAN list?"}
+    E2 --> G0
     F2 -- Yes --> X3(["Failed result, no order placed"])
     F2 -- No --> G0{"SSL/TLS with V2InlineCsr on?<br/>(Private PKI never)"}
-    G0 -- "No: two-call, the default" --> G["Create the order without a CSR<br/>(X-Product-Code and Idempotency-Key headers)"]
-    G0 -- "Yes: single call" --> GI["Create the order with the CSR inline, unchanged<br/>(X-Product-Code and Idempotency-Key headers)"]
+    G0 -- "No: two-call (V2InlineCsr false, or Private PKI)" --> G["Create the order without a CSR<br/>(Idempotency-Key header, X-Product-Code only if the template sets ProductCode)"]
+    G0 -- "Yes: single call, the default" --> GI["Create the order with the CSR inline, unchanged<br/>(Idempotency-Key header, X-Product-Code only if the template sets ProductCode)"]
     GI --> GI2{"Create call answered?"}
     GI2 -- "Rejected by the CA (HTTP 4xx)" --> X5a(["Enrollment fails, no order was created"])
     GI2 -- "5xx, timeout, or no response" --> X5b(["Enrollment fails with a do-not-resubmit message:<br/>the order may exist and may issue, the next sync imports it"])
@@ -1285,14 +1339,14 @@ flowchart TD
 
 Notes on the V2 flow:
 
-- **Product code.** For SSL/TLS, the plugin fetches the live catalog once per enrollment and resolves the code in this order:
-  1. An explicit `ProductCode` is used as given. The catalog is then used only to recognize multi-domain and wildcard products; if it can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted.
-  2. Otherwise the catalog entry whose product type matches the selected product is used, and the enrollment fails if none match.
-  3. If several entries match, `DefaultProductCode` must name one of them, or the enrollment fails and lists the candidates.
+- **Product code.** The spec makes `X-Product-Code` an optional override: CERTInext picks the catalog product itself from the variant, whether the domain is a wildcard (starts with `*.`), and whether `additionalDomains` is non-empty. So the plugin sends the header only when the template sets `ProductCode` (or the deprecated `ProfileId`), to choose between several matching catalog products. The connector's `DefaultProductCode` doesn't affect V2 orders. The create response's `resolvedProductCode` is logged at Information level.
+  - **With an explicit `ProductCode`,** the plugin fetches the live catalog once per enrollment, only to recognize multi-domain and wildcard products; if it can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted.
+  - **Without one,** there is no catalog call. The order is a wildcard when the domain starts with `*.`. It is multi-domain when the selected product is a UCC product, or when the CSR or SAN list has DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count); those names go out as `additionalDomains`, which is what makes CERTInext choose a UCC product.
 
-  Private PKI never fetches the catalog. Its `ProductCode` is required and was validated when the template was saved.
+  Private PKI never fetches the catalog. Its `ProductCode`, when set, was validated when the template was saved.
+- **SSL.com organization validation (OV/EV).** Just before the create call, an OV or EV SSL/TLS order reads the organization's SSL.com validation status, refreshes it once if the order's level isn't validated, and, only when `SslComSubmitOrganization` is on and the organization is ready, submits it (accepting SSL.com's subscriber agreement on its behalf, audit-logged). This step is advisory: any failure or not-validated result logs a warning and the order is placed anyway. See [SSL.com organization validation](configuration.md#sslcom-organization-validation).
 - **Multi-domain products.** DNS SANs other than the primary domain are sent as `additionalDomains`, and non-DNS SANs are left off the order with a warning. Private PKI sends DNS and IP SANs as `additionalHosts`.
-- **CSR delivery (`V2InlineCsr`).** By default the plugin creates the order without a CSR and then submits it with `PUT .../csr`; if that submit is rejected, the plugin cancels the orphaned order once. With `V2InlineCsr = true` (SSL/TLS only), the CSR is sent inline in the create body exactly as Command supplied it, and there is no Submit CSR step (a `PUT .../csr` after an inline CSR is rejected with HTTP 422). The create call then often holds about 20 seconds until the certificate is issued, and the order ID is known only once it returns. If that call fails with a 5xx or times out, the order may still exist and issue: the failure message says so, the plugin doesn't cancel the order, and the next sync imports it. Private PKI ignores the setting and always uses two calls, because CERTInext rejects an inline CSR on the Private PKI create (HTTP 422). In both modes the create call is pinned with `X-Product-Code`, because an unpinned SSL create resolves to a CERTInext default product whose Submit CSR is rejected ("PFX based certificate orders are not allowed"). A blank CSR is rejected before any CA call.
+- **CSR delivery (`V2InlineCsr`).** By default (`V2InlineCsr = true`, SSL/TLS) the CSR is sent inline in the create body exactly as Command supplied it, and there is no Submit CSR step (a `PUT .../csr` after an inline CSR is rejected with HTTP 422). The create call then often holds about 20 seconds until the certificate is issued, and the order ID is known only once it returns. If that call fails with a 5xx or times out, the order may still exist and issue: the failure message says so, the plugin doesn't cancel the order, and the next sync imports it. Private PKI ignores the setting and always uses two calls, because CERTInext rejects an inline CSR on the Private PKI create (HTTP 422). With `V2InlineCsr = false` the plugin creates the order without a CSR and then submits it with `PUT .../csr`, cancelling the orphaned order once if that submit is rejected. That two-call flow fails for a domain the account has already validated: CERTInext reports the order `issued` at create, before any CSR, and then rejects the submit with HTTP 422 "Something went Wrong". A blank CSR is rejected before any CA call.
 - **Idempotency.** Order-create, revoke, and cancel calls carry a fresh `Idempotency-Key` UUID. The V2 spec documents that header only for Verify DCV and Domains, as parsed but not yet enforced. On order create, a same-key retry was observed to create a second order behind an HTTP 500, so the plugin never retries an order-create call, and the AnyCA Gateway doesn't retry a timed-out `Enroll`. If an operator resubmits after an order-create error, check the CERTInext portal for an order that was created anyway.
 - **Revoked before delivery.** An order CERTInext reports as revoked before any certificate was delivered is returned as failed, never as a revoked record with no certificate.
 - **Full certificate chain.** The V2 `/certificate` endpoint returns the leaf in `certificatePem` and intermediates in `chainPem[]`. The plugin concatenates them, leaf first, into one PEM.
@@ -1397,12 +1451,11 @@ The same https-or-loopback check runs again at gateway startup, so a connector s
 
 #### Template validation
 
-When an administrator saves a certificate template, the gateway asks the plugin to validate its product settings. The product code must be set (explicitly, or derived from the selected product on V1). On V1 it must appear in the CERTInext product list for the account. On V2:
+When an administrator saves a certificate template, the gateway asks the plugin to validate its product settings. On V1 the product code must be set (explicitly, or derived from the selected product) and appear in the CERTInext product list for the account. On V2:
 
-- an explicit `ProductCode` must exist in the live catalog and match the selected product's type;
-- without one, exactly one catalog entry must match the selected product, or `DefaultProductCode` must name one of several;
+- an explicit `ProductCode` is optional; if set, it must exist in the live catalog and match the selected product's type, and no catalog check runs without one;
 - an SSL template's `ProductVariant` must agree with the selected product;
-- a Private PKI template needs a Private PKI `ProductVariant` and an explicit `ProductCode` that is a Private PKI catalog product.
+- a Private PKI template needs a Private PKI `ProductVariant`, and its `ProductCode`, if set, must be a Private PKI catalog product.
 
 Any failure is shown to the administrator with the candidate codes or the field to fix.
 
@@ -1430,8 +1483,8 @@ The table below maps each Keyfactor Command operation to the CERTInext API endpo
 |---|---|
 | Obtain Bearer token | `POST /oauth/token` |
 | Test connection | `GET /api/certinext/v2/auth/me` |
-| Create order | `POST /api/certinext/v2/{family}` (carries the CSR inline only with `V2InlineCsr`, SSL/TLS) |
-| Submit CSR | `PUT /api/certinext/v2/{family}/{orderId}/csr` (two-call flow: the default, and always for Private PKI) |
+| Create order | `POST /api/certinext/v2/{family}` (carries the CSR inline for SSL/TLS by default, `V2InlineCsr`) |
+| Submit CSR | `PUT /api/certinext/v2/{family}/{orderId}/csr` (two-call flow: always for Private PKI, and SSL/TLS with `V2InlineCsr = false`) |
 | Check order status | `GET /api/certinext/v2/{family}/{orderId}` |
 | Get DCV challenge (SSL/TLS only) | `GET /api/certinext/v2/ssl-certificates/{orderId}/dcv` (with `?domain=` per domain) |
 | Verify DCV (SSL/TLS only) | `POST /api/certinext/v2/ssl-certificates/{orderId}/dcv/verify` |
