@@ -2203,7 +2203,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                   : (int.TryParse(_config.SubscriptionValidityYears, out int cfgYears) && cfgYears > 0 ? cfgYears : 1);
 
             // requestorIsd/requestorMobile are the same Requestor* defaults V1 falls back to for
-            // its own TechnicalPointOfContact (CERTInextClient.cs BuildOrderRequestFromLegacyEnrollRequest).
+            // its own TechnicalPointOfContact (CERTInextClient.cs BuildTechnicalPointOfContact).
             // Also used directly for this order's own Requestor.Phone (below) via ComposeV2Phone,
             // which combines RequestorIsdCode with the mobile number rather than sending the raw
             // mobile number alone — the same helper TechnicalPointOfContact.Phone uses.
@@ -2255,7 +2255,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Designation = Constants.ApiV2.DefaultTechnicalContactDesignation
             };
             const string remarks = "Issued via Keyfactor Command AnyCA REST Gateway.";
-            // Mirrors V1's DelegationInformation.GroupNumber — omit when unconfigured so the
+            // Mirrors V1's SslOrderDetails.GroupNumber — omit when unconfigured so the
             // order falls back to the account's default billing group.
             string groupNumber = string.IsNullOrWhiteSpace(_config.GroupNumber) ? null : _config.GroupNumber;
 

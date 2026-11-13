@@ -181,7 +181,7 @@ When the connector is saved (and `Enabled` is `true`), the plugin checks only th
 | `RequestorIsdCode` | Both | Optional | Dialing code for the requestor phone, digits only, no `+`. Default: `1`. |
 | `RequestorMobileNumber` | Both | Optional | Requestor mobile number, digits only, no country code. |
 | `RequestorDesignation` | Both | Optional | Job title of the requestor. Sent as `requestorInformation.requestorDesignation` (V1) and `requestor.designation` (V2). Omitted when blank. |
-| `TechnicalContactName`<br>`TechnicalContactEmail`<br>`TechnicalContactIsdCode`<br>`TechnicalContactMobileNumber` | Both | Optional | Technical point of contact on every SSL order. Each defaults to the matching `Requestor*` field. Some products park orders without one. |
+| `TechnicalContactName`<br>`TechnicalContactEmail`<br>`TechnicalContactIsdCode`<br>`TechnicalContactMobileNumber` | Both | Optional | Technical point of contact on every SSL order. Each defaults to the matching `Requestor*` field. On V1 the name is sent as `pocFirstName` and `pocLastName`, split on the first whitespace (a single word goes in both). If no name or no email resolves, V1 omits the whole block and logs a warning, because CERTInext requires both inside it. |
 | `SignerPlace` | Both | Required | City of the person accepting the subscriber agreement. Required at save on V2; a template `SignerPlace` overrides it. Example: `Austin`. |
 | `SignerIp` | Both | Required | Public IP of the host accepting the subscriber agreement. See the bullets below. Example: `203.0.113.10`. |
 
@@ -200,10 +200,10 @@ When the connector is saved (and `Enabled` is `true`), the plugin checks only th
 | `SubscriptionValidityYears` | Both | Optional | Default validity in years: `1`, `2`, or `3`. A template `ValidityYears` overrides it. Default: `1`. |
 | `SubscriptionAutoRenew` | Both | Optional | `0` = CERTInext does not auto-renew (recommended; Command drives renewal), `1` = enabled. Default: `0`. |
 | `SubscriptionRenewCriteriaDays` | Both | Optional | Days before expiry at which CERTInext auto-renews. Honored only when `SubscriptionAutoRenew` is `1`. Default: `30`. |
-| `AutoSecureWww` | Both | Optional | `1` adds the `www.` variant of the primary domain as an extra SAN. Default: `0`. |
+| `AutoSecureWww` | Both | Optional | `1` adds the `www.` variant of the primary domain as an extra SAN, which must also pass domain validation. Sent as `orderDetails.autoSecureWWW` on every V1 SSL order (new and renewal). Default: `0`. |
 | `SubmitNonDnsSans` | V1 | Optional | `true` submits non-DNS SANs (IP, email, URI) to CERTInext, which cannot validate them, so the order will not issue until they are removed. `false` submits DNS names only. Default: `true`. |
 
-- **`GroupNumber`:** it is sent in `productDetails.groupNumber` on `GetProductDetails` and in `delegationInformation.groupNumber` on every V1 SSL order. On V2 it is sent as `groupNumber` on order create and as a query parameter on the catalog and orders-report calls. Some sandbox accounts return an empty product list unless it is set.
+- **`GroupNumber`:** it is sent in `productDetails.groupNumber` on `GetProductDetails` and in `orderDetails.groupNumber` on every V1 SSL order (new and renewal). When blank, CERTInext uses the account's default group. On V2 it is sent as `groupNumber` on order create and as a query parameter on the catalog and orders-report calls. Some sandbox accounts return an empty product list unless it is set.
 - **`GroupNumber` is not `AccountNumber`:** `AccountNumber` is your top-level account identifier. Each CERTInext group (cost center or department) has its own `groupNumber`, which is separate from any organization number on the Organizations page.
 - **`OrganizationNumber`:** when set, V1 orders carry `organizationDetails.preVetting="1"` and this number, so CERTInext skips its manual vetting queue. Without it, orders can sit in `Pending System RA` for tens of hours. V2 DV orders never send an organization block.
 - **Non-DNS SANs on V2:** `SubmitNonDnsSans` is not consulted. See [Migrating from V1 to V2](#step-2--update-the-ca-connector).

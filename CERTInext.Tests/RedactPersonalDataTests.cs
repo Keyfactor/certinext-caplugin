@@ -42,6 +42,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
         };
 
+        private const string SyntheticAuthKey = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
         // ---------------------------------------------------------------------------
         // V1 GenerateOrderSSL request — requestorInformation / technicalPointOfContact /
         // agreementDetails all carry personal data; certificateInformation/orderDetails don't.
@@ -51,7 +53,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var request = new GenerateOrderSslRequest
             {
-                Meta = new RequestMeta { Ver = "1.0", Ts = "2026-05-22T10:00:00+00:00", Txn = "1234567890", AccountNumber = "9988776655" },
+                Meta = new RequestMeta
+                {
+                    Ver = "1.0", Ts = "2026-05-22T10:00:00+00:00", Txn = "1234567890",
+                    AccountNumber = "9988776655", AuthKey = SyntheticAuthKey
+                },
                 OrderDetails = new SslOrderDetails
                 {
                     ProductCode = "842",
@@ -81,10 +87,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     },
                     TechnicalPointOfContact = new TechnicalPointOfContact
                     {
-                        TpcName = "Tech Contact",
-                        TpcEmail = "tech.contact@example.com",
-                        TpcIsdCode = "1",
-                        TpcMobileNumber = "5559876543"
+                        PocFirstName = "Terry",
+                        PocLastName = "Techcontact",
+                        PocEmail = "tech.contact@example.com",
+                        PocIsdCode = "44",
+                        PocMobileNumber = "5559876543"
                     }
                 }
             };
@@ -105,9 +112,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             output.Should().NotContain("John Signer");
             output.Should().NotContain("Austin");
             output.Should().NotContain("203.0.113.10");
-            output.Should().NotContain("Tech Contact");
+            output.Should().NotContain("Terry");
+            output.Should().NotContain("Techcontact");
             output.Should().NotContain("tech.contact@example.com");
             output.Should().NotContain("5559876543");
+            output.Should().NotContain("\"pocIsdCode\":\"44\"");
         }
 
         [Fact]
@@ -116,7 +125,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             string output = CERTInextClient.RedactPersonalData(BuildV1OrderRequestJson());
 
             output.Should().Contain("\"requestorEmail\":\"j***@example.com\"");
-            output.Should().Contain("\"tpcEmail\":\"t***@example.com\"");
+            output.Should().Contain("\"pocEmail\":\"t***@example.com\"");
         }
 
         [Fact]
@@ -143,8 +152,83 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             output.Should().Contain("\"signerName\":\"***REDACTED***\"");
             output.Should().Contain("\"signerPlace\":\"***REDACTED***\"");
             output.Should().Contain("\"signerIP\":\"***REDACTED***\"");
-            output.Should().Contain("\"tpcName\":\"***REDACTED***\"");
-            output.Should().Contain("\"tpcMobileNumber\":\"***REDACTED***\"");
+            output.Should().Contain("\"pocFirstName\":\"***REDACTED***\"");
+            output.Should().Contain("\"pocLastName\":\"***REDACTED***\"");
+            output.Should().Contain("\"pocIsdCode\":\"***REDACTED***\"");
+            output.Should().Contain("\"pocMobileNumber\":\"***REDACTED***\"");
+        }
+
+        // ---------------------------------------------------------------------------
+        // The V1 order body's meta.authKey is a replayable credential — always redacted by
+        // ApplyLoggingRedaction, whatever LogSensitiveRequestData says.
+        // ---------------------------------------------------------------------------
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void ApplyLoggingRedaction_V1OrderRequest_AuthKeyAlwaysRedacted(bool logSensitiveRequestData)
+        {
+            string input = BuildV1OrderRequestJson();
+            input.Should().Contain(SyntheticAuthKey, "precondition: the serialized body carries meta.authKey");
+
+            string output = CERTInextClient.ApplyLoggingRedaction(input, logSensitiveRequestData);
+
+            output.Should().NotContain(SyntheticAuthKey);
+            output.Should().Contain("\"authKey\":\"***REDACTED***\"");
+        }
+
+        [Fact]
+        public void ApplyLoggingRedaction_V1OrderRequest_FlagOn_KeepsPersonalDataInFull()
+        {
+            string output = CERTInextClient.ApplyLoggingRedaction(BuildV1OrderRequestJson(), logSensitiveRequestData: true);
+
+            output.Should().Contain("Jane Doe");
+            output.Should().Contain("jane.doe@example.com");
+            output.Should().Contain("5551234567");
+            output.Should().Contain("tech.contact@example.com");
+            output.Should().Contain("\"pocFirstName\":\"Terry\"");
+            output.Should().Contain("\"pocLastName\":\"Techcontact\"");
+            output.Should().Contain("\"pocIsdCode\":\"44\"");
+            output.Should().Contain("\"pocMobileNumber\":\"5559876543\"");
+            output.Should().Contain("\"authKey\":\"***REDACTED***\"", "credentials stay redacted with the flag on");
+            output.Should().NotContain(SyntheticAuthKey);
+        }
+
+        [Fact]
+        public void ApplyLoggingRedaction_V1OrderRequest_FlagOff_RedactsEveryPocField()
+        {
+            string output = CERTInextClient.ApplyLoggingRedaction(BuildV1OrderRequestJson(), logSensitiveRequestData: false);
+
+            output.Should().Contain("\"pocFirstName\":\"***REDACTED***\"");
+            output.Should().Contain("\"pocLastName\":\"***REDACTED***\"");
+            output.Should().Contain("\"pocEmail\":\"t***@example.com\"");
+            output.Should().Contain("\"pocIsdCode\":\"***REDACTED***\"");
+            output.Should().Contain("\"pocMobileNumber\":\"***REDACTED***\"");
+            output.Should().NotContain("tech.contact@example.com");
+            output.Should().NotContain(SyntheticAuthKey);
+        }
+
+        [Fact]
+        public void RedactPersonalData_PrettyPrintedNestedPocBlock_IsRedacted()
+        {
+            string input = "{\n  \"technicalPointOfContact\" : {\n    \"pocFirstName\" : \"Terry\",\n    \"pocEmail\"   :   \"tech.contact@example.com\",\n    \"pocMobileNumber\":\"5559876543\"\n  }\n}";
+
+            string output = CERTInextClient.RedactPersonalData(input);
+
+            output.Should().NotContain("Terry").And.NotContain("tech.contact@example.com").And.NotContain("5559876543");
+            output.Should().Contain("t***@example.com");
+        }
+
+        [Fact]
+        public void RedactPersonalData_LegacyTpcKeysInResponseBody_AreRedacted_DefenceInDepth()
+        {
+            // The V1 request no longer emits tpc* (renamed to poc*), but a CA error body may echo
+            // the old names, so they stay on the redaction lists.
+            string input = "{\"tpcName\":\"Tech Contact\",\"tpcEmail\":\"tech.contact@example.com\",\"tpcIsdCode\":\"1\",\"tpcMobileNumber\":\"5559876543\"}";
+
+            string output = CERTInextClient.RedactPersonalData(input);
+
+            output.Should().Be("{\"tpcName\":\"***REDACTED***\",\"tpcEmail\":\"t***@example.com\",\"tpcIsdCode\":\"***REDACTED***\",\"tpcMobileNumber\":\"***REDACTED***\"}");
         }
 
         // ---------------------------------------------------------------------------

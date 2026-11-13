@@ -46,11 +46,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.Config.GroupNumber] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: CERTInext group (delegation) number. When set, it is included in " +
-                               "product-catalog requests and in the order (`delegationInformation.groupNumber` on V1, " +
-                               "`groupNumber` on V2) so the order is routed to the correct account group, and V2 " +
-                               "synchronization is scoped to the group. Some accounts will queue orders for additional " +
-                               "review when this field is omitted. Available in the CERTInext portal under Delegation → " +
-                               "Groups.",
+                               "product-catalog requests and in the order (`orderDetails.groupNumber` on V1, " +
+                               "`groupNumber` on V2) so the order is routed to the configured account group, and V2 " +
+                               "synchronization is scoped to the group. When blank, CERTInext uses the account's " +
+                               "default group. Available in the CERTInext portal under Delegation → Groups.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -66,18 +65,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.Config.TechnicalContactName] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Name sent as the order's technical point of contact (V1 " +
-                               "`technicalPointOfContact.tpcName`, V2 `technicalPointOfContact.name`). Defaults to the " +
-                               "configured RequestorName when blank. Some product configurations require a TPoC to be " +
-                               "present; omitting it can cause CERTInext to park orders awaiting manual completion of " +
-                               "the field.",
+                               "`technicalPointOfContact.pocFirstName` / `pocLastName`, V2 `technicalPointOfContact.name`). " +
+                               "On V1 the name is split on the first whitespace: the first word is the first name and the " +
+                               "rest is the last name; a single-word name is sent in both. Defaults to the configured " +
+                               "RequestorName when blank. On V1, if no contact name or no email resolves (including from " +
+                               "RequestorName/RequestorEmail), the whole technicalPointOfContact block is omitted from the " +
+                               "order and a Warning is logged, since CERTInext requires both inside the block.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.Config.TechnicalContactEmail] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: Email sent as the order's technical point of contact (V1 `tpcEmail`, V2 " +
-                               "`email`). Defaults to the configured RequestorEmail when blank.",
+                    Comments = "OPTIONAL: Email sent as the order's technical point of contact (V1 " +
+                               "`technicalPointOfContact.pocEmail`, V2 `email`). Defaults to the configured RequestorEmail " +
+                               "when blank. On V1, if no contact name or no email resolves (including from " +
+                               "RequestorName/RequestorEmail), the whole technicalPointOfContact block is omitted from the " +
+                               "order and a Warning is logged, since CERTInext requires both inside the block.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -249,9 +253,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.Config.AutoSecureWww] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: If \"1\", CERTInext automatically adds the `www.` variant of the " +
-                               "primary domain as an additional SAN. \"0\" = use only the CN/SANs supplied " +
-                               "with the CSR. Default: \"0\".",
+                    Comments = "OPTIONAL: Sent as `orderDetails.autoSecureWWW` on every V1 SSL order (new and " +
+                               "renewal) and as `autoSecureWww` on V2 SSL orders. If \"1\", CERTInext automatically adds " +
+                               "the `www.` variant of the primary domain as an additional SAN, which must also pass " +
+                               "domain validation. \"0\" = use only the CN/SANs supplied with the CSR. Default: \"0\".",
                     Hidden = false,
                     DefaultValue = "0",
                     Type = "String"
@@ -627,9 +632,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// <summary>
         /// Optional CERTInext group (delegation) number.  When set, it is passed in
         /// the <c>productDetails.groupNumber</c> field of <c>GetProductDetails</c>
-        /// requests AND in the <c>delegationInformation.groupNumber</c> field of every
-        /// SSL order body so the order is routed to the correct account group.  Some
-        /// accounts queue orders for extra review when this field is omitted.
+        /// requests AND in the <c>orderDetails.groupNumber</c> field of every
+        /// SSL order body (new and renewal) so the order is routed to the configured account
+        /// group.  When blank, CERTInext uses the account's default group.
         /// </summary>
         [JsonPropertyName("GroupNumber")]
         public string GroupNumber { get; set; } = string.Empty;
