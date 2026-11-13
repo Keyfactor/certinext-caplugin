@@ -6,11 +6,20 @@
 // and limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using FluentAssertions;
+using Keyfactor.AnyGateway.Extensions;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
+using Keyfactor.PKI.Enums.EJBCA;
+using Org.BouncyCastle.Asn1.X509;
+using Org.BouncyCastle.Crypto;
+using Org.BouncyCastle.Crypto.Generators;
+using Org.BouncyCastle.Pkcs;
+using Org.BouncyCastle.Security;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -63,6 +72,75 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 SignerPlace    = "Gateway Lab",
                 PageSize       = 100
             });
+
+        private CERTInextConfig BuildV2Config() =>
+            new CERTInextConfig
+            {
+                ApiUrl            = _v2ApiUrl,
+                UseV2Api          = true,
+                V2InlineCsr       = V2EnvHelper.InlineCsrFromEnv,
+                OAuthClientId     = _v2ClientId,
+                OAuthClientSecret = _v2ClientSecret,
+                RequestorName         = _fixture.IsConfigured ? _fixture.Config.RequestorName : "Keyfactor Test",
+                RequestorEmail        = _fixture.IsConfigured ? _fixture.Config.RequestorEmail : "test@example.com",
+                RequestorIsdCode      = "1",
+                RequestorMobileNumber = "0000000000",
+                SignerPlace           = "Gateway Lab",
+                SignerIp              = "127.0.0.1",
+                PageSize              = 100,
+                DcvEnabled            = false,
+                PickupRetries         = 0
+            };
+
+        private CERTInextCAPlugin BuildV2Plugin(CERTInextConfig config = null)
+        {
+            config ??= BuildV2Config();
+            return new CERTInextCAPlugin(new CERTInextClient(config), config);
+        }
+
+        /// <summary>RSA-2048 PKCS#10 CSR for <paramref name="commonName"/> (BouncyCastle only).</summary>
+        private static string GenerateCsrPem(string commonName)
+        {
+            var keyGen = new RsaKeyPairGenerator();
+            keyGen.Init(new KeyGenerationParameters(new SecureRandom(), 2048));
+            var keyPair = keyGen.GenerateKeyPair();
+            var csr = new Pkcs10CertificationRequest(
+                "SHA256withRSA", new X509Name($"CN={commonName}"), keyPair.Public, null, keyPair.Private);
+            return "-----BEGIN CERTIFICATE REQUEST-----\n"
+                + Convert.ToBase64String(csr.GetEncoded(), Base64FormattingOptions.InsertLineBreaks)
+                + "\n-----END CERTIFICATE REQUEST-----";
+        }
+
+        /// <summary>
+        /// Enrolls a pinned DV order for <c>CERTINEXT_DCV_DOMAIN</c> through the plugin and polls Track
+        /// Order (up to <paramref name="waitSeconds"/>) for <c>issued</c>. Returns the order id and its
+        /// last status; the caller must clean the order up.
+        /// </summary>
+        private async Task<(string orderId, string status)> PlaceOwnDvOrderAsync(CERTInextClient client, int waitSeconds = 90)
+        {
+            var result = await BuildV2Plugin().Enroll(
+                csr:            GenerateCsrPem(_v2Domain),
+                subject:        $"CN={_v2Domain}",
+                san:            new Dictionary<string, string[]> { ["dns"] = new[] { _v2Domain } },
+                productInfo:    V2ProductPinning.Info(Constants.Products.DvSsl, V2PinMode.Pinned),
+                requestFormat:  RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+            _output.WriteLine($"Placed own order: CARequestID={result.CARequestID}, Status={result.Status}, " +
+                              $"Message={result.StatusMessage}");
+            result.CARequestID.Should().NotBeNullOrWhiteSpace("the test needs its own order");
+
+            string status = null;
+            var deadline = DateTime.UtcNow.AddSeconds(waitSeconds);
+            while (true)
+            {
+                var tracked = await client.ResolveAndTrackOrderV2Async(result.CARequestID);
+                status = tracked.Status;
+                if (status == Constants.ApiV2.StatusIssued || DateTime.UtcNow >= deadline) break;
+                await Task.Delay(TimeSpan.FromSeconds(10));
+            }
+            _output.WriteLine($"Own order {result.CARequestID}: status={status}");
+            return (result.CARequestID, status);
+        }
 
         /// <summary>Top-level key names of the first <c>content[]</c> row, for shape discovery (no values).</summary>
         private static string FirstRowKeys(string json)
@@ -160,6 +238,108 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 _output.WriteLine($"GET /domains/{{id}}/dcv failed: {ex.Message}");
                 _output.WriteLine("RESULT: a customer on this account would see DCV left pending with this warning.");
+            }
+        }
+        // ---------------------------------------------------------------------------
+        // 0094 item 2: revoke reason privilege-withdrawn
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Places its own pinned DV order and, once Track Order shows it <c>issued</c>, revokes it
+        /// directly with <c>privilege-withdrawn</c> (dropped from the 2.0.0 spec's SSL/TLS enum) to see
+        /// whether CERTInext still accepts it. If CERTInext rejects it, the order is revoked through the
+        /// plugin with CRL reason 9 instead, which exercises the <c>cessation-of-operation</c> fallback.
+        /// Touches only the order it creates. Opt-in: <c>CERTINEXT_V2_REVOKE_PRIVILEGE_WITHDRAWN=1</c>.
+        /// </summary>
+        [SkippableFact]
+        public async Task Revoke_PrivilegeWithdrawn_OwnOrder_ReportsCaAcceptance()
+        {
+            Skip.If(!_v2Enabled || !Flag("CERTINEXT_V2_REVOKE_PRIVILEGE_WITHDRAWN"),
+                "Requires CERTINEXT_USE_V2_API + V2 credentials and CERTINEXT_V2_REVOKE_PRIVILEGE_WITHDRAWN=1.");
+
+            using var client = BuildV2Client();
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
+            string orderId = null;
+            try
+            {
+                string status;
+                (orderId, status) = await PlaceOwnDvOrderAsync(client);
+                Skip.If(status != Constants.ApiV2.StatusIssued,
+                    $"Own order {orderId} did not reach issued (status={status}); nothing to revoke. Cleaned up below.");
+
+                try
+                {
+                    await client.RevokeOrderV2Async(Constants.ApiV2.FamilySsl, orderId, new V2RevokeRequest
+                    {
+                        Reason = Constants.RevocationReasonV2.PrivilegeWithdrawn,
+                        Note   = "V2 integration test, privilege-withdrawn acceptance check"
+                    });
+                    var after = await client.ResolveAndTrackOrderV2Async(orderId);
+                    _output.WriteLine($"RESULT: CERTInext ACCEPTED privilege-withdrawn. Re-tracked status={after.Status}, " +
+                                      $"revocation reason={after.Revocation?.Reason ?? "(none)"}");
+                }
+                catch (InvalidOperationException ex) when (CERTInextCAPlugin.IsRevokeReasonRejection(ex.Message))
+                {
+                    _output.WriteLine($"RESULT: CERTInext REJECTED privilege-withdrawn: {ex.Message}");
+                    int viaPlugin = await BuildV2Plugin().Revoke(orderId, string.Empty, 9);
+                    _output.WriteLine($"Plugin Revoke(reason 9) with fallback -> {viaPlugin}");
+                    viaPlugin.Should().Be((int)EndEntityStatus.REVOKED, "the fallback must revoke the order");
+                }
+            }
+            finally
+            {
+                restoreLogging();
+                await V2OrderCleanup.RevokeOrCancelAsync(client, orderId, "V2 integration test cleanup", _output.WriteLine);
+            }
+        }
+        /// <summary>
+        /// Sends each V2 revoke reason to one of the caller's own test orders and reports how CERTInext
+        /// answers. CERTInext checks the reason before the order state, so on an order whose certificate
+        /// isn't generated yet (the 2026-11 sandbox) an accepted reason answers "still being processed"
+        /// and nothing changes, while a rejected one answers with its reason-rejection wording. If the
+        /// certificate has been generated, the first accepted reason revokes the order, so only point
+        /// this at an order the test run created and wants revoked.
+        /// Opt-in: <c>CERTINEXT_V2_REVOKE_REASON_PROBE_ORDER_ID=&lt;own order id&gt;</c>.
+        /// </summary>
+        [SkippableFact]
+        public async Task Revoke_ReasonAcceptance_OwnOrder_Probe()
+        {
+            string orderId = V2EnvHelper.GetEnv(_env, "CERTINEXT_V2_REVOKE_REASON_PROBE_ORDER_ID");
+            Skip.If(!_v2Enabled || string.IsNullOrWhiteSpace(orderId),
+                "Requires CERTINEXT_USE_V2_API + V2 credentials and CERTINEXT_V2_REVOKE_REASON_PROBE_ORDER_ID.");
+
+            using var client = BuildV2Client();
+            // Rejected-before-live reasons first, accepted ones last, so the order is revoked (if at all)
+            // only after every rejected reason has been observed.
+            var reasons = new[]
+            {
+                Constants.RevocationReasonV2.Unspecified, Constants.RevocationReasonV2.CACompromise,
+                Constants.RevocationReasonV2.CertificateHold, Constants.RevocationReasonV2.AACompromise,
+                Constants.RevocationReasonV2.PrivilegeWithdrawn, "remove-from-crl",
+                Constants.RevocationReasonV2.AffiliationChanged, Constants.RevocationReasonV2.CessationOfOperation,
+                Constants.RevocationReasonV2.KeyCompromise, Constants.RevocationReasonV2.Superseded
+            };
+            foreach (var reason in reasons)
+            {
+                var status = await client.ResolveAndTrackOrderV2Async(orderId);
+                if (status.Status == Constants.ApiV2.StatusRevoked)
+                {
+                    _output.WriteLine($"{reason}: not sent, order is already revoked.");
+                    continue;
+                }
+                try
+                {
+                    await client.RevokeOrderV2Async(Constants.ApiV2.FamilySsl, orderId,
+                        new V2RevokeRequest { Reason = reason, Note = "V2 integration test, reason acceptance probe" });
+                    _output.WriteLine($"{reason}: ACCEPTED and revoked.");
+                }
+                catch (Exception ex)
+                {
+                    string verdict = CERTInextCAPlugin.IsRevokeReasonRejection(ex.Message) ? "REJECTED (reason)"
+                        : ex.Message.Contains("still being processed") ? "accepted (order still being processed)"
+                        : "other error";
+                    _output.WriteLine($"{reason}: {verdict}: {ex.Message}");
+                }
             }
         }
     }

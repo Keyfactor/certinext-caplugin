@@ -3899,24 +3899,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Maps a V2 revoke reason that CERTInext rejects with "Invalid Revoke Reason
-        /// ID" to an accepted fallback, or <c>null</c> if <paramref name="rejectedV2Reason"/>
-        /// is not one of the known-rejected values. Of the 9 spec-documented reason strings,
-        /// only <c>key-compromise</c>, <c>affiliation-changed</c>, <c>superseded</c>,
-        /// <c>cessation-of-operation</c>, and <c>privilege-withdrawn</c> are actually accepted
-        /// (the same restriction V1's <see cref="StatusMapper.ToRevocationReasonId"/> has
-        /// always documented) — <c>unspecified</c>, <c>ca-compromise</c>,
+        /// Maps a V2 revoke reason that CERTInext rejects (<see cref="IsRevokeReasonRejection"/>) to an
+        /// accepted fallback, or <c>null</c> if <paramref name="rejectedV2Reason"/> has no fallback.
+        /// Live, only <c>key-compromise</c>, <c>affiliation-changed</c>, <c>superseded</c>, and
+        /// <c>cessation-of-operation</c> are reliably accepted — <c>unspecified</c>, <c>ca-compromise</c>,
         /// <c>certificate-hold</c>, and <c>aa-compromise</c> are all rejected.
         /// <c>key-compromise</c> is the fallback for the two *-compromise reasons (closest
         /// semantic match); <c>cessation-of-operation</c> is the fallback for
         /// <c>unspecified</c> and <c>certificate-hold</c>, neither of which implies an actual
         /// key compromise — <c>key-compromise</c> there would misrepresent the revoke and
         /// trigger the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation for no reason.
+        /// <c>privilege-withdrawn</c> is no longer in the 2.0.0 spec's SSL/TLS revoke enum and was
+        /// rejected live on 2026-11-13 ("Revocation reason privilege-withdrawn is not allowed."), so it
+        /// also falls back once to <c>cessation-of-operation</c>; the first attempt still sends
+        /// <c>privilege-withdrawn</c>, in case another account or the Private PKI family accepts it.
         /// </summary>
         private static string ResolveRejectedRevokeReasonFallback(string rejectedV2Reason) =>
             rejectedV2Reason switch
             {
                 Constants.RevocationReasonV2.Unspecified => Constants.RevocationReasonV2.CessationOfOperation,
+                Constants.RevocationReasonV2.PrivilegeWithdrawn => Constants.RevocationReasonV2.CessationOfOperation,
                 Constants.RevocationReasonV2.CertificateHold => Constants.RevocationReasonV2.CessationOfOperation,
                 Constants.RevocationReasonV2.CACompromise => Constants.RevocationReasonV2.KeyCompromise,
                 Constants.RevocationReasonV2.AACompromise => Constants.RevocationReasonV2.KeyCompromise,
@@ -3924,10 +3926,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             };
 
         /// <summary>
+        /// True when a V2 revoke 422 rejected the reason itself. CERTInext has used two wordings:
+        /// "Invalid Revoke Reason ID" and, seen live on 2026-11-13 for <c>privilege-withdrawn</c>,
+        /// "Revocation reason {reason} is not allowed." Neither carries an EMS code.
+        /// </summary>
+        internal static bool IsRevokeReasonRejection(string message) =>
+            !string.IsNullOrEmpty(message)
+            && (message.IndexOf("Invalid Revoke Reason ID", StringComparison.OrdinalIgnoreCase) >= 0
+                || System.Text.RegularExpressions.Regex.IsMatch(
+                    message, @"Revocation reason \S+ is not allowed", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+
+        /// <summary>
         /// Revokes a certificate via the V2 REST API. If CERTInext rejects the resolved
-        /// reason with its "Invalid Revoke Reason ID" 422 and the reason is one of the four
-        /// known-rejected values (<see cref="ResolveRejectedRevokeReasonFallback"/>), retries
-        /// exactly once with an accepted fallback. Any other revoke failure (including a 422 for a
+        /// reason (<see cref="IsRevokeReasonRejection"/>) and the reason has a fallback
+        /// (the four known-rejected values plus <c>privilege-withdrawn</c>; see
+        /// <see cref="ResolveRejectedRevokeReasonFallback"/>), retries exactly once with an accepted fallback. Any other revoke failure (including a 422 for a
         /// reason not in that set) is surfaced as-is, with no retry.
         /// </summary>
         private async Task<int> RevokeV2Async(string caRequestID, string hexSerialNumber, uint revocationReason)
@@ -4015,7 +4028,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             catch (InvalidOperationException ioe) when (
                 ResolveRejectedRevokeReasonFallback(v2Reason) != null &&
-                ioe.Message.IndexOf("Invalid Revoke Reason ID", StringComparison.OrdinalIgnoreCase) >= 0)
+                IsRevokeReasonRejection(ioe.Message))
             {
                 // CERTInext's V2 API rejects several of the spec-documented reason values
                 // outright (422 "Invalid Revoke Reason ID"), independent of

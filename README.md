@@ -1411,7 +1411,7 @@ sequenceDiagram
         Plugin-->>CMD: Error, certificate is not revokable
     else Certificate is issued
         Plugin->>API: Revoke (order number, reason, remarks)
-        opt V2 only, reason in the rejected set and CERTInext replies 422 Invalid Revoke Reason ID
+        opt V2 only, reason has a substitute and CERTInext replies 422 Invalid Revoke Reason ID
             Plugin->>API: Revoke again, once, with the substitute reason
         end
         API-->>Plugin: Revocation confirmed
@@ -1438,11 +1438,12 @@ V1 sends a numeric `revokeReasonId`; V2 sends a kebab-case `reason` string. The 
 | Superseded (4) | 4 | `superseded` | Accepted |
 | Cessation of operation (5) | 5 | `cessation-of-operation` | Accepted |
 | Certificate hold (6) | Key compromise (1) | `certificate-hold` | Rejected on V2; retried once as `cessation-of-operation` |
-| Privilege withdrawn (9) | 9 | `privilege-withdrawn` | Accepted |
+| Privilege withdrawn (9) | 9 | `privilege-withdrawn` | Rejected on V2 SSL/TLS since 2026-11-13 (the 2.0.0 spec no longer lists it); retried once as `cessation-of-operation` |
 | AA compromise (10) | Key compromise (1) | `aa-compromise` | Rejected on V2; retried once as `key-compromise` |
 | Any other code (for example 8, `removeFromCRL`) | Key compromise (1) | `unspecified` | Same as Unspecified |
 
-- **What CERTInext accepts.** Only key compromise (1), affiliation changed (3), superseded (4), cessation of operation (5), and privilege withdrawn (9), on both API generations. V1 never sends anything else, so it needs no retry.
+- **What CERTInext accepts.** On V2 SSL/TLS: key compromise (1), affiliation changed (3), superseded (4), and cessation of operation (5). Privilege withdrawn (9) was accepted until CERTInext began rejecting it (seen 2026-11-13); V2 still sends it first, and only a rejection triggers the substitute. V1 sends only those five values and has no retry.
+- **Rejection wording.** CERTInext has answered a rejected reason with 422 "Invalid Revoke Reason ID" and, more recently, 422 "Revocation reason {reason} is not allowed." Both trigger the retry.
 - **V2 spec versus live behavior.** The V2 spec documents 8 reason values for the SSL/TLS revoke endpoint (`aa-compromise` is listed only for the Private PKI and Document Signer endpoints). Live, SSL/TLS orders reject four of the values, `unspecified`, `ca-compromise`, `certificate-hold`, and `aa-compromise`, with 422 "Invalid Revoke Reason ID".
 - **Retry rule.** The plugin retries a rejected reason once with the substitute in the table; any other revoke failure is surfaced as-is.
 - **Why `cessation-of-operation`.** It substitutes for `unspecified` and `certificate-hold` because neither implies a key compromise, and `key-compromise` carries the V2 spec's Baseline Requirements §4.9.1.1 24-hour CRL-turnaround obligation, which would misrepresent the revoke. `unspecified` is Command's default reason, so it is the most common revoke case.

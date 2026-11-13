@@ -47,7 +47,7 @@
 - `V2InlineCsr` now defaults to `true`. A connector that already has `V2InlineCsr = false` saved, as connectors created with an earlier 2.0 build do, keeps the two-call flow, which fails for already-validated domains. Set it to `true` on those connectors.
 - `SignerIp` (connector and template) is V1 only: V2 no longer sends `agreement.signerIp`, which the V2 spec's agreement schema doesn't define.
 - V2 `ProductVariant` is derived from the selected product when unset.
-- V2 revoke reasons CERTInext rejects are retried with a substitute (see Revocation Reason Codes in the README).
+- V2 revoke reasons CERTInext rejects are retried with a substitute (see Revocation Reason Codes in the README). `privilege-withdrawn`, which the 2.0.0 V2 spec dropped from the SSL/TLS enum and CERTInext rejected live on 2026-11-13, is still sent first and now falls back to `cessation-of-operation`. The retry also recognizes CERTInext's newer 422 wording, "Revocation reason {reason} is not allowed."
 - V2 `expired` orders are reported as issued, and revoking one is sent to the CA.
 - V2 renew and reissue place a new order and don't revoke the original.
 - On V2 accounts whose domains SSL.com validates, DCV now publishes SSL.com's record name and value, not `DcvTxtRecordTemplate`. The DNS provider plugin must be able to write those names (for example `_pki-validation.<domain>`).

@@ -464,9 +464,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                         req.Reason == Constants.RevocationReasonV2.Unspecified ||
                         req.Reason == Constants.RevocationReasonV2.CACompromise ||
                         req.Reason == Constants.RevocationReasonV2.CertificateHold ||
-                        req.Reason == Constants.RevocationReasonV2.AACompromise;
+                        req.Reason == Constants.RevocationReasonV2.AACompromise ||
+                        req.Reason == Constants.RevocationReasonV2.PrivilegeWithdrawn;
                     if (firstAttemptRejected && seenReasons.Count == 1)
-                        throw new InvalidOperationException("V2 revoke rejected. Unprocessable Entity: Invalid Revoke Reason ID");
+                        throw new InvalidOperationException(req.Reason == Constants.RevocationReasonV2.PrivilegeWithdrawn
+                            // Live wording seen 2026-11-13; no EMS code.
+                            ? "V2 revoke rejected. Unprocessable Entity: Revocation reason privilege-withdrawn is not allowed."
+                            : "V2 revoke rejected. Unprocessable Entity: Invalid Revoke Reason ID");
                     return Task.CompletedTask;
                 });
             return mock;
@@ -478,6 +482,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(2u, Constants.RevocationReasonV2.CACompromise, Constants.RevocationReasonV2.KeyCompromise)]
         [InlineData(6u, Constants.RevocationReasonV2.CertificateHold, Constants.RevocationReasonV2.CessationOfOperation)]
         [InlineData(10u, Constants.RevocationReasonV2.AACompromise, Constants.RevocationReasonV2.KeyCompromise)]
+        // Dropped from the 2.0.0 spec's SSL/TLS enum though accepted live: retried only if rejected.
+        [InlineData(9u, Constants.RevocationReasonV2.PrivilegeWithdrawn, Constants.RevocationReasonV2.CessationOfOperation)]
         public async Task Revoke_V2Enabled_KnownRejectedReason_RetriesWithExpectedFallback(
             uint crlReason, string expectedOriginal, string expectedFallback)
         {
@@ -489,6 +495,40 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             status.Should().Be((int)EndEntityStatus.REVOKED);
             seenReasons.Should().Equal(expectedOriginal, expectedFallback);
+        }
+
+        [Theory]
+        [InlineData("V2 revoke rejected. Unprocessable Entity: Invalid Revoke Reason ID", true)]
+        [InlineData("V2 revoke rejected. Unprocessable Entity: Revocation reason unspecified is not allowed.", true)]
+        [InlineData("V2 revoke rejected. Unprocessable Entity: Certificate Request still being processed", false)]
+        [InlineData("V2 revoke rejected. Unprocessable Entity: Invalid Revoke Remarks", false)]
+        [InlineData(null, false)]
+        public void IsRevokeReasonRejection_MatchesBothLiveWordingsOnly(string message, bool expected) =>
+            CERTInextCAPlugin.IsRevokeReasonRejection(message).Should().Be(expected);
+
+        [Fact]
+        public async Task Revoke_V2Enabled_PrivilegeWithdrawnAccepted_SentOnceUnchanged()
+        {
+            var seen = new List<string>();
+            var mock = new Mock<ICERTInextClient>();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = MockCertificateData.V2OrderId1,
+                    Status  = "issued"
+                }));
+            mock.Setup(c => c.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1,
+                    It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()))
+                .Callback((string f, string o, V2RevokeRequest req, CancellationToken ct) => seen.Add(req.Reason))
+                .Returns(Task.CompletedTask);
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var status = await plugin.Revoke(MockCertificateData.V2OrderId1, "AABB", 9u);
+
+            status.Should().Be((int)EndEntityStatus.REVOKED);
+            seen.Should().Equal(Constants.RevocationReasonV2.PrivilegeWithdrawn);
         }
 
         [Fact]
