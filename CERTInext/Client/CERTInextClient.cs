@@ -1473,7 +1473,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     path, createStatus, sw.ElapsedMilliseconds);
                 throw new Exception(
                     "CERTInext did not return a usable response to the V2 order create " +
-                    (createStatus == 0 ? "(no HTTP response)" : $"(HTTP {createStatus})") +
+                    (createStatus == 0 ? $"(no HTTP response: {DescribeTransportFailure(resp)})" : $"(HTTP {createStatus})") +
                     ". If the order was created it will be imported by the next synchronization — do not " +
                     "resubmit immediately. See gateway logs for details.");
             }
@@ -1989,7 +1989,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 LogV2ApiFailure("V2 reissue order", resp, LogLevel.Warning);
                 throw new Exception(
                     $"CERTInext did not return a usable response to the V2 reissue of order '{orderId}' " +
-                    (status == 0 ? "(no HTTP response)" : $"(HTTP {status})") +
+                    (status == 0 ? $"(no HTTP response: {DescribeTransportFailure(resp)})" : $"(HTTP {status})") +
                     ". If the reissue was created it will be imported by the next synchronization — do not " +
                     "resubmit immediately. See gateway logs for details.");
             }
@@ -2397,14 +2397,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     _config.ApiUrl, _config.OAuthClientId);
 
                 string tokenUrl = _config.ApiUrl.TrimEnd('/') + Constants.ApiV2.TokenPath;
-                using var tokenClient = new RestClient(tokenUrl);
-                var tokenReq = new RestRequest(string.Empty, Method.Post);
-                tokenReq.AddHeader("Content-Type", "application/x-www-form-urlencoded");
-                tokenReq.AddParameter("grant_type", "client_credentials");
-                tokenReq.AddParameter("client_id", _config.OAuthClientId);
-                tokenReq.AddParameter("client_secret", _config.OAuthClientSecret);
 
-                var tokenResp = await tokenClient.ExecuteAsync(tokenReq, ct);
+                // The token request creates nothing and is idempotent, so a transport failure (no HTTP
+                // response at all) is retried with a short backoff; one network blip otherwise fails a
+                // whole enrollment, sync or config save (issue 0095). Any HTTP answer, including
+                // 400/401/403, is final. Order creates are unaffected: they are never retried.
+                RestResponse tokenResp;
+                int maxAttempts = V2TokenRetryDelays.Length + 1;
+                int attempt = 1;
+                while (true)
+                {
+                    using var tokenClient = new RestClient(tokenUrl);
+                    var tokenReq = new RestRequest(string.Empty, Method.Post);
+                    tokenReq.AddHeader("Content-Type", "application/x-www-form-urlencoded");
+                    tokenReq.AddParameter("grant_type", "client_credentials");
+                    tokenReq.AddParameter("client_id", _config.OAuthClientId);
+                    tokenReq.AddParameter("client_secret", _config.OAuthClientSecret);
+
+                    tokenResp = await tokenClient.ExecuteAsync(tokenReq, ct);
+                    bool transportFailure = (int)tokenResp.StatusCode == 0;
+                    if (!transportFailure || attempt >= maxAttempts)
+                        break;
+                    ct.ThrowIfCancellationRequested();
+
+                    TimeSpan delay = V2TokenRetryDelays[attempt - 1];
+                    Logger.LogWarning(
+                        "V2 OAuth2 token request got no HTTP response (attempt {Attempt}/{Max}). ApiUrl={ApiUrl}, " +
+                        "ClientId={ClientId}, TransportDetail={TransportDetail}. Retrying in {DelaySeconds}s.",
+                        attempt, maxAttempts, _config.ApiUrl, _config.OAuthClientId,
+                        DescribeTransportFailure(tokenResp), delay.TotalSeconds);
+                    await Task.Delay(delay, ct);
+                    attempt++;
+                }
+
                 if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
                 {
                     // SOX CC6.1: never log tokenResp.Content — may contain client_secret.
@@ -2438,6 +2463,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             "portal (Integration → REST APIs → OAuth2) with the OAuth radio button selected. " +
                             "See gateway logs for details.");
                     }
+                    if ((int)tokenResp.StatusCode == 0)
+                    {
+                        string transportDetail = DescribeTransportFailure(tokenResp);
+                        Logger.LogError(
+                            "V2 OAuth2 token acquisition failed: no HTTP response after {Attempts} attempt(s). " +
+                            "ApiUrl={ApiUrl}, ClientId={ClientId}, HttpStatus=0, TransportDetail={TransportDetail}",
+                            attempt, _config.ApiUrl, _config.OAuthClientId, transportDetail);
+                        throw new Exception(
+                            $"Failed to obtain V2 OAuth2 token: no HTTP response after {attempt} attempt(s) " +
+                            $"({transportDetail}). See gateway logs for details.");
+                    }
                     Logger.LogError(
                         "V2 OAuth2 token acquisition failed. ApiUrl={ApiUrl}, ClientId={ClientId}, HttpStatus={Status}",
                         _config.ApiUrl, _config.OAuthClientId, (int)tokenResp.StatusCode);
@@ -2466,6 +2502,37 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 _v2TokenLock.Release();
             }
+        }
+
+        /// <summary>
+        /// Backoff between V2 token attempts after a transport failure; one more attempt than entries.
+        /// Settable so tests don't wait.
+        /// </summary>
+        internal TimeSpan[] V2TokenRetryDelays { get; set; } = { TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3) };
+
+        /// <summary>
+        /// Short, secret-free description of a request that got no HTTP response: RestSharp's
+        /// <c>ResponseStatus</c> and the exception chain's types and messages (for example
+        /// <c>HttpRequestException: Connection reset by peer</c>). RestSharp's error text can echo the
+        /// request, so it is passed through <see cref="RedactCredentials"/>, the configured secret values
+        /// are replaced outright, and the result is capped.
+        /// </summary>
+        internal string DescribeTransportFailure(RestResponse resp)
+        {
+            var parts = new List<string> { $"ResponseStatus={resp?.ResponseStatus.ToString() ?? "(none)"}" };
+            Exception ex = resp?.ErrorException;
+            for (int depth = 0; ex != null && depth < 4; depth++, ex = ex.InnerException)
+                parts.Add($"{ex.GetType().Name}: {ex.Message}");
+            if (resp?.ErrorException == null && !string.IsNullOrWhiteSpace(resp?.ErrorMessage))
+                parts.Add(resp.ErrorMessage);
+
+            string text = RedactCredentials(string.Join("; ", parts));
+            foreach (string secret in new[] { _config.OAuthClientSecret, _config.ApiKey })
+            {
+                if (!string.IsNullOrEmpty(secret) && secret.Length >= 4)
+                    text = text.Replace(secret, "***REDACTED***");
+            }
+            return Truncate(LogSanitizer.Strip(text), 400);
         }
 
         /// <summary>
@@ -2512,6 +2579,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
 
             LogV2ApiFailure(operation, resp, LogLevel.Warning);
+            if ((int)resp.StatusCode == 0)
+                // "HTTP 0." stays first: IsTransportLevelCsrFailure reads the first "HTTP n." in the message.
+                throw new Exception(
+                    $"CERTInext V2 API error during '{operation}'. HTTP 0. No HTTP response ({DescribeTransportFailure(resp)}). " +
+                    "See gateway logs for details.");
             string msg = ExtractV2ErrorMessage(resp.Content, operation, _config.LogSensitiveRequestData);
             throw new Exception($"CERTInext V2 API error during '{operation}'. HTTP {(int)resp.StatusCode}. {msg}");
         }
@@ -2527,6 +2599,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             // Skip the redaction passes entirely when this level is disabled.
             if (!Logger.IsEnabled(level)) return;
+            if (resp != null && (int)resp.StatusCode == 0)
+            {
+                // No HTTP response: there is no body; the transport error is what explains it.
+                Logger.Log(
+                    level,
+                    "CERTInext V2 API non-success. Operation={Operation}, Method={Method}, Path={Path}, " +
+                    "HttpStatus=0, TransportDetail={TransportDetail}",
+                    operation,
+                    resp.Request?.Method.ToString() ?? "(unknown)",
+                    resp.Request?.Resource ?? "(unknown)",
+                    DescribeTransportFailure(resp));
+                return;
+            }
             string sanitizedBody = Truncate(
                 ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)",
                 LoggedResponseBodyCapBytes);

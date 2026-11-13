@@ -528,7 +528,7 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 
 #### V2 Token Caching
 
-The plugin obtains a V2 bearer token via the standard OAuth2 `client_credentials` grant (`grant_type=client_credentials`, form-encoded) against `{ApiUrl}/oauth/token`. Tokens are cached in memory and reused until 60 seconds before expiry (minimum 30-second cache). Token refresh is thread-safe.
+The plugin obtains a V2 bearer token via the standard OAuth2 `client_credentials` grant (`grant_type=client_credentials`, form-encoded) against `{ApiUrl}/oauth/token`. Tokens are cached in memory and reused until 60 seconds before expiry (minimum 30-second cache). Token refresh is thread-safe. A token request that gets no HTTP response (for example a dropped connection) is retried twice, after 1 and 3 seconds. An HTTP error such as 401 or 403 is not retried. The failure log then carries `TransportDetail=`, which gives the response status and the exception chain, with credentials removed.
 
 ### V2 Certificate Template Fields
 
