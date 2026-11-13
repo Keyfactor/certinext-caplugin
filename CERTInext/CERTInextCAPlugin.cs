@@ -3935,8 +3935,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     try
                     {
-                        bool dcvDone = await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
-                        if (dcvDone)
+                        var dcvOutcome = await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token);
+                        // Only wait for issuance when every pending domain was validated. If any
+                        // domain was skipped (e.g. an IP/email SAN with no DNS provider) the order
+                        // cannot issue, so waiting would just hold the worker for
+                        // DcvWaitForIssuanceSeconds; return pending and let the sync DCV retry path
+                        // pick the order up.
+                        if (dcvOutcome == DcvOutcome.Completed)
                         {
                             // Poll GetCertificate until CERTInext finishes generating the cert OR the
                             // issuance budget expires.  CERTInext issuance is async — DCV may verify
@@ -4245,9 +4250,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "OrderNumber={OrderNumber}, DcvTimeoutMinutes={Timeout}",
                     orderNumber, timeoutMinutes);
 
-                return await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token,
+                // Any outcome other than NotRun means DCV executed, so sync/refresh callers re-fetch
+                // the order (a partial run may still have advanced per-domain state).
+                var outcome = await PerformDcvIfNeededAsync(orderNumber, dcvCts.Token,
                     waitForChallengeSecondsOverride: 0,
                     propagationDelaySecondsOverride: fastSync ? Constants.Dcv.SyncPropagationDelaySeconds : (int?)null);
+                return outcome != DcvOutcome.NotRun;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -4274,8 +4282,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
         /// <summary>
         /// Runs DNS DCV for any domains on <paramref name="orderNumber"/> that are still pending
-        /// validation.  Returns <c>true</c> when DCV steps were executed, <c>false</c> when
-        /// skipped (order already issued, no pending domains, or factory not available).
+        /// validation.  Returns <see cref="DcvOutcome.Completed"/> when every pending domain was
+        /// staged and verified, <see cref="DcvOutcome.CompletedWithSkippedDomains"/> when some were
+        /// verified but others were skipped (the order cannot issue yet), and
+        /// <see cref="DcvOutcome.NotRun"/> when skipped (order already issued, no pending domains,
+        /// or factory not available).
         ///
         /// Rule: if the order is already issued we never attempt DCV — it would be a no-op
         /// at best and could confuse the CA at worst.
@@ -4288,7 +4299,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// budget (user-visible latency benefits from a one-shot end-to-end finish).
         /// </summary>
 #if SUPPORTS_DCV
-        private async Task<bool> PerformDcvIfNeededAsync(
+        /// <summary>Result of <see cref="PerformDcvIfNeededAsync"/>.</summary>
+        private enum DcvOutcome
+        {
+            /// <summary>No DCV work was done (nothing pending, deferred, or no domain could be staged).</summary>
+            NotRun,
+            /// <summary>All pending domains were staged and verified.</summary>
+            Completed,
+            /// <summary>Staged domains were verified and cleaned up, but at least one domain was skipped.</summary>
+            CompletedWithSkippedDomains
+        }
+
+        private async Task<DcvOutcome> PerformDcvIfNeededAsync(
             string orderNumber,
             CancellationToken ct,
             int? waitForChallengeSecondsOverride = null,
@@ -4328,7 +4350,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         _logger.LogDebug(
                             "DCV skipped — order {OrderNumber} is already in terminal state (certificateStatusId={Status}).",
                             orderNumber, certStatusId);
-                        return false;
+                        return DcvOutcome.NotRun;
                     }
                 }
 
@@ -4343,7 +4365,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "DCV skipped — order {OrderNumber} is cancelled/rejected " +
                         "(orderStatusId={OrderStatus}).",
                         orderNumber, track.OrderDetails.OrderStatusId);
-                    return false;
+                    return DcvOutcome.NotRun;
                 }
 
                 domainVerification = track.OrderDetails?.DomainVerification;
@@ -4357,7 +4379,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "DCV challenge not exposed by CERTInext within {Budget}s for order {OrderNumber} " +
                         "(attempted {Attempts} TrackOrder polls). Deferring to next sync cycle.",
                         waitBudgetSeconds, orderNumber, pollAttempts);
-                    return false;
+                    return DcvOutcome.NotRun;
                 }
 
                 try
@@ -4369,7 +4391,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     // Rethrow if the gateway-level token is cancelled so shutdown is not blocked;
                     // only swallow an internal timeout (e.g. a per-poll deadline CTS).
                     ct.ThrowIfCancellationRequested();
-                    return false;
+                    return DcvOutcome.NotRun;
                 }
             }
 
@@ -4395,7 +4417,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "(aggregateStatus={Aggregate}, perDomainAllValidated={PerDomain}). " +
                     "Skipping DNS-TXT staging; caller may run the issuance poll.",
                     orderNumber, aggregateValidated, everyDomainValidated);
-                return true;
+                return DcvOutcome.Completed;
             }
 
             // Include domains that are pending DCV and either have no method set yet,
@@ -4475,7 +4497,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             pendingDomains = validPendingDomains;
 
             if (pendingDomains.Count == 0)
-                return false;
+                return DcvOutcome.NotRun;
 
             _logger.LogInformation(
                 "DCV required for order {OrderNumber}. Pending DNS TXT domains: [{Domains}]",
@@ -4761,7 +4783,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (deferToNextSyncCycle)
             {
                 await CleanupPartialStagingAsync();
-                return false;
+                return DcvOutcome.NotRun;
             }
 
             if (skippedDomains.Count > 0)
@@ -4774,7 +4796,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             if (stagedValidations.Count == 0)
-                return false;
+                return DcvOutcome.NotRun;
 
             try
             {
@@ -4814,7 +4836,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     CleanupOneStagedValidationAsync(entry, "")));
             }
 
-            return true;
+            // A skipped domain (non-FQDN entry filtered above, or one that could not be staged)
+            // means the order cannot issue yet: tell the caller not to wait for issuance.
+            return (skippedDomains.Count > 0 || invalidDomains.Count > 0)
+                ? DcvOutcome.CompletedWithSkippedDomains
+                : DcvOutcome.Completed;
         }
 
         /// <summary>
