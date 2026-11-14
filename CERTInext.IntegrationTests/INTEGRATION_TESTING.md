@@ -250,3 +250,18 @@ Before blaming the plugin, separate CA-side from plugin-side failures: run the s
 on a **fresh** name under the validated parent zone, and with the CSR **inline**. Change one variable
 at a time. Record confirmed spec-vs-live discrepancies as dated Findings in the CERTInext
 support-questions list kept with the maintainers.
+
+## V2 spec follow-up probes (issues 0094/0095)
+
+`V2SpecFollowupsLiveTests` holds one opt-in test per follow-up, each on top of `CERTINEXT_USE_V2_API=1`:
+
+| Flag | Test | Touches |
+|---|---|---|
+| `CERTINEXT_V2_SSLCOM_DCV_PROBE=1` | `SslComDomainDcv_LookupAndShape_Probe` | Read-only |
+| `CERTINEXT_V2_UNRESOLVED_STATUS_PROBE=1` | `Sync_UnresolvedReportStatuses_Probe` | Read-only |
+| `CERTINEXT_V2_REVOKE_PRIVILEGE_WITHDRAWN=1` | `Revoke_PrivilegeWithdrawn_OwnOrder_ReportsCaAcceptance` | Places and revokes its own order |
+| `CERTINEXT_V2_REVOKE_REASON_PROBE_ORDER_ID=<own order>` | `Revoke_ReasonAcceptance_OwnOrder_Probe` | Sends each revoke reason to that order |
+| `CERTINEXT_V2_LIFECYCLE_REISSUE_ENDPOINT=1` + `CERTINEXT_V2_REISSUE_SOURCE_ORDER_ID=<issued order>` | `Reissue_V2_ReissueEndpoint_DerivedOrder_Report` | Creates a derived order, then cleans it up |
+
+On a sandbox that has stopped generating certificates, the cleanup of an order the test created can fail with "Certificate Request still being processed". Clean such orders up later with `CERTINEXT_V2_CLEANUP_ORDERS`.
+
