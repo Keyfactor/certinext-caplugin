@@ -3510,6 +3510,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int unresolvedStatusFallbacks = 0; // report rows whose display strings needed a live track call
             // Report rows Track Order can't find in any family (seen live: "On Hold | Setup Pending").
             int untrackableListedOrders = 0;
+            // Distinct orderStatus|certificateStatus pairs the display-string mapping didn't know, with
+            // counts. The vocabulary is undocumented (Finding 35), so the summary names every new
+            // value at Information instead of leaving it to per-row Debug lines.
+            var unmappedStatusPairs = new SortedDictionary<string, int>(StringComparer.Ordinal);
             int issuedNotGeneratedYet = 0; // issued orders whose download answered 422 EMS-1165 (certificate not generated yet)
             // Sync has no template, so the agreement signer is the connector's: RequestorName (the
             // enroll default for SignerName) and SignerPlace. One context per pass: each order is
@@ -3578,6 +3582,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             // exhaustive. Don't guess: fall back to a live TrackOrder call, which
                             // returns the authoritative V2 `status` enum via StatusMapper.
                             unresolvedStatusFallbacks++;
+                            string pair = $"{row.OrderStatus ?? "(none)"} | {row.CertificateStatus ?? "(none)"}";
+                            unmappedStatusPairs[pair] = unmappedStatusPairs.TryGetValue(pair, out int seen) ? seen + 1 : 1;
                             _logger.LogDebug(
                                 "V2 sync: unrecognised report status — falling back to live track. " +
                                 "Id={Id}, OrderStatus={OrderStatus}, CertificateStatus={CertificateStatus}",
@@ -3901,7 +3907,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 #endif
                 _logger.LogInformation(
                     "CERTInext V2 synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}, " +
-                    "UnresolvedStatusFallbacks={Fallbacks}, UntrackableListedOrders={Untrackable} (listed by the " +
+                    "UnresolvedStatusFallbacks={Fallbacks}, UnmappedReportStatuses=[{UnmappedPairs}], " +
+                    "UntrackableListedOrders={Untrackable} (listed by the " +
                     "report, not found by Track Order; skipped). Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
                     "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
                     "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
@@ -3909,7 +3916,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "RecentOrdersDeferred={RecentOrdersDeferred} (pending/issued, younger than {Grace}s, imported next pass). " +
                     "IssuedNotGeneratedYet={IssuedNotGeneratedYet} (issued at the CA, certificate not downloadable yet, " +
                     "422 EMS-1165; picked up by a later pass). {DcvClause}",
-                    synced, skipped, errors, unresolvedStatusFallbacks, untrackableListedOrders,
+                    synced, skipped, errors, unresolvedStatusFallbacks,
+                    LogSanitizer.Strip(string.Join("; ", unmappedStatusPairs.Select(kv => $"{kv.Key} ({kv.Value})"))),
+                    untrackableListedOrders,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
                     deferredRecentOrders, recentOrderGraceSeconds,
