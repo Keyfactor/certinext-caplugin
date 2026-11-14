@@ -8,6 +8,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -678,6 +679,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // Recognised report-status strings must not need a live track fallback.
             mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
                 It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_OnHoldSetupPending_TrackNotFound_SkippedNotError_OthersStillSynced()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            // Live shape: listed by the report as "On Hold | Setup Pending", 404 in every family.
+            var onHold = ReportRow("3549334354", "On Hold", "Setup Pending");
+            var issued = ReportRow("ord_v2sync_ok", "Order Fulfilled", "Certificate Downloaded");
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(onHold, issued));
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("3549334354", It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new KeyNotFoundException("V2 order '3549334354' not found in any product family."));
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_ok", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId = "ord_v2sync_ok", SerialNumber = "AABB", CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+            await BuildV2Plugin(mock.Object).Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Select(r => r.CARequestID).Should().Equal("ord_v2sync_ok");
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_ManyUntrackableRows_DoNotTripTheErrorRateAbort()
+        {
+            // Before: each 404 fallback counted as an error, so a pass made mostly of such rows threw
+            // "synchronization aborted ... >25% error rate".
+            var mock = new Mock<ICERTInextClient>();
+            var rows = Enumerable.Range(0, 60).Select(i => ReportRow($"onhold_{i}", "On Hold", "Setup Pending")).ToArray();
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(rows));
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new KeyNotFoundException("not found in any product family"));
+
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+            Func<Task> act = () => BuildV2Plugin(mock.Object).Synchronize(buffer, null, true, CancellationToken.None);
+
+            await act.Should().NotThrowAsync();
+            buffer.Should().BeEmpty();
         }
 
         [Fact]

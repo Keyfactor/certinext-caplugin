@@ -6,6 +6,7 @@
 // and limitations under the License.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -522,6 +523,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 }
                 _output.WriteLine($"  {row.OrderNumber}  orderStatus='{row.OrderStatus}' certificateStatus='{row.CertificateStatus}' " +
                                   $"product={row.ProductCode} orderDate={row.OrderDate} -> Track: {track}");
+            }
+        }
+        /// <summary>
+        /// Read-only. Runs the plugin's real full V2 Synchronize (DCV off), scoped to
+        /// <c>CERTINEXT_GROUP_NUMBER</c> like the lab gateway, and reports what it emitted. The plugin's
+        /// own "synchronization complete" line (UnresolvedStatusFallbacks, UntrackableListedOrders,
+        /// Errors) goes to the test output; run with <c>CERTINEXT_TEST_LOG_LEVEL=Information</c> to keep
+        /// the output short. Downloads the certificate of every issued order it lists.
+        /// Opt-in: <c>CERTINEXT_V2_FULL_SYNC_PROBE=1</c>.
+        /// </summary>
+        [SkippableFact]
+        public async Task Sync_V2_FullSync_Summary_Probe()
+        {
+            Skip.If(!_v2Enabled || !Flag("CERTINEXT_V2_FULL_SYNC_PROBE"),
+                "Requires CERTINEXT_USE_V2_API + V2 credentials and CERTINEXT_V2_FULL_SYNC_PROBE=1.");
+
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
+            try
+            {
+                var config = BuildV2Config();
+                config.GroupNumber = V2EnvHelper.GetEnv(_env, "CERTINEXT_GROUP_NUMBER", string.Empty);
+                var plugin = BuildV2Plugin(config);
+                var buffer = new BlockingCollection<AnyCAPluginCertificate>(boundedCapacity: 20_000);
+                await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: System.Threading.CancellationToken.None);
+                buffer.CompleteAdding();
+                var byStatus = buffer.GroupBy(r => r.Status).OrderBy(g => g.Key)
+                    .Select(g => $"{g.Key}={g.Count()}");
+                _output.WriteLine($"RESULT: emitted {buffer.Count} records by status: {string.Join(", ", byStatus)} " +
+                                  $"(GroupNumber={(string.IsNullOrEmpty(config.GroupNumber) ? "(none)" : config.GroupNumber)})");
+            }
+            finally
+            {
+                restoreLogging();
             }
         }
     }

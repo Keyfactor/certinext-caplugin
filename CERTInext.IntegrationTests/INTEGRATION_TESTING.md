@@ -261,6 +261,7 @@ support-questions list kept with the maintainers.
 | `CERTINEXT_V2_UNRESOLVED_STATUS_PROBE=1` | `Sync_UnresolvedReportStatuses_Probe` | Read-only |
 | `CERTINEXT_V2_REVOKE_PRIVILEGE_WITHDRAWN=1` | `Revoke_PrivilegeWithdrawn_OwnOrder_ReportsCaAcceptance` | Places and revokes its own order |
 | `CERTINEXT_V2_REVOKE_REASON_PROBE_ORDER_ID=<own order>` | `Revoke_ReasonAcceptance_OwnOrder_Probe` | Sends each revoke reason to that order |
+| `CERTINEXT_V2_FULL_SYNC_PROBE=1` | `Sync_V2_FullSync_Summary_Probe` | Read-only (downloads issued certificates) |
 | `CERTINEXT_V2_LIFECYCLE_REISSUE_ENDPOINT=1` + `CERTINEXT_V2_REISSUE_SOURCE_ORDER_ID=<issued order>` | `Reissue_V2_ReissueEndpoint_DerivedOrder_Report` | Creates a derived order, then cleans it up |
 
 On a sandbox that has stopped generating certificates, the cleanup of an order the test created can fail with "Certificate Request still being processed". Clean such orders up later with `CERTINEXT_V2_CLEANUP_ORDERS`.

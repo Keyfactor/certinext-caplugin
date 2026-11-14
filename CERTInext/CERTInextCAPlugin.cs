@@ -2810,8 +2810,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 _logger.LogInformation(
                     "V2 reissue created a derived order. PriorCARequestID={PriorId}, NewOrderId={NewId}, " +
-                    "Status={Status}, PreviousRevocationRequested={RevokePrevious}",
-                    priorOrderId, outcome.Order.OrderId, outcome.Order.Status, revokePrevious);
+                    "HttpStatus={HttpStatus}, Status={Status}, PreviousRevocationRequested={RevokePrevious}",
+                    priorOrderId, outcome.Order.OrderId, outcome.HttpStatus, outcome.Order.Status, revokePrevious);
                 reissue.Note = $"Reissued from CERTInext order {priorOrderId}" +
                                (revokePrevious ? "; revocation of the previous certificate (superseded) was requested." : ".");
                 return outcome.Order;
@@ -3508,6 +3508,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int errors = 0;
             int deferredRecentOrders = 0; // pending/issued orders withheld because they are younger than the grace window
             int unresolvedStatusFallbacks = 0; // report rows whose display strings needed a live track call
+            // Report rows Track Order can't find in any family (seen live: "On Hold | Setup Pending").
+            int untrackableListedOrders = 0;
             int issuedNotGeneratedYet = 0; // issued orders whose download answered 422 EMS-1165 (certificate not generated yet)
             // Sync has no template, so the agreement signer is the connector's: RequestorName (the
             // enroll default for SignerName) and SignerPlace. One context per pass: each order is
@@ -3580,8 +3582,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                 "V2 sync: unrecognised report status — falling back to live track. " +
                                 "Id={Id}, OrderStatus={OrderStatus}, CertificateStatus={CertificateStatus}",
                                 row.OrderNumber, row.OrderStatus, row.CertificateStatus);
-                            (resolvedFamily, trackedStatus) =
-                                await _client.ResolveAndTrackOrderV2WithFamilyAsync(row.OrderNumber, cancelToken);
+                            try
+                            {
+                                (resolvedFamily, trackedStatus) =
+                                    await _client.ResolveAndTrackOrderV2WithFamilyAsync(row.OrderNumber, cancelToken);
+                            }
+                            catch (KeyNotFoundException)
+                            {
+                                // The report lists the order but Track Order finds it in no family, so
+                                // there is nothing to track or download. Seen live for every
+                                // "On Hold | Setup Pending" row (meaning undocumented; asked of CERTInext).
+                                // Not an error: it must not count toward the error-rate abort. Skipped,
+                                // not emitted as failed, because nothing says the order failed; a later
+                                // pass tracks it again.
+                                _logger.LogInformation(
+                                    "V2 sync: order listed by /reports/orders but not found by Track Order in any " +
+                                    "product family; skipping it this pass. Id={Id}, OrderStatus={OrderStatus}, " +
+                                    "CertificateStatus={CertificateStatus}",
+                                    row.OrderNumber, row.OrderStatus, row.CertificateStatus);
+                                untrackableListedOrders++;
+                                skipped++;
+                                continue;
+                            }
                             disposition = StatusMapper.V2StatusToRequestDisposition(trackedStatus.Status);
                         }
 
@@ -3879,14 +3901,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 #endif
                 _logger.LogInformation(
                     "CERTInext V2 synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}, " +
-                    "UnresolvedStatusFallbacks={Fallbacks}. Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
+                    "UnresolvedStatusFallbacks={Fallbacks}, UntrackableListedOrders={Untrackable} (listed by the " +
+                    "report, not found by Track Order; skipped). Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
                     "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
                     "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
                     "BodylessRevokedSkipped={BodylessRevokedSkipped} (bodyless-revoked guard). " +
                     "RecentOrdersDeferred={RecentOrdersDeferred} (pending/issued, younger than {Grace}s, imported next pass). " +
                     "IssuedNotGeneratedYet={IssuedNotGeneratedYet} (issued at the CA, certificate not downloadable yet, " +
                     "422 EMS-1165; picked up by a later pass). {DcvClause}",
-                    synced, skipped, errors, unresolvedStatusFallbacks,
+                    synced, skipped, errors, unresolvedStatusFallbacks, untrackableListedOrders,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
                     deferredRecentOrders, recentOrderGraceSeconds,

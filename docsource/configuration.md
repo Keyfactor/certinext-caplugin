@@ -597,7 +597,7 @@ mapped to Failed — see the gateway trace log if certificates unexpectedly show
 **V2 synchronization:**
 
 - Synchronize pages through `/reports/orders`. Pages are capped at 100 rows, and `PageSize` is clamped to that.
-- The report carries display strings (for example `Order Fulfilled`, `Certificate Downloaded`) rather than the status enum above. Recognized strings are mapped directly. Any other combination falls back to a live order-status call, so a new display value never silently misclassifies an order.
+- The report carries display strings (for example `Order Fulfilled`, `Certificate Downloaded`) rather than the status enum above. Recognized strings are mapped directly. Any other combination falls back to a live order-status call, so a new display value never silently misclassifies an order. If that call finds the order in no product family, as for every `On Hold | Setup Pending` row on the sandbox, the order is skipped for that pass and counted as `UntrackableListedOrders`; it isn't treated as an error.
 - Cancelled and rejected orders are skipped. Issued orders have their certificate chain downloaded.
 - CERTInext does not serve the certificate body of a revoked order. A revoked order is propagated as revoked only when the gateway already holds that certificate (the revocation date and reason come from a live status call).
 - Otherwise a revoked order is reported as Failed (the gateway has a record without a body) or skipped (no record), so the gateway never stores a revoked record without a certificate.
