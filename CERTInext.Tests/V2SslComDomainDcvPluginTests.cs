@@ -389,5 +389,111 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             result.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
             validator.CleanedUpKeys.Should().HaveCount(2, "both staged records are cleaned up");
         }
+
+        // ---------------------------------------------------------------------------
+        // GET /domains lookups are cached per sync pass: many pending orders share a domain.
+        // ---------------------------------------------------------------------------
+
+        private static async IAsyncEnumerable<OrderReportEntryV2> Rows(params OrderReportEntryV2[] rows)
+        {
+            foreach (var r in rows) yield return r;
+            await Task.CompletedTask;
+        }
+
+        private static OrderReportEntryV2 PendingRow(string orderNumber, string domain) =>
+            new OrderReportEntryV2
+            {
+                OrderNumber = orderNumber, OrderStatus = "Order Accepted", CertificateStatus = "Pending for Approver",
+                DomainName = domain, OrderDate = DateTime.UtcNow.AddMinutes(-30).ToString("o")
+            };
+
+        /// <summary>
+        /// Loose mock for a sync pass over pending SSL orders. Each order's own DCV fails fast at
+        /// GET /domains/{id}/dcv (SSL.com row) or GET /dcv (emSign), leaving it pending: these tests
+        /// count lookups, not DCV outcomes.
+        /// </summary>
+        private static Mock<ICERTInextClient> NewSyncMock(params (string id, string domain)[] orders)
+        {
+            var mock = new Mock<ICERTInextClient>();
+            mock.Setup(c => c.ListOrdersV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(() => Rows(orders.Select(o => PendingRow(o.id, o.domain)).ToArray()));
+            foreach (var (id, domain) in orders)
+                mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(id, It.IsAny<CancellationToken>()))
+                    .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse { OrderId = id, Status = "pending-dcv", Domain = domain }));
+            mock.Setup(c => c.GetDomainDcvV2Async(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("CERTInext V2 API error during 'V2 get domain DCV'. HTTP 502."));
+            mock.Setup(c => c.GetDcvV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("simulated GetDcv failure"));
+            return mock;
+        }
+
+        private static CERTInextCAPlugin BuildSyncPlugin(ICERTInextClient client) =>
+            new CERTInextCAPlugin(client, new FakeDomainValidatorFactory(new FakeDomainValidator()), new CERTInextConfig
+            {
+                UseV2Api = true, ApiUrl = "https://v2.certinext.io", OAuthClientId = "c", OAuthClientSecret = "s",
+                DcvEnabled = true, DcvTimeoutMinutes = 1, DcvPropagationDelaySeconds = 1,
+                DcvSyncMaxOrderAgeHours = 0, DcvSyncMaxPerPass = 0
+            });
+
+        private static Task SyncOnce(CERTInextCAPlugin plugin) =>
+            plugin.Synchronize(new System.Collections.Concurrent.BlockingCollection<AnyCAPluginCertificate>(100), null, true,
+                CancellationToken.None);
+
+        [Fact]
+        public async Task Sync_TwoOrdersSameDomain_LooksDomainUpOnce_ReadsDcvStateForEach()
+        {
+            var mock = NewSyncMock(("ord_a", Domain), ("ord_b", Domain.ToUpperInvariant()));
+            mock.Setup(c => c.FindDomainV2Async(It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(SslComRow());
+
+            await SyncOnce(BuildSyncPlugin(mock.Object));
+
+            mock.Verify(c => c.FindDomainV2Async(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once,
+                "the second order's domain (different case) is answered from the pass cache");
+            mock.Verify(c => c.GetDomainDcvV2Async(DomainId, It.IsAny<CancellationToken>()), Times.Exactly(2),
+                "the cached row supplies only the domain id; each order still reads SSL.com's current DCV state");
+        }
+
+        [Fact]
+        public async Task Sync_NoDomainRow_IsCachedToo()
+        {
+            var mock = NewSyncMock(("ord_a", Domain), ("ord_b", Domain));
+            mock.Setup(c => c.FindDomainV2Async(Domain, It.IsAny<CancellationToken>())).ReturnsAsync((V2DomainRecord)null);
+
+            await SyncOnce(BuildSyncPlugin(mock.Object));
+
+            mock.Verify(c => c.FindDomainV2Async(Domain, It.IsAny<CancellationToken>()), Times.Once);
+            mock.Verify(c => c.GetDcvV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Exactly(2),
+                "both orders take the emSign flow");
+        }
+
+        [Fact]
+        public async Task Sync_FailedLookup_IsNotCached_NextOrderTriesAgain()
+        {
+            var mock = NewSyncMock(("ord_a", Domain), ("ord_b", Domain));
+            mock.SetupSequence(c => c.FindDomainV2Async(Domain, It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("CERTInext V2 API error during 'V2 find domain'. HTTP 500."))
+                .ReturnsAsync(SslComRow());
+
+            await SyncOnce(BuildSyncPlugin(mock.Object));
+
+            mock.Verify(c => c.FindDomainV2Async(Domain, It.IsAny<CancellationToken>()), Times.Exactly(2));
+            mock.Verify(c => c.GetDcvV2Async("ord_a", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once,
+                "the failed lookup falls back to the emSign flow, as before");
+            mock.Verify(c => c.GetDomainDcvV2Async(DomainId, It.IsAny<CancellationToken>()), Times.Once,
+                "the retried lookup found the SSL.com row for the second order");
+        }
+
+        [Fact]
+        public async Task Sync_NewPass_LooksDomainUpAgain()
+        {
+            var mock = NewSyncMock(("ord_a", Domain));
+            mock.Setup(c => c.FindDomainV2Async(Domain, It.IsAny<CancellationToken>())).ReturnsAsync(SslComRow());
+            var plugin = BuildSyncPlugin(mock.Object);
+
+            await SyncOnce(plugin);
+            await SyncOnce(plugin);
+
+            mock.Verify(c => c.FindDomainV2Async(Domain, It.IsAny<CancellationToken>()), Times.Exactly(2));
+        }
     }
 }

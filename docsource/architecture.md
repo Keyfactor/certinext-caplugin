@@ -298,7 +298,7 @@ For an order that lists per-domain verification state (a multi-domain order, for
 
 ##### SSL.com-validated domains (V2)
 
-Before it requests a challenge for a pending domain, the V2 flow looks the domain up (`GET /domains?search={domain}&exactMatch=true`). A domain whose row says `validatedBy: SSLCOM` uses the domain-level DCV endpoints instead of the order-level ones:
+Before it requests a challenge for a pending domain, the V2 flow looks the domain up (`GET /domains?search={domain}&exactMatch=true`). Each sync pass, and each `Enroll` or single-record DCV attempt, looks a domain up once and reuses the answer, including "no row", for every other order on that domain. A failed lookup isn't reused, so the next order on that domain tries again. A domain whose row says `validatedBy: SSLCOM` uses the domain-level DCV endpoints instead of the order-level ones:
 
 1. `GET /domains/{domainId}/dcv` returns SSL.com's record. If SSL.com reports the domain `VALIDATED`, step 2 is skipped.
 2. The plugin picks a `dns-txt` option, preferring the selected one, then one for exactly this name. It publishes that `recordName` and `recordValue` through the DNS provider plugin and ignores `DcvTxtRecordTemplate`. `dns-cname` and `http-url` options are not used, because the DNS provider interface (`IAnyCAPlugin` 3.3) can only publish TXT records.

@@ -3526,6 +3526,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int emittedFailedFromBodylessRevoked = 0, skippedBodylessRevoked = 0;
 
 #if SUPPORTS_DCV
+            // SSL.com domain lookups (GET /domains) for this pass: many orders share a domain.
+            var domainLookups = NewDomainLookupCache();
             bool dcvOperational = _config.DcvEnabled && _domainValidatorFactory != null;
             int ageWindowHours = _config.DcvSyncMaxOrderAgeHours;
             int perPassCap = _config.DcvSyncMaxPerPass;
@@ -3694,7 +3696,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                     {
                                         bool dcvDone = await PerformDcvV2IfNeededAsync(
                                             row.OrderNumber, domain, resolvedFamily, dcvCts.Token,
-                                            trackedStatus?.Verifications?.Domain?.Domains);
+                                            trackedStatus?.Verifications?.Domain?.Domains, domainLookups);
                                         if (dcvDone)
                                         {
                                             trackedStatus = await _client.ResolveAndTrackOrderV2Async(row.OrderNumber, cancelToken);
@@ -5455,7 +5457,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string domain,
             string productFamilySlug,
             CancellationToken ct,
-            IReadOnlyList<API.V2.V2DomainVerificationEntry> domainEntries = null)
+            IReadOnlyList<API.V2.V2DomainVerificationEntry> domainEntries = null,
+            Dictionary<string, V2DomainRecord> domainLookups = null)
         {
             if (_domainValidatorFactory == null || !_config.DcvEnabled)
             {
@@ -5498,11 +5501,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 return false;
             }
 
+            // Enroll and GetSingleRecord get a cache for this one call; a sync pass passes its own.
+            domainLookups ??= NewDomainLookupCache();
+
             try
             {
                 return multiDomainMode
-                    ? await PerformDcvV2MultiDomainAsync(orderId, domainEntries, productFamilySlug, ct)
-                    : await PerformDcvV2SingleDomainAsync(orderId, domain, productFamilySlug, ct);
+                    ? await PerformDcvV2MultiDomainAsync(orderId, domainEntries, productFamilySlug, ct, domainLookups)
+                    : await PerformDcvV2SingleDomainAsync(orderId, domain, productFamilySlug, ct, domainLookups);
             }
             finally
             {
@@ -5538,13 +5544,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string orderId,
             string domain,
             string productFamilySlug,
-            CancellationToken ct)
+            CancellationToken ct,
+            Dictionary<string, V2DomainRecord> domainLookups)
         {
             _logger.LogInformation(
                 "V2 DCV starting for order {OrderId}, domain {Domain}.", orderId, LogSanitizer.Strip(domain));
 
             // A domain SSL.com validates takes the domain-level flow with SSL.com's own record.
-            var sslComDomain = await FindSslComDomainAsync(orderId, domain, ct);
+            var sslComDomain = await FindSslComDomainAsync(orderId, domain, ct, domainLookups);
             if (sslComDomain != null)
                 return await PerformDcvV2SslComSingleDomainAsync(orderId, domain, sslComDomain, productFamilySlug, ct);
 
@@ -5745,7 +5752,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string orderId,
             IReadOnlyList<API.V2.V2DomainVerificationEntry> domainEntries,
             string productFamilySlug,
-            CancellationToken ct)
+            CancellationToken ct,
+            Dictionary<string, V2DomainRecord> domainLookups)
         {
             var pendingDomains = domainEntries
                 .Where(e => !string.IsNullOrWhiteSpace(e?.Domain)
@@ -5807,7 +5815,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 {
                     ct.ThrowIfCancellationRequested();
 
-                    var sslComDomain = await FindSslComDomainAsync(orderId, d, ct);
+                    var sslComDomain = await FindSslComDomainAsync(orderId, d, ct, domainLookups);
                     if (sslComDomain != null)
                     {
                         var (plan, skipReason) = await PrepareSslComDcvAsync(orderId, d, sslComDomain, ct);
@@ -6146,15 +6154,32 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// Per-pass cache for <see cref="FindSslComDomainAsync"/>: domain (case-insensitive) to the
+        /// account's <c>GET /domains</c> row, or null for "no row". One per sync pass and one per
+        /// Enroll/GetSingleRecord DCV attempt. Not thread-safe; sync processes rows one at a time.
+        /// </summary>
+        internal static Dictionary<string, V2DomainRecord> NewDomainLookupCache() =>
+            new Dictionary<string, V2DomainRecord>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
         /// Returns the account's domain row when SSL.com validates <paramref name="domain"/>, else null.
         /// A failed lookup also returns null, so the order takes the emSign path it took before the
         /// SSL.com path existed, with a warning; cancellation propagates.
+        /// Found rows and "no row" are cached in <paramref name="domainLookups"/>, so a pass looks each
+        /// domain up once; only <c>DomainId</c> and <c>validatedBy</c> are read from a cached row, and
+        /// the DCV state comes from a fresh <c>GET /domains/{id}/dcv</c>. Failures aren't cached, so the
+        /// next order on the same domain tries again.
         /// </summary>
-        private async Task<V2DomainRecord> FindSslComDomainAsync(string orderId, string domain, CancellationToken ct)
+        private async Task<V2DomainRecord> FindSslComDomainAsync(
+            string orderId, string domain, CancellationToken ct, Dictionary<string, V2DomainRecord> domainLookups)
         {
             try
             {
-                var row = await _client.FindDomainV2Async(domain, ct);
+                if (!domainLookups.TryGetValue(domain, out var row))
+                {
+                    row = await _client.FindDomainV2Async(domain, ct);
+                    domainLookups[domain] = row;
+                }
                 if (row?.IsValidatedBySslCom != true)
                     return null;
                 _logger.LogInformation(
