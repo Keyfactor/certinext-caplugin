@@ -100,6 +100,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         public string DomainName => GetString(Constants.EnrollmentParam.DomainName, string.Empty);
 
         /// <summary>
+        /// Serial number of the certificate being renewed or reissued, which Command injects as
+        /// <c>PriorCertSN</c> on renewal flows; null when absent.
+        /// </summary>
+        public string PriorCertSn => GetString("PriorCertSN", null);
+
+        /// <summary>
         /// Per-template subscriber agreement signer name.
         /// Falls back to the connector-level <c>RequestorName</c> if empty.
         /// </summary>

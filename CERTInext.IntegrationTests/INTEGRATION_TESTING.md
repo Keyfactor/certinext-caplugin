@@ -243,10 +243,26 @@ test that "passes" with the order still pending tells you nothing.
 | No `X-Product-Code`: two-call CSR submit returns 422 "PFX based certificate orders are not allowed" | CERTInext resolved the product to one that doesn't take a client CSR (on the sandbox, DV resolves to `917`, not `842`) | The create response's `resolvedProductCode` (logged as `ResolvedProductCode=`). Pin `ProductCode` on the template. |
 | No `X-Product-Code`: `GET .../dcv` returns 422 `EMS-1164 Domain Name is not matching`, and `certificateState` is "System Error" | Same product resolution as the row above. It isn't the domain or its letter case. | Pin 842 on the same domain shape; the order issues. |
 | Two-call, pinned: `PUT .../csr` returns 422 "Something went Wrong." | The domain is already validated, so the create came back `issued` with `csrSubmitted: false` and the order won't accept a CSR | Trace payloads show the create response. Use `V2InlineCsr=true`, the default since 2.0. |
-| `V2 OAuth2 token acquisition failed ... HttpStatus=0` (enroll, sync, or config save returns 500 "could not connect to CERTInext") | A transient transport failure to the token endpoint. The plugin currently logs no transport detail and doesn't retry the token request; a fix is planned. | Retry once. From a gateway pod, test with `curl --cacert /etc/pki/tls/certs/ca-bundle.crt` (the lab pod's `SSL_CERT_FILE` trusts only the lab CA, so plain curl fails TLS even when .NET works). |
+| `V2 OAuth2 token acquisition failed: no HTTP response after 3 attempt(s)` (enroll, sync, or config save returns 500 "could not connect to CERTInext") | A transport failure to the token endpoint that outlasted the plugin's two retries (1 s, 3 s). The line's `TransportDetail=` names the error, such as connection reset, TLS, or DNS. Builds before issue 0095 logged only `HttpStatus=0` and didn't retry. | Retry once. From a gateway pod, test with `curl --cacert /etc/pki/tls/certs/ca-bundle.crt` (the lab pod's `SSL_CERT_FILE` trusts only the lab CA, so plain curl fails TLS even when .NET works). |
 | Unpinned (`V2Template`) rows fail while pinned rows pass | Expected on the sandbox until CERTInext changes how it resolves DV | See the 917 rows above. |
 
 Before blaming the plugin, separate CA-side from plugin-side failures: run the same request **pinned**,
 on a **fresh** name under the validated parent zone, and with the CSR **inline**. Change one variable
 at a time. Record confirmed spec-vs-live discrepancies as dated Findings in the CERTInext
 support-questions list kept with the maintainers.
+
+## V2 spec follow-up probes (issues 0094/0095)
+
+`V2SpecFollowupsLiveTests` holds one opt-in test per follow-up, each on top of `CERTINEXT_USE_V2_API=1`:
+
+| Flag | Test | Touches |
+|---|---|---|
+| `CERTINEXT_V2_SSLCOM_DCV_PROBE=1` | `SslComDomainDcv_LookupAndShape_Probe` | Read-only |
+| `CERTINEXT_V2_UNRESOLVED_STATUS_PROBE=1` | `Sync_UnresolvedReportStatuses_Probe` | Read-only |
+| `CERTINEXT_V2_REVOKE_PRIVILEGE_WITHDRAWN=1` | `Revoke_PrivilegeWithdrawn_OwnOrder_ReportsCaAcceptance` | Places and revokes its own order |
+| `CERTINEXT_V2_REVOKE_REASON_PROBE_ORDER_ID=<own order>` | `Revoke_ReasonAcceptance_OwnOrder_Probe` | Sends each revoke reason to that order |
+| `CERTINEXT_V2_FULL_SYNC_PROBE=1` | `Sync_V2_FullSync_Summary_Probe` | Read-only (downloads issued certificates) |
+| `CERTINEXT_V2_LIFECYCLE_REISSUE_ENDPOINT=1` + `CERTINEXT_V2_REISSUE_SOURCE_ORDER_ID=<issued order>` | `Reissue_V2_ReissueEndpoint_DerivedOrder_Report` | Creates a derived order, then cleans it up |
+
+On a sandbox that has stopped generating certificates, the cleanup of an order the test created can fail with "Certificate Request still being processed". Clean such orders up later with `CERTINEXT_V2_CLEANUP_ORDERS`.
+

@@ -610,6 +610,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Constants.Config.V2InlineCsr);
             }
 
+            // V2ReissueRevokePrevious is a Boolean (V2 only): a malformed value must not silently decide
+            // whether a reissue revokes the previous certificate.
+            if (connectionInfo.TryGetValue(Constants.Config.V2ReissueRevokePrevious, out object reissueRevokeObj)
+                && reissueRevokeObj != null && !IsBooleanSettingValue(reissueRevokeObj))
+            {
+                errors.Add($"'{Constants.Config.V2ReissueRevokePrevious}' must be true or false. Got: '{reissueRevokeObj}'.");
+            }
+
             // SslComSubmitOrganization is a Boolean (V2 only), validated like V2InlineCsr. It accepts a
             // third party's subscriber agreement on the organization's behalf, so a malformed value must
             // not silently fall back to anything.
@@ -1745,6 +1753,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             EnrollmentParams ep,
             EnrollmentType enrollmentType)
         {
+            var reissue = new V2ReissueContext();
+            var result = await EnrollV2CoreAsync(csr, subject, san, ep, enrollmentType, reissue);
+            // A reissue (or a reissue that fell back to a new order) says so in Command's result.
+            if (result != null && !string.IsNullOrWhiteSpace(reissue.Note))
+            {
+                string message = result.StatusMessage?.TrimEnd();
+                result.StatusMessage = string.IsNullOrEmpty(message)
+                    ? reissue.Note
+                    : (message.EndsWith(".") ? message : message + ".") + " " + reissue.Note;
+            }
+            return result;
+        }
+
+        /// <summary>What the V2 reissue step decided, for the result message.</summary>
+        private sealed class V2ReissueContext
+        {
+            public string Note { get; set; }
+        }
+
+        private async Task<EnrollmentResult> EnrollV2CoreAsync(
+            string csr,
+            string subject,
+            Dictionary<string, string[]> san,
+            EnrollmentParams ep,
+            EnrollmentType enrollmentType,
+            V2ReissueContext reissue)
+        {
             _logger.MethodEntry(LogLevel.Debug);
             _logger.LogInformation(
                 "EnrollV2Async started. EnrollmentType={EnrollmentType}, ProductFamily={Family}, ProductVariant={Variant}, " +
@@ -2302,8 +2337,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     _config.OrganizationNumber, sslProductVariant.ToUpperInvariant());
             }
 
-            V2CreateOrderResponse createResp;
-            if (isPrivatePki)
+            // V2 SSL/TLS reissue: POST /ssl-certificates/{prior}/reissue creates a derived order that
+            // carries the CSR; the post-create flow below (track, agreement, DCV, pickup) then runs on
+            // that order exactly as on a new one. No prior order, or a 404/422 from CERTInext, places a
+            // new order instead (said so in the result). A 5xx or lost response throws from the client
+            // with a do-not-resubmit message: the derived order may exist, so nothing is placed.
+            V2CreateOrderResponse createResp = null;
+            if (!isPrivatePki)
+            {
+                string priorOrderId = await ResolveV2ReissueSourceOrderAsync(enrollmentType, ep, subject, reissue);
+                if (priorOrderId != null)
+                {
+                    createResp = await TryReissueV2Async(priorOrderId, csr, additionalDomains, reissue);
+                    if (createResp != null)
+                        inlineCsr = true; // the reissue body carried the CSR
+                }
+            }
+
+            if (createResp != null)
+            {
+                // Reissued; nothing to place.
+            }
+            else if (isPrivatePki)
             {
                 // Spec "Private PKI Certificates" body: no productVariant / organization /
                 // certificate / agreement blocks — "Private PKI has no DCV, no organization
@@ -2644,6 +2699,131 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             if (!m.Success) return true;
             int status = int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
             return status < 400 || status >= 500;
+        }
+
+        /// <summary>
+        /// Decides whether a V2 SSL/TLS enrollment is a reissue and, if so, returns the prior order's
+        /// CARequestID. A reissue is <see cref="EnrollmentType.Reissue"/>, or
+        /// <see cref="EnrollmentType.RenewOrReissue"/> whose prior certificate is unexpired and expires
+        /// after <c>RenewalWindowDays</c> (V1's reissue branch; inside the window it is a renewal, which
+        /// V2 places as a new order). Returns null when this is not a reissue or the prior order can't
+        /// be resolved from <c>PriorCertSN</c>; the latter records a note for the result message.
+        /// </summary>
+        private async Task<string> ResolveV2ReissueSourceOrderAsync(
+            EnrollmentType enrollmentType, EnrollmentParams ep, string subject, V2ReissueContext reissue)
+        {
+            if (enrollmentType != EnrollmentType.Reissue && enrollmentType != EnrollmentType.RenewOrReissue)
+                return null;
+
+            string priorCertSn = ep.PriorCertSn;
+            // SOC2 CC6.1: a read against the gateway's certificate inventory is logged at Information.
+            _logger.LogInformation(
+                "V2 reissue probe — read PriorCertSN from EnrollmentProductInfo. EnrollmentType={EnrollmentType}, " +
+                "Subject={Subject}, PriorCertSN={PriorCertSN}, RenewalWindowDays={WindowDays}",
+                enrollmentType, LogSanitizer.Strip(subject), priorCertSn ?? "(none)", ep.RenewalWindowDays);
+
+            const string fallback = "a new order was placed instead of a reissue";
+            if (string.IsNullOrWhiteSpace(priorCertSn) || _certificateDataReader == null)
+            {
+                if (enrollmentType == EnrollmentType.Reissue)
+                    reissue.Note = $"No prior certificate serial number was supplied, so {fallback}.";
+                return null;
+            }
+
+            string priorOrderId;
+            try
+            {
+                priorOrderId = await _certificateDataReader.GetRequestIDBySerialNumber(priorCertSn);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 reissue: could not resolve the CARequestID for serial '{SN}'; placing a new order.", priorCertSn);
+                priorOrderId = null;
+            }
+            if (string.IsNullOrWhiteSpace(priorOrderId))
+            {
+                reissue.Note = $"The prior certificate's order could not be found, so {fallback}.";
+                return null;
+            }
+
+            if (enrollmentType == EnrollmentType.RenewOrReissue)
+            {
+                DateTime? expiry = null;
+                try
+                {
+                    expiry = _certificateDataReader.GetExpirationDateByRequestId(priorOrderId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "V2 reissue: could not read the expiry of '{Id}'; placing a new order.", priorOrderId);
+                }
+                DateTime now = DateTime.UtcNow;
+                bool isReissue = expiry.HasValue && expiry.Value > now.AddDays(ep.RenewalWindowDays);
+                // SOX CC6.2 / SOC2 CC7.2: the decision that reuses an existing CA record.
+                _logger.LogInformation(
+                    "V2 renew-or-reissue evaluation complete. PriorCARequestID={PriorId}, CertExpiry={Expiry}, " +
+                    "RenewalWindowDays={Window}, Reissue={Reissue}",
+                    priorOrderId, expiry.HasValue ? expiry.Value.ToString("O") : "(unknown)", ep.RenewalWindowDays, isReissue);
+                if (!isReissue)
+                    return null;
+            }
+
+            return priorOrderId;
+        }
+
+        /// <summary>
+        /// Calls the SSL/TLS reissue endpoint in <c>rekey</c> mode for <paramref name="priorOrderId"/>.
+        /// Returns the derived order, or null (with a note) when CERTInext answers 404/422 so the caller
+        /// places a new order. With <c>V2ReissueRevokePrevious</c> on, the revoke intent is audit-logged
+        /// before the call. Exceptions (5xx, no response, auth) propagate: the derived order may exist.
+        /// </summary>
+        private async Task<V2CreateOrderResponse> TryReissueV2Async(
+            string priorOrderId, string csr, List<string> additionalDomains, V2ReissueContext reissue)
+        {
+            bool revokePrevious = _config.V2ReissueRevokePrevious;
+            var request = new V2ReissueRequest
+            {
+                Mode              = Constants.ApiV2.ReissueModeRekey,
+                Reason            = Constants.ApiV2.ReissueReason,
+                Csr               = csr,
+                AdditionalDomains = additionalDomains,
+                RevokePrevious    = revokePrevious,
+                RevokeReason      = revokePrevious ? Constants.RevocationReasonV2.Superseded : null
+            };
+
+            if (revokePrevious)
+            {
+                // SOX / SOC2 CC7.3: the revoke intent is recorded before the call, as RevokeV2Async does.
+                _logger.LogInformation(
+                    "Revocation V2 attempt started (via reissue revokePrevious). CARequestID={Id}, " +
+                    "V2Reason={V2Reason}, Setting={Setting}=true",
+                    priorOrderId, Constants.RevocationReasonV2.Superseded, Constants.Config.V2ReissueRevokePrevious);
+            }
+            _logger.LogInformation(
+                "V2 reissue started. PriorCARequestID={PriorId}, Mode={Mode}, RevokePrevious={RevokePrevious}, " +
+                "AdditionalDomainCount={Count}",
+                priorOrderId, request.Mode, revokePrevious, additionalDomains?.Count ?? 0);
+
+            var outcome = await _client.ReissueOrderV2Async(priorOrderId, request);
+            if (outcome?.Created == true)
+            {
+                _logger.LogInformation(
+                    "V2 reissue created a derived order. PriorCARequestID={PriorId}, NewOrderId={NewId}, " +
+                    "HttpStatus={HttpStatus}, Status={Status}, PreviousRevocationRequested={RevokePrevious}",
+                    priorOrderId, outcome.Order.OrderId, outcome.HttpStatus, outcome.Order.Status, revokePrevious);
+                reissue.Note = $"Reissued from CERTInext order {priorOrderId}" +
+                               (revokePrevious ? "; revocation of the previous certificate (superseded) was requested." : ".");
+                return outcome.Order;
+            }
+
+            _logger.LogWarning(
+                "V2 reissue of order {PriorId} was rejected (HttpStatus={Status}): {Detail}. Placing a new order instead.",
+                priorOrderId, outcome?.HttpStatus ?? 0, outcome?.Detail ?? "(no detail)");
+            reissue.Note = $"CERTInext rejected the reissue of order {priorOrderId} " +
+                           $"(HTTP {outcome?.HttpStatus ?? 0}: {outcome?.Detail ?? "no detail"}), so a new order was placed " +
+                           (revokePrevious ? "and the previous certificate was not revoked." : "instead.");
+            return null;
         }
 
         /// <summary>
@@ -3328,6 +3508,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int errors = 0;
             int deferredRecentOrders = 0; // pending/issued orders withheld because they are younger than the grace window
             int unresolvedStatusFallbacks = 0; // report rows whose display strings needed a live track call
+            // Report rows Track Order can't find in any family (seen live: "On Hold | Setup Pending").
+            int untrackableListedOrders = 0;
+            // Distinct orderStatus|certificateStatus pairs the display-string mapping didn't know, with
+            // counts. The vocabulary is undocumented (Finding 35), so the summary names every new
+            // value at Information instead of leaving it to per-row Debug lines.
+            var unmappedStatusPairs = new SortedDictionary<string, int>(StringComparer.Ordinal);
             int issuedNotGeneratedYet = 0; // issued orders whose download answered 422 EMS-1165 (certificate not generated yet)
             // Sync has no template, so the agreement signer is the connector's: RequestorName (the
             // enroll default for SignerName) and SignerPlace. One context per pass: each order is
@@ -3396,12 +3582,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             // exhaustive. Don't guess: fall back to a live TrackOrder call, which
                             // returns the authoritative V2 `status` enum via StatusMapper.
                             unresolvedStatusFallbacks++;
+                            string pair = $"{row.OrderStatus ?? "(none)"} | {row.CertificateStatus ?? "(none)"}";
+                            unmappedStatusPairs[pair] = unmappedStatusPairs.TryGetValue(pair, out int seen) ? seen + 1 : 1;
                             _logger.LogDebug(
                                 "V2 sync: unrecognised report status — falling back to live track. " +
                                 "Id={Id}, OrderStatus={OrderStatus}, CertificateStatus={CertificateStatus}",
                                 row.OrderNumber, row.OrderStatus, row.CertificateStatus);
-                            (resolvedFamily, trackedStatus) =
-                                await _client.ResolveAndTrackOrderV2WithFamilyAsync(row.OrderNumber, cancelToken);
+                            try
+                            {
+                                (resolvedFamily, trackedStatus) =
+                                    await _client.ResolveAndTrackOrderV2WithFamilyAsync(row.OrderNumber, cancelToken);
+                            }
+                            catch (KeyNotFoundException)
+                            {
+                                // The report lists the order but Track Order finds it in no family, so
+                                // there is nothing to track or download. Seen live for every
+                                // "On Hold | Setup Pending" row (meaning undocumented; asked of CERTInext).
+                                // Not an error: it must not count toward the error-rate abort. Skipped,
+                                // not emitted as failed, because nothing says the order failed; a later
+                                // pass tracks it again.
+                                _logger.LogInformation(
+                                    "V2 sync: order listed by /reports/orders but not found by Track Order in any " +
+                                    "product family; skipping it this pass. Id={Id}, OrderStatus={OrderStatus}, " +
+                                    "CertificateStatus={CertificateStatus}",
+                                    row.OrderNumber, row.OrderStatus, row.CertificateStatus);
+                                untrackableListedOrders++;
+                                skipped++;
+                                continue;
+                            }
                             disposition = StatusMapper.V2StatusToRequestDisposition(trackedStatus.Status);
                         }
 
@@ -3699,7 +3907,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 #endif
                 _logger.LogInformation(
                     "CERTInext V2 synchronization complete. Synced={Synced}, Skipped={Skipped}, Errors={Errors}, " +
-                    "UnresolvedStatusFallbacks={Fallbacks}. Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
+                    "UnresolvedStatusFallbacks={Fallbacks}, UnmappedReportStatuses=[{UnmappedPairs}], " +
+                    "UntrackableListedOrders={Untrackable} (listed by the " +
+                    "report, not found by Track Order; skipped). Emitted to gateway buffer: GeneratedWithBody={GenWithBody}, " +
                     "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
                     "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
                     "BodylessRevokedSkipped={BodylessRevokedSkipped} (bodyless-revoked guard). " +
@@ -3707,6 +3917,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "IssuedNotGeneratedYet={IssuedNotGeneratedYet} (issued at the CA, certificate not downloadable yet, " +
                     "422 EMS-1165; picked up by a later pass). {DcvClause}",
                     synced, skipped, errors, unresolvedStatusFallbacks,
+                    LogSanitizer.Strip(string.Join("; ", unmappedStatusPairs.Select(kv => $"{kv.Key} ({kv.Value})"))),
+                    untrackableListedOrders,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
                     deferredRecentOrders, recentOrderGraceSeconds,
@@ -3899,24 +4111,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// Maps a V2 revoke reason that CERTInext rejects with "Invalid Revoke Reason
-        /// ID" to an accepted fallback, or <c>null</c> if <paramref name="rejectedV2Reason"/>
-        /// is not one of the known-rejected values. Of the 9 spec-documented reason strings,
-        /// only <c>key-compromise</c>, <c>affiliation-changed</c>, <c>superseded</c>,
-        /// <c>cessation-of-operation</c>, and <c>privilege-withdrawn</c> are actually accepted
-        /// (the same restriction V1's <see cref="StatusMapper.ToRevocationReasonId"/> has
-        /// always documented) — <c>unspecified</c>, <c>ca-compromise</c>,
+        /// Maps a V2 revoke reason that CERTInext rejects (<see cref="IsRevokeReasonRejection"/>) to an
+        /// accepted fallback, or <c>null</c> if <paramref name="rejectedV2Reason"/> has no fallback.
+        /// Live, only <c>key-compromise</c>, <c>affiliation-changed</c>, <c>superseded</c>, and
+        /// <c>cessation-of-operation</c> are reliably accepted — <c>unspecified</c>, <c>ca-compromise</c>,
         /// <c>certificate-hold</c>, and <c>aa-compromise</c> are all rejected.
         /// <c>key-compromise</c> is the fallback for the two *-compromise reasons (closest
         /// semantic match); <c>cessation-of-operation</c> is the fallback for
         /// <c>unspecified</c> and <c>certificate-hold</c>, neither of which implies an actual
         /// key compromise — <c>key-compromise</c> there would misrepresent the revoke and
         /// trigger the spec's own BR 4.9.1.1 24-hour CRL-turnaround obligation for no reason.
+        /// <c>privilege-withdrawn</c> is no longer in the 2.0.0 spec's SSL/TLS revoke enum and was
+        /// rejected live on 2026-11-13 ("Revocation reason privilege-withdrawn is not allowed."), so it
+        /// also falls back once to <c>cessation-of-operation</c>; the first attempt still sends
+        /// <c>privilege-withdrawn</c>, in case another account or the Private PKI family accepts it.
         /// </summary>
         private static string ResolveRejectedRevokeReasonFallback(string rejectedV2Reason) =>
             rejectedV2Reason switch
             {
                 Constants.RevocationReasonV2.Unspecified => Constants.RevocationReasonV2.CessationOfOperation,
+                Constants.RevocationReasonV2.PrivilegeWithdrawn => Constants.RevocationReasonV2.CessationOfOperation,
                 Constants.RevocationReasonV2.CertificateHold => Constants.RevocationReasonV2.CessationOfOperation,
                 Constants.RevocationReasonV2.CACompromise => Constants.RevocationReasonV2.KeyCompromise,
                 Constants.RevocationReasonV2.AACompromise => Constants.RevocationReasonV2.KeyCompromise,
@@ -3924,10 +4138,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             };
 
         /// <summary>
+        /// True when a V2 revoke 422 rejected the reason itself. CERTInext has used two wordings:
+        /// "Invalid Revoke Reason ID" and, seen live on 2026-11-13 for <c>privilege-withdrawn</c>,
+        /// "Revocation reason {reason} is not allowed." Neither carries an EMS code.
+        /// </summary>
+        internal static bool IsRevokeReasonRejection(string message) =>
+            !string.IsNullOrEmpty(message)
+            && (message.IndexOf("Invalid Revoke Reason ID", StringComparison.OrdinalIgnoreCase) >= 0
+                || System.Text.RegularExpressions.Regex.IsMatch(
+                    message, @"Revocation reason \S+ is not allowed", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+
+        /// <summary>
         /// Revokes a certificate via the V2 REST API. If CERTInext rejects the resolved
-        /// reason with its "Invalid Revoke Reason ID" 422 and the reason is one of the four
-        /// known-rejected values (<see cref="ResolveRejectedRevokeReasonFallback"/>), retries
-        /// exactly once with an accepted fallback. Any other revoke failure (including a 422 for a
+        /// reason (<see cref="IsRevokeReasonRejection"/>) and the reason has a fallback
+        /// (the four known-rejected values plus <c>privilege-withdrawn</c>; see
+        /// <see cref="ResolveRejectedRevokeReasonFallback"/>), retries exactly once with an accepted fallback. Any other revoke failure (including a 422 for a
         /// reason not in that set) is surfaced as-is, with no retry.
         /// </summary>
         private async Task<int> RevokeV2Async(string caRequestID, string hexSerialNumber, uint revocationReason)
@@ -4015,7 +4240,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
             catch (InvalidOperationException ioe) when (
                 ResolveRejectedRevokeReasonFallback(v2Reason) != null &&
-                ioe.Message.IndexOf("Invalid Revoke Reason ID", StringComparison.OrdinalIgnoreCase) >= 0)
+                IsRevokeReasonRejection(ioe.Message))
             {
                 // CERTInext's V2 API rejects several of the spec-documented reason values
                 // outright (422 "Invalid Revoke Reason ID"), independent of
@@ -5290,6 +5515,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// treated as DCV already satisfied: publishing is skipped and
         /// the flow proceeds straight to step 4.
         ///
+        /// A domain whose account row says <c>validatedBy: SSLCOM</c> takes
+        /// <see cref="PerformDcvV2SslComSingleDomainAsync"/> instead (SSL.com's own record, domain-level
+        /// endpoints).
+        ///
         /// Returns <c>true</c> when DCV steps were executed, <c>false</c> when skipped.
         /// </summary>
         private async Task<bool> PerformDcvV2SingleDomainAsync(
@@ -5300,6 +5529,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             _logger.LogInformation(
                 "V2 DCV starting for order {OrderId}, domain {Domain}.", orderId, LogSanitizer.Strip(domain));
+
+            // A domain SSL.com validates takes the domain-level flow with SSL.com's own record.
+            var sslComDomain = await FindSslComDomainAsync(orderId, domain, ct);
+            if (sslComDomain != null)
+                return await PerformDcvV2SslComSingleDomainAsync(orderId, domain, sslComDomain, productFamilySlug, ct);
 
             // 1. Fetch challenge
             V2DcvChallengeResponse challenge = null;
@@ -5440,31 +5674,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
 
                 // 4. Poll TrackOrderV2 until status leaves pending-dcv
-                int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
-                var deadline = DateTime.UtcNow.AddMinutes(timeoutMinutes);
-                // Fixed short cadence — decoupled from DcvPropagationDelaySeconds (one-shot
-                // DNS wait), not a poll interval. Reusing it here would yield only ~2 polls
-                // before the 5-minute timeout.
-                int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
-
-                while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
-                    try
-                    {
-                        var trackResp = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
-                        _logger.LogDebug(
-                            "V2 DCV poll. OrderId={OrderId}, Status={Status}", orderId, trackResp.Status);
-                        if (!string.Equals(trackResp.Status, "pending-dcv", StringComparison.OrdinalIgnoreCase))
-                            break;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "V2 DCV: TrackOrderV2 poll failed for order {OrderId}.", orderId);
-                        break;
-                    }
-                }
-
+                await PollV2UntilLeavesPendingDcvAsync(orderId, productFamilySlug, ct);
                 return true;
             }
             finally
@@ -5562,6 +5772,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // already-staged record instead of publishing (and later cleaning up) a duplicate.
             var stagedHostnames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+            // Domains SSL.com validates, keyed by domain: verified in Phase 2 through
+            // POST /domains/{id}/dcv/verify instead of the order-level verify.
+            var sslComPlans = new Dictionary<string, SslComDcvPlan>(StringComparer.OrdinalIgnoreCase);
+
             async Task CleanupStagedAsync()
             {
                 // Concurrent, not sequential — mirrors the V1 multi-SAN cleanup rationale
@@ -5579,6 +5793,48 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 foreach (var d in pendingDomains)
                 {
                     ct.ThrowIfCancellationRequested();
+
+                    var sslComDomain = await FindSslComDomainAsync(orderId, d, ct);
+                    if (sslComDomain != null)
+                    {
+                        var (plan, skipReason) = await PrepareSslComDcvAsync(orderId, d, sslComDomain, ct);
+                        if (plan == null)
+                        {
+                            failedDomains.Add((d, skipReason));
+                            continue;
+                        }
+                        sslComPlans[d] = plan;
+                        if (plan.AlreadyValidated)
+                        {
+                            // Nothing to publish; Phase 2 still asks CERTInext to verify.
+                            verifyCandidates.Add(d);
+                            continue;
+                        }
+
+                        string sslComKey = plan.RecordName + "|" + plan.RecordValue;
+                        if (stagedHostnames.TryGetValue(sslComKey, out string sslComSharedWith))
+                        {
+                            _logger.LogInformation(
+                                "V2 DCV (SSL.com) record {Hostname} for domain {Domain} on order {OrderId} is " +
+                                "already staged (shared with {SharedWith}); reusing it.",
+                                LogSanitizer.Strip(plan.RecordName), LogSanitizer.Strip(d), orderId,
+                                LogSanitizer.Strip(sslComSharedWith));
+                            verifyCandidates.Add(d);
+                            continue;
+                        }
+
+                        string stageError = await StageSslComRecordAsync(orderId, plan, ct);
+                        if (stageError != null)
+                        {
+                            sslComPlans.Remove(d);
+                            failedDomains.Add((d, stageError));
+                            continue;
+                        }
+                        stagedHostnames[sslComKey] = d;
+                        staged.Add((d, plan.RecordName, plan.Validator));
+                        verifyCandidates.Add(d);
+                        continue;
+                    }
 
                     V2DcvChallengeResponse challenge = null;
                     bool alreadySatisfied = false;
@@ -5734,6 +5990,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     // share one TXT record.
                     foreach (var d in verifyCandidates)
                     {
+                        if (sslComPlans.TryGetValue(d, out var sslComPlan))
+                        {
+                            var (sslComVerified, sslComReason) = await VerifySslComDomainAsync(orderId, sslComPlan, ct);
+                            if (sslComVerified)
+                                verifiedDomains.Add(d);
+                            else
+                                failedDomains.Add((d, sslComReason));
+                            continue;
+                        }
+
                         try
                         {
                             _logger.LogInformation(
@@ -5815,6 +6081,285 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 orderId, pendingDomains.Count, verifiedDomains.Count, failedDomains.Count);
 
             return true;
+        }
+
+        /// <summary>
+        /// Polls <see cref="ICERTInextClient.TrackOrderV2Async"/> until the order leaves
+        /// <c>pending-dcv</c>, a poll fails, or the DCV timeout / <paramref name="ct"/> ends it.
+        /// </summary>
+        private async Task PollV2UntilLeavesPendingDcvAsync(string orderId, string productFamilySlug, CancellationToken ct)
+        {
+            int timeoutMinutes = _config.GetEffectiveDcvTimeoutMinutes();
+            var deadline = DateTime.UtcNow.AddMinutes(timeoutMinutes);
+            // Fixed short cadence — decoupled from DcvPropagationDelaySeconds (one-shot
+            // DNS wait), not a poll interval. Reusing it here would yield only ~2 polls
+            // before the 5-minute timeout.
+            int pollSeconds = Constants.Dcv.SyncPropagationDelaySeconds;
+
+            while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
+                try
+                {
+                    var trackResp = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
+                    _logger.LogDebug(
+                        "V2 DCV poll. OrderId={OrderId}, Status={Status}", orderId, trackResp.Status);
+                    if (!string.Equals(trackResp.Status, "pending-dcv", StringComparison.OrdinalIgnoreCase))
+                        break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "V2 DCV: TrackOrderV2 poll failed for order {OrderId}.", orderId);
+                    break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// What the SSL.com DCV path publishes and verifies for one domain: SSL.com's own record
+        /// from <c>GET /domains/{id}/dcv</c>, never <c>DcvTxtRecordTemplate</c>.
+        /// </summary>
+        private sealed class SslComDcvPlan
+        {
+            public string Domain { get; init; }
+            public string DomainId { get; init; }
+            public string OptionId { get; init; }
+            public string RecordName { get; init; }
+            /// <summary>Never logged.</summary>
+            public string RecordValue { get; init; }
+            /// <summary>SSL.com already reports <c>VALIDATED</c>: verify without publishing.</summary>
+            public bool AlreadyValidated { get; init; }
+            public Keyfactor.AnyGateway.Extensions.IDomainValidator Validator { get; init; }
+        }
+
+        /// <summary>
+        /// Returns the account's domain row when SSL.com validates <paramref name="domain"/>, else null.
+        /// A failed lookup also returns null, so the order takes the emSign path it took before the
+        /// SSL.com path existed, with a warning; cancellation propagates.
+        /// </summary>
+        private async Task<V2DomainRecord> FindSslComDomainAsync(string orderId, string domain, CancellationToken ct)
+        {
+            try
+            {
+                var row = await _client.FindDomainV2Async(domain, ct);
+                if (row?.IsValidatedBySslCom != true)
+                    return null;
+                _logger.LogInformation(
+                    "V2 DCV: domain {Domain} on order {OrderId} is validated by SSL.com; using the domain-level " +
+                    "DCV flow with SSL.com's record.", LogSanitizer.Strip(domain), orderId);
+                return row;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 DCV: could not look up domain {Domain} for order {OrderId} (GET /domains); continuing " +
+                    "with the emSign DCV flow.", LogSanitizer.Strip(domain), orderId);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Reads SSL.com's DCV instructions for one domain and picks the <c>dns-txt</c> option to publish.
+        /// Returns a null plan with a reason when DCV can't proceed this pass (SSL.com unreachable,
+        /// unknown shape, no <c>dns-txt</c> option, no DNS provider); the order stays pending and a later
+        /// sync retries. Never cancels the order.
+        /// </summary>
+        private async Task<(SslComDcvPlan plan, string skipReason)> PrepareSslComDcvAsync(
+            string orderId, string domain, V2DomainRecord record, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(record.DomainId))
+            {
+                _logger.LogWarning(
+                    "V2 DCV (SSL.com): the domain row for {Domain} on order {OrderId} has no id; cannot read " +
+                    "SSL.com's DCV record. The order stays pending.", LogSanitizer.Strip(domain), orderId);
+                return (null, "SSL.com domain row has no id");
+            }
+
+            V2DomainDcvDetails details;
+            try
+            {
+                details = await _client.GetDomainDcvV2Async(record.DomainId, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Spec: 502 when SSL.com can't be reached.
+                _logger.LogWarning(ex,
+                    "V2 DCV (SSL.com): GET /domains/{DomainId}/dcv failed for {Domain} on order {OrderId}; the " +
+                    "order stays pending and a later sync retries.",
+                    record.DomainId, LogSanitizer.Strip(domain), orderId);
+                return (null, "SSL.com DCV details unavailable");
+            }
+
+            var validator = DomainValidatorFactory.ResolveDomainValidator(StripWildcardPrefix(domain), "dns-01");
+            if (validator == null)
+            {
+                _logger.LogError(
+                    "No DNS provider plugin resolved for domain '{Domain}' on V2 order {OrderId}. " +
+                    "Ensure the appropriate DNS provider plugin is deployed and configured.",
+                    LogSanitizer.Strip(domain), orderId);
+                return (null, "no DNS provider resolved");
+            }
+
+            if (details == null)
+            {
+                _logger.LogWarning(
+                    "V2 DCV (SSL.com): GET /domains/{DomainId}/dcv returned no body for {Domain} on order {OrderId}; " +
+                    "the order stays pending.", record.DomainId, LogSanitizer.Strip(domain), orderId);
+                return (null, "SSL.com DCV details unavailable");
+            }
+
+            if (string.Equals(details.CaStatus, Constants.ApiV2.SslComCaStatusValidated, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation(
+                    "V2 DCV (SSL.com): {Domain} on order {OrderId} is already VALIDATED at SSL.com; verifying " +
+                    "without publishing a record.", LogSanitizer.Strip(domain), orderId);
+                return (new SslComDcvPlan
+                {
+                    Domain = domain, DomainId = record.DomainId, OptionId = details.OptionId,
+                    AlreadyValidated = true, Validator = validator
+                }, null);
+            }
+
+            var option = details.SelectDnsTxtOption();
+            if (option == null)
+            {
+                _logger.LogWarning(
+                    "V2 DCV (SSL.com): no dns-txt option for {Domain} on order {OrderId} (offered: {Methods}). " +
+                    "The DNS provider interface can only publish TXT records, so dns-cname and http-url can't be " +
+                    "used. The order stays pending; validate the domain in the CERTInext portal.",
+                    LogSanitizer.Strip(domain), orderId, details.DescribeOfferedMethods());
+                return (null, "no SSL.com dns-txt option");
+            }
+
+            return (new SslComDcvPlan
+            {
+                Domain = domain, DomainId = record.DomainId, OptionId = option.OptionId,
+                RecordName = option.RecordName.Trim().TrimEnd('.'), RecordValue = option.RecordValue,
+                Validator = validator
+            }, null);
+        }
+
+        /// <summary>Publishes SSL.com's TXT record. Returns null on success, else the failure reason.</summary>
+        private async Task<string> StageSslComRecordAsync(string orderId, SslComDcvPlan plan, CancellationToken ct)
+        {
+            _logger.LogInformation(
+                "Staging V2 DNS TXT record for SSL.com DCV. OrderId={OrderId}, Domain={Domain}, Hostname={Hostname}",
+                orderId, LogSanitizer.Strip(plan.Domain), LogSanitizer.Strip(plan.RecordName));
+            DomainValidationResult stageResult;
+            try
+            {
+                stageResult = await plan.Validator.StageValidation(plan.RecordName, plan.RecordValue, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "V2 DCV (SSL.com): DNS provider threw while staging '{Domain}' for order {OrderId}.",
+                    LogSanitizer.Strip(plan.Domain), orderId);
+                return "DNS provider plugin threw";
+            }
+            if (!stageResult.Success)
+            {
+                _logger.LogError(
+                    "V2 DCV (SSL.com): Failed to stage DNS TXT for '{Domain}' on order {OrderId}: {Error}.",
+                    LogSanitizer.Strip(plan.Domain), orderId, LogSanitizer.Strip(stageResult.ErrorMessage));
+                return $"stage failed: {stageResult.ErrorMessage}";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Calls <c>POST /domains/{id}/dcv/verify</c> for SSL.com's option. Returns false with a reason
+        /// when SSL.com reports PENDING / UNDER_REVIEW / FAILED / EXPIRED (422) or can't be reached
+        /// (502 or any other failure); the order stays pending either way.
+        /// </summary>
+        private async Task<(bool verified, string reason)> VerifySslComDomainAsync(
+            string orderId, SslComDcvPlan plan, CancellationToken ct)
+        {
+            _logger.LogInformation(
+                "Triggering V2 domain DCV verification (SSL.com). OrderId={OrderId}, Domain={Domain}, DomainId={DomainId}",
+                orderId, LogSanitizer.Strip(plan.Domain), plan.DomainId);
+            try
+            {
+                var result = await _client.VerifyDomainDcvV2Async(plan.DomainId, plan.OptionId, ct);
+                if (result?.Verified == true)
+                {
+                    _logger.LogInformation(
+                        "V2 DCV (SSL.com) verified. OrderId={OrderId}, Domain={Domain}, ValidTill={ValidTill}",
+                        orderId, LogSanitizer.Strip(plan.Domain), result.ValidTill ?? "(not returned)");
+                    return (true, null);
+                }
+                _logger.LogWarning(
+                    "V2 DCV (SSL.com) not verified yet for {Domain} on order {OrderId}. CaStatus={CaStatus}, " +
+                    "CaMessage={CaMessage}. The order stays pending and a later sync retries.",
+                    LogSanitizer.Strip(plan.Domain), orderId, result?.CaStatus ?? "(none)",
+                    LogSanitizer.Strip(result?.CaMessage) ?? "(none)");
+                return (false, $"SSL.com caStatus={result?.CaStatus ?? "(none)"}");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "V2 DCV (SSL.com): verify failed for {Domain} on order {OrderId}; the order stays pending and " +
+                    "a later sync retries.", LogSanitizer.Strip(plan.Domain), orderId);
+                return (false, "SSL.com verify failed");
+            }
+        }
+
+        /// <summary>
+        /// Single-domain DCV for a domain SSL.com validates: read SSL.com's record, publish it, wait for
+        /// propagation, verify through the domain-level endpoint, poll Track Order, clean up.
+        /// <c>DcvTxtRecordTemplate</c> is not used. Returns <c>true</c> when the domain verified.
+        /// </summary>
+        private async Task<bool> PerformDcvV2SslComSingleDomainAsync(
+            string orderId, string domain, V2DomainRecord record, string productFamilySlug, CancellationToken ct)
+        {
+            var (plan, _) = await PrepareSslComDcvAsync(orderId, domain, record, ct);
+            if (plan == null)
+                return false;
+
+            bool staged = false;
+            try
+            {
+                if (!plan.AlreadyValidated)
+                {
+                    if (await StageSslComRecordAsync(orderId, plan, ct) != null)
+                        return false;
+                    staged = true;
+
+                    int delaySeconds = _config.DcvPropagationDelaySeconds > 0 ? _config.DcvPropagationDelaySeconds : 30;
+                    _logger.LogInformation(
+                        "Waiting {Delay}s for DNS propagation before V2 SSL.com DCV verify. OrderId={OrderId}",
+                        delaySeconds, orderId);
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+                }
+
+                var (verified, _) = await VerifySslComDomainAsync(orderId, plan, ct);
+                if (!verified)
+                    return false;
+
+                await PollV2UntilLeavesPendingDcvAsync(orderId, productFamilySlug, ct);
+                return true;
+            }
+            finally
+            {
+                if (staged)
+                    await CleanupOneV2StagedRecordAsync(orderId, (domain, plan.RecordName, plan.Validator));
+            }
         }
 
         /// <summary>

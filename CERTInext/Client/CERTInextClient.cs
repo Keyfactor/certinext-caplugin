@@ -1473,7 +1473,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     path, createStatus, sw.ElapsedMilliseconds);
                 throw new Exception(
                     "CERTInext did not return a usable response to the V2 order create " +
-                    (createStatus == 0 ? "(no HTTP response)" : $"(HTTP {createStatus})") +
+                    (createStatus == 0 ? $"(no HTTP response: {DescribeTransportFailure(resp)})" : $"(HTTP {createStatus})") +
                     ". If the order was created it will be imported by the next synchronization — do not " +
                     "resubmit immediately. See gateway logs for details.");
             }
@@ -1870,6 +1870,231 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         }
 
         /// <inheritdoc/>
+        public async Task<V2DomainRecord> FindDomainV2Async(string domainName, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            if (string.IsNullOrWhiteSpace(domainName))
+                throw new ArgumentException("A domain name is required.", nameof(domainName));
+            EnsureV2Client();
+            string path = Constants.ApiV2.DomainsPath + "?search=" + Uri.EscapeDataString(domainName) + "&exactMatch=true";
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                Constants.ApiV2.DomainsPath, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 find domain");
+            var result = ParseDomainListRow(resp.Content, domainName);
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2DomainDcvDetails> GetDomainDcvV2Async(string domainId, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = $"{Constants.ApiV2.DomainsPath}/{Uri.EscapeDataString(domainId)}/dcv";
+            var req = await BuildV2RequestAsync(path, Method.Get, ct);
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=GET, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+            ThrowOnV2Failure(resp, "V2 get domain DCV");
+            var result = DeserializeV2OrThrow<V2DomainDcvDetails>(resp, "V2 get domain DCV");
+            Logger.MethodExit(LogLevel.Trace);
+            return result;
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2DomainDcvVerifyResult> VerifyDomainDcvV2Async(
+            string domainId, string optionId, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            EnsureV2Client();
+            string path = $"{Constants.ApiV2.DomainsPath}/{Uri.EscapeDataString(domainId)}/dcv/verify";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct);
+            req.AddJsonBody(JsonSerializer.Serialize(
+                new V2DomainDcvVerifyRequest { OptionId = string.IsNullOrWhiteSpace(optionId) ? null : optionId },
+                GetJsonOptions()));
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}",
+                path, (int)resp.StatusCode);
+
+            if (resp.StatusCode == (HttpStatusCode)422)
+            {
+                // Spec: "otherwise 422 with diagnostics.caStatus (PENDING, FAILED, UNDER_REVIEW,
+                // EXPIRED) and diagnostics.caMessage (SSL.com's reason)". Not an exception: the caller
+                // leaves the order pending and the next sync retries.
+                LogV2ApiFailure("V2 verify domain DCV", resp, LogLevel.Warning);
+                var (caStatus, caMessage) = ReadDomainVerifyDiagnostics(resp.Content);
+                Logger.MethodExit(LogLevel.Trace);
+                return new V2DomainDcvVerifyResult
+                {
+                    Verified  = false,
+                    CaStatus  = caStatus,
+                    CaMessage = caMessage == null
+                        ? null
+                        : LogSanitizer.SanitizeCaText(caMessage, _config.LogSensitiveRequestData)
+                };
+            }
+
+            ThrowOnV2Failure(resp, "V2 verify domain DCV");
+            string validTill = null;
+            if (!string.IsNullOrWhiteSpace(resp.Content))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(resp.Content);
+                    validTill = TryReadString(doc.RootElement, "validTill");
+                }
+                catch (JsonException)
+                {
+                    // A 200 is the success signal; validTill is informational only.
+                }
+            }
+            Logger.MethodExit(LogLevel.Trace);
+            return new V2DomainDcvVerifyResult { Verified = true, ValidTill = validTill };
+        }
+
+        /// <inheritdoc/>
+        public async Task<V2ReissueOutcome> ReissueOrderV2Async(
+            string orderId, V2ReissueRequest request, CancellationToken ct = default)
+        {
+            Logger.MethodEntry(LogLevel.Trace);
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            EnsureV2Client();
+            string path = BuildV2OrderPath(Constants.ApiV2.FamilySsl, orderId) + "/reissue";
+            var req = await BuildV2RequestAsync(path, Method.Post, ct, Guid.NewGuid().ToString());
+            string json = JsonSerializer.Serialize(request, GetJsonOptions());
+            if (Logger.IsEnabled(LogLevel.Trace))
+                Logger.LogTrace("ReissueOrderV2Async request payload: {Payload}",
+                    ApplyLoggingRedaction(json, _config.LogSensitiveRequestData));
+            req.AddJsonBody(json);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var resp = await _httpV2.ExecuteAsync(req, ct);
+            sw.Stop();
+            int status = (int)resp.StatusCode;
+            Logger.LogInformation(
+                "CERTInext V2 API call: Method=POST, Path={Path}, HttpStatus={Status}, LatencyMs={Latency}",
+                path, status, sw.ElapsedMilliseconds);
+            if (Logger.IsEnabled(LogLevel.Trace))
+                Logger.LogTrace("ReissueOrderV2Async response: {Body}",
+                    ApplyLoggingRedaction(resp.Content, _config.LogSensitiveRequestData));
+
+            // Same rule as the inline-CSR create: the reissue carries the CSR and creates an order, so
+            // a lost response may hide a derived order that issues. Never retried or replaced.
+            if (!resp.IsSuccessful && (status == 0 || status >= 500))
+            {
+                LogV2ApiFailure("V2 reissue order", resp, LogLevel.Warning);
+                throw new Exception(
+                    $"CERTInext did not return a usable response to the V2 reissue of order '{orderId}' " +
+                    (status == 0 ? $"(no HTTP response: {DescribeTransportFailure(resp)})" : $"(HTTP {status})") +
+                    ". If the reissue was created it will be imported by the next synchronization — do not " +
+                    "resubmit immediately. See gateway logs for details.");
+            }
+
+            if (status == 404 || status == 422)
+            {
+                LogV2ApiFailure("V2 reissue order", resp, LogLevel.Warning);
+                Logger.MethodExit(LogLevel.Trace);
+                return new V2ReissueOutcome
+                {
+                    Created    = false,
+                    HttpStatus = status,
+                    Detail     = ExtractV2ErrorMessage(resp.Content, "V2 reissue order", _config.LogSensitiveRequestData)
+                };
+            }
+
+            ThrowOnV2Failure(resp, "V2 reissue order");
+            V2CreateOrderResponse order = null;
+            try
+            {
+                order = DeserializeV2OrThrow<V2CreateOrderResponse>(resp, "V2 reissue order");
+            }
+            catch (Exception deserEx)
+            {
+                Logger.LogWarning(deserEx,
+                    "V2 reissue returned HTTP {Status} but the body could not be read; the derived order may exist.",
+                    status);
+            }
+            if (string.IsNullOrWhiteSpace(order?.OrderId))
+                throw new Exception(
+                    $"CERTInext accepted the V2 reissue of order '{orderId}' but returned no readable order id. " +
+                    "The derived order was most likely created and will be imported by the next synchronization — " +
+                    "do not resubmit immediately. See gateway logs for details.");
+            Logger.MethodExit(LogLevel.Trace);
+            return new V2ReissueOutcome { Created = true, HttpStatus = status, Order = order };
+        }
+
+        /// <summary>
+        /// Parses a <c>GET /domains</c> body into the row for <paramref name="domainName"/>, or null.
+        /// Rows come under <c>content</c> (seen live, same envelope as <c>/reports/orders</c>); a bare
+        /// array is accepted too. Rows are matched on <c>domainName</c> case-insensitively, as a guard in
+        /// case <c>exactMatch</c> is ignored and the substring search returns sibling hosts.
+        /// </summary>
+        internal static V2DomainRecord ParseDomainListRow(string content, string domainName)
+        {
+            if (string.IsNullOrWhiteSpace(content)) return null;
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+            JsonElement rows;
+            if (root.ValueKind == JsonValueKind.Array)
+                rows = root;
+            else if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.Array)
+                rows = c;
+            else
+                throw new InvalidOperationException(
+                    "V2 GET /domains returned an unrecognised body (no 'content' array).");
+
+            foreach (var row in rows.EnumerateArray())
+            {
+                if (row.ValueKind != JsonValueKind.Object) continue;
+                string name = TryReadString(row, "domainName") ?? TryReadString(row, "domain");
+                if (!string.Equals(name, domainName, StringComparison.OrdinalIgnoreCase)) continue;
+                return new V2DomainRecord
+                {
+                    DomainId    = TryReadString(row, "domainId") ?? TryReadString(row, "id"),
+                    DomainName  = name,
+                    DcvStatus   = TryReadString(row, "dcvStatus"),
+                    ValidatedBy = TryReadString(row, "validatedBy")
+                };
+            }
+            return null;
+        }
+
+        private static (string caStatus, string caMessage) ReadDomainVerifyDiagnostics(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content)) return (null, null);
+            try
+            {
+                using var doc = JsonDocument.Parse(content);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("diagnostics", out var diag)
+                    && diag.ValueKind == JsonValueKind.Object)
+                    return (TryReadString(diag, "caStatus"), TryReadString(diag, "caMessage"));
+            }
+            catch (JsonException)
+            {
+                // Not JSON — no diagnostics to report.
+            }
+            return (null, null);
+        }
+
+        /// <summary>Reads a string or number property as a string; null when absent or another kind.</summary>
+        private static string TryReadString(JsonElement obj, string name)
+        {
+            if (!obj.TryGetProperty(name, out var v)) return null;
+            return v.ValueKind switch
+            {
+                JsonValueKind.String => v.GetString(),
+                JsonValueKind.Number => v.GetRawText(),
+                _ => null
+            };
+        }
+
+        /// <inheritdoc/>
         public async Task<List<ProductDetail>> GetProductDetailsV2Async(CancellationToken ct = default)
         {
             Logger.MethodEntry(LogLevel.Trace);
@@ -2172,14 +2397,39 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                     _config.ApiUrl, _config.OAuthClientId);
 
                 string tokenUrl = _config.ApiUrl.TrimEnd('/') + Constants.ApiV2.TokenPath;
-                using var tokenClient = new RestClient(tokenUrl);
-                var tokenReq = new RestRequest(string.Empty, Method.Post);
-                tokenReq.AddHeader("Content-Type", "application/x-www-form-urlencoded");
-                tokenReq.AddParameter("grant_type", "client_credentials");
-                tokenReq.AddParameter("client_id", _config.OAuthClientId);
-                tokenReq.AddParameter("client_secret", _config.OAuthClientSecret);
 
-                var tokenResp = await tokenClient.ExecuteAsync(tokenReq, ct);
+                // The token request creates nothing and is idempotent, so a transport failure (no HTTP
+                // response at all) is retried with a short backoff; one network blip otherwise fails a
+                // whole enrollment, sync or config save (issue 0095). Any HTTP answer, including
+                // 400/401/403, is final. Order creates are unaffected: they are never retried.
+                RestResponse tokenResp;
+                int maxAttempts = V2TokenRetryDelays.Length + 1;
+                int attempt = 1;
+                while (true)
+                {
+                    using var tokenClient = new RestClient(tokenUrl);
+                    var tokenReq = new RestRequest(string.Empty, Method.Post);
+                    tokenReq.AddHeader("Content-Type", "application/x-www-form-urlencoded");
+                    tokenReq.AddParameter("grant_type", "client_credentials");
+                    tokenReq.AddParameter("client_id", _config.OAuthClientId);
+                    tokenReq.AddParameter("client_secret", _config.OAuthClientSecret);
+
+                    tokenResp = await tokenClient.ExecuteAsync(tokenReq, ct);
+                    bool transportFailure = (int)tokenResp.StatusCode == 0;
+                    if (!transportFailure || attempt >= maxAttempts)
+                        break;
+                    ct.ThrowIfCancellationRequested();
+
+                    TimeSpan delay = V2TokenRetryDelays[attempt - 1];
+                    Logger.LogWarning(
+                        "V2 OAuth2 token request got no HTTP response (attempt {Attempt}/{Max}). ApiUrl={ApiUrl}, " +
+                        "ClientId={ClientId}, TransportDetail={TransportDetail}. Retrying in {DelaySeconds}s.",
+                        attempt, maxAttempts, _config.ApiUrl, _config.OAuthClientId,
+                        DescribeTransportFailure(tokenResp), delay.TotalSeconds);
+                    await Task.Delay(delay, ct);
+                    attempt++;
+                }
+
                 if (!tokenResp.IsSuccessful || string.IsNullOrWhiteSpace(tokenResp.Content))
                 {
                     // SOX CC6.1: never log tokenResp.Content — may contain client_secret.
@@ -2213,6 +2463,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                             "portal (Integration → REST APIs → OAuth2) with the OAuth radio button selected. " +
                             "See gateway logs for details.");
                     }
+                    if ((int)tokenResp.StatusCode == 0)
+                    {
+                        string transportDetail = DescribeTransportFailure(tokenResp);
+                        Logger.LogError(
+                            "V2 OAuth2 token acquisition failed: no HTTP response after {Attempts} attempt(s). " +
+                            "ApiUrl={ApiUrl}, ClientId={ClientId}, HttpStatus=0, TransportDetail={TransportDetail}",
+                            attempt, _config.ApiUrl, _config.OAuthClientId, transportDetail);
+                        throw new Exception(
+                            $"Failed to obtain V2 OAuth2 token: no HTTP response after {attempt} attempt(s) " +
+                            $"({transportDetail}). See gateway logs for details.");
+                    }
                     Logger.LogError(
                         "V2 OAuth2 token acquisition failed. ApiUrl={ApiUrl}, ClientId={ClientId}, HttpStatus={Status}",
                         _config.ApiUrl, _config.OAuthClientId, (int)tokenResp.StatusCode);
@@ -2241,6 +2502,37 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             {
                 _v2TokenLock.Release();
             }
+        }
+
+        /// <summary>
+        /// Backoff between V2 token attempts after a transport failure; one more attempt than entries.
+        /// Settable so tests don't wait.
+        /// </summary>
+        internal TimeSpan[] V2TokenRetryDelays { get; set; } = { TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3) };
+
+        /// <summary>
+        /// Short, secret-free description of a request that got no HTTP response: RestSharp's
+        /// <c>ResponseStatus</c> and the exception chain's types and messages (for example
+        /// <c>HttpRequestException: Connection reset by peer</c>). RestSharp's error text can echo the
+        /// request, so it is passed through <see cref="RedactCredentials"/>, the configured secret values
+        /// are replaced outright, and the result is capped.
+        /// </summary>
+        internal string DescribeTransportFailure(RestResponse resp)
+        {
+            var parts = new List<string> { $"ResponseStatus={resp?.ResponseStatus.ToString() ?? "(none)"}" };
+            Exception ex = resp?.ErrorException;
+            for (int depth = 0; ex != null && depth < 4; depth++, ex = ex.InnerException)
+                parts.Add($"{ex.GetType().Name}: {ex.Message}");
+            if (resp?.ErrorException == null && !string.IsNullOrWhiteSpace(resp?.ErrorMessage))
+                parts.Add(resp.ErrorMessage);
+
+            string text = RedactCredentials(string.Join("; ", parts));
+            foreach (string secret in new[] { _config.OAuthClientSecret, _config.ApiKey })
+            {
+                if (!string.IsNullOrEmpty(secret) && secret.Length >= 4)
+                    text = text.Replace(secret, "***REDACTED***");
+            }
+            return Truncate(LogSanitizer.Strip(text), 400);
         }
 
         /// <summary>
@@ -2287,6 +2579,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             }
 
             LogV2ApiFailure(operation, resp, LogLevel.Warning);
+            if ((int)resp.StatusCode == 0)
+                // "HTTP 0." stays first: IsTransportLevelCsrFailure reads the first "HTTP n." in the message.
+                throw new Exception(
+                    $"CERTInext V2 API error during '{operation}'. HTTP 0. No HTTP response ({DescribeTransportFailure(resp)}). " +
+                    "See gateway logs for details.");
             string msg = ExtractV2ErrorMessage(resp.Content, operation, _config.LogSensitiveRequestData);
             throw new Exception($"CERTInext V2 API error during '{operation}'. HTTP {(int)resp.StatusCode}. {msg}");
         }
@@ -2302,6 +2599,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
         {
             // Skip the redaction passes entirely when this level is disabled.
             if (!Logger.IsEnabled(level)) return;
+            if (resp != null && (int)resp.StatusCode == 0)
+            {
+                // No HTTP response: there is no body; the transport error is what explains it.
+                Logger.Log(
+                    level,
+                    "CERTInext V2 API non-success. Operation={Operation}, Method={Method}, Path={Path}, " +
+                    "HttpStatus=0, TransportDetail={TransportDetail}",
+                    operation,
+                    resp.Request?.Method.ToString() ?? "(unknown)",
+                    resp.Request?.Resource ?? "(unknown)",
+                    DescribeTransportFailure(resp));
+                return;
+            }
             string sanitizedBody = Truncate(
                 ApplyLoggingRedaction(resp?.Content, _config.LogSensitiveRequestData) ?? "(empty)",
                 LoggedResponseBodyCapBytes);

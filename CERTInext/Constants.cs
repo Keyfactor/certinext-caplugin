@@ -91,6 +91,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // V1 and V2: sync does not emit pending or issued orders younger than this (issue 0090).
             public const string SyncRecentOrderGraceSeconds = "SyncRecentOrderGraceSeconds";
             public const string V2InlineCsr = "V2InlineCsr"; // opt-in: SSL/TLS sends the CSR inline on create (V2 only)
+            // V2 SSL/TLS reissue via POST /ssl-certificates/{id}/reissue: also revoke the prior certificate (default off).
+            public const string V2ReissueRevokePrevious = "V2ReissueRevokePrevious";
             // V2 OV/EV orders: opt-in submission of the organization to SSL.com for validation, which
             // accepts SSL.com's subscriber agreement on the organization's behalf (default off).
             public const string SslComSubmitOrganization = "SslComSubmitOrganization";
@@ -491,6 +493,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // (GET status, POST submit) and .../{SslComValidationSuffix}/sync (POST refresh).
             public const string OrganizationsPath          = "/api/certinext/v2/organizations";
             public const string SslComValidationSuffix     = "ca-validations/sslcom";
+
+            // Domain-level DCV, used for domains SSL.com validates: GET {DomainsPath}?search=&exactMatch=true,
+            // GET {DomainsPath}/{domainId}/dcv, POST {DomainsPath}/{domainId}/dcv/verify.
+            public const string DomainsPath                = "/api/certinext/v2/domains";
+            // DcvDetails/domain-row validatedBy value for SSL.com; absent means emSign.
+            public const string ValidatedBySslCom          = "SSLCOM";
+            public const string DcvMethodDnsTxt            = "dns-txt";
+
+            // POST /ssl-certificates/{orderId}/reissue (ReissueRequest.mode). The plugin always rekeys:
+            // Command sends a new CSR and gives no signal that only the SANs changed.
+            public const string ReissueModeRekey           = "rekey";
+            public const string ReissueReason              = "Reissued via Keyfactor Command AnyCA REST Gateway.";
+            // SSL.com caStatus on GET .../dcv once the domain is validated.
+            public const string SslComCaStatusValidated    = "VALIDATED";
 
             // Order status strings (V2 REST — NOT numeric IDs)
             public const string StatusPendingDcv                     = "pending-dcv";

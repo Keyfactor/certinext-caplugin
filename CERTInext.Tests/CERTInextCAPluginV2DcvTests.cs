@@ -1,16 +1,9 @@
 // Copyright 2026 Keyfactor
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions
+// and limitations under the License.
 
 using System;
 using System.Collections.Concurrent;
@@ -41,8 +34,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// </summary>
     public class CERTInextCAPluginV2DcvTests
     {
-        private static Mock<ICERTInextClient> NewMock() =>
-            new Mock<ICERTInextClient>(MockBehavior.Strict);
+        private static Mock<ICERTInextClient> NewMock()
+        {
+            var mock = new Mock<ICERTInextClient>(MockBehavior.Strict);
+            // No account domain row: every domain here takes the emSign DCV path.
+            // V2SslComDomainDcvPluginTests covers SSL.com-validated domains.
+            mock.Setup(c => c.FindDomainV2Async(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((V2DomainRecord)null);
+            return mock;
+        }
 
         private static CERTInextCAPlugin BuildV2DcvPlugin(
             ICERTInextClient client, IDomainValidatorFactory factory, string dcvTxtRecordTemplate = null,

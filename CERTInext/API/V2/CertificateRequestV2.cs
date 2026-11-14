@@ -90,9 +90,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         /// <summary>
         /// Optional per spec (re-vetting flow token). Not currently surfaced as plugin config;
-        /// omitted from the wire body when null/empty.
+        /// omitted from the wire body when null/empty. The wire name is the spec schema's
+        /// <c>SslOrganizationRef.prevettingToken</c> (lower-case "v"); an older spec example spelled
+        /// it <c>preVettingToken</c>.
         /// </summary>
-        [JsonPropertyName("preVettingToken")]
+        [JsonPropertyName("prevettingToken")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string PreVettingToken { get; set; }
     }
@@ -495,17 +497,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     public class V2RevokeRequest
     {
         /// <summary>
-        /// RFC 5280 string reason, kebab-case per the V2 spec. Valid values: unspecified,
-        /// key-compromise, ca-compromise, affiliation-changed, superseded,
-        /// cessation-of-operation, certificate-hold, privilege-withdrawn (plus
-        /// aa-compromise on the signature-certificates / private-pki-certificates
-        /// endpoints). Sending camelCase gets HTTP 400.
+        /// RFC 5280 string reason, kebab-case per the V2 spec. The 2.0.0 SSL/TLS enum: unspecified,
+        /// key-compromise, ca-compromise, affiliation-changed, superseded, cessation-of-operation,
+        /// certificate-hold, remove-from-crl, aa-compromise (no privilege-withdrawn). Live rejects
+        /// several of these; see <c>CERTInextCAPlugin.ResolveRejectedRevokeReasonFallback</c>.
+        /// Sending camelCase gets HTTP 400.
         /// </summary>
         [JsonPropertyName("reason")]
         public string Reason { get; set; } = "unspecified";
 
         [JsonPropertyName("note")]
         public string Note { get; set; }
+    }
+
+    /// <summary>
+    /// Request body for POST /api/certinext/v2/ssl-certificates/{orderId}/reissue (spec
+    /// <c>ReissueRequest</c>; SSL/TLS only). The response is a new order derived from the original
+    /// (<c>1984857369</c> → <c>1984857369R001</c>); the original order is left as it is.
+    /// </summary>
+    public class V2ReissueRequest
+    {
+        /// <summary><c>rekey</c> (new CSR replaces the certificate) or <c>update-sans</c>. Required.</summary>
+        [JsonPropertyName("mode")]
+        public string Mode { get; set; } = Constants.ApiV2.ReissueModeRekey;
+
+        /// <summary>Free text, required, at most 500 characters.</summary>
+        [JsonPropertyName("reason")]
+        public string Reason { get; set; }
+
+        [JsonPropertyName("csr")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Csr { get; set; }
+
+        /// <summary>UCC SANs beyond the primary domain, same rule as create's <c>additionalDomains</c>.</summary>
+        [JsonPropertyName("additionalDomains")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public System.Collections.Generic.List<string> AdditionalDomains { get; set; }
+
+        [JsonPropertyName("revokePrevious")]
+        public bool RevokePrevious { get; set; }
+
+        /// <summary>Sent only with <see cref="RevokePrevious"/>; the plugin uses <c>superseded</c>.</summary>
+        [JsonPropertyName("revokeReason")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string RevokeReason { get; set; }
     }
 
     /// <summary>

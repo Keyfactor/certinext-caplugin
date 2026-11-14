@@ -461,6 +461,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     DefaultValue = true,
                     Type = "Boolean"
                 },
+                [Constants.Config.V2ReissueRevokePrevious] = new PropertyConfigInfo
+                {
+                    Comments = "OPTIONAL (V2 mode only, SSL/TLS reissue): a V2 SSL/TLS reissue goes through CERTInext's " +
+                               "reissue endpoint, which creates a new order derived from the original (for example " +
+                               "1984857369R001). When true, that call also asks CERTInext to revoke the previous " +
+                               "certificate with reason superseded; the intent is audit-logged before the call. When " +
+                               "false (the default), the previous certificate stays valid until it expires or is " +
+                               "revoked separately. Ignored when UseV2Api is false. Default: false.",
+                    Hidden = false,
+                    DefaultValue = false,
+                    Type = "Boolean"
+                },
                 [Constants.Config.SslComSubmitOrganization] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL (V2 mode only): before an OV or EV SSL/TLS order, the plugin checks " +
@@ -1026,6 +1038,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         [JsonPropertyName("V2InlineCsr")]
         public bool V2InlineCsr { get; set; } = true;
+
+        /// <summary>
+        /// OPTIONAL (V2 mode only), default false. When true, a V2 SSL/TLS reissue
+        /// (<c>POST /ssl-certificates/{orderId}/reissue</c>) sends <c>revokePrevious: true</c> with
+        /// <c>revokeReason: superseded</c>, so CERTInext revokes the certificate being reissued.
+        /// </summary>
+        [JsonPropertyName("V2ReissueRevokePrevious")]
+        public bool V2ReissueRevokePrevious { get; set; }
 
         /// <summary>
         /// V2 only. When true, an OV/EV SSL/TLS enrollment whose organization SSL.com has not

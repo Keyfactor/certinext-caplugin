@@ -371,6 +371,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
     }
 
     /// <summary>
+    /// Result of POST /ssl-certificates/{orderId}/reissue that the caller can act on. A created
+    /// reissue carries the derived order in <see cref="Order"/>; a 404 (order not found) or 422
+    /// (business rule, e.g. original not issued) is <see cref="Created"/> = false with the CA's
+    /// reason, and the caller may place a new order instead. A 5xx or no response is never
+    /// returned here: the client throws, because the derived order may exist.
+    /// </summary>
+    public class V2ReissueOutcome
+    {
+        public bool Created { get; set; }
+
+        /// <summary>The derived order (<c>orderId</c>, <c>status</c>) when <see cref="Created"/>.</summary>
+        public V2CreateOrderResponse Order { get; set; }
+
+        public int HttpStatus { get; set; }
+
+        /// <summary>CA reason for a rejection, already passed through <c>LogSanitizer.SanitizeCaText</c>.</summary>
+        public string Detail { get; set; }
+    }
+
+    /// <summary>
     /// RFC 7807 Problem Details error response from the V2 API.
     /// Content-Type: application/problem+json
     /// </summary>

@@ -62,6 +62,9 @@ Tests that place real orders, publish DNS records, or cancel orders run only whe
 | `CERTINEXT_PRIVATE_PKI_LIVE` | One live Private PKI order and revoke |
 | `CERTINEXT_V2_OPS_TESTS` | V2 order-window sweep (maintenance tool) |
 | `CERTINEXT_V2_LIFECYCLE_DV_UCC`, `_OV`, `_OV_UCC`, `_EV`, `_WILDCARD_DV`, `_RENEW_REISSUE`, `_FRESH_DCV` | The matching V2 full-lifecycle test |
+| `CERTINEXT_V2_LIFECYCLE_REISSUE_ENDPOINT` (plus `CERTINEXT_V2_REISSUE_SOURCE_ORDER_ID`) | One reissue of an issued order through `/reissue`; creates a derived order and cleans it up |
+| `CERTINEXT_V2_SSLCOM_DCV_PROBE`, `CERTINEXT_V2_UNRESOLVED_STATUS_PROBE` | Read-only probes: SSL.com domain lookup and DCV shape; report status pairs the sync can't map |
+| `CERTINEXT_V2_REVOKE_PRIVILEGE_WITHDRAWN` | Places its own DV order and revokes it with `privilege-withdrawn` |
 
 Set each to `1`. [INTEGRATION_TESTING.md](../CERTInext.IntegrationTests/INTEGRATION_TESTING.md) lists the remaining flags, such as the algorithm matrices, and the extra variables each test needs. To load `~/.env_certinext` into a shell that also exports a flag, use `set -a; . ~/.env_certinext; set +a`.
 

@@ -348,6 +348,13 @@
                     "default": "true"
                 },
                 {
+                    "name": "V2ReissueRevokePrevious",
+                    "description": "OPTIONAL (V2 mode only, SSL/TLS reissue): a V2 SSL/TLS reissue goes through CERTInext's reissue endpoint, which creates a new order derived from the original (for example 1984857369R001). When true, that call also asks CERTInext to revoke the previous certificate with reason superseded; the intent is audit-logged before the call. When false (the default), the previous certificate stays valid until it expires or is revoked separately. Ignored when UseV2Api is false. Default: false.",
+                    "required": "Optional",
+                    "example": "false",
+                    "default": "false"
+                },
+                {
                     "name": "SslComSubmitOrganization",
                     "description": "OPTIONAL (V2 mode only): before an OV or EV SSL/TLS order, the plugin checks whether SSL.com has validated the organization (OrganizationNumber) at that level, refreshing the status once if not. When this is true and the organization is still unvalidated and ready to submit, the plugin also SUBMITS it to SSL.com for validation. WARNING: enabling this ACCEPTS SSL.COM'S SUBSCRIBER AGREEMENT ON THE ORGANIZATION'S BEHALF; each acceptance is audit-logged. Leave false unless you are authorized to do that. Whatever the outcome, the order is placed anyway and a not-validated organization only logs a warning. Default: false.",
                     "required": "Optional",

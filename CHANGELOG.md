@@ -9,9 +9,11 @@
 - feat(v2): An SSL/TLS order that Track Order shows at `pending-agreement` gets the Subscriber Agreement accepted via `POST /ssl-certificates/{orderId}/agreement`, using the same signer values as create: at most once per order per enroll call or sync pass, audit-logged first, and a failure only warns.
 - feat(v2): The create call no longer sends `X-Product-Code` unless the template sets `ProductCode` (SSL/TLS and Private PKI): CERTInext resolves the product from the variant, wildcard shape and `additionalDomains`, and the response's `resolvedProductCode` is logged. An ambiguous catalog match is no longer an error, Private PKI no longer needs `ProductCode`, and without one a wildcard is detected from the `*.` domain and a UCC order from the template's product or extra DNS SANs.
 - feat(v2): V2 SSL/TLS enrollment sends the CSR inline in one create call (`V2InlineCsr`, default `true`). Setting it to `false` selects create + Submit CSR, which fails for a domain the account has already validated; Private PKI stays two-call.
+- feat(v2): An SSL/TLS reissue (`Reissue`, or `RenewOrReissue` outside `RenewalWindowDays`) calls `POST /ssl-certificates/{orderId}/reissue` in `rekey` mode with the new CSR, and the derived order (for example `1984857369R001`) becomes the new `CARequestID`. New setting `V2ReissueRevokePrevious` (default `false`) also revokes the previous certificate as `superseded`, audit-logged first. A missing prior order or a 404/422 places a new order instead and says so; a 5xx or lost response fails with "do not resubmit". Not verified live: the sandbox no longer generates certificates.
 - feat(v2): Synchronize reads `/reports/orders` and honors `IgnoreExpired`.
 - feat(v2): Incremental syncs look back `V2SyncLookbackHours` (default 72).
 - feat(dcv): DNS-01 domain validation for V2 SSL/TLS orders, including every SAN on a UCC order.
+- feat(dcv): V2 DCV for domains SSL.com validates: the plugin looks each pending domain up (`GET /domains`) and, for `validatedBy: SSLCOM`, publishes SSL.com's own `dns-txt` record from `GET /domains/{id}/dcv` (not `DcvTxtRecordTemplate`) and verifies it with `POST /domains/{id}/dcv/verify`. SSL.com outages (502), `UNDER_REVIEW`/`PENDING` results, and domains with no `dns-txt` option leave the order pending for the next sync; emSign domains keep the order-level flow.
 - feat(dcv): `DcvEnabled` now defaults to `true`; it needs a DNS provider plugin, or set it to `false`.
 - feat(enroll): V2 orders also return a quickly issued certificate in the same `Enroll` call, using the `PickupRetries` and `PickupDelay` settings V1 gained in 1.0.1.
 - feat(config): New settings `RequestorDesignation` and `V2SyncLookbackHours`.
@@ -29,6 +31,9 @@
 - fix(logging): Email addresses in CERTInext V2 error text (the problem+json `title`, `detail`, and `errors[]` that end up in exception messages and logs) are masked unless `LogSensitiveRequestData` is on, as V1 error text is.
 - fix(logging): V2 payload dumps no longer run redaction when Trace logging is off.
 - fix(enroll): V2 order and CSR submissions are never auto-retried after a timeout, which could create duplicate orders (V1 since 1.0.1).
+- fix(sync): A V2 order that `/reports/orders` lists but Track Order finds in no product family (seen for every `On Hold | Setup Pending` row) is skipped with one Information line and counted as `UntrackableListedOrders` in the sync summary. It used to log an error with a stack trace and count toward the sync's 25% error-rate abort.
+- fix(sync): The V2 sync summary lists every `orderStatus | certificateStatus` pair from `/reports/orders` that the plugin didn't recognize, with counts (`UnmappedReportStatuses=[...]`), at Information. CERTInext doesn't document these values, so new ones now show up in ordinary logs.
+- fix(v2): A V2 OAuth2 token request that gets no HTTP response (a dropped connection or other transport error) is retried twice, after 1 s and 3 s, so one network blip no longer fails an enrollment, a sync or a connector save. HTTP errors (400/401/403) are not retried, and order creates are still never retried. Token failures and other V2 calls with no response now log the transport detail (`TransportDetail=`: RestSharp's response status and the exception types and messages, with credentials removed) and include a short form in the error, instead of only `HttpStatus=0`.
 - fix(sync): The V2 sync also holds back pending and issued orders created in the last 120 s (`SyncRecentOrderGraceSeconds`, `0` disables), so an in-flight enrollment no longer fails with a duplicate key (V1 since 1.0.1).
 - fix(enroll): The in-call pickup wait is now capped at 75 s (it was 180 s) for V1 and V2, inside Command's roughly 100 s enrollment-call timeout, so a pickup that used its whole budget is no longer abandoned by Command. The 55 s default (`PickupRetries` 5, `PickupDelay` 10) is unaffected.
 - fix(logging): Log redaction no longer leaks the rest of a value after an escaped quote, CERTInext error text has email addresses masked unless `LogSensitiveRequestData` is on, and `mailto:` and userinfo are masked in URI SANs in enrollment logs (V1 and V2).
@@ -36,6 +41,7 @@
 ## Chores
 - chore(compat): Requires AnyCA Gateway REST 26.2.0 or later; built against `IAnyCAPlugin` 3.3.0 with DNS-01 DCV included.
 - chore(compat): The plugin targets both `net8.0` and `net10.0`.
+- chore(v2): The V2 organization block's optional pre-vetting token serializes as the spec's `prevettingToken` (was `preVettingToken`). Nothing sets it yet, so requests are unchanged.
 
 ## Upgrade Notes
 - AnyCA Gateway REST 25.5.x isn't supported; upgrade the gateway to 26.2.0 or later (Command 25.5 or later works with it).
@@ -46,9 +52,10 @@
 - `V2InlineCsr` now defaults to `true`. A connector that already has `V2InlineCsr = false` saved, as connectors created with an earlier 2.0 build do, keeps the two-call flow, which fails for already-validated domains. Set it to `true` on those connectors.
 - `SignerIp` (connector and template) is V1 only: V2 no longer sends `agreement.signerIp`, which the V2 spec's agreement schema doesn't define.
 - V2 `ProductVariant` is derived from the selected product when unset.
-- V2 revoke reasons CERTInext rejects are retried with a substitute (see Revocation Reason Codes in the README).
+- V2 revoke reasons CERTInext rejects are retried with a substitute (see Revocation Reason Codes in the README). `privilege-withdrawn`, which the 2.0.0 V2 spec dropped from the SSL/TLS enum and CERTInext rejected live on 2026-11-13, is still sent first and now falls back to `cessation-of-operation`. The retry also recognizes CERTInext's newer 422 wording, "Revocation reason {reason} is not allowed."
 - V2 `expired` orders are reported as issued, and revoking one is sent to the CA.
-- V2 renew and reissue place a new order and don't revoke the original.
+- V2 renewals place a new order and don't revoke the original. V2 SSL/TLS reissues now go through the reissue endpoint and produce derived order ids such as `1984857369R001`, which aren't numeric. Scripts or reports that assume numeric `CARequestID`s need updating. Set `V2ReissueRevokePrevious` to `true` if a reissue should revoke the previous certificate.
+- On V2 accounts whose domains SSL.com validates, DCV now publishes SSL.com's record name and value, not `DcvTxtRecordTemplate`. The DNS provider plugin must be able to write those names (for example `_pki-validation.<domain>`).
 - Upgrading from 1.0.0 also brings the changes in 1.0.1 and 1.0.2 above. For example, V1 now submits non-DNS SANs; set `SubmitNonDnsSans` to `false` to drop them.
 
 ## Known Limitations
@@ -57,11 +64,12 @@
 - Document Signer (`ProductFamily=signature`) enrollment isn't supported under V2.
 - Per-SAN DCV on UCC orders, DCV for a never-validated domain, and wildcard DCV aren't validated end to end against the CA.
 - Rolling a connector back to V1 after it has issued V2 certificates isn't validated.
+- V2 SSL/TLS reissue through the reissue endpoint isn't verified live (the sandbox stopped generating certificates), and it always uses `rekey`, never `update-sans`.
 - V1 `IgnoreExpired` isn't applied yet; it works on V2.
 - V1 `AuthMode=OAuth` isn't supported: the live V1 API ignores the bearer token, so V1 needs an access key.
 - The V2 incremental sync doesn't yet skip orders the gateway already holds unchanged, as the V1 incremental sync does from 1.0.2, so it re-reads each order listed.
 - Without a template `ProductCode`, the product CERTInext resolves depends on the account's catalog. Where several products match a variant, CERTInext may pick one that rejects a client CSR. On the sandbox, plain DV resolves to `917` "SSL DV 1 month" instead of `842`. Set `ProductCode` on the template to choose the product.
-- DCV for domains validated by SSL.com (after the issuing-CA change) isn't supported yet: SSL.com supplies the record name and value through the domain-level DCV endpoints, and the plugin still publishes `DcvTxtRecordTemplate` records through the order-level endpoint.
+- DCV for domains validated by SSL.com is built from the V2 spec and unit-tested but not verified live (the sandbox has no SSL.com-validated domains). Only SSL.com's `dns-txt` option can be published, because the DNS provider interface publishes TXT records only; a domain offered only `dns-cname` or `http-url` stays pending.
 - Command's enrollment workflow can give up at 60 s, before the 75 s pickup ceiling. When it does, Command records the enrollment as failed even though the order continues at CERTInext, so the certificate can only arrive through a later sync.
 
 # 1.0.2

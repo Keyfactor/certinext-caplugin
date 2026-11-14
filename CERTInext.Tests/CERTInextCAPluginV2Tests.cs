@@ -8,6 +8,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -464,9 +465,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                         req.Reason == Constants.RevocationReasonV2.Unspecified ||
                         req.Reason == Constants.RevocationReasonV2.CACompromise ||
                         req.Reason == Constants.RevocationReasonV2.CertificateHold ||
-                        req.Reason == Constants.RevocationReasonV2.AACompromise;
+                        req.Reason == Constants.RevocationReasonV2.AACompromise ||
+                        req.Reason == Constants.RevocationReasonV2.PrivilegeWithdrawn;
                     if (firstAttemptRejected && seenReasons.Count == 1)
-                        throw new InvalidOperationException("V2 revoke rejected. Unprocessable Entity: Invalid Revoke Reason ID");
+                        throw new InvalidOperationException(req.Reason == Constants.RevocationReasonV2.PrivilegeWithdrawn
+                            // Live wording seen 2026-11-13; no EMS code.
+                            ? "V2 revoke rejected. Unprocessable Entity: Revocation reason privilege-withdrawn is not allowed."
+                            : "V2 revoke rejected. Unprocessable Entity: Invalid Revoke Reason ID");
                     return Task.CompletedTask;
                 });
             return mock;
@@ -478,6 +483,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(2u, Constants.RevocationReasonV2.CACompromise, Constants.RevocationReasonV2.KeyCompromise)]
         [InlineData(6u, Constants.RevocationReasonV2.CertificateHold, Constants.RevocationReasonV2.CessationOfOperation)]
         [InlineData(10u, Constants.RevocationReasonV2.AACompromise, Constants.RevocationReasonV2.KeyCompromise)]
+        // Dropped from the 2.0.0 spec's SSL/TLS enum though accepted live: retried only if rejected.
+        [InlineData(9u, Constants.RevocationReasonV2.PrivilegeWithdrawn, Constants.RevocationReasonV2.CessationOfOperation)]
         public async Task Revoke_V2Enabled_KnownRejectedReason_RetriesWithExpectedFallback(
             uint crlReason, string expectedOriginal, string expectedFallback)
         {
@@ -489,6 +496,40 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             status.Should().Be((int)EndEntityStatus.REVOKED);
             seenReasons.Should().Equal(expectedOriginal, expectedFallback);
+        }
+
+        [Theory]
+        [InlineData("V2 revoke rejected. Unprocessable Entity: Invalid Revoke Reason ID", true)]
+        [InlineData("V2 revoke rejected. Unprocessable Entity: Revocation reason unspecified is not allowed.", true)]
+        [InlineData("V2 revoke rejected. Unprocessable Entity: Certificate Request still being processed", false)]
+        [InlineData("V2 revoke rejected. Unprocessable Entity: Invalid Revoke Remarks", false)]
+        [InlineData(null, false)]
+        public void IsRevokeReasonRejection_MatchesBothLiveWordingsOnly(string message, bool expected) =>
+            CERTInextCAPlugin.IsRevokeReasonRejection(message).Should().Be(expected);
+
+        [Fact]
+        public async Task Revoke_V2Enabled_PrivilegeWithdrawnAccepted_SentOnceUnchanged()
+        {
+            var seen = new List<string>();
+            var mock = new Mock<ICERTInextClient>();
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
+                    MockCertificateData.V2OrderId1, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse
+                {
+                    OrderId = MockCertificateData.V2OrderId1,
+                    Status  = "issued"
+                }));
+            mock.Setup(c => c.RevokeOrderV2Async(
+                    Constants.ApiV2.FamilySsl, MockCertificateData.V2OrderId1,
+                    It.IsAny<V2RevokeRequest>(), It.IsAny<CancellationToken>()))
+                .Callback((string f, string o, V2RevokeRequest req, CancellationToken ct) => seen.Add(req.Reason))
+                .Returns(Task.CompletedTask);
+
+            var plugin = BuildV2Plugin(mock.Object);
+            var status = await plugin.Revoke(MockCertificateData.V2OrderId1, "AABB", 9u);
+
+            status.Should().Be((int)EndEntityStatus.REVOKED);
+            seen.Should().Equal(Constants.RevocationReasonV2.PrivilegeWithdrawn);
         }
 
         [Fact]
@@ -638,6 +679,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // Recognised report-status strings must not need a live track fallback.
             mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync(
                 It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_OnHoldSetupPending_TrackNotFound_SkippedNotError_OthersStillSynced()
+        {
+            var mock = new Mock<ICERTInextClient>();
+            // Live shape: listed by the report as "On Hold | Setup Pending", 404 in every family.
+            var onHold = ReportRow("3549334354", "On Hold", "Setup Pending");
+            var issued = ReportRow("ord_v2sync_ok", "Order Fulfilled", "Certificate Downloaded");
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(onHold, issued));
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("3549334354", It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new KeyNotFoundException("V2 order '3549334354' not found in any product family."));
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("ord_v2sync_ok", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse
+                {
+                    OrderId = "ord_v2sync_ok", SerialNumber = "AABB", CertificatePem = MockCertificateData.FakePemCertificate
+                });
+
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+            await BuildV2Plugin(mock.Object).Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Select(r => r.CARequestID).Should().Equal("ord_v2sync_ok");
+        }
+
+        [Fact]
+        public async Task Synchronize_V2Enabled_ManyUntrackableRows_DoNotTripTheErrorRateAbort()
+        {
+            // Before: each 404 fallback counted as an error, so a pass made mostly of such rows threw
+            // "synchronization aborted ... >25% error rate".
+            var mock = new Mock<ICERTInextClient>();
+            var rows = Enumerable.Range(0, 60).Select(i => ReportRow($"onhold_{i}", "On Hold", "Setup Pending")).ToArray();
+            mock.Setup(c => c.ListOrdersV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(AsyncEnumerable(rows));
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new KeyNotFoundException("not found in any product family"));
+
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
+            Func<Task> act = () => BuildV2Plugin(mock.Object).Synchronize(buffer, null, true, CancellationToken.None);
+
+            await act.Should().NotThrowAsync();
+            buffer.Should().BeEmpty();
         }
 
         [Fact]
