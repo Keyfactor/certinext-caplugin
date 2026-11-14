@@ -1757,9 +1757,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var result = await EnrollV2CoreAsync(csr, subject, san, ep, enrollmentType, reissue);
             // A reissue (or a reissue that fell back to a new order) says so in Command's result.
             if (result != null && !string.IsNullOrWhiteSpace(reissue.Note))
-                result.StatusMessage = string.IsNullOrWhiteSpace(result.StatusMessage)
+            {
+                string message = result.StatusMessage?.TrimEnd();
+                result.StatusMessage = string.IsNullOrEmpty(message)
                     ? reissue.Note
-                    : result.StatusMessage.TrimEnd() + " " + reissue.Note;
+                    : (message.EndsWith(".") ? message : message + ".") + " " + reissue.Note;
+            }
             return result;
         }
 

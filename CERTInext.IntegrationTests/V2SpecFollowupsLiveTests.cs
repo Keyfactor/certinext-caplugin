@@ -379,6 +379,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var cert = await client.DownloadCertificateV2Async(Constants.ApiV2.FamilySsl, sourceId);
             _output.WriteLine($"Source certificate serial={cert.SerialNumber}");
 
+            // Route logs before the plugin and its client exist: their loggers are created at construction.
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
             var config = BuildV2Config();
             config.V2ReissueRevokePrevious = false;
             var reader = new SingleCertificateDataReader(cert.SerialNumber, sourceId,
@@ -387,7 +389,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var info = V2ProductPinning.Info(Constants.Products.DvSsl, V2PinMode.Pinned,
                 new Dictionary<string, string> { ["PriorCertSN"] = cert.SerialNumber });
 
-            var restoreLogging = TestOutputLogging.RouteTo(_output);
             EnrollmentResult result = null;
             try
             {
@@ -445,6 +446,83 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             }
 
             result.Status.Should().NotBe((int)EndEntityStatus.FAILED, result.StatusMessage);
+        }
+        // ---------------------------------------------------------------------------
+        // Sync: which orders make a wide V2 sync report UnresolvedStatusFallbacks (read-only)
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Read-only. Pages the whole <c>/reports/orders</c> listing (no date filter, as a full sync
+        /// does), runs each row through the plugin's display-string mapping, and for every row the
+        /// mapping can't place (the sync's <c>UnresolvedStatusFallbacks</c>) prints the raw
+        /// <c>orderStatus</c>/<c>certificateStatus</c> and what Track Order says. Prints order numbers,
+        /// statuses, product codes and dates only. Opt-in: <c>CERTINEXT_V2_UNRESOLVED_STATUS_PROBE=1</c>.
+        /// </summary>
+        [SkippableFact]
+        public async Task Sync_UnresolvedReportStatuses_Probe()
+        {
+            Skip.If(!_v2Enabled || !Flag("CERTINEXT_V2_UNRESOLVED_STATUS_PROBE"),
+                "Requires CERTINEXT_USE_V2_API + V2 credentials and CERTINEXT_V2_UNRESOLVED_STATUS_PROBE=1.");
+
+            using var client = BuildV2Client();
+            int total = 0;
+            var combos = new Dictionary<string, int>();
+            var unresolved = new List<OrderReportEntryV2>();
+            // Rows the mapping places, but only from one of the two fields, or where the fields disagree.
+            var mismatched = new List<OrderReportEntryV2>();
+            await foreach (var row in client.ListOrdersV2Async())
+            {
+                total++;
+                string key = $"{row.OrderStatus} | {row.CertificateStatus}";
+                combos[key] = combos.TryGetValue(key, out int c) ? c + 1 : 1;
+                if (CERTInextCAPlugin.MapV2ReportStatusToDisposition(row.OrderStatus, row.CertificateStatus) == null)
+                    unresolved.Add(row);
+                else if (CERTInextCAPlugin.MapV2ReportStatusToDisposition(null, row.CertificateStatus) == null
+                         || CERTInextCAPlugin.MapV2ReportStatusToDisposition(null, row.CertificateStatus)
+                            != CERTInextCAPlugin.MapV2ReportStatusToDisposition(row.OrderStatus, null))
+                    mismatched.Add(row);
+            }
+            _output.WriteLine($"Report rows: {total}. Status combinations:");
+            foreach (var kv in combos.OrderByDescending(k => k.Value))
+                _output.WriteLine($"  {kv.Value,5}  {kv.Key}");
+
+            // Track a sample of each mismatched combination (not every row: a combination can have hundreds).
+            var sample = mismatched.GroupBy(r => $"{r.OrderStatus} | {r.CertificateStatus}")
+                .SelectMany(g => g.Take(3)).ToList();
+            _output.WriteLine($"Mapped from one field only, or fields disagree: {mismatched.Count} rows; tracking up to 3 per combination:");
+            foreach (var row in sample)
+            {
+                int? mapped = CERTInextCAPlugin.MapV2ReportStatusToDisposition(row.OrderStatus, row.CertificateStatus);
+                string track;
+                try
+                {
+                    var (family, st) = await client.ResolveAndTrackOrderV2WithFamilyAsync(row.OrderNumber);
+                    track = $"status={st.Status}, orderState={st.OrderState}, certificateState={st.CertificateState}";
+                }
+                catch (Exception ex)
+                {
+                    track = $"{ex.GetType().Name}: {ex.Message}";
+                }
+                _output.WriteLine($"  {row.OrderNumber}  '{row.OrderStatus} | {row.CertificateStatus}' mapped={mapped} " +
+                                  $"product={row.ProductCode} -> Track: {track}");
+            }
+
+            _output.WriteLine($"Unresolved (would fall back to Track Order): {unresolved.Count}");
+            foreach (var row in unresolved)
+            {
+                string track;
+                try
+                {
+                    var (family, st) = await client.ResolveAndTrackOrderV2WithFamilyAsync(row.OrderNumber);
+                    track = $"family={family}, status={st.Status}, orderState={st.OrderState}, certificateState={st.CertificateState}";
+                }
+                catch (Exception ex)
+                {
+                    track = $"{ex.GetType().Name}: {ex.Message}";
+                }
+                _output.WriteLine($"  {row.OrderNumber}  orderStatus='{row.OrderStatus}' certificateStatus='{row.CertificateStatus}' " +
+                                  $"product={row.ProductCode} orderDate={row.OrderDate} -> Track: {track}");
+            }
         }
     }
 
