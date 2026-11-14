@@ -239,6 +239,7 @@ Calling `GetProductDetails` against your account lists the codes available to yo
 | `SyncRecentOrderGraceSeconds` | Both | Optional | A sync (full or incremental) skips pending or issued orders created less than this many seconds ago (plus a 5-second clock margin); the next incremental sync imports them. This keeps a sync that runs during an in-flight enrollment from causing that enrollment to fail with a duplicate key. `0` disables it. Default: `120`. |
 | `PickupRetries` | Both | Optional | Times `Enroll` polls CERTInext for the certificate after a successful order. `0` disables the wait. Default: `5`. |
 | `PickupDelay` | Both | Optional | Seconds between pickup polls. Default: `10`. |
+| `EnrollmentCallBudgetSeconds` | Both | Optional | Seconds from the start of an enrollment after which the pickup stops waiting and returns the order as pending, so the call returns before Command's workflow step timeout. Set it about 10 s below Command's **Workflow Step Run Timeout (seconds)** application setting. `0` disables it. Default: `50`. Maximum: `90`. |
 
 - **`IgnoreExpired` on V1:** the V1 sync maps no certificate expiry date, so the filter never matches and expired certificates are still imported. The V2 sync applies it.
 - **`PageSize` limits:** values above the maximum are clamped. On V2, a value of 0 or less falls back to 100. On V1, a value below 1 is not corrected, so keep it at 1 or higher.
@@ -251,6 +252,7 @@ Calling `GetProductDetails` against your account lists the codes available to yo
 | `PickupRetries` | 0 (disabled) | 30 | 5 | Negative becomes 0; above 30 becomes 30 |
 | `PickupDelay` (seconds) | 1 | 60 | 10 | Zero or negative becomes 10; above 60 becomes 60 |
 | Total wait | — | 75 s | ~55 s | The retry count is reduced to fit the cap |
+| `EnrollmentCallBudgetSeconds` | 0 (no deadline) | 90 | 50 | Negative becomes 50; above 90 becomes 90 |
 
 > **Pickup timing detail:** after a successful order placement, the plugin waits a fixed 5-second initial delay before the first poll, then polls CERTInext every `PickupDelay` seconds up to `PickupRetries` times. Each poll calls `GetCertificate` to check whether the certificate has been issued. The total time budget is **5 s + (`PickupRetries` × `PickupDelay`) + about 1 s API round trip per poll**. With the defaults this is 5 + (5 × 10) = **~55 s plus round trips**.
 >
@@ -264,6 +266,17 @@ Calling `GetProductDetails` against your account lists the codes available to yo
 > | Minimal wait | `0` | — | 0 s | No polling; defers to sync |
 >
 > The 5-second initial delay is not configurable, and the 75-second ceiling applies regardless of configuration. It sits inside Command's roughly 100-second enrollment-call timeout, which leaves headroom for order submission and per-poll round trips. When the DCV flow ran for the order inside the same `Enroll` call, the pickup poll is skipped, because the DCV flow already waited for issuance.
+
+#### Command's workflow step timeout and `EnrollmentCallBudgetSeconds`
+
+Command runs the gateway enrollment inside the **Keyfactor-Enroll** step of the enrollment workflow. The step is bounded by the global application setting **Workflow Step Run Timeout (seconds)** (System Settings > Application Settings > Workflow > General; API short name `Workflow.General.Timeout`), which defaults to 60. The step itself has no timeout field of its own. If the plugin's `Enroll` call is still running when that time is up, Command fails the request with "Step 'Keyfactor-Enroll' failed: Failed to complete in 60 seconds", even though the order already exists at CERTInext. The certificate then arrives only through a later sync, and a resubmit creates a duplicate order.
+
+The pickup budget above is counted from the start of the pickup, so the time spent placing the order is added on top of it. On the lab, a new V2 order's create took about 1 s and the pickup started about 3 s after `Enroll` was called; a V2 reissue call alone took about 26 s. With the default 55 s pickup, both ran past 60 s when the certificate wasn't ready.
+
+`EnrollmentCallBudgetSeconds` (default 50) is a deadline measured from the start of `Enroll`. The pickup shortens its waits to fit inside it, skips the delay after its last poll, and stops early, returning the order as pending, when no further poll fits (it keeps a 3-second margin for the poll itself). It logs one Information line saying how much of the budget had passed and how many polls ran. The deadline only limits waiting: a create, reissue, Submit CSR or revoke call already in flight is never cut short, and orders are still never retried. `PickupRetries=0` still disables the pickup entirely. Inline DCV during `Enroll` isn't bounded by this deadline (it has its own `DcvTimeoutMinutes`), so an enrollment that runs DCV inline can still exceed the workflow step timeout.
+
+- **If you raise Workflow Step Run Timeout**, for example because DNS propagation is slow, raise `EnrollmentCallBudgetSeconds` to about 10 s less than the new value. The 10 s leaves time for the Command-to-gateway call and the response.
+- **The maximum is 90 s.** Separately from the workflow setting, Command's HTTP call into the gateway uses the .NET default timeout of 100 s, and no Command setting for it is documented. Neither the Command API nor the documentation states a maximum for Workflow Step Run Timeout.
 
 ### Domain Control Validation (DCV)
 

@@ -85,7 +85,7 @@ This is the expected result in any of these cases:
 - **OV or EV order:** CERTInext issues these after organization verification (minutes to hours), longer than the enrollment call waits.
 - **DCV enabled but unable to run:** no DNS provider plugin is deployed on the gateway, or none resolves the order's domain. The plugin logs why. The order completes only after the domain is validated some other way.
 - **`Enroll()` budget elapsed:** the plugin's bounded wait ended before CERTInext finished issuing. The budget is:
-    - `PickupRetries` × `PickupDelay` for the certificate pickup poll, capped at 75 s in total (inside Command's roughly 100 s enrollment-call timeout);
+    - `PickupRetries` × `PickupDelay` for the certificate pickup poll, capped at 75 s in total and ended at `EnrollmentCallBudgetSeconds` (default 50 s from the start of the enrollment, inside Command's 60 s default workflow step timeout);
     - on V1, `DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds` (default 60 s each) around DCV. When DCV engages for an order, these waits replace the pickup wait; they do not stack.
 - **Issued but certificate not generated yet (V2):** CERTInext reports the order `issued` while Download Certificate still answers 422 `EMS-1165`. Normal generation takes about 20 s; the pickup poll waits for it, logging at Debug level and writing one Information summary. If the budget runs out the next sync imports the certificate.
 - **DCV could not validate every domain:** for example an IP or email SAN with no DNS provider. V1 still validates the other domains but returns pending without waiting for issuance.

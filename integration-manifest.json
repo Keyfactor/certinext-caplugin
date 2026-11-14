@@ -258,10 +258,17 @@
                 },
                 {
                     "name": "PickupDelay",
-                    "description": "OPTIONAL: Seconds between certificate-pickup polls (1-60). Total wait is 5 s + PickupRetries x this value. Command's own enrollment call into the gateway is bounded at roughly 100 s, so the plugin caps the total at 75 s regardless of how PickupRetries/PickupDelay are set, reducing the retry count to fit. Keep your configured total well under that ceiling. Default: 10 (~55 s with default retries).",
+                    "description": "OPTIONAL: Seconds between certificate-pickup polls (1-60). Total wait is 5 s + PickupRetries x this value. Command's own enrollment call into the gateway is bounded at roughly 100 s, so the plugin caps the total at 75 s regardless of how PickupRetries/PickupDelay are set, reducing the retry count to fit. Keep your configured total well under that ceiling. Default: 10 (~55 s with default retries). EnrollmentCallBudgetSeconds also ends the wait early.",
                     "required": "Optional",
                     "example": "10",
                     "default": "10"
+                },
+                {
+                    "name": "EnrollmentCallBudgetSeconds",
+                    "description": "OPTIONAL: Seconds from the start of an enrollment after which the certificate pickup stops waiting and returns the order as pending (0 disables; at most 90). Command fails an enrollment still running at its Workflow Step Run Timeout application setting (60 s by default), even though the order exists at CERTInext. If you raise that setting, set this about 10 s lower. Order and reissue calls already in flight are never cut short. Default: 50.",
+                    "required": "Optional",
+                    "example": "50",
+                    "default": "50"
                 },
                 {
                     "name": "DcvEnabled",

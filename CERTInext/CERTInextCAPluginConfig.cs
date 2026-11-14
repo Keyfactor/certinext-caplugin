@@ -332,9 +332,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                                $"are set, reducing the retry count to fit. Keep your configured total well under that " +
                                $"ceiling. Default: {Constants.Pickup.DefaultDelaySeconds} " +
                                $"(~{Constants.Pickup.InitialDelaySeconds + Constants.Pickup.DefaultRetries * Constants.Pickup.DefaultDelaySeconds} " +
-                               $"s with default retries).",
+                               $"s with default retries). EnrollmentCallBudgetSeconds also ends the wait early.",
                     Hidden = false,
                     DefaultValue = Constants.Pickup.DefaultDelaySeconds,
+                    Type = "Number"
+                },
+                [Constants.Config.EnrollmentCallBudgetSeconds] = new PropertyConfigInfo
+                {
+                    Comments = $"OPTIONAL: Seconds from the start of an enrollment after which the certificate pickup " +
+                               $"stops waiting and returns the order as pending (0 disables; at most " +
+                               $"{Constants.Pickup.MaxEnrollmentCallBudgetSeconds}). Command fails an enrollment still " +
+                               $"running at its Workflow Step Run Timeout application setting (60 s by default), even " +
+                               $"though the order exists at CERTInext. If you raise that setting, set this about 10 s " +
+                               $"lower. Order and reissue calls already in flight are never cut short. Default: " +
+                               $"{Constants.Pickup.DefaultEnrollmentCallBudgetSeconds}.",
+                    Hidden = false,
+                    DefaultValue = Constants.Pickup.DefaultEnrollmentCallBudgetSeconds,
                     Type = "Number"
                 },
                 [Constants.Config.DcvEnabled] = new PropertyConfigInfo
@@ -943,6 +956,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         [JsonPropertyName("PickupDelay")]
         public int PickupDelayInSeconds { get; set; } = Constants.Pickup.DefaultDelaySeconds;
 
+        /// <summary>
+        /// Seconds from <c>Enroll()</c> entry after which the certificate pickup stops waiting and
+        /// returns pending. Set it about 10 s below Command's "Workflow Step Run Timeout (seconds)"
+        /// application setting. 0 disables the deadline. Default: 50.
+        /// </summary>
+        [JsonPropertyName("EnrollmentCallBudgetSeconds")]
+        public int EnrollmentCallBudgetSeconds { get; set; } = Constants.Pickup.DefaultEnrollmentCallBudgetSeconds;
+
         [JsonPropertyName("DcvPropagationDelaySeconds")]
         public int DcvPropagationDelaySeconds { get; set; } = 30;
 
@@ -1116,5 +1137,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             => System.Math.Max(1, System.Math.Min(
                 PickupDelayInSeconds > 0 ? PickupDelayInSeconds : Constants.Pickup.DefaultDelaySeconds,
                 Constants.Pickup.MaxDelaySeconds));
+
+        /// <summary>
+        /// Effective enrollment-call budget in seconds: 0 (no deadline) when configured as 0, the
+        /// default when negative, otherwise clamped to
+        /// <see cref="Constants.Pickup.MaxEnrollmentCallBudgetSeconds"/>.
+        /// </summary>
+        public int GetEffectiveEnrollmentCallBudgetSeconds()
+        {
+            if (EnrollmentCallBudgetSeconds == 0)
+                return 0;
+            int configured = EnrollmentCallBudgetSeconds > 0
+                ? EnrollmentCallBudgetSeconds
+                : Constants.Pickup.DefaultEnrollmentCallBudgetSeconds;
+            return System.Math.Min(configured, Constants.Pickup.MaxEnrollmentCallBudgetSeconds);
+        }
     }
 }

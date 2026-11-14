@@ -87,6 +87,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // to stage TXT records for the same order. The value byte is unused; this is a set.
         private readonly ConcurrentDictionary<string, byte> _dcvInFlight = new();
 
+        // The EnrollmentCallBudgetSeconds deadline of the Enroll() call on this async flow, read by
+        // both pickup methods. Async-local so concurrent enrollments each see their own, and so the
+        // V1 new/renew and V2 pickup call sites need no extra parameters. Null outside Enroll() and
+        // when the budget is 0.
+        private readonly AsyncLocal<EnrollmentDeadline> _enrollDeadline = new();
+
+        // Test seams for the enrollment deadline: the clock it is measured on, and the pickup's waits.
+        internal TimeProvider Clock { get; set; } = TimeProvider.System;
+        internal Func<TimeSpan, CancellationToken, Task> PickupDelayAsync { get; set; } = Task.Delay;
+
         // ---------------------------------------------------------------------------
         // Constructors
         // ---------------------------------------------------------------------------
@@ -950,6 +960,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             EnrollmentType enrollmentType)
         {
             _logger.MethodEntry(LogLevel.Debug);
+
+            // Start the deadline first, so everything before the pickup counts against it.
+            int budgetSeconds = _config.GetEffectiveEnrollmentCallBudgetSeconds();
+            _enrollDeadline.Value = budgetSeconds > 0
+                ? new EnrollmentDeadline(Clock, TimeSpan.FromSeconds(budgetSeconds))
+                : null;
 
             var ep = new EnrollmentParams(productInfo);
 
@@ -6759,14 +6775,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Constants.Pickup.InitialDelaySeconds + retries * delaySeconds, Constants.Pickup.InitialDelaySeconds);
 
             int pollErrors = 0;
+            int attemptsRun = 0;
+            var deadline = _enrollDeadline.Value;
+            bool stoppedByDeadline = false;
             try
             {
                 // Small static delay before the first poll — mirrors the Sectigo connector's
                 // attempt to let a fast order finish issuing before we start polling at all.
-                await Task.Delay(TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds), ct);
+                // The enrollment deadline can shorten it, or skip the pickup when no poll fits.
+                stoppedByDeadline = !EnrollmentDeadline.TryGetWait(
+                    deadline, TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds), out TimeSpan initialWait);
+                if (!stoppedByDeadline)
+                    await PickupDelayAsync(initialWait, ct);
 
-                for (int attempt = 1; attempt <= retries; attempt++)
+                for (int attempt = 1; attempt <= retries && !stoppedByDeadline; attempt++)
                 {
+                    attemptsRun = attempt;
                     try
                     {
                         var cert = await _client.GetCertificateAsync(orderNumber, ct);
@@ -6839,26 +6863,35 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
 
                     // Delay after every attempt (including the last), matching the Sectigo
-                    // connector's pickup cadence so the max-occupancy ceiling is identical.
-                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+                    // connector's pickup cadence so the max-occupancy ceiling is identical. Under an
+                    // enrollment deadline the delay after the last attempt is skipped (no poll follows
+                    // it), and the others are shortened or end the pickup when no poll fits.
+                    if (deadline != null && attempt == retries)
+                        break;
+                    stoppedByDeadline = !EnrollmentDeadline.TryGetWait(
+                        deadline, TimeSpan.FromSeconds(delaySeconds), out TimeSpan wait);
+                    if (!stoppedByDeadline)
+                        await PickupDelayAsync(wait, ct);
                 }
 
                 // SOC1 accuracy: don't attribute non-completion to "OV/EV async by design" when the
                 // real cause was every poll erroring (e.g. a CA-side TrackOrder outage). Distinguish
                 // the two so the log reflects what actually happened.
-                if (pollErrors == retries)
+                if (attemptsRun > 0 && pollErrors == attemptsRun)
                     _logger.LogWarning(
                         "Synchronous pickup exhausted {Retries} attempts for order {OrderNumber} — ALL polls " +
                         "errored (see preceding warnings). Returning pending result; the next synchronization " +
                         "will re-attempt retrieval.",
-                        retries, orderNumber);
-                else
+                        attemptsRun, orderNumber);
+                if (stoppedByDeadline)
+                    LogPickupStoppedByDeadline(orderNumber, deadline, attemptsRun, retries);
+                else if (pollErrors != attemptsRun)
                     _logger.LogInformation(
                         "Synchronous pickup did not complete within {Retries} attempts for order {OrderNumber} " +
                         "({Errors} poll error(s); remainder still pending). Returning pending result; the " +
                         "certificate will be imported by the next synchronization. CERTInext issues OV/EV " +
                         "asynchronously by design.",
-                        retries, orderNumber, pollErrors);
+                        attemptsRun, orderNumber, pollErrors);
                 pendingResult.StatusMessage =
                     $"{pendingResult.StatusMessage} The certificate was not issued within the enrollment-pickup " +
                     "window; it will be imported by a later synchronization.";
@@ -6871,6 +6904,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             }
 
             return pendingResult;
+        }
+
+        /// <summary>
+        /// The one Information line for a pickup the enrollment deadline ended before its configured
+        /// attempts ran out: elapsed time since <c>Enroll()</c> started, the budget, and why.
+        /// </summary>
+        private void LogPickupStoppedByDeadline(string orderId, EnrollmentDeadline deadline, int attemptsRun, int retries)
+        {
+            _logger.LogInformation(
+                "Synchronous pickup for order {OrderId} stopped early: {Elapsed:F1} s of the {Budget} s " +
+                "EnrollmentCallBudgetSeconds had passed since Enroll started, leaving too little time for another " +
+                "poll ({Attempts} of {Retries} attempt(s) ran). Returning pending result so the enrollment returns " +
+                "before Command's workflow step timeout; the certificate will be imported by the next synchronization.",
+                orderId, deadline.Elapsed.TotalSeconds, (int)deadline.Budget.TotalSeconds, attemptsRun, retries);
         }
 
         /// <summary>
@@ -6974,14 +7021,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // summarized once at Info below — not a Warning per attempt, and not a poll error.
             int notGeneratedYet = 0;
             string lastStates = null;
+            int attemptsRun = 0;
+            var deadline = _enrollDeadline.Value;
+            bool stoppedByDeadline = false;
             try
             {
                 // Small static delay before the first poll — mirrors the V1 method's attempt to
-                // let a fast order finish issuing before we start polling at all.
-                await Task.Delay(TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds), ct);
+                // let a fast order finish issuing before we start polling at all. The enrollment
+                // deadline can shorten it, or skip the pickup when no poll fits (a slow create or
+                // reissue already used the budget).
+                stoppedByDeadline = !EnrollmentDeadline.TryGetWait(
+                    deadline, TimeSpan.FromSeconds(Constants.Pickup.InitialDelaySeconds), out TimeSpan initialWait);
+                if (!stoppedByDeadline)
+                    await PickupDelayAsync(initialWait, ct);
 
-                for (int attempt = 1; attempt <= retries; attempt++)
+                for (int attempt = 1; attempt <= retries && !stoppedByDeadline; attempt++)
                 {
+                    attemptsRun = attempt;
                     try
                     {
                         var tracked = await _client.TrackOrderV2Async(productFamilySlug, orderId, ct);
@@ -7097,32 +7153,41 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
 
                     // Delay after every attempt (including the last), matching the V1 method's
-                    // pickup cadence so the max-occupancy ceiling is identical.
-                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+                    // pickup cadence so the max-occupancy ceiling is identical. Under an enrollment
+                    // deadline the delay after the last attempt is skipped (no poll follows it), and
+                    // the others are shortened or end the pickup when no poll fits.
+                    if (deadline != null && attempt == retries)
+                        break;
+                    stoppedByDeadline = !EnrollmentDeadline.TryGetWait(
+                        deadline, TimeSpan.FromSeconds(delaySeconds), out TimeSpan wait);
+                    if (!stoppedByDeadline)
+                        await PickupDelayAsync(wait, ct);
                 }
 
                 // SOC1 accuracy: don't attribute non-completion to "still validating" when the
                 // real cause was every poll erroring (e.g. a CA-side TrackOrder outage). Distinguish
                 // the two so the log reflects what actually happened.
-                if (pollErrors == retries)
+                if (attemptsRun > 0 && pollErrors == attemptsRun)
                     _logger.LogWarning(
                         "V2 synchronous pickup exhausted {Retries} attempts for order {OrderId} — ALL polls " +
                         "errored (see preceding warnings). Returning pending result; the next synchronization " +
                         "will re-attempt retrieval.",
-                        retries, orderId);
+                        attemptsRun, orderId);
                 else if (notGeneratedYet > 0)
                     _logger.LogInformation(
                         "V2 order {OrderId} is issued at CERTInext but its certificate was not generated yet after " +
                         "{NotGenerated} of {Retries} pickup attempt(s) (Download Certificate answered 422 EMS-1165 each " +
                         "time; normal generation takes about 20 s). {States}. Returning pending result; the " +
                         "certificate will be imported by the next synchronization.",
-                        orderId, notGeneratedYet, retries, lastStates);
-                else
+                        orderId, notGeneratedYet, attemptsRun, lastStates);
+                else if (!stoppedByDeadline)
                     _logger.LogInformation(
                         "V2 synchronous pickup did not complete within {Retries} attempts for order {OrderId} " +
                         "({Errors} poll error(s); remainder still pending). Returning pending result; the " +
                         "certificate will be imported by the next synchronization.",
-                        retries, orderId, pollErrors);
+                        attemptsRun, orderId, pollErrors);
+                if (stoppedByDeadline)
+                    LogPickupStoppedByDeadline(orderId, deadline, attemptsRun, retries);
                 pendingResult.StatusMessage = notGeneratedYet > 0
                     ? $"{pendingResult.StatusMessage} The order is issued at CERTInext but its certificate was not " +
                       "generated yet within the enrollment-pickup window; it will be imported by a later synchronization."

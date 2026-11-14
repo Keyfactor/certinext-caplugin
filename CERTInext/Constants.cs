@@ -36,6 +36,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string PickupRetries = "PickupRetries";
             public const string PickupDelay = "PickupDelay";
 
+            // Seconds from Enroll() entry after which the pickup stops waiting and returns pending,
+            // so the call returns before Command's "Workflow Step Run Timeout" (60 s by default).
+            public const string EnrollmentCallBudgetSeconds = "EnrollmentCallBudgetSeconds";
+
             public const string RequestorName = "RequestorName";
             public const string RequestorEmail = "RequestorEmail";
             public const string RequestorIsdCode = "RequestorIsdCode";
@@ -428,6 +432,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // headroom inside the 100s Command budget for the order submit (plus DCV/CSR calls on V2)
             // and per-poll round-trips, which also consume that budget but aren't counted in this ceiling.
             public const int MaxTotalWaitSeconds = 75;
+
+            // Deadline for the whole Enroll() call, measured from entry (EnrollmentCallBudgetSeconds).
+            // Command runs the Keyfactor-Enroll workflow step under the global application setting
+            // "Workflow Step Run Timeout (seconds)" (Workflow.General.Timeout), 60 s by default; a step
+            // still running then is failed even though the order exists at CERTInext. 50 s leaves about
+            // 10 s for Command-to-gateway transit and the response. The pickup is counted from its own
+            // start, so without this deadline the create/reissue time (a reissue alone took 26 s live)
+            // pushed the default 55 s pickup past the step timeout. 0 disables the deadline.
+            public const int DefaultEnrollmentCallBudgetSeconds = 50;
+
+            // Upper clamp: below the 100 s HttpClient timeout on Command's call into the gateway, which
+            // applies whatever the workflow step timeout is set to.
+            public const int MaxEnrollmentCallBudgetSeconds = 90;
+
+            // Time kept back for the poll itself (Track Order plus a download on V2) when the deadline
+            // shortens a wait, so the last poll also finishes inside the budget.
+            public const int DeadlinePollMarginSeconds = 3;
         }
 
         public static class Dcv
