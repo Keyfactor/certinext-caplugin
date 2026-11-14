@@ -69,5 +69,47 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .And.Contain("UntrackableListedOrders=2")
                 .And.Contain("Errors=0");
         }
+
+        [Theory]
+        // Live on 1125823297: the report says pending, Track Order says issued.
+        [InlineData("Order Fulfilled", "Pending for Approver", null)]
+        [InlineData("Order Fulfilled", "Approved by System", null)]
+        // Disagreements certificateStatus already resolves correctly keep their mapping (no Track call).
+        [InlineData("Order Accepted", "Certificate Revoked", (int)Keyfactor.PKI.Enums.EJBCA.EndEntityStatus.REVOKED)]
+        [InlineData("Order Accepted", "Certificate Downloaded", (int)Keyfactor.PKI.Enums.EJBCA.EndEntityStatus.GENERATED)]
+        [InlineData("Order Fulfilled", "Certificate Downloaded", (int)Keyfactor.PKI.Enums.EJBCA.EndEntityStatus.GENERATED)]
+        [InlineData("Order Accepted", "Pending for Approver", (int)Keyfactor.PKI.Enums.EJBCA.EndEntityStatus.EXTERNALVALIDATION)]
+        [InlineData("Order Fulfilled", null, (int)Keyfactor.PKI.Enums.EJBCA.EndEntityStatus.GENERATED)]
+        public void MapReportStatus_OrderFulfilledButCertificatePending_DefersToTrack(
+            string orderStatus, string certificateStatus, int? expected)
+        {
+            CERTInextCAPlugin.MapV2ReportStatusToDisposition(orderStatus, certificateStatus).Should().Be(expected);
+        }
+
+        [Fact]
+        public async Task Sync_OrderFulfilledPendingForApprover_TracksOnce_EmitsIssuedWithCertificate()
+        {
+            using var capture = new PluginLogCapture();
+            var mock = new Mock<ICERTInextClient>();
+            mock.Setup(c => c.ListOrdersV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(Rows(Row("1125823297", "Order Fulfilled", "Pending for Approver")));
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync("1125823297", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse { OrderId = "1125823297", Status = "issued" }));
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async("1125823297", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2CertificateDownloadResponse { OrderId = "1125823297", SerialNumber = "AA", CertificatePem = MockCertificateData.FakePemCertificate });
+            var config = new CERTInextConfig { UseV2Api = true, ApiUrl = "https://v2.certinext.io", OAuthClientId = "id", OAuthClientSecret = "s" };
+            var plugin = new CERTInextCAPlugin(mock.Object, config);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var record = buffer.ToArray().Should().ContainSingle().Subject;
+            record.CARequestID.Should().Be("1125823297");
+            record.Status.Should().Be((int)Keyfactor.PKI.Enums.EJBCA.EndEntityStatus.GENERATED);
+            record.Certificate.Should().StartWith("-----BEGIN CERTIFICATE-----");
+            mock.Verify(c => c.ResolveAndTrackOrderV2WithFamilyAsync("1125823297", It.IsAny<CancellationToken>()), Times.Once);
+            capture.Lines(LogLevel.Information, "synchronization complete").Should().ContainSingle()
+                .Which.Should().Contain("UnmappedReportStatuses=[Order Fulfilled | Pending for Approver (1)]");
+        }
     }
 }

@@ -4026,11 +4026,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         internal static int? MapV2ReportStatusToDisposition(string orderStatus, string certificateStatus)
         {
+            bool certMapped = TryMapV2ReportDisplayStatus(certificateStatus, out int certDisposition);
+            bool orderMapped = TryMapV2ReportDisplayStatus(orderStatus, out int orderDisposition);
+
+            // "Order Fulfilled | Pending for Approver" (seen live on 1125823297): the order says issued,
+            // the certificate says pending, and Track Order returns `issued`. Neither display string is
+            // authoritative, so return null and let the caller ask Track. Deliberately narrow: other
+            // disagreements (e.g. "Order Accepted | Certificate Revoked") are resolved correctly by
+            // certificateStatus and would only cost a Track call per row per pass.
+            if (certMapped && orderMapped
+                && orderDisposition == (int)EndEntityStatus.GENERATED
+                && certDisposition == (int)EndEntityStatus.EXTERNALVALIDATION)
+                return null;
+
             // certificateStatus is the more specific signal when present — prefer it.
-            if (TryMapV2ReportDisplayStatus(certificateStatus, out int certDisposition))
+            if (certMapped)
                 return certDisposition;
 
-            if (TryMapV2ReportDisplayStatus(orderStatus, out int orderDisposition))
+            if (orderMapped)
                 return orderDisposition;
 
             return null;
