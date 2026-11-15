@@ -77,13 +77,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         internal static string SanitizeCaText(string text, bool logSensitiveRequestData)
         {
             if (logSensitiveRequestData || string.IsNullOrEmpty(text)) return text;
+            string masked = MaskEmailsInText(text);
+            return masked == WithheldCaText ? masked : Strip(masked);
+        }
+
+        private const string WithheldCaText = "(CA error text withheld: could not be safely masked)";
+
+        /// <summary>
+        /// Masks every email-shaped token in free text via <see cref="MaskEmail"/> and leaves the rest
+        /// byte for byte (no <see cref="Strip"/>), so it can run on a JSON string value in place. On a
+        /// regex timeout the whole text is withheld. Null and empty pass through.
+        /// </summary>
+        internal static string MaskEmailsInText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
             try
             {
-                return Strip(EmailInText.Replace(text, m => MaskEmail(m.Value)));
+                return EmailInText.Replace(text, m => MaskEmail(m.Value));
             }
             catch (RegexMatchTimeoutException)
             {
-                return "(CA error text withheld: could not be safely masked)";
+                return WithheldCaText;
             }
         }
 

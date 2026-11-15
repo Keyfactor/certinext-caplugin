@@ -658,6 +658,51 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Hidden = false,
                     DefaultValue = "dv",
                     Type = "String"
+                },
+                [Constants.EnrollmentParam.OrgRepresentativeName] = new PropertyConfigInfo
+                {
+                    Comments = "V2 ONLY, OV only: Name of a new Organization Representative to register on the order. Set " +
+                               "together with OrgRepresentativeEmail; both turn on useNewOrgRepresentative. Leave all " +
+                               "OrgRepresentative* parameters blank to keep the organization's existing representative. " +
+                               "Requires the connector's OrganizationNumber. Personal data: never logged.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.OrgRepresentativeEmail] = new PropertyConfigInfo
+                {
+                    Comments = "V2 ONLY, OV only: Email address of the new Organization Representative. Required with " +
+                               "OrgRepresentativeName. An email that is already a representative of the organization is " +
+                               "rejected by CERTInext (EMS-1317); leave these parameters blank to use the existing one. " +
+                               "Personal data: never logged.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.OrgRepresentativePhone] = new PropertyConfigInfo
+                {
+                    Comments = "V2 ONLY, OV only, optional: Phone number of the new Organization Representative, 6-15 digits " +
+                               "with an optional leading '+' and spaces, dashes, dots or parentheses. Needs " +
+                               "OrgRepresentativeName and OrgRepresentativeEmail. Personal data: never logged.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.OrgRepresentativeDesignation] = new PropertyConfigInfo
+                {
+                    Comments = "V2 ONLY, OV only, optional: Job title of the new Organization Representative. Needs " +
+                               "OrgRepresentativeName and OrgRepresentativeEmail. Personal data: never logged.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
+                },
+                [Constants.EnrollmentParam.OrgRepresentativeEmployeeId] = new PropertyConfigInfo
+                {
+                    Comments = "V2 ONLY, OV only, optional: Employee ID of the new Organization Representative. Needs " +
+                               "OrgRepresentativeName and OrgRepresentativeEmail. Personal data: never logged.",
+                    Hidden = false,
+                    DefaultValue = string.Empty,
+                    Type = "String"
                 }
             };
         }

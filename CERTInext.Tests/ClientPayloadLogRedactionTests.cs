@@ -289,5 +289,104 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             lines.Single(l => l.Message.StartsWith("TrackOrderAsync response payload")).Message
                 .Should().Contain(RequestorName).And.Contain(RequestorEmail).And.Contain(EmailSan);
         }
+
+
+        // ---------------------------------------------------------------------------
+        // V2 PlaceOrderV2Async: OV organization representative in the Trace dumps and failure log
+        // ---------------------------------------------------------------------------
+
+        private const string RepName = "Rita Representative";
+        private const string RepEmail = "rita.rep@example.com";
+        private const string MaskedRepEmail = "r***@example.com";
+        private const string RepEmployeeId = "EMP-77231";
+
+        private CERTInextClient BuildV2Client(bool logSensitiveRequestData)
+        {
+            _server.Given(Request.Create().WithPath("/oauth/token").UsingPost())
+                .RespondWith(Response.Create().WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json").WithBody(MockCertificateData.V2TokenResponseJson()));
+            return new CERTInextClient(new CERTInextConfig
+            {
+                ApiUrl = _server.Urls[0], UseV2Api = true, OAuthClientId = "v2-client", OAuthClientSecret = "v2-secret",
+                AccountNumber = "9988776655", LogSensitiveRequestData = logSensitiveRequestData
+            });
+        }
+
+        private static Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2CreateSslOrderRequest BuildOvOrderWithRepresentative(string domain) =>
+            new Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2CreateSslOrderRequest
+            {
+                ProductVariant = "ov",
+                Organization = new Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2OrganizationParams
+                {
+                    OrganizationNumber = "1234567",
+                    UseNewOrgRepresentative = true,
+                    OrganizationRepresentative = new Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2OrganizationRepresentative
+                    {
+                        Name = RepName, Email = RepEmail, Phone = "+15550100199", Designation = "CSO", EmployeeId = RepEmployeeId
+                    }
+                },
+                Certificate = new Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2CertificateParams { Domain = domain }
+            };
+
+        private void StubV2Create(int status, string body) =>
+            _server.Given(Request.Create().WithPath("/api/certinext/v2/ssl-certificates").UsingPost())
+                .RespondWith(Response.Create().WithStatusCode(status)
+                    .WithHeader("Content-Type", status >= 400 ? "application/problem+json" : "application/json").WithBody(body));
+
+        private static string PendingRepresentativeResponse(string domain) =>
+            "{\"orderId\":\"1234567890\",\"status\":\"pending-organization-verification\",\"domain\":\"" + domain + "\"," +
+            "\"organizationRepresentativeStatus\":\"pending-approval\"," +
+            "\"pendingOrganizationRepresentative\":{\"name\":\"" + RepName + "\",\"email\":\"" + RepEmail + "\"," +
+            "\"employeeId\":\"" + RepEmployeeId + "\"}}";
+
+        [Fact]
+        public async Task V2PlaceOrder_TraceDumps_FlagOff_RedactRepresentative()
+        {
+            string domain = "rep-" + Guid.NewGuid().ToString("N") + ".example.com";
+            StubV2Create(201, PendingRepresentativeResponse(domain));
+            using var client = BuildV2Client(logSensitiveRequestData: false);
+
+            var lines = await CaptureAsync(domain, () => client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, null, BuildOvOrderWithRepresentative(domain)));
+
+            lines.Should().Contain(l => l.Message.StartsWith("PlaceOrderV2Async request payload"));
+            lines.Should().Contain(l => l.Message.StartsWith("PlaceOrderV2Async response"));
+            lines.Should().NotContain(l => l.Message.Contains(RepName) || l.Message.Contains(RepEmail)
+                || l.Message.Contains(RepEmployeeId) || l.Message.Contains("5550100199"),
+                "no client log line may carry the representative's details with the flag off");
+            lines.Single(l => l.Message.StartsWith("PlaceOrderV2Async request payload")).Message
+                .Should().Contain(MaskedRepEmail).And.Contain("\"useNewOrgRepresentative\":true");
+        }
+
+        [Fact]
+        public async Task V2PlaceOrder_TraceDumps_FlagOn_IncludeRepresentative()
+        {
+            string domain = "rep-" + Guid.NewGuid().ToString("N") + ".example.com";
+            StubV2Create(201, PendingRepresentativeResponse(domain));
+            using var client = BuildV2Client(logSensitiveRequestData: true);
+
+            var lines = await CaptureAsync(domain, () => client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, null, BuildOvOrderWithRepresentative(domain)));
+
+            lines.Single(l => l.Message.StartsWith("PlaceOrderV2Async request payload")).Message
+                .Should().Contain(RepName).And.Contain(RepEmail).And.Contain(RepEmployeeId);
+        }
+
+        [Fact]
+        public async Task V2PlaceOrder_Ems1317EchoingEmail_FlagOff_NoUnmaskedEmailLogged()
+        {
+            string domain = "rep-" + Guid.NewGuid().ToString("N") + ".example.com";
+            StubV2Create(422,
+                "{\"type\":\"about:blank\",\"title\":\"Unprocessable Entity\",\"status\":422," +
+                "\"detail\":\"[EMS-1317] " + RepEmail + " is already a representative of this organization (" + domain + ")\"}");
+            using var client = BuildV2Client(logSensitiveRequestData: false);
+
+            var lines = await CaptureAsync(domain, () => client.PlaceOrderV2Async(
+                Constants.ApiV2.FamilySsl, null, BuildOvOrderWithRepresentative(domain)));
+
+            lines.Should().Contain(l => l.Message.Contains("EMS-1317"));
+            lines.Should().NotContain(l => l.Message.Contains(RepEmail),
+                "an EMS-1317 error that echoes the representative's email must not log it unmasked");
+        }
     }
 }

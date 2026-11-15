@@ -163,6 +163,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         public bool HasExplicitProductVariant =>
             !string.IsNullOrEmpty(GetString(Constants.EnrollmentParam.ProductVariant, string.Empty));
 
+        // V2 OV Organization Representative (personal data; never logged). Empty when unset.
+        public string OrgRepresentativeName => GetString(Constants.EnrollmentParam.OrgRepresentativeName, string.Empty);
+        public string OrgRepresentativeEmail => GetString(Constants.EnrollmentParam.OrgRepresentativeEmail, string.Empty);
+        public string OrgRepresentativePhone => GetString(Constants.EnrollmentParam.OrgRepresentativePhone, string.Empty);
+        public string OrgRepresentativeDesignation => GetString(Constants.EnrollmentParam.OrgRepresentativeDesignation, string.Empty);
+        public string OrgRepresentativeEmployeeId => GetString(Constants.EnrollmentParam.OrgRepresentativeEmployeeId, string.Empty);
+
+        /// <summary>True when any of the five OrgRepresentative* parameters is set.</summary>
+        public bool HasAnyOrgRepresentativeParam =>
+            OrgRepresentativeName.Length > 0 || OrgRepresentativeEmail.Length > 0 || OrgRepresentativePhone.Length > 0
+            || OrgRepresentativeDesignation.Length > 0 || OrgRepresentativeEmployeeId.Length > 0;
+
         // ------------------------------------------------------------------
         // Helpers
         // ------------------------------------------------------------------

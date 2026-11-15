@@ -97,6 +97,46 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("prevettingToken")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string PreVettingToken { get; set; }
+
+        /// <summary>
+        /// OV only: <c>true</c> registers <see cref="OrganizationRepresentative"/> as the order's (and
+        /// the organization's) representative. Null — omitted — uses the existing representative, which
+        /// is also what the spec does with the block when the flag is absent or false.
+        /// </summary>
+        [JsonPropertyName("useNewOrgRepresentative")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? UseNewOrgRepresentative { get; set; }
+
+        [JsonPropertyName("organizationRepresentative")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public V2OrganizationRepresentative OrganizationRepresentative { get; set; }
+    }
+
+    /// <summary>
+    /// Spec <c>SslOrganizationRepresentative</c>: <c>name</c> and <c>email</c> are mandatory when
+    /// <c>useNewOrgRepresentative</c> is true (EMS-1319 / EMS-1320). The schema also lists an
+    /// <c>empty</c> boolean, which reads as a serializer artifact and is never sent. Personal data:
+    /// the bare keys are covered by <c>CERTInextClient.RedactPersonalData</c>.
+    /// </summary>
+    public class V2OrganizationRepresentative
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
+
+        [JsonPropertyName("email")]
+        public string Email { get; set; }
+
+        [JsonPropertyName("phone")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Phone { get; set; }
+
+        [JsonPropertyName("designation")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Designation { get; set; }
+
+        [JsonPropertyName("employeeId")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string EmployeeId { get; set; }
     }
 
     /// <summary>
