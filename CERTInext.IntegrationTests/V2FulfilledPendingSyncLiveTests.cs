@@ -149,5 +149,52 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 restoreLogging();
             }
         }
+
+        /// <summary>
+        /// The same rule through <c>GetSingleRecord</c>, which reads Track Order's <c>certificateState</c>
+        /// instead of the report. Read-only, DCV off. Orders from <c>CERTINEXT_V2_SINGLE_RECORD_ORDERS</c>
+        /// (comma-separated; default 1125823297). For each: issued with a certificate, or pending without one
+        /// when the certificate state says pending.
+        /// </summary>
+        [SkippableFact]
+        public async Task GetSingleRecord_IssuedWithoutCertificate_PendingCertificateState_ReturnsPending()
+        {
+            string apiUrl = V2EnvHelper.GetEnv(_env, "CERTINEXT_API_URL");
+            string clientId = V2EnvHelper.GetEnv(_env, "CERTINEXT_CLIENT_ID");
+            string clientSecret = V2EnvHelper.GetEnv(_env, "CERTINEXT_CLIENT_SECRET");
+            Skip.If(string.IsNullOrWhiteSpace(V2EnvHelper.GetEnv(_env, "CERTINEXT_USE_V2_API"))
+                    || string.IsNullOrWhiteSpace(apiUrl) || string.IsNullOrWhiteSpace(clientId)
+                    || string.IsNullOrWhiteSpace(clientSecret)
+                    || V2EnvHelper.GetEnv(_env, "CERTINEXT_V2_FULFILLED_PENDING_SYNC") != "1",
+                "Requires CERTINEXT_USE_V2_API + V2 credentials and CERTINEXT_V2_FULFILLED_PENDING_SYNC=1.");
+            var orderIds = V2EnvHelper.GetEnv(_env, "CERTINEXT_V2_SINGLE_RECORD_ORDERS", "1125823297")
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            var config = new CERTInextConfig
+            {
+                ApiUrl = apiUrl, UseV2Api = true, OAuthClientId = clientId, OAuthClientSecret = clientSecret,
+                SignerPlace = "Gateway Lab", DcvEnabled = false
+            };
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
+            try
+            {
+                using var plugin = new CERTInextCAPlugin(new CERTInextClient(config), config);
+                foreach (string id in orderIds)
+                {
+                    var record = await plugin.GetSingleRecord(id);
+                    bool hasBody = !string.IsNullOrWhiteSpace(record.Certificate);
+                    _output.WriteLine($"GetSingleRecord {id}: Status={record.Status}, HasCertificate={hasBody}, ProductID={record.ProductID}");
+                    if (hasBody)
+                        record.Status.Should().Be((int)EndEntityStatus.GENERATED, $"order {id} has a certificate");
+                    else
+                        record.Status.Should().NotBe((int)EndEntityStatus.GENERATED,
+                            $"order {id} has no certificate; a pending certificate state must be reported pending");
+                }
+            }
+            finally
+            {
+                restoreLogging();
+            }
+        }
     }
 }
