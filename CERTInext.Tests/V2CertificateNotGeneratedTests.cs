@@ -179,13 +179,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // GetSingleRecord
         // ---------------------------------------------------------------------------
 
-        [Fact]
-        public async Task GetSingleRecord_IssuedButNotGenerated_LogsInfoNotWarning_AndReturnsTheRecordWithoutABody()
+        [Theory]
+        // The certificate state says pending (same text the report's certificateStatus uses): returned pending,
+        // matching the V2 sync. Live: 1125823297 ("Pending for Approver"); the sandbox's recent orders
+        // ("Approved by System").
+        [InlineData("Approved by System")]
+        [InlineData("Pending for Approver")]
+        public async Task GetSingleRecord_IssuedButNotGenerated_CertificateStatePending_ReturnsPendingWithoutBody(string certificateState)
         {
             using var capture = new PluginLogCapture();
             var mock = new Mock<ICERTInextClient>(MockBehavior.Strict);
+            var status = IssuedButNotGenerated();
+            status.CertificateState = certificateState;
             mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(OrderId, It.IsAny<CancellationToken>()))
-                .ReturnsAsync((Constants.ApiV2.FamilySsl, IssuedButNotGenerated()));
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, status));
             mock.Setup(c => c.ResolveAndDownloadCertificateV2Async(OrderId, It.IsAny<CancellationToken>()))
                 .ThrowsAsync(NotGenerated);
             var plugin = new CERTInextCAPlugin(mock.Object, Config());
@@ -194,10 +201,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             record.CARequestID.Should().Be(OrderId);
             record.Certificate.Should().BeNull();
+            record.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION);
             capture.Entries.Where(e => e.Level >= LogLevel.Warning).Should().BeEmpty();
-            var lines = capture.Lines(LogLevel.Information, "not generated yet");
+            var lines = capture.Lines(LogLevel.Information, "returning it as pending");
             lines.Should().ContainSingle();
-            lines[0].Should().Contain("CertificateState='Approved by System'");
+            lines[0].Should().Contain($"CertificateState='{certificateState}'");
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("Certificate Generated")]
+        [InlineData("Some New State")]
+        public async Task GetSingleRecord_IssuedButNotGenerated_CertificateStateNotPending_ReturnsIssuedWithoutBody(string certificateState)
+        {
+            using var capture = new PluginLogCapture();
+            var mock = new Mock<ICERTInextClient>(MockBehavior.Strict);
+            var status = IssuedButNotGenerated();
+            status.CertificateState = certificateState;
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(OrderId, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, status));
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async(OrderId, It.IsAny<CancellationToken>()))
+                .ThrowsAsync(NotGenerated);
+            var plugin = new CERTInextCAPlugin(mock.Object, Config());
+
+            var record = await plugin.GetSingleRecord(OrderId);
+
+            record.Status.Should().Be((int)EndEntityStatus.GENERATED);
+            record.Certificate.Should().BeNull();
+            capture.Lines(LogLevel.Information, "not generated yet").Should().ContainSingle();
         }
 
         [Fact]

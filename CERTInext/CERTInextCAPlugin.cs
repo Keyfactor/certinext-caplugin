@@ -3415,7 +3415,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     }
                     catch (Exception dlEx)
                     {
-                        if (IsCertificateNotGeneratedYet(dlEx))
+                        if (IsCertificateNotGeneratedYet(dlEx) && IsReportCertificatePending(statusResp.CertificateState))
+                        {
+                            // Same rule as the V2 sync: Track says issued, there is no certificate, and the
+                            // order's own certificate state (same text as the report's certificateStatus,
+                            // e.g. "Pending for Approver", "Approved by System") says pending. Return pending
+                            // rather than issued without a body (live: 1125823297).
+                            disposition = (int)EndEntityStatus.EXTERNALVALIDATION;
+                            _logger.LogInformation(
+                                "V2 GetSingleRecord: order is issued per Track Order but its certificate is not generated " +
+                                "(Download Certificate 422 EMS-1165) and its certificate state is pending; returning it " +
+                                "as pending. CARequestID={Id}, {States}", caRequestID, DescribeV2States(statusResp));
+                        }
+                        else if (IsCertificateNotGeneratedYet(dlEx))
                         {
                             _logger.LogInformation(
                                 "V2 GetSingleRecord: order is issued at CERTInext but its certificate is not generated " +

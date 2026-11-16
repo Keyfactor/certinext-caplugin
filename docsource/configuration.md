@@ -615,7 +615,7 @@ mapped to Failed — see the gateway trace log if certificates unexpectedly show
 - CERTInext does not serve the certificate body of a revoked order. A revoked order is propagated as revoked only when the gateway already holds that certificate (the revocation date and reason come from a live status call).
 - Otherwise a revoked order is reported as Failed (the gateway has a record without a body) or skipped (no record), so the gateway never stores a revoked record without a certificate.
 - `IgnoreExpired` is applied here: expired certificates are skipped.
-- An issued order whose download answers 422 `EMS-1165` is emitted without a certificate body and counted as `IssuedNotGeneratedYet` in the sync summary instead of logging a warning per order; a later pass picks it up.
+- An issued order whose download answers 422 `EMS-1165` is counted as `IssuedNotGeneratedYet` in the sync summary instead of logging a warning per order. It is emitted as pending when the row's certificate status says pending, otherwise without a certificate body; a later pass picks it up.
 
 #### SSL.com organization validation
 
@@ -644,8 +644,8 @@ The create body already carries the agreement (`signerName`, `signerPlace`, `acc
 CERTInext can report an order as `issued` before the certificate exists: Download Certificate then answers HTTP 422 `EMS-1165 Invalid request status.` Normally the certificate is generated about 20 seconds later, but the sandbox has been seen to take far longer. The plugin treats this as an expected state, not an error:
 
 - **Enrollment:** the pickup poll keeps waiting (within `PickupRetries` x `PickupDelay`), logging each attempt at Debug level and writing one Information summary if the budget runs out. The enrollment returns pending, and a later synchronization imports the certificate.
-- **`GetSingleRecord` and Synchronize:** logged at Information (single record) or Debug with a count in the sync summary, rather than a warning. The record is returned without a certificate body, as for any failed download.
-- **Log fields:** the lines include CERTInext's `orderState` and `certificateState` text (for example `Approved by System` versus `Certificate Generated`) for diagnosis. Their vocabulary isn't documented, so the plugin never acts on it.
+- **`GetSingleRecord` and Synchronize:** logged at Information (single record) or Debug with a count in the sync summary, rather than a warning. When the order's certificate status says pending (`Pending for Approver`, `Approved by System` or `Order Accepted`), the record is returned as **pending**. `GetSingleRecord` reads that status from Track Order's `certificateState`, and the sync from the report's `certificateStatus`, which use the same text. Otherwise the record is returned as issued without a certificate body, as for any failed download. A later pass downloads the certificate once it exists.
+- **Log fields:** the lines include CERTInext's `orderState` and `certificateState` text (for example `Approved by System` versus `Certificate Generated`) for diagnosis. Their vocabulary isn't documented, so the plugin acts on it only in the case above, and only to report pending rather than issued; an unrecognized value keeps the issued-without-body result.
 - **Any other download error** is still logged as a warning.
 
 #### V2 reissue
