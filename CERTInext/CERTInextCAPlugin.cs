@@ -1345,6 +1345,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
             // Bodyless-REVOKED guard decisions — see DecideBodylessRevokedRecord.
             int emittedFailedFromBodylessRevoked = 0, skippedBodylessRevoked = 0;
+            // Issue 0098: cancelled/rejected orders the gateway still held as pending, emitted as failed.
+            int failedPropagated = 0;
             // Issue 0097: product code -> the template product name the gateway matches on.
             var productNames = new SyncProductNameResolver(ct => _client.GetProductDetailsAsync(ct), _logger);
 
@@ -1478,15 +1480,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         }
 #endif
 
-                        // Skip failed/rejected/cancelled certificates — they have no cert body
+                        // Skip failed/rejected/cancelled certificates — they have no cert body — unless the
+                        // gateway still holds the order as pending (issue 0098): then emit it as failed, once.
                         if (status == (int)EndEntityStatus.FAILED)
                         {
-                            _logger.LogTrace(
-                                "Skipping certificate '{Id}' with terminal failure status '{Status}'.",
-                                current.Id, current.Status);
-                            if (!string.IsNullOrWhiteSpace(current.Certificate)) skippedWithBody++;
-                            skipped++;
-                            continue;
+                            if (!await ShouldPropagateTerminalFailureAsync(current.Id))
+                            {
+                                _logger.LogTrace(
+                                    "Skipping certificate '{Id}' with terminal failure status '{Status}'.",
+                                    current.Id, current.Status);
+                                if (!string.IsNullOrWhiteSpace(current.Certificate)) skippedWithBody++;
+                                skipped++;
+                                continue;
+                            }
+                            current.Certificate = null;
+                            failedPropagated++;
                         }
 
                         // The order-report listing (ListCertificatesAsync) does NOT include the
@@ -1639,12 +1647,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "BodylessRevokedSkipped={BodylessRevokedSkipped} (bodyless-REVOKED guard). " +
                     "RecentOrderDeferred={RecentOrderDeferred} (younger than {Grace}s, imported next pass). " +
                     "ProductNames: Resolved={ProductNamesResolved}, Unresolved={ProductNamesUnresolved} (unresolved keep " +
-                    "the CERTInext product code; the gateway assigns those no template). {DcvClause}",
+                    "the CERTInext product code; the gateway assigns those no template). " +
+                    "FailedPropagated={FailedPropagated} (cancelled/rejected at CERTInext while the gateway held them as " +
+                    "pending; emitted as failed). {DcvClause}",
                     synced, skipped, skippedWithBody, unchangedInGateway, errors,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
                     deferredRecentOrders, recentOrderGraceSeconds,
                     productNames.Resolved, productNames.Unresolved,
+                    failedPropagated,
                     dcvClause);
             }
             catch (OperationCanceledException)
@@ -3317,6 +3328,43 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// Issue 0098: a sync skips orders cancelled or rejected at CERTInext, so an order the gateway already holds as
+        /// pending would stay pending indefinitely. True only when the gateway holds this order as pending
+        /// (<see cref="EndEntityStatus.EXTERNALVALIDATION"/>); the caller then emits it as failed. No row (the reader
+        /// throws <see cref="ArgumentException"/>), a row that is already terminal, a row with a certificate (issued or
+        /// revoked; a cancellation must never downgrade it), no reader, or any lookup failure all return false and the
+        /// order is skipped as before.
+        /// </summary>
+        private async Task<bool> ShouldPropagateTerminalFailureAsync(string caRequestId)
+        {
+            if (_certificateDataReader == null || string.IsNullOrWhiteSpace(caRequestId))
+                return false;
+
+            try
+            {
+                int dbStatus = await _certificateDataReader.GetStatusByRequestID(caRequestId);
+                if (dbStatus != (int)EndEntityStatus.EXTERNALVALIDATION)
+                    return false;
+
+                _logger.LogInformation(
+                    "Sync: order '{Id}' is cancelled or rejected at CERTInext, but the gateway still holds it as pending; " +
+                    "emitting it as failed so the gateway records that it is finished.", caRequestId);
+                return true;
+            }
+            catch (ArgumentException)
+            {
+                return false; // the gateway has no row for this order: skip, as for any cancelled order it never held
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex,
+                    "Sync: could not read the gateway's status for cancelled/rejected order '{Id}'; skipping it as before.",
+                    caRequestId);
+                return false;
+            }
+        }
+
+        /// <summary>
         /// True when the gateway already holds this order with the status the listing reports and
         /// a stored certificate body, so an incremental V1 pass can skip the TrackOrder +
         /// DownloadCertificate refetch. A row whose status differs (e.g. issued → revoked), a row
@@ -3632,6 +3680,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             var agreementContext = new V2AgreementAcceptContext(_config.RequestorName, _config.SignerPlace);
             // Issue 0097: product code -> the template product name the gateway matches on.
             var productNames = new SyncProductNameResolver(ct => _client.GetProductDetailsV2Async(ct), _logger);
+            // Issue 0098: cancelled/rejected orders the gateway still held as pending, emitted as failed.
+            int failedPropagated = 0;
 
             // Emit-side accounting (mirrors the V1 path).
             int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
@@ -3730,12 +3780,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                         if (disposition == (int)EndEntityStatus.FAILED)
                         {
-                            _logger.LogTrace(
-                                "V2 sync: skipping order '{Id}' with terminal status. OrderStatus={OrderStatus}, " +
-                                "CertificateStatus={CertificateStatus}",
-                                row.OrderNumber, row.OrderStatus, row.CertificateStatus);
-                            skipped++;
-                            continue;
+                            // Skipped, unless the gateway still holds the order as pending (issue 0098): then it
+                            // falls through and is emitted as failed with no certificate, once.
+                            if (!await ShouldPropagateTerminalFailureAsync(row.OrderNumber))
+                            {
+                                _logger.LogTrace(
+                                    "V2 sync: skipping order '{Id}' with terminal status. OrderStatus={OrderStatus}, " +
+                                    "CertificateStatus={CertificateStatus}",
+                                    row.OrderNumber, row.OrderStatus, row.CertificateStatus);
+                                skipped++;
+                                continue;
+                            }
+                            failedPropagated++;
                         }
 
                         // Issue 0090: do not hand the gateway a row for a pending or issued order
@@ -4050,7 +4106,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "IssuedNotGeneratedYet={IssuedNotGeneratedYet} (issued at the CA, certificate not downloadable yet, " +
                     "422 EMS-1165; picked up by a later pass). ProductNames: Resolved={ProductNamesResolved}, " +
                     "Unresolved={ProductNamesUnresolved} (unresolved keep the CERTInext product code; the gateway assigns " +
-                    "those no template). {DcvClause}",
+                    "those no template). FailedPropagated={FailedPropagated} (cancelled/rejected at CERTInext while the " +
+                    "gateway held them as pending; emitted as failed). {DcvClause}",
                     synced, skipped, errors, unresolvedStatusFallbacks,
                     LogSanitizer.Strip(string.Join("; ", unmappedStatusPairs.Select(kv => $"{kv.Key} ({kv.Value})"))),
                     untrackableListedOrders,
@@ -4059,6 +4116,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     deferredRecentOrders, recentOrderGraceSeconds,
                     issuedNotGeneratedYet,
                     productNames.Resolved, productNames.Unresolved,
+                    failedPropagated,
                     dcvClause);
             }
             catch (OperationCanceledException)
