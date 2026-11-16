@@ -126,6 +126,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                                       $"NotBefore={cert.NotBefore:u}, NotAfter={cert.NotAfter:u}");
                 }
 
+                // Issue 0097: ProductID is the product name the gateway's templates use, named through the catalog.
+                plugin.GetProductIds().Should().Contain(record.ProductID,
+                    "the gateway gives a synced record a template only when ProductID equals a template's product name");
                 calls.Should().Contain(nameof(ICERTInextClient.ResolveAndTrackOrderV2WithFamilyAsync),
                     "the Fulfilled/Pending-for-Approver pair must defer to Track Order");
                 calls.Should().Contain(nameof(ICERTInextClient.ResolveAndDownloadCertificateV2Async),

@@ -501,6 +501,8 @@ Expired certificates are included in the V1 sync. `IgnoreExpired` has no effect 
 
 On V2, synchronization reads `/reports/orders` instead — see [V2 Order Lifecycle](#v2-order-lifecycle).
 
+**Templates for synced certificates (V1 and V2).** The gateway gives a synced certificate a template only when the record's product matches a configured template's product name (`DV SSL`, `OV SSL Wildcard`, …) exactly. CERTInext reports a product code instead, so each sync pass reads the account's product catalog once and names the code by its product type. On the sandbox, for example, `842` and `917` both become `DV SSL`, and `847` becomes `OV SSL Wildcard`. A certificate ordered outside Command, for example in the CERTInext portal, then arrives in Command with the first template configured for that product. A code with no matching plugin product (Private PKI, S/MIME, Document Signer) is passed on unchanged and gets no template, as before. If the catalog can't be read, the pass logs one warning and keeps the codes. The sync summary reports `ProductNames: Resolved=…, Unresolved=…`. Certificates enrolled through Command keep the template Command recorded at enrollment.
+
 ### Product Code Resolution
 
 On V1, the numeric CERTInext product code is resolved in this order (V2 follows [V2 Product Code Resolution](#v2-product-code-resolution)):

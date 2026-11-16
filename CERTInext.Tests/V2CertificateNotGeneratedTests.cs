@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Keyfactor.AnyGateway.Extensions;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API;
 using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.PKI.Enums.EJBCA;
@@ -277,6 +278,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .Returns(Rows(IssuedRow()));
             mock.Setup(c => c.ResolveAndDownloadCertificateV2Async(OrderId, It.IsAny<CancellationToken>()))
                 .ThrowsAsync(NotGenerated);
+            // Issue 0097: the sync names the row's product code through the catalog (sandbox: 842 is DV SSL).
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ProductDetail> { new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } });
             var plugin = new CERTInextCAPlugin(mock.Object, Config());
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(100);
 
@@ -285,6 +289,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var record = buffer.ToArray().Should().ContainSingle().Which;
             record.CARequestID.Should().Be(OrderId);
             record.Certificate.Should().BeNullOrEmpty();
+            record.ProductID.Should().Be(Constants.Products.DvSsl);
             capture.Entries.Where(e => e.Level >= LogLevel.Warning).Should().BeEmpty();
             capture.Lines(LogLevel.Debug, "not generated yet").Should().ContainSingle();
             capture.Lines(LogLevel.Information, "synchronization complete").Should().ContainSingle()

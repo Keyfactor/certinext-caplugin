@@ -421,6 +421,83 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             };
         }
 
+        // Inverse of Constants.Products.ProductTypeIdsV2: catalog productTypeID -> the product name GetProductIds()
+        // advertises (one name per type).
+        private static readonly Dictionary<string, string> ProductNamesByTypeId =
+            Constants.Products.ProductTypeIdsV2.ToDictionary(kv => kv.Value, kv => kv.Key, StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// The product name (one of <see cref="GetProductIds"/>) for a catalog <c>productTypeID</c>, or null when the
+        /// plugin has no product of that type.
+        /// </summary>
+        internal static string ProductNameForTypeId(string productTypeId) =>
+            !string.IsNullOrWhiteSpace(productTypeId) && ProductNamesByTypeId.TryGetValue(productTypeId.Trim(), out string name)
+                ? name
+                : null;
+
+        /// <summary>
+        /// Issue 0097: the gateway gives a synced record a template only when its <c>ProductID</c> equals a configured
+        /// template's ProductID — a product name from <see cref="GetProductIds"/> — exactly. CERTInext reports a product
+        /// code, so a sync pass maps code -> catalog <c>productTypeID</c> -> name through the account's own catalog,
+        /// read once per pass on first use. Codes vary by account and CA, so no fixed table is used (the V1-era
+        /// <c>DefaultProductCodes</c> would label the sandbox's DV code 842 "OV SSL"). A code the catalog can't name,
+        /// or a catalog that can't be read, keeps the code: the gateway then assigns no template, as before.
+        /// Not thread-safe; a sync pass handles rows one at a time.
+        /// </summary>
+        internal sealed class SyncProductNameResolver
+        {
+            private readonly Func<CancellationToken, Task<List<ProductDetail>>> _loadCatalog;
+            private readonly ILogger _logger;
+            private Dictionary<string, string> _nameByCode;
+
+            public SyncProductNameResolver(Func<CancellationToken, Task<List<ProductDetail>>> loadCatalog, ILogger logger)
+            {
+                _loadCatalog = loadCatalog;
+                _logger = logger;
+            }
+
+            public int Resolved { get; private set; }
+            public int Unresolved { get; private set; }
+
+            public async Task<string> ResolveAsync(string productCode, CancellationToken ct)
+            {
+                if (string.IsNullOrWhiteSpace(productCode))
+                    return productCode;
+
+                if (_nameByCode == null)
+                {
+                    _nameByCode = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    try
+                    {
+                        foreach (var p in await _loadCatalog(ct) ?? new List<ProductDetail>())
+                        {
+                            string name = ProductNameForTypeId(p?.ProductTypeId);
+                            if (!string.IsNullOrWhiteSpace(p?.ProductCode) && name != null)
+                                _nameByCode.TryAdd(p.ProductCode.Trim(), name);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Sync: could not read the product catalog to name synced certificates' products; this pass " +
+                            "keeps CERTInext product codes, so the gateway assigns imported certificates no template.");
+                    }
+                }
+
+                if (_nameByCode.TryGetValue(productCode.Trim(), out string resolved))
+                {
+                    Resolved++;
+                    return resolved;
+                }
+                Unresolved++;
+                return productCode;
+            }
+        }
+
         // ---------------------------------------------------------------------------
         // IAnyCAPlugin — Health and validation
         // ---------------------------------------------------------------------------
@@ -1268,6 +1345,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
             // Bodyless-REVOKED guard decisions — see DecideBodylessRevokedRecord.
             int emittedFailedFromBodylessRevoked = 0, skippedBodylessRevoked = 0;
+            // Issue 0097: product code -> the template product name the gateway matches on.
+            var productNames = new SyncProductNameResolver(ct => _client.GetProductDetailsAsync(ct), _logger);
 
             try
             {
@@ -1452,6 +1531,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         }
 
                         var record = MapToAnyCAPluginCertificate(current);
+                        record.ProductID = await productNames.ResolveAsync(record.ProductID, cancelToken);
 
                         // Emit-side observability (issue 0003): account for what the plugin hands to
                         // the gateway buffer, broken down by status and whether a cert body is present.
@@ -1557,11 +1637,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "GeneratedNoBody={GenNoBody}, Revoked={Revoked}, Pending={Pending}, " +
                     "FailedFromBodylessRevoked={FailedFromBodylessRevoked}. " +
                     "BodylessRevokedSkipped={BodylessRevokedSkipped} (bodyless-REVOKED guard). " +
-                    "RecentOrderDeferred={RecentOrderDeferred} (younger than {Grace}s, imported next pass). {DcvClause}",
+                    "RecentOrderDeferred={RecentOrderDeferred} (younger than {Grace}s, imported next pass). " +
+                    "ProductNames: Resolved={ProductNamesResolved}, Unresolved={ProductNamesUnresolved} (unresolved keep " +
+                    "the CERTInext product code; the gateway assigns those no template). {DcvClause}",
                     synced, skipped, skippedWithBody, unchangedInGateway, errors,
                     emittedGeneratedWithBody, emittedGeneratedNoBody, emittedRevoked, emittedPending,
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
                     deferredRecentOrders, recentOrderGraceSeconds,
+                    productNames.Resolved, productNames.Unresolved,
                     dcvClause);
             }
             catch (OperationCanceledException)
@@ -3547,6 +3630,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // enroll default for SignerName) and SignerPlace. One context per pass: each order is
             // attempted at most once per pass.
             var agreementContext = new V2AgreementAcceptContext(_config.RequestorName, _config.SignerPlace);
+            // Issue 0097: product code -> the template product name the gateway matches on.
+            var productNames = new SyncProductNameResolver(ct => _client.GetProductDetailsV2Async(ct), _logger);
 
             // Emit-side accounting (mirrors the V1 path).
             int emittedGeneratedWithBody = 0, emittedGeneratedNoBody = 0, emittedRevoked = 0, emittedPending = 0;
@@ -3848,8 +3933,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         // in local scope from one of the lazy TrackOrder fetches above
                         // (unresolved-status fallback, DCV attempt, or revoked-row lookup) — never
                         // fetch just to backfill this field.
+                        // Issue 0097: the code is then named through the catalog, so the gateway can match the record
+                        // to a template. The variant fallback can't be named (DV SSL vs Wildcard vs UCC) and stays as is.
                         string productId = !string.IsNullOrWhiteSpace(row.ProductCode)
-                            ? row.ProductCode
+                            ? await productNames.ResolveAsync(row.ProductCode, cancelToken)
                             : (trackedStatus?.ProductVariant ?? string.Empty);
 
                         var record = new AnyCAPluginCertificate
@@ -3961,7 +4048,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     "BodylessRevokedSkipped={BodylessRevokedSkipped} (bodyless-revoked guard). " +
                     "RecentOrdersDeferred={RecentOrdersDeferred} (pending/issued, younger than {Grace}s, imported next pass). " +
                     "IssuedNotGeneratedYet={IssuedNotGeneratedYet} (issued at the CA, certificate not downloadable yet, " +
-                    "422 EMS-1165; picked up by a later pass). {DcvClause}",
+                    "422 EMS-1165; picked up by a later pass). ProductNames: Resolved={ProductNamesResolved}, " +
+                    "Unresolved={ProductNamesUnresolved} (unresolved keep the CERTInext product code; the gateway assigns " +
+                    "those no template). {DcvClause}",
                     synced, skipped, errors, unresolvedStatusFallbacks,
                     LogSanitizer.Strip(string.Join("; ", unmappedStatusPairs.Select(kv => $"{kv.Key} ({kv.Value})"))),
                     untrackableListedOrders,
@@ -3969,6 +4058,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     emittedFailedFromBodylessRevoked, skippedBodylessRevoked,
                     deferredRecentOrders, recentOrderGraceSeconds,
                     issuedNotGeneratedYet,
+                    productNames.Resolved, productNames.Unresolved,
                     dcvClause);
             }
             catch (OperationCanceledException)
