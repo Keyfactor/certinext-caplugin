@@ -27,7 +27,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 {
     /// <summary>
     /// Plan 0096 item 2, live: a <c>/reports/orders</c> row reading <c>Order Fulfilled | Pending for Approver</c>
-    /// must go through Track Order and come out of the V2 sync as issued, with the certificate downloaded.
+    /// must go through Track Order and have its certificate download tried: issued with the certificate when
+    /// one exists, pending (as the row's certificate status says) when the download answers EMS-1165.
     /// Runs the real <c>Synchronize</c> code against the live API, with the report listing narrowed to one
     /// order by a forwarding proxy; every other call goes to the real client unchanged. Read-only at
     /// CERTInext (list, track, download), DCV off. Opt-in: <c>CERTINEXT_V2_FULFILLED_PENDING_SYNC=1</c>;
@@ -127,15 +128,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
                 calls.Should().Contain(nameof(ICERTInextClient.ResolveAndTrackOrderV2WithFamilyAsync),
                     "the Fulfilled/Pending-for-Approver pair must defer to Track Order");
-                record.Status.Should().Be((int)EndEntityStatus.GENERATED, "Track Order reports the order issued");
                 calls.Should().Contain(nameof(ICERTInextClient.ResolveAndDownloadCertificateV2Async),
-                    "an issued order's certificate is downloaded");
-                // Whether a body comes back is CA state, not plugin behaviour. Live 2026-11-15: 1125823297
-                // answered 422 EMS-1165 (never generated; see Finding 35 update), so it was emitted as
-                // issued without a body (sync summary IssuedNotGeneratedYet=1) for a later pass.
+                    "Track Order reports the order issued, so its certificate download is tried");
+                // Whether a body comes back is CA state. Live 2026-11-15: 1125823297 answered 422 EMS-1165
+                // (never generated; Finding 35 update). With a certificate the order is issued; without one it
+                // stays pending, as the report's "Pending for Approver" says.
                 if (string.IsNullOrWhiteSpace(record.Certificate))
-                    _output.WriteLine("No certificate body: CERTInext reports the order issued but its certificate " +
-                                      "isn't generated (see IssuedNotGeneratedYet in the sync summary above).");
+                {
+                    record.Status.Should().Be((int)EndEntityStatus.EXTERNALVALIDATION,
+                        "no certificate was generated, so the report's pending certificate status stands");
+                    _output.WriteLine("No certificate body: download answered EMS-1165; emitted pending.");
+                }
+                else
+                {
+                    record.Status.Should().Be((int)EndEntityStatus.GENERATED);
+                }
             }
             finally
             {

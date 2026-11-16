@@ -111,5 +111,66 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             capture.Lines(LogLevel.Information, "synchronization complete").Should().ContainSingle()
                 .Which.Should().Contain("UnmappedReportStatuses=[Order Fulfilled | Pending for Approver (1)]");
         }
+
+        private static readonly System.Exception Ems1165 = new System.Exception(
+            "CERTInext V2 API error during 'V2 download certificate'. HTTP 422. Unprocessable Entity: EMS-1165 Invalid request status.");
+
+        private static (Mock<ICERTInextClient> Mock, CERTInextCAPlugin Plugin) TrackIssued(
+            string id, string orderStatus, string certificateStatus, System.Exception downloadError)
+        {
+            var mock = new Mock<ICERTInextClient>();
+            mock.Setup(c => c.ListOrdersV2Async(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns(Rows(Row(id, orderStatus, certificateStatus)));
+            mock.Setup(c => c.ResolveAndTrackOrderV2WithFamilyAsync(id, It.IsAny<CancellationToken>()))
+                .ReturnsAsync((Constants.ApiV2.FamilySsl, new V2OrderStatusResponse { OrderId = id, Status = "issued" }));
+            mock.Setup(c => c.ResolveAndDownloadCertificateV2Async(id, It.IsAny<CancellationToken>())).ThrowsAsync(downloadError);
+            var config = new CERTInextConfig { UseV2Api = true, ApiUrl = "https://v2.certinext.io", OAuthClientId = "id", OAuthClientSecret = "s" };
+            return (mock, new CERTInextCAPlugin(mock.Object, config));
+        }
+
+        [Fact]
+        public async Task Sync_OrderFulfilledPendingForApprover_NotGenerated_EmittedPending()
+        {
+            // Live on 1125823297: Track says issued, Download answers EMS-1165, and the report's
+            // "Pending for Approver" was right. Pending, not issued-without-a-certificate.
+            using var capture = new PluginLogCapture();
+            var (mock, plugin) = TrackIssued("1125823297", "Order Fulfilled", "Pending for Approver", Ems1165);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            var record = buffer.ToArray().Should().ContainSingle().Subject;
+            record.Status.Should().Be((int)Keyfactor.PKI.Enums.EJBCA.EndEntityStatus.EXTERNALVALIDATION);
+            record.Certificate.Should().BeNullOrEmpty();
+            mock.Verify(c => c.ResolveAndDownloadCertificateV2Async("1125823297", It.IsAny<CancellationToken>()), Times.Once,
+                "the download is still tried every pass, so a certificate that appears is picked up");
+            capture.Lines(LogLevel.Information, "synchronization complete").Should().ContainSingle()
+                .Which.Should().Contain("GeneratedNoBody=0").And.Contain("Pending=1").And.Contain("IssuedNotGeneratedYet=1");
+        }
+
+        [Fact]
+        public async Task Sync_OrderFulfilledPendingForApprover_OtherDownloadFailure_StaysIssuedWithoutBody()
+        {
+            // A transient failure says nothing about the certificate; keep Track's issued.
+            var (_, plugin) = TrackIssued("1125823297", "Order Fulfilled", "Pending for Approver",
+                new System.Exception("CERTInext V2 API error during 'V2 download certificate'. HTTP 503."));
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().ContainSingle().Which.Status.Should().Be((int)Keyfactor.PKI.Enums.EJBCA.EndEntityStatus.GENERATED);
+        }
+
+        [Fact]
+        public async Task Sync_UnmappedPairTrackIssued_NotGenerated_StaysIssuedWithoutBody()
+        {
+            // The pending override applies only when the report itself says the certificate is pending.
+            var (_, plugin) = TrackIssued("b1", "Brand New", "Never Seen", Ems1165);
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().Should().ContainSingle().Which.Status.Should().Be((int)Keyfactor.PKI.Enums.EJBCA.EndEntityStatus.GENERATED);
+        }
     }
 }

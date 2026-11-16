@@ -3795,7 +3795,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             }
                             catch (Exception dlEx)
                             {
-                                if (IsCertificateNotGeneratedYet(dlEx))
+                                if (IsCertificateNotGeneratedYet(dlEx) && IsReportCertificatePending(row.CertificateStatus))
+                                {
+                                    // Track said issued only because the report row disagreed with itself
+                                    // ("Order Fulfilled | Pending for Approver"), and there is no certificate:
+                                    // the report's certificate status was right (live: 1125823297, placed
+                                    // months before the sandbox stopped generating, still EMS-1165). Emit it
+                                    // pending, as before the Track fallback; once a certificate exists the
+                                    // download succeeds and it is emitted issued.
+                                    issuedNotGeneratedYet++;
+                                    disposition = (int)EndEntityStatus.EXTERNALVALIDATION;
+                                    _logger.LogDebug(
+                                        "V2 sync: order '{Id}' is issued per Track Order but its certificate is not generated " +
+                                        "(Download Certificate 422 EMS-1165) and the report's certificate status is " +
+                                        "'{CertificateStatus}' — emitting it as pending. {States}",
+                                        row.OrderNumber, LogSanitizer.Strip(row.CertificateStatus), DescribeV2States(trackedStatus));
+                                }
+                                else if (IsCertificateNotGeneratedYet(dlEx))
                                 {
                                     // Not a failure: issued at the CA, certificate not generated yet.
                                     // Per-order line at Debug; the count is in the pass summary below.
@@ -4066,6 +4082,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             return null;
         }
+
+        /// <summary>True when a report row's <c>certificateStatus</c> text maps to pending.</summary>
+        internal static bool IsReportCertificatePending(string certificateStatus) =>
+            TryMapV2ReportDisplayStatus(certificateStatus, out int d) && d == (int)EndEntityStatus.EXTERNALVALIDATION;
 
         private static bool TryMapV2ReportDisplayStatus(string status, out int disposition)
         {
