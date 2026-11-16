@@ -70,5 +70,57 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             });
             Print("V2", await v2.GetProductDetailsV2Async(CancellationToken.None));
         }
+
+        /// <summary>
+        /// Why a gateway row never gets re-saved by the sync: for each order in
+        /// <c>CERTINEXT_PROBE_ORDERS</c> (comma-separated), prints its <c>/reports/orders</c> row (or that the report
+        /// doesn't list it), the plugin's mapping of that row, and Track Order's status. Read-only.
+        /// </summary>
+        [SkippableFact]
+        public async Task Probe_OrderReportAndTrackStatus_ReadOnly()
+        {
+            string ids = V2EnvHelper.GetEnv(_env, "CERTINEXT_PROBE_ORDERS");
+            Skip.If(V2EnvHelper.GetEnv(_env, "CERTINEXT_SYNC_PRODUCTID_PROBE") != "1" || string.IsNullOrWhiteSpace(ids),
+                "Requires CERTINEXT_SYNC_PRODUCTID_PROBE=1 and CERTINEXT_PROBE_ORDERS.");
+            var wanted = new HashSet<string>(ids.Split(',', System.StringSplitOptions.RemoveEmptyEntries | System.StringSplitOptions.TrimEntries));
+
+            using var v2 = new CERTInextClient(new CERTInextConfig
+            {
+                ApiUrl = V2EnvHelper.GetEnv(_env, "CERTINEXT_API_URL"), UseV2Api = true,
+                OAuthClientId = V2EnvHelper.GetEnv(_env, "CERTINEXT_CLIENT_ID"),
+                OAuthClientSecret = V2EnvHelper.GetEnv(_env, "CERTINEXT_CLIENT_SECRET")
+            });
+
+            var rows = new Dictionary<string, API.V2.OrderReportEntryV2>();
+            int total = 0;
+            await foreach (var row in v2.ListOrdersV2Async())
+            {
+                total++;
+                if (wanted.Contains(row.OrderNumber)) rows[row.OrderNumber] = row;
+            }
+            _output.WriteLine($"Report rows read: {total}");
+
+            foreach (string id in wanted.OrderBy(x => x))
+            {
+                string report = "not listed by /reports/orders";
+                if (rows.TryGetValue(id, out var r))
+                {
+                    int? mapped = CERTInextCAPlugin.MapV2ReportStatusToDisposition(r.OrderStatus, r.CertificateStatus);
+                    report = $"'{r.OrderStatus} | {r.CertificateStatus}' product={r.ProductCode} orderDate={r.OrderDate} " +
+                             $"mapped={(mapped?.ToString() ?? "null (Track fallback)")}";
+                }
+                string track;
+                try
+                {
+                    var (family, st) = await v2.ResolveAndTrackOrderV2WithFamilyAsync(id);
+                    track = $"family={family}, status={st.Status}, orderState={st.OrderState}, certificateState={st.CertificateState}";
+                }
+                catch (System.Exception ex)
+                {
+                    track = $"{ex.GetType().Name}: {ex.Message}";
+                }
+                _output.WriteLine($"{id}: report {report} -> Track: {track}");
+            }
+        }
     }
 }
