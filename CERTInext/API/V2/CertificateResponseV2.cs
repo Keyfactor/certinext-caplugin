@@ -147,10 +147,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
 
         /// <summary>
         /// CERTInext's free-text certificate state (live values seen: "Approved by System",
-        /// "Certificate Generated", "System Error"). Undocumented vocabulary: for diagnostics and
-        /// log lines only, never branch logic on it. Notably an order can report
-        /// <see cref="Status"/> "issued" while this still reads "Approved by System" and the
-        /// certificate cannot be downloaded yet (Download Certificate answers 422 EMS-1165).
+        /// "Certificate Generated", "System Error", "Pending for Approver"). Undocumented vocabulary,
+        /// used for diagnostics and log lines, plus one decision: <c>GetSingleRecord</c> returns an
+        /// order pending when <see cref="Status"/> is "issued", Download Certificate answers 422
+        /// EMS-1165, and this value maps to pending (same text as the report's certificateStatus).
+        /// Notably an order can report "issued" while this still reads "Approved by System".
         /// </summary>
         [JsonPropertyName("certificateState")]
         public string CertificateState { get; set; }
