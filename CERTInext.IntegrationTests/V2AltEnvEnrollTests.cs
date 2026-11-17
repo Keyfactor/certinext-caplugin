@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// V2 DV enrollment against an account described by an arbitrary env file, rather than
+// V2 SSL enrollment against an account described by an arbitrary env file, rather than
 // ~/.env_certinext[_v2]. Covers the plugin path and the equivalent direct API call, plus
 // read-only probes of the account's catalog and group membership. Orders placed here are
 // deliberately NOT revoked or cancelled afterwards.
@@ -29,6 +29,8 @@ using Keyfactor.AnyGateway.Extensions;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.PKI.Enums;
 using Keyfactor.PKI.Enums.EJBCA;
+using Org.BouncyCastle.Asn1;
+using Org.BouncyCastle.Asn1.Pkcs;
 using Org.BouncyCastle.Asn1.X509;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Generators;
@@ -55,6 +57,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     ///     domain as a SAN on the plugin path) instead of the single name.</item>
     ///   <item><c>CERTINEXT_ALT_ENV_GROUP_NUMBER</c> overrides the file's group;
     ///     <c>CERTINEXT_ALT_ENV_OMIT_GROUP=1</c> sends none (the credential's default group).</item>
+    ///   <item><c>CERTINEXT_ALT_ENV_EXTRA_SANS</c> — comma-separated extra DNS names (UCC order).</item>
+    ///   <item><c>CERTINEXT_ALT_ENV_VARIANT=ov|ev</c> and <c>CERTINEXT_ALT_ENV_ORG_NUMBER</c> — direct API test only:
+    ///     an OV/EV order with an <c>organization</c> block (org falls back to the file's CERTINEXT_ORG_NUMBER).</item>
     ///   <item><c>CERTINEXT_ALT_ENV_PRODUCT_CODE</c> — optional ProductCode override.</item>
     ///   <item><c>CERTINEXT_ALT_ENV_ORDER_ID</c> — plugin test only: re-read an existing order
     ///     instead of placing a new one.</item>
@@ -109,6 +114,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         private static bool WantWildcard => Opt("CERTINEXT_ALT_ENV_WILDCARD") == "1";
+
+        /// <summary>CERTINEXT_ALT_ENV_EXTRA_SANS (comma-separated): extra DNS names, which make the order UCC.</summary>
+        private static string[] ExtraSans =>
+            (Opt("CERTINEXT_ALT_ENV_EXTRA_SANS") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         /// <summary>Plugin config for the alt env account (V2, DCV off).</summary>
         private static CERTInextConfig BuildPluginConfig(Dictionary<string, string> env, int syncLookbackHours = 1)
@@ -181,14 +191,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private static string ScrubEmails(string s) =>
             s == null ? null : Regex.Replace(s, @"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", "<email>");
 
-        private static string GenerateCsrPem(string commonName)
+        /// <summary>RSA-2048 CSR with CN=<paramref name="commonName"/> and every name in <paramref name="dnsSans"/> as a DNS SAN.</summary>
+        private static string GenerateCsrPem(string commonName, IEnumerable<string> dnsSans)
         {
             var keyGen = new RsaKeyPairGenerator();
             keyGen.Init(new KeyGenerationParameters(new SecureRandom(), 2048));
             var keyPair = keyGen.GenerateKeyPair();
 
+            var names = new GeneralNames(dnsSans.Select(d => new GeneralName(GeneralName.DnsName, d)).ToArray());
+            var extGen = new X509ExtensionsGenerator();
+            extGen.AddExtension(X509Extensions.SubjectAlternativeName, false, names);
+            var attrs = new DerSet(new AttributePkcs(
+                PkcsObjectIdentifiers.Pkcs9AtExtensionRequest, new DerSet(extGen.Generate())));
+
             var csr = new Pkcs10CertificationRequest(
-                "SHA256withRSA", new X509Name($"CN={commonName}"), keyPair.Public, null, keyPair.Private);
+                "SHA256withRSA", new X509Name($"CN={commonName}"), keyPair.Public, attrs, keyPair.Private);
 
             return "-----BEGIN CERTIFICATE REQUEST-----\n"
                 + Convert.ToBase64String(csr.GetEncoded(), Base64FormattingOptions.InsertLineBreaks)
@@ -247,11 +264,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Direct <c>POST /ssl-certificates</c>, bypassing the plugin: DV, CSR inline, and no
-        /// X-Product-Code unless CERTINEXT_ALT_ENV_PRODUCT_CODE is set.
+        /// Direct <c>POST /ssl-certificates</c>, bypassing the plugin: CSR inline, and no
+        /// X-Product-Code unless CERTINEXT_ALT_ENV_PRODUCT_CODE is set. DV by default;
+        /// CERTINEXT_ALT_ENV_VARIANT=ov (or ev) adds an <c>organization</c> block from
+        /// CERTINEXT_ALT_ENV_ORG_NUMBER, else the file's CERTINEXT_ORG_NUMBER.
         /// </summary>
         [SkippableFact]
-        public async Task Raw_PlaceDvOrder_FromAltEnvFile()
+        public async Task Raw_PlaceSslOrder_FromAltEnvFile()
         {
             string baseName = RequireOrderDomain();
             var env = LoadAltEnv();
@@ -265,21 +284,30 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             string email = Get(env, "CERTINEXT_REQUESTOR_EMAIL");
             string phone = "+1" + Get(env, "CERTINEXT_REQUESTOR_MOBILE", "0000000000");
             string domain = WantWildcard ? $"*.{baseName}" : baseName;
+            string variant = Opt("CERTINEXT_ALT_ENV_VARIANT") is { Length: > 0 } v ? v.ToLowerInvariant() : "dv";
 
             var body = new Dictionary<string, object>
             {
-                ["productVariant"] = "dv",
+                ["productVariant"] = variant,
                 ["emailNotifications"] = "consent-only",
                 ["requestor"] = new { name, email, phone },
-                ["certificate"] = new { domain, autoSecureWww = false },
+                ["certificate"] = ExtraSans.Length > 0
+                    ? new { domain, autoSecureWww = false, additionalDomains = ExtraSans }
+                    : (object)new { domain, autoSecureWww = false },
                 ["subscription"] = new { validityYears = 1, autoRenew = false, renewBeforeDays = 30 },
                 ["agreement"] = new { signerName = name, signerPlace = "Gateway Lab", accepted = true },
                 ["technicalPointOfContact"] = new { name, email, phone, designation = "Technical Contact" },
-                ["csr"] = GenerateCsrPem(domain),
+                ["csr"] = GenerateCsrPem(domain, new[] { domain }.Concat(ExtraSans)),
                 ["remarks"] = "Keyfactor plugin test (direct API).",
             };
             if (group != null)
                 body["groupNumber"] = group;
+            if (variant != "dv")
+            {
+                string org = Opt("CERTINEXT_ALT_ENV_ORG_NUMBER") is { Length: > 0 } o ? o : Get(env, "CERTINEXT_ORG_NUMBER");
+                org.Should().NotBeNullOrWhiteSpace("an OV/EV order needs CERTINEXT_ALT_ENV_ORG_NUMBER or CERTINEXT_ORG_NUMBER");
+                body["organization"] = new { organizationNumber = org, preVetted = true };
+            }
 
             using var api = V2RawHttpHelpers.NewApiClient(apiUrl.TrimEnd('/'), TimeSpan.FromSeconds(120));
             var req = new RestRequest(Constants.ApiV2.SslCertificatesPath, Method.Post);
@@ -291,7 +319,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var resp = await api.ExecuteAsync(req);
 
             string corr = resp.Headers?.FirstOrDefault(h => string.Equals(h.Name, "x-correlation-id", StringComparison.OrdinalIgnoreCase))?.Value?.ToString();
-            _output.WriteLine($"POST {Constants.ApiV2.SslCertificatesPath} domain={domain} group={group ?? "(omitted)"} " +
+            _output.WriteLine($"POST {Constants.ApiV2.SslCertificatesPath} variant={variant} domain={domain} " +
+                              $"additionalDomains=[{string.Join(", ", ExtraSans)}] group={group ?? "(omitted)"} " +
                               $"productCode={(string.IsNullOrWhiteSpace(productCode) ? "(none)" : productCode)} " +
                               $"-> {(int)resp.StatusCode} x-correlation-id={corr}\n{ScrubEmails(resp.Content)}");
             resp.IsSuccessful.Should().BeTrue($"the order should be accepted; response: {ScrubEmails(resp.Content)}");
@@ -325,7 +354,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 parameters[Constants.EnrollmentParam.ProductCode] = productCode;
 
             string commonName = WantWildcard ? $"*.{baseName}" : baseName;
-            string[] dnsSans = WantWildcard ? new[] { commonName, baseName } : new[] { commonName };
+            string[] dnsSans = (WantWildcard ? new[] { commonName, baseName } : new[] { commonName })
+                .Concat(ExtraSans).ToArray();
+            bool ucc = ExtraSans.Length > 0;
             _output.WriteLine($"ProductCode: {(string.IsNullOrWhiteSpace(productCode) ? "(none)" : productCode)}, " +
                               $"SANs requested: {string.Join(", ", dnsSans)}");
 
@@ -333,12 +364,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var enrollResult = !string.IsNullOrWhiteSpace(existingOrderId)
                 ? new EnrollmentResult { CARequestID = existingOrderId, Status = (int)EndEntityStatus.EXTERNALVALIDATION }
                 : await plugin.Enroll(
-                    csr:            GenerateCsrPem(commonName),
+                    csr:            GenerateCsrPem(commonName, dnsSans),
                     subject:        $"CN={commonName}",
                     san:            new Dictionary<string, string[]> { ["dns"] = dnsSans },
                     productInfo:    new EnrollmentProductInfo
                     {
-                        ProductID         = WantWildcard ? Constants.Products.DvSslWildcard : Constants.Products.DvSsl,
+                        ProductID         = (WantWildcard, ucc) switch
+                        {
+                            (true, true)   => Constants.Products.DvSslWildcardUcc,
+                            (true, false)  => Constants.Products.DvSslWildcard,
+                            (false, true)  => Constants.Products.DvSslUcc,
+                            (false, false) => Constants.Products.DvSsl,
+                        },
                         ProductParameters = parameters
                     },
                     requestFormat:  RequestFormat.PKCS10,
@@ -385,11 +422,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             int hours = int.TryParse(Opt("CERTINEXT_ALT_ENV_SYNC_LAST_HOURS"), out int h) && h > 0 ? h : 1;
             var config = BuildPluginConfig(env, syncLookbackHours: hours);
-            using var client = new CERTInextClient(config);
-            var plugin = new CERTInextCAPlugin(client, config);
 
+            // Route plugin logs to the test output (before the plugin is constructed) so held-back
+            // and skipped orders are visible in the sync summary.
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
+            List<AnyCAPluginCertificate> records;
             DateTime lastSync = DateTime.UtcNow.AddHours(-hours);
-            var records = await RunSyncAsync(plugin, lastSync, fullSync: false);
+            try
+            {
+                using var client = new CERTInextClient(config);
+                var plugin = new CERTInextCAPlugin(client, config);
+                records = await RunSyncAsync(plugin, lastSync, fullSync: false);
+            }
+            finally
+            {
+                restoreLogging();
+            }
             _output.WriteLine($"Incremental sync (lastSync={lastSync:O}, lookback={hours}h) returned {records.Count} record(s).");
             foreach (var r in records)
                 _output.WriteLine($"  CARequestID={r.CARequestID}, Status={r.Status}, CertBytes={r.Certificate?.Length ?? 0}, ProductID={r.ProductID}");
