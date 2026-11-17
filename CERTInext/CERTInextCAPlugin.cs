@@ -1771,6 +1771,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// The account's Wildcard UCC product code for an SSL <paramref name="productVariant"/>, read
+        /// from the live V2 catalog (the single active product whose productTypeID is
+        /// <see cref="Constants.ApiV2.WildcardUccProductTypeIdByVariant"/>'s entry for the variant).
+        /// Returns <c>(code, null)</c> on success, else <c>(null, reason)</c>: the variant has no
+        /// wildcard product (EV), the catalog could not be read, or it lists zero or several matches.
+        /// Each reason tells the user to set ProductCode on the template, which skips this lookup.
+        /// </summary>
+        private async Task<(string ProductCode, string Error)> ResolveWildcardUccProductCodeAsync(string productVariant)
+        {
+            const string setCode = "Set ProductCode on the template to the account's Wildcard UCC product code.";
+            if (!Constants.ApiV2.WildcardUccProductTypeIdByVariant.TryGetValue(productVariant ?? string.Empty, out string typeId))
+                return (null, $"Product variant '{productVariant}' has no wildcard product.");
+
+            List<ProductDetail> catalog;
+            try
+            {
+                catalog = await _client.GetProductDetailsV2Async();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "EnrollV2Async: could not read the V2 product catalog to resolve a Wildcard UCC product.");
+                return (null, $"The product catalog could not be read to find the Wildcard UCC product. {setCode}");
+            }
+
+            var matches = (catalog ?? new List<ProductDetail>())
+                .Where(p => p.Active && string.Equals(p.ProductTypeId, typeId, StringComparison.Ordinal)
+                            && !string.IsNullOrWhiteSpace(p.ProductCode))
+                .Select(p => p.ProductCode)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (matches.Count == 1)
+            {
+                _logger.LogInformation(
+                    "EnrollV2Async: resolved Wildcard UCC product {ProductCode} (productTypeID {TypeId}) for a wildcard SAN " +
+                    "on a non-wildcard domain.", matches[0], typeId);
+                return (matches[0], null);
+            }
+
+            return (null, matches.Count == 0
+                ? $"The account's catalog has no active Wildcard UCC product (productTypeID {typeId}). {setCode}"
+                : $"The account's catalog has several active Wildcard UCC products ({string.Join(", ", matches)}). {setCode}");
+        }
+
+        /// <summary>
         /// Validates the template parameters a V2 <c>private-pki</c> order needs
         /// beyond the SSL ones, before any CA call. Shared by <see cref="EnrollV2Async"/> (fail
         /// fast with a FAILED result) and <see cref="ValidateProductInfo"/> (reject at template
@@ -2170,6 +2214,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             //    beyond the primary domain (its www. variant and a wildcard's bare apex are not
             //    "extra"), which is what makes the wrapper pick a UCC product — so those extras go
             //    out in additionalDomains instead of failing the single-domain guard.
+            //    One exception reads the catalog: a wildcard SAN on a non-wildcard domain (CN =
+            //    apex, SAN = *.apex) needs a Wildcard UCC product the wrapper cannot infer, so its
+            //    code is resolved and sent (ResolveWildcardUccProductCodeAsync).
             //
             // Private PKI: ProductCode is likewise optional (the wrapper resolves it from
             // `variant`); the catalog is never fetched because its only use on this path — SSL UCC
@@ -2209,12 +2256,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var extraDnsSans = FindExtraDnsSans(csr, san, domain, isWildcardProduct);
                 isUccProduct = templateIsUccType || extraDnsSans.Count > 0;
 
+                // Wildcard only in the SANs (CN = the apex, SAN = *.apex): the wrapper keys
+                // "wildcard" on certificate.domain alone, so it resolves a plain UCC product and
+                // rejects the wildcard additional domain (EMS-1173). Sending the wildcard as the
+                // domain instead is rejected too, because the domain must match the CSR CN
+                // (EMS-1056). Both confirmed live (V2WildcardSanShapeTests). The order needs a
+                // Wildcard UCC product, which only an explicit X-Product-Code selects, so resolve
+                // the account's one from the catalog. Fail before placing an order when that can't
+                // be done unambiguously.
+                if (!isWildcardProduct && extraDnsSans.Any(s => s.StartsWith("*.", StringComparison.Ordinal)))
+                {
+                    string wildcardUccError;
+                    (productCode, wildcardUccError) = await ResolveWildcardUccProductCodeAsync(sslProductVariant);
+                    if (wildcardUccError != null)
+                    {
+                        _logger.LogError(
+                            "EnrollV2Async rejected an order with a wildcard SAN on a non-wildcard domain '{Domain}': " +
+                            "{Reason}", LogSanitizer.Strip(domain), wildcardUccError);
+                        _logger.MethodExit(LogLevel.Debug);
+                        return new EnrollmentResult
+                        {
+                            CARequestID   = string.Empty,
+                            Certificate   = null,
+                            Status        = (int)EndEntityStatus.FAILED,
+                            StatusMessage = $"V2 enrollment rejected: the request carries a wildcard SAN but its " +
+                                            $"primary domain ('{domain}', the CSR CN) is not a wildcard, which needs " +
+                                            $"a Wildcard UCC product. {wildcardUccError} No order was placed."
+                        };
+                    }
+                }
+
                 _logger.LogInformation(
-                    "EnrollV2Async: no explicit ProductCode — no X-Product-Code header will be sent; CERTInext " +
-                    "resolves the product from the variant, wildcard shape and additional domains. " +
-                    "ProductId={ProductId}, Wildcard={Wildcard}, Ucc={Ucc} (TemplateUccType={TemplateUccType}, " +
-                    "ExtraDnsSanCount={ExtraCount})",
-                    ep.ProductId, isWildcardProduct, isUccProduct, templateIsUccType, extraDnsSans.Count);
+                    "EnrollV2Async: no explicit ProductCode on the template. CERTInext resolves the product from " +
+                    "the variant, wildcard shape and additional domains unless a wildcard SAN on a non-wildcard " +
+                    "domain needed a Wildcard UCC code. ProductId={ProductId}, Wildcard={Wildcard}, Ucc={Ucc} " +
+                    "(TemplateUccType={TemplateUccType}, ExtraDnsSanCount={ExtraCount}), " +
+                    "XProductCode={ProductCode}",
+                    ep.ProductId, isWildcardProduct, isUccProduct, templateIsUccType, extraDnsSans.Count,
+                    productCode ?? "(none)");
             }
 
             // Non-UCC V2 products support only a single domain plus autoSecureWww's www.<domain>

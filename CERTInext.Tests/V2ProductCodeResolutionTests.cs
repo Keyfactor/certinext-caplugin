@@ -224,6 +224,105 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             cap.Request.Certificate.AdditionalDomains.Should().BeNull();
         }
 
+        private static List<ProductDetail> SandboxSslCatalog() => new List<ProductDetail>
+        {
+            new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true }, // DV SSL
+            new ProductDetail { ProductCode = "843", ProductTypeId = "14", Active = true }, // DV SSL Wildcard
+            new ProductDetail { ProductCode = "844", ProductTypeId = "15", Active = true }, // DV SSL UCC
+            new ProductDetail { ProductCode = "845", ProductTypeId = "21", Active = true }, // DV SSL Wildcard UCC
+            new ProductDetail { ProductCode = "849", ProductTypeId = "22", Active = true }, // OV SSL Wildcard UCC
+        };
+
+        // CN = apex, wildcard only in the SANs: the wrapper would resolve a plain UCC product and
+        // reject the wildcard additional domain (EMS-1173), and a wildcard domain that differs from
+        // the CN is rejected too (EMS-1056), so the plugin must name the Wildcard UCC product.
+        [Theory]
+        [InlineData("DV SSL", null, "845")]
+        [InlineData("OV SSL", "ORG-1", "849")]
+        public async Task NoExplicitProductCode_WildcardSanOnApexCn_SendsTheCatalogsWildcardUccCode(
+            string productId, string organizationNumber, string expectedCode)
+        {
+            var (mock, cap) = NewSslMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>())).ReturnsAsync(SandboxSslCatalog());
+            var plugin = new CERTInextCAPlugin(mock.Object, Config(organizationNumber: organizationNumber));
+
+            var result = await EnrollAsync(plugin, ProductInfo(productId), "example.com", "*.example.com");
+
+            result.CARequestID.Should().Be(OrderId);
+            cap.ProductCode.Should().Be(expectedCode);
+            cap.Request.Certificate.Domain.Should().Be("example.com", "certificate.domain must stay equal to the CSR CN");
+            cap.Request.Certificate.AdditionalDomains.Should().Equal("*.example.com");
+        }
+
+        [Fact]
+        public async Task NoExplicitProductCode_WildcardSanOnApexCn_WithAnotherName_StillWildcardUcc()
+        {
+            var (mock, cap) = NewSslMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>())).ReturnsAsync(SandboxSslCatalog());
+            var plugin = new CERTInextCAPlugin(mock.Object, Config());
+
+            await EnrollAsync(plugin, ProductInfo(Constants.Products.DvSsl), "example.com", "*.example.com", "other.example.org");
+
+            cap.ProductCode.Should().Be("845");
+            cap.Request.Certificate.AdditionalDomains.Should().BeEquivalentTo("*.example.com", "other.example.org");
+        }
+
+        public static IEnumerable<object[]> UnresolvableCatalogs() => new[]
+        {
+            new object[] { "none", new List<ProductDetail> { new ProductDetail { ProductCode = "844", ProductTypeId = "15", Active = true } } },
+            new object[] { "inactive", new List<ProductDetail> { new ProductDetail { ProductCode = "845", ProductTypeId = "21", Active = false } } },
+            new object[] { "several", new List<ProductDetail>
+            {
+                new ProductDetail { ProductCode = "845",  ProductTypeId = "21", Active = true },
+                new ProductDetail { ProductCode = "1021", ProductTypeId = "21", Active = true },
+            } },
+        };
+
+        [Theory]
+        [MemberData(nameof(UnresolvableCatalogs))]
+        public async Task NoExplicitProductCode_WildcardSanOnApexCn_NoSingleWildcardUccProduct_FailsWithoutPlacing(
+            string label, List<ProductDetail> catalog)
+        {
+            var (mock, cap) = NewSslMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>())).ReturnsAsync(catalog);
+            var plugin = new CERTInextCAPlugin(mock.Object, Config());
+
+            var result = await EnrollAsync(plugin, ProductInfo(Constants.Products.DvSsl), "example.com", "*.example.com");
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED, label);
+            result.StatusMessage.Should().Contain("Wildcard UCC").And.Contain("ProductCode");
+            cap.Placed.Should().BeFalse();
+        }
+
+        [Fact]
+        public async Task NoExplicitProductCode_WildcardSanOnApexCn_CatalogUnavailable_FailsWithoutPlacing()
+        {
+            var (mock, cap) = NewSslMock();
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new Exception("catalog down"));
+            var plugin = new CERTInextCAPlugin(mock.Object, Config());
+
+            var result = await EnrollAsync(plugin, ProductInfo(Constants.Products.DvSsl), "example.com", "*.example.com");
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().Contain("catalog could not be read");
+            cap.Placed.Should().BeFalse();
+        }
+
+        [Fact]
+        public async Task NoExplicitProductCode_WildcardSanOnEv_FailsWithoutReadingTheCatalog()
+        {
+            var (mock, cap) = NewSslMock();
+            var plugin = new CERTInextCAPlugin(mock.Object, Config(organizationNumber: "ORG-1"));
+
+            var result = await EnrollAsync(plugin, ProductInfo(Constants.Products.EvSsl), "example.com", "*.example.com");
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().Contain("no wildcard product");
+            cap.Placed.Should().BeFalse();
+            mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Never);
+        }
+
         [Fact]
         public async Task OrderCreated_LogsResolvedProductCodeFromTheResponse()
         {

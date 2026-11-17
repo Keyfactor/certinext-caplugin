@@ -65,6 +65,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_V2_INLINE_CSR_EXPERIMENT",
                 // V2 certificate-lifetime probe (V2ValidityProbeTests) — places real sandbox orders.
                 "CERTINEXT_PROBE_VALIDITY",
+                // Wildcard-in-the-SANs shape probe (V2WildcardSanShapeTests) — places real sandbox orders.
+                "CERTINEXT_V2_WILDCARD_SAN_PROBE",
             };
 
         // ---------------------------------------------------------------------------
