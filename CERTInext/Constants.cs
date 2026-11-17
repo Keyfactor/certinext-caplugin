@@ -147,6 +147,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // V2 API enrollment parameters
             public const string ProductFamily = "ProductFamily";  // V2: "ssl", "private-pki", or "signature"
             public const string ProductVariant = "ProductVariant"; // V2: ssl "dv"/"ov"/"ev"; private-pki "intranet-ssl"/"igtf-host"
+
+            // V2 OV only: register a new Organization Representative on the order
+            // (organization.useNewOrgRepresentative + organizationRepresentative). Name and Email
+            // together turn it on; the other three are optional. Personal data: never logged.
+            public const string OrgRepresentativeName = "OrgRepresentativeName";
+            public const string OrgRepresentativeEmail = "OrgRepresentativeEmail";
+            public const string OrgRepresentativePhone = "OrgRepresentativePhone";
+            public const string OrgRepresentativeDesignation = "OrgRepresentativeDesignation";
+            public const string OrgRepresentativeEmployeeId = "OrgRepresentativeEmployeeId";
         }
 
         public static class Products

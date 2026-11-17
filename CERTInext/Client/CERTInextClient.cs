@@ -3482,6 +3482,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             "tpcName", "tpcIsdCode", "tpcMobileNumber", "signerPlace", "signedPlace", "signerip", "phone", "designation",
             "firstName", "lastName", "subjectDisplayName", "identityDocumentType", "identificationNumber",
             "streetAddress1", "streetAddress2", "locality", "postalCode",
+            // V2 OV organization representative (create body, Track Order, create response). Its name /
+            // email / phone / designation use the bare keys above; employeeId is new. The two block keys
+            // only match if CERTInext ever returns them as strings (defence in depth; the documented
+            // shape is an object, whose fields the bare keys cover).
+            "employeeId", "organizationRepresentative", "pendingOrganizationRepresentative",
             // The V2 SSL create body carries the PKCS#10 CSR inline ("csr") when V2InlineCsr is on; its
             // subject is requester data.
             "csr"
@@ -3526,8 +3531,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             foreach (var key in PersonalOtherFieldNames)
                 body = RedactJsonField(body, key, _ => "***REDACTED***");
 
+            // CA error text can echo a submitted value: EMS-1317 names the organization representative's
+            // email in problem+json `detail`. Mask emails inside these free-text values, keep the rest.
+            foreach (var key in ErrorTextFieldNames)
+                body = RedactJsonField(body, key, LogSanitizer.MaskEmailsInText);
+
             return MaskEmailsInSanContainers(body);
         }
+
+        // Exact JSON keys whose string value is CA-written error text (V2 problem+json title/detail, a
+        // nested errors[] entry's message, V1 meta.errorMessage) rather than a single personal field.
+        private static readonly string[] ErrorTextFieldNames = { "detail", "title", "message", "errorMessage" };
 
         // Exact JSON keys whose value is an array of SAN strings. V1 additionalDomains carries every
         // requested SAN regardless of type, emails included.

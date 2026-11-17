@@ -889,5 +889,68 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             string input = "additionalDomains=alice@example.com&x=1";
             CERTInextClient.RedactPersonalData(input).Should().Be(input);
         }
+
+        // ---------------------------------------------------------------------------
+        // V2 OV organization representative (create body, create response)
+        // ---------------------------------------------------------------------------
+
+        private const string RepName = "Rita Representative";
+        private const string RepEmail = "rita.rep@example.com";
+        private const string RepPhone = "+1 (555) 010-0199";
+        private const string RepDesignation = "Chief Security Officer";
+        private const string RepEmployeeId = "EMP-77231";
+
+        [Fact]
+        public void RedactPersonalData_V2OrganizationRepresentativeBlock_RedactsEveryField()
+        {
+            string body = System.Text.Json.JsonSerializer.Serialize(new Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2CreateSslOrderRequest
+            {
+                ProductVariant = "ov",
+                Organization = new Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2OrganizationParams
+                {
+                    OrganizationNumber = "1234567",
+                    UseNewOrgRepresentative = true,
+                    OrganizationRepresentative = new Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2OrganizationRepresentative
+                    {
+                        Name = RepName, Email = RepEmail, Phone = RepPhone, Designation = RepDesignation, EmployeeId = RepEmployeeId
+                    }
+                },
+                Certificate = new Keyfactor.Extensions.CAPlugin.CERTInext.API.V2.V2CertificateParams { Domain = "example.com" }
+            });
+
+            string output = CERTInextClient.RedactPersonalData(body);
+
+            output.Should().NotContain(RepName).And.NotContain(RepEmail).And.NotContain(RepDesignation)
+                .And.NotContain(RepEmployeeId).And.NotContain("010-0199");
+            output.Should().Contain("\"email\":\"r***@example.com\"");
+            output.Should().Contain("\"employeeId\":\"***REDACTED***\"");
+            output.Should().Contain("\"useNewOrgRepresentative\":true").And.Contain("\"organizationNumber\":\"1234567\"");
+        }
+
+        [Fact]
+        public void RedactPersonalData_V2CreateResponse_PendingRepresentative_RedactsEveryField()
+        {
+            // The pending block's shape is undocumented; any of these key spellings must be caught.
+            string body =
+                "{\"orderId\":\"1234567890\",\"status\":\"pending-organization-verification\"," +
+                "\"organizationRepresentativeStatus\":\"pending-approval\"," +
+                "\"pendingOrganizationRepresentative\":{\"name\":\"" + RepName + "\",\"email\":\"" + RepEmail + "\"," +
+                "\"phone\":\"" + RepPhone + "\",\"designation\":\"" + RepDesignation + "\",\"employeeId\":\"" + RepEmployeeId + "\"}}";
+
+            string output = CERTInextClient.RedactPersonalData(body);
+
+            output.Should().NotContain(RepName).And.NotContain(RepEmail).And.NotContain(RepDesignation)
+                .And.NotContain(RepEmployeeId).And.NotContain("010-0199");
+            output.Should().Contain("\"organizationRepresentativeStatus\":\"pending-approval\"");
+        }
+
+        [Fact]
+        public void RedactPersonalData_RepresentativeBlockAsString_IsRedactedWhole()
+        {
+            string output = CERTInextClient.RedactPersonalData(
+                "{\"pendingOrganizationRepresentative\":\"" + RepName + " <" + RepEmail + ">\"}");
+
+            output.Should().Be("{\"pendingOrganizationRepresentative\":\"***REDACTED***\"}");
+        }
     }
 }

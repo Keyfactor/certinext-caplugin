@@ -853,9 +853,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 // placement as the private-pki check above, so a template that would silently
                 // send a DV-shaped body for an OV/EV product (or vice versa) is rejected at save
                 // time instead of at enroll.
+                string resolvedSslVariant = null;
                 if (isSsl)
                 {
-                    string variantError = ResolveSslProductVariant(params_, out _);
+                    string variantError = ResolveSslProductVariant(params_, out resolvedSslVariant);
                     if (variantError != null)
                     {
                         _logger.LogWarning(
@@ -863,6 +864,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                             variantError, params_.ProductId);
                         throw new AnyCAValidationException(variantError);
                     }
+                }
+
+                // A new OV Organization Representative: same rules EnrollV2CoreAsync enforces, so a
+                // template that can never enroll is rejected at save time. V1 has no such field.
+                if (useV2)
+                {
+                    string repError = ValidateOrgRepresentativeParams(
+                        params_, isSsl, resolvedSslVariant, tempConfig.OrganizationNumber, out _);
+                    if (repError != null)
+                    {
+                        _logger.LogWarning(
+                            "Product/profile validation failed — {Reason} ProductID={ProductID}",
+                            repError, params_.ProductId);
+                        throw new AnyCAValidationException(repError);
+                    }
+                }
+                else if (params_.HasAnyOrgRepresentativeParam)
+                {
+                    _logger.LogWarning(
+                        "The OrgRepresentative* template parameters apply to the V2 API only and are ignored on V1. " +
+                        "ProductID={ProductID}", params_.ProductId);
                 }
 
                 // V2 catalog validation mirrors ValidateCAConnectionInfo's UseV2Api branch:
@@ -1898,6 +1920,72 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// Validates the template's <c>OrgRepresentative*</c> parameters for a V2 SSL order and builds the
+        /// <c>organizationRepresentative</c> block. Returns null with a null <paramref name="representative"/>
+        /// when none is set (the order keeps the organization's existing representative). Otherwise the
+        /// rules mirror the CA's, so a bad template fails before any CA call: OV only (EMS-1315 on DV/EV),
+        /// a pre-vetted organization (EMS-1316), name and email both set (EMS-1319 / EMS-1320; the other
+        /// three would otherwise be dropped silently), one email address, and a phone of 6-15 digits with
+        /// optional punctuation and leading '+' (EMS-1321). Messages name parameters, never their values.
+        /// Shared by <see cref="ValidateProductInfo"/> and <see cref="EnrollV2CoreAsync"/>.
+        /// </summary>
+        internal static string ValidateOrgRepresentativeParams(
+            EnrollmentParams ep, bool isSsl, string sslProductVariant, string organizationNumber,
+            out V2OrganizationRepresentative representative)
+        {
+            representative = null;
+            if (!ep.HasAnyOrgRepresentativeParam)
+                return null;
+
+            const string names = "OrgRepresentative* template parameters";
+            if (!isSsl || !string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantOv, StringComparison.OrdinalIgnoreCase))
+                return $"The {names} apply to OV SSL/TLS orders only; CERTInext rejects a new organization " +
+                       "representative on DV and EV orders (EMS-1315). Remove them from this template.";
+
+            if (string.IsNullOrWhiteSpace(organizationNumber))
+                return $"The {names} need a pre-vetted organization (EMS-1316), but the CA connector's " +
+                       "OrganizationNumber setting is empty.";
+
+            if (ep.OrgRepresentativeName.Length == 0 || ep.OrgRepresentativeEmail.Length == 0)
+                return $"'{Constants.EnrollmentParam.OrgRepresentativeName}' and " +
+                       $"'{Constants.EnrollmentParam.OrgRepresentativeEmail}' must both be set to register a new " +
+                       "organization representative (EMS-1319 / EMS-1320). Set both, or clear all the " +
+                       $"{names} to keep the organization's existing representative.";
+
+            if (!LooksLikeEmailAddress(ep.OrgRepresentativeEmail))
+                return $"'{Constants.EnrollmentParam.OrgRepresentativeEmail}' must be a single email address.";
+
+            if (ep.OrgRepresentativePhone.Length > 0 && !IsValidRepresentativePhone(ep.OrgRepresentativePhone))
+                return $"'{Constants.EnrollmentParam.OrgRepresentativePhone}' must contain 6-15 digits, " +
+                       "optionally with a leading '+' and spaces, dashes, dots or parentheses (EMS-1321).";
+
+            representative = new V2OrganizationRepresentative
+            {
+                Name        = ep.OrgRepresentativeName,
+                Email       = ep.OrgRepresentativeEmail,
+                Phone       = ep.OrgRepresentativePhone.Length > 0 ? ep.OrgRepresentativePhone : null,
+                Designation = ep.OrgRepresentativeDesignation.Length > 0 ? ep.OrgRepresentativeDesignation : null,
+                EmployeeId  = ep.OrgRepresentativeEmployeeId.Length > 0 ? ep.OrgRepresentativeEmployeeId : null
+            };
+            return null;
+        }
+
+        /// <summary>EMS-1321: 6-15 digits; an optional leading '+', and spaces, dashes, dots or parentheses.</summary>
+        internal static bool IsValidRepresentativePhone(string phone)
+        {
+            string p = phone.Trim();
+            if (p.StartsWith("+"))
+                p = p.Substring(1);
+            int digits = 0;
+            foreach (char c in p)
+            {
+                if (c >= '0' && c <= '9') digits++;
+                else if (c != ' ' && c != '-' && c != '.' && c != '(' && c != ')') return false;
+            }
+            return digits >= 6 && digits <= 15;
+        }
+
+        /// <summary>
         /// Dispatches all enrollment types through the V2 REST API.
         /// </summary>
         private async Task<EnrollmentResult> EnrollV2Async(
@@ -2112,6 +2200,31 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     OrganizationNumber = _config.OrganizationNumber,
                     PreVetted          = true
                 };
+            }
+
+            // A new OV Organization Representative from the template: validated before any CA call
+            // (same rules as ValidateProductInfo). Without the parameters, both fields stay omitted
+            // and the order keeps the organization's existing representative.
+            string orgRepError = ValidateOrgRepresentativeParams(
+                ep, string.Equals(ep.ProductFamilySlug, Constants.ApiV2.FamilySsl, StringComparison.Ordinal),
+                sslProductVariant, _config.OrganizationNumber, out V2OrganizationRepresentative orgRepresentative);
+            if (orgRepError != null)
+            {
+                _logger.LogWarning("EnrollV2Async rejected an order before any CA call: {Reason}", orgRepError);
+                _logger.MethodExit(LogLevel.Debug);
+                return new EnrollmentResult
+                {
+                    CARequestID   = string.Empty,
+                    Certificate   = null,
+                    Status        = (int)EndEntityStatus.FAILED,
+                    StatusMessage = "V2 enrollment rejected: " + orgRepError
+                };
+            }
+            // Validation passes only for OV with an OrganizationNumber, which is where the block is built.
+            if (orgRepresentative != null && organization != null)
+            {
+                organization.UseNewOrgRepresentative = true;
+                organization.OrganizationRepresentative = orgRepresentative;
             }
 
             // SubscriptionAutoRenew / SubscriptionRenewCriteriaDays — CA connector config that
@@ -2540,6 +2653,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     createResp = await TryReissueV2Async(priorOrderId, csr, additionalDomains, reissue);
                     if (createResp != null)
                         inlineCsr = true; // the reissue body carried the CSR
+                    // The reissue body has no organization block, so a template representative isn't sent.
+                    if (createResp != null && orgRepresentative != null)
+                        _logger.LogInformation(
+                            "V2 reissue of order {PriorOrderId} doesn't send the template's OrgRepresentative* " +
+                            "parameters; the reissued order keeps the original order's organization representative. " +
+                            "NewOrderId={OrderId}", priorOrderId, createResp.OrderId);
                 }
             }
 
@@ -2602,6 +2721,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 orderId, createResp.Status, enrollmentType,
                 string.IsNullOrWhiteSpace(productCode) ? "(none)" : productCode,
                 string.IsNullOrWhiteSpace(createResp.ResolvedProductCode) ? "(not reported)" : createResp.ResolvedProductCode);
+            // New OV Organization Representative: CERTInext says whether the change applied or is queued
+            // for Validation Agent review. The representative's details are personal data: never logged.
+            if (!string.IsNullOrWhiteSpace(createResp.OrganizationRepresentativeStatus) || orgRepresentative != null)
+                _logger.LogInformation(
+                    "V2 order {OrderId}: new organization representative requested. " +
+                    "OrganizationRepresentativeStatus={RepStatus}, PendingOrganizationRepresentativeReturned={PendingReturned}",
+                    orderId,
+                    string.IsNullOrWhiteSpace(createResp.OrganizationRepresentativeStatus)
+                        ? "(not reported)" : LogSanitizer.Strip(createResp.OrganizationRepresentativeStatus),
+                    createResp.PendingOrganizationRepresentative.HasValue
+                        && createResp.PendingOrganizationRepresentative.Value.ValueKind != System.Text.Json.JsonValueKind.Null);
             // Status bookkeeping shared by both flows below.
             V2OrderStatusResponse postCreateStatus = null;
             int disposition = 0;

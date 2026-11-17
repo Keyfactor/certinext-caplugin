@@ -99,6 +99,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.API.V2
         [JsonPropertyName("resolvedProductCode")]
         public string ResolvedProductCode { get; set; }
 
+        /// <summary>
+        /// OV orders sent with <c>useNewOrgRepresentative: true</c>: <c>applied</c>, or
+        /// <c>pending-approval</c> when the organization is already Validation-Agent approved and the
+        /// change of representative of record is queued for review. Only in the spec's prose; the 201
+        /// schema is a bare object.
+        /// </summary>
+        [JsonPropertyName("organizationRepresentativeStatus")]
+        public string OrganizationRepresentativeStatus { get; set; }
+
+        /// <summary>
+        /// Returned with <c>pending-approval</c>. Its shape is undocumented, so it is kept raw (a typed
+        /// mismatch would throw after the order already exists) and only its presence is logged.
+        /// Personal data.
+        /// </summary>
+        [JsonPropertyName("pendingOrganizationRepresentative")]
+        public System.Text.Json.JsonElement? PendingOrganizationRepresentative { get; set; }
+
         [JsonPropertyName("_links")]
         public V2Links Links { get; set; }
     }

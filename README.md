@@ -231,8 +231,20 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 | `SignerName` | Optional | String | Per-template override for the subscriber agreement signer name. When omitted, defaults to the connector-level `RequestorName` (V2: the requestor name). If no name resolves, V1 sends `Keyfactor Gateway` and logs a warning. | `Jane Smith` |
 | `SignerPlace` | Optional | String | Per-template override for the subscriber agreement signer location. When omitted, defaults to the connector-level `SignerPlace`. If neither is set, V1 sends `Gateway` and logs a warning. | `Austin` |
 | `SignerIp` | Optional (V1 only) | String | Per-template override for the subscriber agreement signer IP address. Ignored on V2. When omitted, defaults to the connector-level `SignerIp`. If neither is set, V1 sends `127.0.0.1` and logs a warning; a V1 value that is not an IP address is sent unchanged, with a warning. | `203.0.113.10` |
+| `OrgRepresentativeName` | Optional (V2, OV only) | String | Registers a new Organization Representative on the order (`organization.useNewOrgRepresentative`), together with `OrgRepresentativeEmail`. Leave all five `OrgRepresentative*` parameters blank to keep the organization's existing representative. Personal data: never logged. | `Jane Doe` |
+| `OrgRepresentativeEmail` | Optional (V2, OV only) | String | The new representative's email address; required with `OrgRepresentativeName`. | `jane.doe@example.com` |
+| `OrgRepresentativePhone` | Optional (V2, OV only) | String | The new representative's phone: 6-15 digits, with an optional leading `+` and spaces, dashes, dots or parentheses. | `+1 555 010 0199` |
+| `OrgRepresentativeDesignation` | Optional (V2, OV only) | String | The new representative's job title. | `CISO` |
+| `OrgRepresentativeEmployeeId` | Optional (V2, OV only) | String | The new representative's employee ID. | `E-1042` |
 
 - **Subscription term (V1):** the order's term is the larger of `ValidityYears` and `ValidityDays` rounded up to whole years (365 days = 1 year). Each field counts only when it is set, and a field left at its default (1 year) never overrides the other, so a template saved with only `ValidityDays` keeps its term. Because the larger value wins, a stale larger `ValidityDays` cannot be shortened with `ValidityYears` alone; set `ValidityDays` back to `365`. V2 uses only `ValidityYears`.
+- **New Organization Representative (V2, OV):** setting `OrgRepresentativeName` and `OrgRepresentativeEmail` sends `useNewOrgRepresentative: true` with an `organizationRepresentative` block on the create call. The order is bound to that person. If the organization is already approved by a Validation Agent, CERTInext queues the change of the organization's representative of record for review, and the plugin logs `OrganizationRepresentativeStatus=pending-approval`; otherwise it reports `applied`. The plugin checks CERTInext's rules before any CA call, both when the template is saved and at enrollment:
+  - OV products only; DV and EV are rejected (`EMS-1315`).
+  - The connector needs `OrganizationNumber` (`EMS-1316`).
+  - Name and email must both be set (`EMS-1319`/`EMS-1320`), including when only the phone, designation or employee ID is set.
+  - The email must be a single address, and the phone must contain 6-15 digits (`EMS-1321`).
+
+  An email that is already a representative of the organization is rejected by CERTInext (`EMS-1317`); clear the parameters to keep the existing one. A reissue doesn't send the block, so the reissued order keeps the original order's representative. V1 ignores these parameters, and saving a V1 template that sets them logs a warning. The values are never logged, and are redacted from payload logs unless `LogSensitiveRequestData` is on.
 - **Key types:** larger RSA, ECC P-521, and the Ed25519/Ed448 curves are rejected by the CA (`Invalid key size`).
 
 When `ProductCode` is omitted:
@@ -262,6 +274,11 @@ The V2-only template parameters `ProductFamily` and `ProductVariant` are describ
     * **SignerIp** - V1 ONLY, OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted. If neither is set, V1 sends the placeholder 127.0.0.1 and logs a Warning; a V1 value that is not an IP address is sent unchanged, with a Warning. Ignored on V2 (the V2 agreement block has no signer IP field).
     * **ProductFamily** - V2 ONLY: Product family for this template. Accepted values: 'ssl' (default) or 'private-pki'. 'private-pki' requires a Private PKI ProductVariant. 'signature' (Document Signer) is accepted by the parameter, but Document Signer enrollment is not supported.
     * **ProductVariant** - V2 ONLY: Product variant sent in the V2 order body. ProductFamily 'ssl': 'dv', 'ov', or 'ev' — if omitted, derived from the selected product; an explicit value that contradicts the product fails enrollment. ProductFamily 'private-pki': 'intranet-ssl' or 'igtf-host' (required; no default).
+    * **OrgRepresentativeName** - V2 ONLY, OV only: Name of a new Organization Representative to register on the order. Set together with OrgRepresentativeEmail; both turn on useNewOrgRepresentative. Leave all OrgRepresentative* parameters blank to keep the organization's existing representative. Requires the connector's OrganizationNumber. Personal data: never logged.
+    * **OrgRepresentativeEmail** - V2 ONLY, OV only: Email address of the new Organization Representative. Required with OrgRepresentativeName. An email that is already a representative of the organization is rejected by CERTInext (EMS-1317); leave these parameters blank to use the existing one. Personal data: never logged.
+    * **OrgRepresentativePhone** - V2 ONLY, OV only, optional: Phone number of the new Organization Representative, 6-15 digits with an optional leading '+' and spaces, dashes, dots or parentheses. Needs OrgRepresentativeName and OrgRepresentativeEmail. Personal data: never logged.
+    * **OrgRepresentativeDesignation** - V2 ONLY, OV only, optional: Job title of the new Organization Representative. Needs OrgRepresentativeName and OrgRepresentativeEmail. Personal data: never logged.
+    * **OrgRepresentativeEmployeeId** - V2 ONLY, OV only, optional: Employee ID of the new Organization Representative. Needs OrgRepresentativeName and OrgRepresentativeEmail. Personal data: never logged.
 
 ## CERTInext API Setup
 
