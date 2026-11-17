@@ -266,7 +266,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Drives <see cref="CERTInextCAPlugin.ValidateProductInfo"/> (not just the client
-        /// method) end-to-end in V2 mode against the configured product code. Read-only.
+        /// method) end-to-end in V2 mode with the configured product code. V2 doesn't check a
+        /// ProductCode against the catalog, so this passes without any CA product lookup. Read-only.
         /// </summary>
         [SkippableFact]
         public async Task ValidateProductInfo_V2_AcceptsConfiguredProductCode()
@@ -284,16 +285,18 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connectionInfo);
 
             await act.Should().NotThrowAsync(
-                $"ProductCode '{_v2ProductCode}' should be present in the live V2 catalog");
+                $"a V2 template's ProductCode ('{_v2ProductCode}') is sent as given, not checked at save time");
         }
 
         /// <summary>
         /// Same as <see cref="ValidateProductInfo_V2_AcceptsConfiguredProductCode"/> but with a
-        /// product code that should never exist, asserting the same "not found" failure mode
-        /// V1 has always had. Read-only — no order is placed.
+        /// product code that doesn't exist on the account. V2 template save doesn't check the code
+        /// against the catalog (CERTInext rejects a code it can't use when an order is placed), so
+        /// this is accepted too. V1 still rejects an unknown code at save time. Read-only — no order
+        /// is placed.
         /// </summary>
         [SkippableFact]
-        public async Task ValidateProductInfo_V2_RejectsUnknownProductCode()
+        public async Task ValidateProductInfo_V2_AcceptsUnknownProductCode_WithoutCatalogCheck()
         {
             Skip.If(!_v2Enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
 
@@ -307,8 +310,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connectionInfo);
 
-            await act.Should().ThrowAsync<AnyCAValidationException>()
-                .WithMessage("*not found*");
+            await act.Should().NotThrowAsync(
+                "V2 template save doesn't check ProductCode against the catalog");
         }
 
         /// <summary>
