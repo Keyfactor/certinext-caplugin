@@ -108,7 +108,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Read-only: lists the account's live catalog entries with their productTypeID, so a run
-        /// shows the catalog codes and productTypeIDs an explicit template ProductCode can be checked against.
+        /// shows the account's product codes and productTypeIDs. Informational only: the plugin doesn't check a
+        /// template ProductCode against the catalog.
         /// </summary>
         [SkippableFact]
         public async Task Catalog_ListsProductTypeIds()

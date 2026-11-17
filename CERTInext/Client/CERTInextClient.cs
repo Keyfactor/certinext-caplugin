@@ -2309,9 +2309,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                 }
                 else if (element.TryGetProperty("productCode", out var fpc))
                 {
-                    // Flat row shaped like ProductDetail. Read field by field like the branches around it:
-                    // deserializing would leave Active false when the row has no "active" field, and throw on
-                    // a numeric productTypeID.
+                    // Flat row shaped like ProductDetail. Read field by field like the branches around it, because
+                    // deserializing throws on a numeric productTypeID. A row with no (or a null) "active" is
+                    // available, as in the other branches; JSON true/false is used as given; any other value
+                    // ("false", 0) isn't trusted as active.
                     result.Add(new ProductDetail
                     {
                         ProductCode = fpc.ValueKind == JsonValueKind.String ? fpc.GetString() : fpc.ToString(),
@@ -2320,7 +2321,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
                         ProductTypeId = element.TryGetProperty("productTypeID", out var fpt)
                             ? (fpt.ValueKind == JsonValueKind.String ? fpt.GetString() : fpt.ToString())
                             : null,
-                        Active = !element.TryGetProperty("active", out var fa) || fa.ValueKind != JsonValueKind.False
+                        Active = !element.TryGetProperty("active", out var fa)
+                                 || fa.ValueKind == JsonValueKind.Null
+                                 || fa.ValueKind == JsonValueKind.True
                     });
                 }
                 else if (element.TryGetProperty("productId", out var pid))

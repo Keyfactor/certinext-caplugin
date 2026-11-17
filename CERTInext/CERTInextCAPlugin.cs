@@ -1672,14 +1672,19 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// DNS SANs on a V2 SSL request beyond what a single-domain order covers: the UNION of the
-        /// CSR's own subjectAltName entries and the gateway's SAN dictionary (deliberately not
-        /// <c>BuildSanList</c>'s "dictionary wins, CSR only as fallback" rule — the create call
-        /// sends the CSR to CERTInext regardless of what the dictionary says, so a CSR-embedded
-        /// extra still reaches the CA), minus the primary <paramref name="domain"/>, its
-        /// <c>www.</c> variant (autoSecureWww), and — for a wildcard order — the bare apex of the
-        /// wildcard (a wildcard CSR routinely carries it alongside <c>*.example.com</c>).
-        /// Lower-cased and de-duplicated.
+        /// DNS SANs on a V2 SSL request beyond what a single-domain order covers, from the same
+        /// source as additionalDomains (<see cref="CollectRequestedSanEntries"/>): the gateway's SAN
+        /// dictionary, or the CSR's own subjectAltName only when the dictionary is <c>null</c> (the
+        /// gateway passes an empty dictionary, not null, when Command sent no SANs). Minus the
+        /// primary <paramref name="domain"/>, its <c>www.</c> variant (autoSecureWww), and, for a
+        /// wildcard order, the bare apex of the wildcard. Lower-cased and de-duplicated.
+        ///
+        /// Command's SAN list is authoritative: a DNS name only in the CSR doesn't make the order
+        /// multi-domain and isn't added to additionalDomains. The CSR still goes to CERTInext
+        /// unchanged. This matches the other Keyfactor CA plugins that build a SAN list for their CA
+        /// (DigiCert CertCentral and mPKI, Entrust, HashiCorp Vault, GCP CAS, GoDaddy, Sectigo,
+        /// GlobalSign, HydrantID, SSLStore, CSC: dictionary only, CSR passed through); none merges
+        /// in or rejects on CSR-only names.
         /// </summary>
         internal static List<string> FindExtraDnsSans(
             string csr, Dictionary<string, string[]> san, string domain, bool isWildcard)
@@ -1689,15 +1694,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 ? StripWildcardPrefix(domain)
                 : null;
 
-            var csrSanEntries = ExtractSanEntriesFromCsr(csr, out _);
-            // CollectRequestedSanEntries(san, csr: null, ...) yields exactly the SAN
-            // dictionary's own (MapSanType-normalized) entries: when san is non-null the
-            // CSR-fallback branch never runs, and when san is null there is nothing to
-            // collect (csr: null makes the fallback branch's own CSR read a no-op) — the
-            // real CSR is already covered by csrSanEntries above, so no double-count.
-            var dictSanEntries = CollectRequestedSanEntries(san, csr: null, out _, out _);
-            return csrSanEntries
-                .Concat(dictSanEntries)
+            return CollectRequestedSanEntries(san, csr, out _, out _)
                 .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
                 .Select(s => s.Value?.ToLowerInvariant())
                 .Where(v => !string.IsNullOrWhiteSpace(v))
@@ -2197,9 +2194,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             //    wildcard's bare apex are not "extra"). Those extras go out in additionalDomains,
             //    including a wildcard SAN on a non-wildcard domain (CN = apex, SAN = *.apex).
             //
-            // FindExtraDnsSans takes the UNION of the CSR's own SANs and the SAN dictionary: the
-            // create call sends the CSR to CERTInext verbatim, so a CSR-embedded extra domain
-            // reaches the CA even when Command also supplied a (single-domain) SAN dictionary.
+            // FindExtraDnsSans and additionalDomains share one SAN source: Command's SAN dictionary
+            // (the CSR only when the dictionary is null). A name that is only in the CSR is ignored,
+            // as in the other Keyfactor CA plugins; the CSR itself is sent unchanged.
             //
             // Private PKI: ProductCode is likewise optional (the wrapper resolves it from
             // `variant`), and its SANs go in additionalHosts, so none of this applies.
@@ -2213,26 +2210,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     && Constants.ApiV2.UccProductTypeIds.Contains(templateTypeId);
                 var extraDnsSans = FindExtraDnsSans(csr, san, domain, isWildcardProduct);
                 isUccProduct = templateIsUccType || extraDnsSans.Count > 0;
-
-                // EV has no wildcard product at all, so a wildcard SAN on an EV request fails before
-                // placing an order.
-                if (!isWildcardProduct
-                    && string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase)
-                    && extraDnsSans.Any(s => s.StartsWith("*.", StringComparison.Ordinal)))
-                {
-                    _logger.LogError(
-                        "EnrollV2Async rejected an EV order with a wildcard SAN on domain '{Domain}': EV has no " +
-                        "wildcard product.", LogSanitizer.Strip(domain));
-                    _logger.MethodExit(LogLevel.Debug);
-                    return new EnrollmentResult
-                    {
-                        CARequestID   = string.Empty,
-                        Certificate   = null,
-                        Status        = (int)EndEntityStatus.FAILED,
-                        StatusMessage = $"V2 enrollment rejected: the request carries a wildcard SAN, but EV has " +
-                                        $"no wildcard product (primary domain '{domain}'). No order was placed."
-                    };
-                }
 
                 _logger.LogInformation(
                     "EnrollV2Async: product decided by CERTInext from the variant, wildcard shape and additional " +
@@ -2277,8 +2254,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     additionalDomains = null;
 
                 _logger.LogInformation(
-                    "EnrollV2Async: resolved UCC product. ProductCode={ProductCode}, AdditionalDomainCount={Count}",
-                    productCode, additionalDomains?.Count ?? 0);
+                    "EnrollV2Async: multi-domain (UCC) order. XProductCode={ProductCode}, AdditionalDomainCount={Count}",
+                    productCode ?? "(none)", additionalDomains?.Count ?? 0);
             }
 
             // Private PKI additionalHosts: same SAN source rule as the UCC path

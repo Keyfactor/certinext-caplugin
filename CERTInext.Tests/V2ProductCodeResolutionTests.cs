@@ -255,17 +255,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Never);
         }
 
-        [Fact]
-        public async Task NoExplicitProductCode_WildcardSanOnEv_FailsWithoutReadingTheCatalog()
+        // EV can't be a wildcard, but that's CERTInext's call to make: the request goes out like any other
+        // and CERTInext rejects it. No pre-check for either shape.
+        [Theory]
+        [InlineData("example.com", new[] { "example.com", "*.example.com" })]   // wildcard SAN on an apex CN
+        [InlineData("*.example.com", new[] { "*.example.com" })]                // wildcard primary domain
+        public async Task NoExplicitProductCode_EvWithWildcard_IsSentToCertinext(string domain, string[] sans)
         {
             var (mock, cap) = NewSslMock();
             var plugin = new CERTInextCAPlugin(mock.Object, Config(organizationNumber: "ORG-1"));
 
-            var result = await EnrollAsync(plugin, ProductInfo(Constants.Products.EvSsl), "example.com", "*.example.com");
+            var result = await EnrollAsync(plugin, ProductInfo(Constants.Products.EvSsl, domainName: domain), sans);
 
-            result.Status.Should().Be((int)EndEntityStatus.FAILED);
-            result.StatusMessage.Should().Contain("no wildcard product");
-            cap.Placed.Should().BeFalse();
+            result.CARequestID.Should().Be(OrderId);
+            cap.Request.ProductVariant.Should().Be("ev");
+            cap.Request.Certificate.Domain.Should().Be(domain);
             mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Never);
         }
 

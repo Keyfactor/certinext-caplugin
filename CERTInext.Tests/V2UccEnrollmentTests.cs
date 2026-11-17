@@ -308,8 +308,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 new[] { "extra1.example.com", "extra2.example.com" } },
             new object[] { "extras in SAN dictionary", new[] { "example.com" }, new[] { "example.com", "san1.example.com" },
                 new[] { "san1.example.com" } },
-            // The dictionary wins as the additionalDomains source when present (BuildSanList), so the CSR's
-            // extra reaches CERTInext only inside the CSR, the same as with no ProductCode.
+            // Command's SAN dictionary is authoritative: a name only in the CSR is ignored (the CSR itself is
+            // still sent unchanged), as in the other Keyfactor CA plugins.
             new object[] { "dictionary has only the primary, CSR has an extra", new[] { "example.com", "other.example.com" },
                 new[] { "example.com" }, new string[0] },
         };
@@ -351,6 +351,78 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             sentCode.Should().Be("842", label);
             (captured!.Certificate.AdditionalDomains ?? new List<string>()).Should().BeEquivalentTo(expectedAdditional, label);
             mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Never, label);
+        }
+
+        // Command's SAN dictionary is the SAN source for both the multi-domain decision and additionalDomains,
+        // as in the other Keyfactor CA plugins that build a SAN list (DigiCert, Entrust, Sectigo, GlobalSign,
+        // ...). The CSR is read only when the dictionary is null; the gateway passes an empty dictionary,
+        // not null, when Command sent no SANs.
+        public static IEnumerable<object[]> SanSourceCases() => new[]
+        {
+            // label, CSR SANs, SAN dictionary DNS names (null = no dictionary), expected extra names
+            new object[] { "CSR-only extra, dictionary has the primary", new[] { "example.com", "other.example.com" },
+                new[] { "example.com" }, new string[0] },
+            new object[] { "CSR-only extra, empty dictionary", new[] { "example.com", "other.example.com" },
+                new string[0], new string[0] },
+            new object[] { "no dictionary: the CSR is used", new[] { "example.com", "other.example.com" },
+                null, new[] { "other.example.com" } },
+            new object[] { "extra only in the dictionary", new[] { "example.com" },
+                new[] { "example.com", "san1.example.com" }, new[] { "san1.example.com" } },
+        };
+
+        [Theory]
+        [MemberData(nameof(SanSourceCases))]
+        public void FindExtraDnsSans_UsesTheSanDictionary_CsrOnlyWhenThereIsNoDictionary(
+            string label, string[] csrSans, string[] dictionaryDns, string[] expected)
+        {
+            var san = dictionaryDns == null ? null : new Dictionary<string, string[]> { ["dnsname"] = dictionaryDns };
+
+            var extras = CERTInextCAPlugin.FindExtraDnsSans(
+                GenerateCsrPem("example.com", csrSans), san, "example.com", isWildcard: false);
+
+            extras.Should().BeEquivalentTo(expected, label);
+        }
+
+        [Fact]
+        public async Task Enroll_V2_NoProductCode_CsrOnlyExtraSan_EmptyDictionary_IsASingleDomainOrder()
+        {
+            var mock = NewMock();
+            V2CreateSslOrderRequest captured = null;
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, __, req, ___) => captured = req)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_csronly_001", Status = "pending-dcv" });
+            mock.Setup(c => c.SubmitCsrV2Async(
+                    It.IsAny<string>(), "ord_csronly_001", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            mock.Setup(c => c.TrackOrderV2Async(It.IsAny<string>(), "ord_csronly_001", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new V2OrderStatusResponse { OrderId = "ord_csronly_001", Status = "pending-dcv" });
+
+            var plugin = BuildV2Plugin(mock.Object);
+            string csr = GenerateCsrPem("example.com", "example.com", "other.example.com");
+
+            var result = await plugin.Enroll(
+                csr: csr,
+                subject: "CN=example.com",
+                san: new Dictionary<string, string[]>(),
+                productInfo: new EnrollmentProductInfo
+                {
+                    ProductID = Constants.Products.DvSsl,
+                    ProductParameters = new Dictionary<string, string>
+                    {
+                        ["ProductFamily"] = "ssl",
+                        ["DomainName"]    = "example.com"
+                    }
+                },
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            result.CARequestID.Should().Be("ord_csronly_001");
+            captured!.Certificate.Domain.Should().Be("example.com");
+            captured.Certificate.AdditionalDomains.Should().BeNull(
+                "a name only in the CSR doesn't make the order multi-domain");
+            captured.Csr.Should().Be(csr, "the CSR is still sent to CERTInext unchanged");
         }
     }
 }
