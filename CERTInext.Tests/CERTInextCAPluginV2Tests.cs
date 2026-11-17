@@ -1725,6 +1725,35 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .WithMessage("*does not correspond to the selected product*");
         }
 
+        // A catalog on another CA backend (SSL.com) whose entry has no documented SSL productTypeID:
+        // the code exists, so it is accepted as given rather than rejected as a mismatch.
+        [Theory]
+        [InlineData(@"[{""productCode"":""1015"",""productName"":""SSL.com DV Wildcard UCC""}]")]
+        [InlineData(@"[{""productCode"":""1015"",""productName"":""SSL.com DV Wildcard UCC"",""productTypeID"":""101""}]")]
+        public async Task ValidateProductInfo_V2_Passes_WhenProductCodeExistsWithUndocumentedProductTypeId(string catalogBody)
+        {
+            using var server = WireMockServer.Start();
+            StubV2TokenAndAuthMe(server);
+            server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(catalogBody));
+
+            var plugin = BuildV2Plugin(NewMock().Object);
+            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
+            var productInfo = new EnrollmentProductInfo
+            {
+                ProductID = Constants.Products.DvSslWildcardUcc,
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = "1015" }
+            };
+
+            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
+
+            await act.Should().NotThrowAsync();
+        }
+
         // ---------------------------------------------------------------------------
         // No explicit ProductCode on a V2 template. X-Product-Code is the spec's optional override
         // (CERTInext resolves the product from the variant / wildcard shape / additionalDomains),
