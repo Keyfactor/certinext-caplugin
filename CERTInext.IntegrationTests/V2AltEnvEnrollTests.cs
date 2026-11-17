@@ -18,9 +18,11 @@
 // deliberately NOT revoked or cancelled afterwards.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Keyfactor.AnyGateway.Extensions;
@@ -107,6 +109,74 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         }
 
         private static bool WantWildcard => Opt("CERTINEXT_ALT_ENV_WILDCARD") == "1";
+
+        /// <summary>Plugin config for the alt env account (V2, DCV off).</summary>
+        private static CERTInextConfig BuildPluginConfig(Dictionary<string, string> env, int syncLookbackHours = 1)
+        {
+            return new CERTInextConfig
+            {
+                ApiUrl             = Get(env, "CERTINEXT_API_URL"),
+                UseV2Api           = true,
+                OAuthClientId      = Get(env, "CERTINEXT_CLIENT_ID"),
+                OAuthClientSecret  = Get(env, "CERTINEXT_CLIENT_SECRET"),
+                AccountNumber      = Get(env, "CERTINEXT_ACCOUNT_NUMBER"),
+                GroupNumber        = ResolveGroup(env) ?? string.Empty,
+                OrganizationNumber = Get(env, "CERTINEXT_ORG_NUMBER"),
+
+                RequestorName         = Get(env, "CERTINEXT_REQUESTOR_NAME", "Keyfactor Test"),
+                RequestorEmail        = Get(env, "CERTINEXT_REQUESTOR_EMAIL"),
+                RequestorIsdCode      = Get(env, "CERTINEXT_REQUESTOR_ISD_CODE", "1"),
+                RequestorMobileNumber = Get(env, "CERTINEXT_REQUESTOR_MOBILE", "0000000000"),
+                SignerPlace           = "Gateway Lab",
+                SignerIp              = "127.0.0.1",
+
+                PageSize            = 100,
+                V2SyncLookbackHours = syncLookbackHours,
+                DcvEnabled          = false
+            };
+        }
+
+        private static async Task<List<AnyCAPluginCertificate>> RunSyncAsync(
+            CERTInextCAPlugin plugin, DateTime? lastSync, bool fullSync)
+        {
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(boundedCapacity: 10_000);
+            var collected = new List<AnyCAPluginCertificate>();
+
+            var syncTask = Task.Run(async () =>
+            {
+                await plugin.Synchronize(buffer, lastSync: lastSync, fullSync: fullSync, cancelToken: CancellationToken.None);
+                if (!buffer.IsAddingCompleted)
+                    buffer.CompleteAdding();
+            });
+
+            foreach (var record in buffer.GetConsumingEnumerable())
+                collected.Add(record);
+
+            await syncTask;
+            return collected;
+        }
+
+        /// <summary>
+        /// Parses the leaf from a certificate payload. It may arrive as one PEM block, a PEM chain,
+        /// or bare base64 DER; the BouncyCastle parser reads PEM itself and returns the first
+        /// (leaf) certificate.
+        /// </summary>
+        private static X509Certificate ParseLeaf(string certPem, out int pemBlocks)
+        {
+            pemBlocks = Regex.Matches(certPem, "-----BEGIN CERTIFICATE-----").Count;
+            byte[] certBytes = pemBlocks > 0
+                ? System.Text.Encoding.ASCII.GetBytes(certPem)
+                : Convert.FromBase64String(string.Concat(certPem.Where(c => !char.IsWhiteSpace(c))));
+            return new X509CertificateParser().ReadCertificate(certBytes);
+        }
+
+        private static string DescribeLeaf(X509Certificate cert)
+        {
+            var sans = cert.GetSubjectAlternativeNames()?.Cast<IList<object>>().Select(s => s[1]?.ToString())
+                       ?? Enumerable.Empty<string>();
+            return $"Subject={cert.SubjectDN}, Issuer={cert.IssuerDN}, Serial={cert.SerialNumber.ToString(16)}, " +
+                   $"NotAfter={cert.NotAfter:yyyy-MM-dd}, SANs=[{string.Join(", ", sans)}]";
+        }
 
         private static string ScrubEmails(string s) =>
             s == null ? null : Regex.Replace(s, @"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", "<email>");
@@ -238,27 +308,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             string baseName = RequireOrderDomain();
             var env = LoadAltEnv();
 
-            var config = new CERTInextConfig
-            {
-                ApiUrl             = Get(env, "CERTINEXT_API_URL"),
-                UseV2Api           = true,
-                OAuthClientId      = Get(env, "CERTINEXT_CLIENT_ID"),
-                OAuthClientSecret  = Get(env, "CERTINEXT_CLIENT_SECRET"),
-                AccountNumber      = Get(env, "CERTINEXT_ACCOUNT_NUMBER"),
-                GroupNumber        = ResolveGroup(env) ?? string.Empty,
-                OrganizationNumber = Get(env, "CERTINEXT_ORG_NUMBER"),
-
-                RequestorName         = Get(env, "CERTINEXT_REQUESTOR_NAME", "Keyfactor Test"),
-                RequestorEmail        = Get(env, "CERTINEXT_REQUESTOR_EMAIL"),
-                RequestorIsdCode      = Get(env, "CERTINEXT_REQUESTOR_ISD_CODE", "1"),
-                RequestorMobileNumber = Get(env, "CERTINEXT_REQUESTOR_MOBILE", "0000000000"),
-                SignerPlace           = "Gateway Lab",
-                SignerIp              = "127.0.0.1",
-
-                PageSize            = 100,
-                V2SyncLookbackHours = 1,
-                DcvEnabled          = false
-            };
+            var config = BuildPluginConfig(env);
 
             config.OAuthClientId.Should().NotBeNullOrWhiteSpace("the alt env file must define CERTINEXT_CLIENT_ID");
             _output.WriteLine($"API host: {new Uri(config.ApiUrl).Host}, group configured: {!string.IsNullOrWhiteSpace(config.GroupNumber)}");
@@ -314,23 +364,46 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             certPem.Should().NotBeNullOrWhiteSpace(
                 $"order {enrollResult.CARequestID} should issue within {IssuanceTimeout.TotalMinutes} minutes");
 
-            // The certificate may arrive as one PEM block, a PEM chain, or bare base64 DER; the
-            // BouncyCastle parser reads PEM itself and returns the first (leaf) certificate.
-            int pemBlocks = Regex.Matches(certPem!, "-----BEGIN CERTIFICATE-----").Count;
+            var cert = ParseLeaf(certPem!, out int pemBlocks);
             _output.WriteLine($"Certificate payload: {certPem!.Length} chars, {pemBlocks} PEM block(s)");
-            byte[] certBytes = pemBlocks > 0
-                ? System.Text.Encoding.ASCII.GetBytes(certPem)
-                : Convert.FromBase64String(string.Concat(certPem.Where(c => !char.IsWhiteSpace(c))));
-            var cert = new X509CertificateParser().ReadCertificate(certBytes);
-            var sans = cert.GetSubjectAlternativeNames()?.Cast<IList<object>>().Select(s => s[1]?.ToString())
-                       ?? Enumerable.Empty<string>();
+            _output.WriteLine($"Issued. OrderId={enrollResult.CARequestID}: {DescribeLeaf(cert)}");
+        }
 
-            _output.WriteLine($"Issued. OrderId={enrollResult.CARequestID}");
-            _output.WriteLine($"Subject    : {cert.SubjectDN}");
-            _output.WriteLine($"Issuer     : {cert.IssuerDN}");
-            _output.WriteLine($"Serial     : {cert.SerialNumber.ToString(16)}");
-            _output.WriteLine($"Valid until: {cert.NotAfter:yyyy-MM-dd}");
-            _output.WriteLine($"SANs       : {string.Join(", ", sans)}");
+        /// <summary>
+        /// Incremental (<c>fullSync: false</c>) sync, read-only: every order in
+        /// CERTINEXT_ALT_ENV_SYNC_ORDER_IDS (comma-separated) must come back GENERATED with a
+        /// parseable certificate. <c>lastSync</c> is CERTINEXT_ALT_ENV_SYNC_LAST_HOURS (default 1)
+        /// hours ago, with the same V2 lookback.
+        /// </summary>
+        [SkippableFact]
+        public async Task Sync_V2_Incremental_FromAltEnvFile_ReturnsIssuedCertificates()
+        {
+            var env = LoadAltEnv();
+            string idList = Opt("CERTINEXT_ALT_ENV_SYNC_ORDER_IDS");
+            Skip.If(string.IsNullOrWhiteSpace(idList), "CERTINEXT_ALT_ENV_SYNC_ORDER_IDS not set. Skipping.");
+            var expectedIds = idList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            int hours = int.TryParse(Opt("CERTINEXT_ALT_ENV_SYNC_LAST_HOURS"), out int h) && h > 0 ? h : 1;
+            var config = BuildPluginConfig(env, syncLookbackHours: hours);
+            using var client = new CERTInextClient(config);
+            var plugin = new CERTInextCAPlugin(client, config);
+
+            DateTime lastSync = DateTime.UtcNow.AddHours(-hours);
+            var records = await RunSyncAsync(plugin, lastSync, fullSync: false);
+            _output.WriteLine($"Incremental sync (lastSync={lastSync:O}, lookback={hours}h) returned {records.Count} record(s).");
+            foreach (var r in records)
+                _output.WriteLine($"  CARequestID={r.CARequestID}, Status={r.Status}, CertBytes={r.Certificate?.Length ?? 0}, ProductID={r.ProductID}");
+
+            foreach (string id in expectedIds)
+            {
+                var record = records.FirstOrDefault(r => r.CARequestID == id);
+                record.Should().NotBeNull($"order {id} should be returned by the incremental sync");
+                record!.Status.Should().Be((int)EndEntityStatus.GENERATED, $"order {id} is issued");
+                record.Certificate.Should().NotBeNullOrWhiteSpace($"order {id} should carry its certificate");
+
+                var cert = ParseLeaf(record.Certificate, out int pemBlocks);
+                _output.WriteLine($"Order {id}: {pemBlocks} PEM block(s); {DescribeLeaf(cert)}");
+            }
         }
     }
 }
