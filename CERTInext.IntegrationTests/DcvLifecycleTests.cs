@@ -199,20 +199,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             IntegrationSkip.IfNotConfigured(_fixture);
 
-            // Use a plugin backed by the real client but DcvEnabled=false
-            var plugin = BuildPlugin(dcvEnabled: false);
+            // Route plugin/client logs to the test output (before the plugin is constructed), so the CA's
+            // answer to the V1 order is visible.
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
+            EnrollmentResult result;
+            try
+            {
+                // Use a plugin backed by the real client but DcvEnabled=false
+                var plugin = BuildPlugin(dcvEnabled: false);
 
-            var result = await plugin.Enroll(
-                csr:            GenerateCsrPem(IntegrationTestData.DcvTestDomain),
-                subject:        $"CN={IntegrationTestData.DcvTestDomain}",
-                san:            new Dictionary<string, string[]>
-                {
-                    ["dns"] = new[] { IntegrationTestData.DcvTestDomain }
-                },
-                productInfo:    IntegrationTestData.DvSslProductInfo(_fixture.Config.DefaultProductCode),
-                requestFormat:  RequestFormat.PKCS10,
-                enrollmentType: EnrollmentType.New);
+                result = await plugin.Enroll(
+                    csr:            GenerateCsrPem(IntegrationTestData.DcvTestDomain),
+                    subject:        $"CN={IntegrationTestData.DcvTestDomain}",
+                    san:            new Dictionary<string, string[]>
+                    {
+                        ["dns"] = new[] { IntegrationTestData.DcvTestDomain }
+                    },
+                    productInfo:    IntegrationTestData.DvSslProductInfo(_fixture.Config.DefaultProductCode),
+                    requestFormat:  RequestFormat.PKCS10,
+                    enrollmentType: EnrollmentType.New);
+            }
+            finally
+            {
+                restoreLogging();
+            }
 
+            _output.WriteLine($"RESULT: CARequestID={result?.CARequestID ?? "(none)"}, Status={result?.Status}, " +
+                              $"Message={result?.StatusMessage}");
             result.Should().NotBeNull();
         }
 

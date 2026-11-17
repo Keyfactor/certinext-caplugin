@@ -16,6 +16,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Keyfactor.AnyGateway.Extensions;
+using Keyfactor.Extensions.CAPlugin.CERTInext.API.V2;
 using Keyfactor.Extensions.CAPlugin.CERTInext.Client;
 using Keyfactor.PKI.Enums.EJBCA;
 using Org.BouncyCastle.Asn1;
@@ -200,6 +201,94 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                     using var client = new CERTInextClient(BuildV2Config());
                     await V2OrderCleanup.RevokeOrCancelAsync(
                         client, orderId, "V2 wildcard-SAN shape probe cleanup.", _output.WriteLine);
+                }
+            }
+        }
+
+        public static IEnumerable<object[]> RawShapes() => new[]
+        {
+            // shape, additionalDomains mode: "omit" | "wildcard" (the plugin's body)
+            new object[] { "R1-noHeader-wildcardOnlyInCsr", "omit" },
+            new object[] { "R2-noHeader-wildcardInAdditionalDomains", "wildcard" },
+        };
+
+        /// <summary>
+        /// Bypasses the plugin and posts the create body directly: no X-Product-Code, CSR inline with
+        /// CN = apex and SANs apex + <c>*.apex</c>, <c>domain</c> = apex. Only <c>additionalDomains</c>
+        /// varies, to tell whether CERTInext resolves a wildcard product from the CSR alone (as a
+        /// customer script that leaves the product to CERTInext appears to). Records the outcome,
+        /// <c>resolvedProductCode</c> and the raw Track Order body; cleans up a placed order.
+        /// </summary>
+        [SkippableTheory]
+        [MemberData(nameof(RawShapes))]
+        public async Task Probe_Raw_ApexCn_WildcardSan(string shape, string additionalDomainsMode)
+        {
+            Skip.If(!_enabled, "CERTINEXT_USE_V2_API not set or V2 credentials not configured — skipping.");
+            Skip.If(Environment.GetEnvironmentVariable("CERTINEXT_V2_WILDCARD_SAN_PROBE") != "1",
+                "CERTINEXT_V2_WILDCARD_SAN_PROBE=1 not set — this places real wildcard DV sandbox orders. Skipping.");
+
+            string ts = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
+            string apex = $"wcraw-{ts}.{_v2Domain}";
+            string wildcard = "*." + apex;
+            var config = BuildV2Config();
+
+            var request = new V2CreateSslOrderRequest
+            {
+                ProductVariant     = Constants.ApiV2.ProductVariantDv,
+                EmailNotifications = Constants.ApiV2.EmailNotificationsConsentOnly,
+                Requestor = new V2Requestor
+                {
+                    Name = config.RequestorName, Email = config.RequestorEmail,
+                    Phone = "+10000000000", Designation = "IT Administrator"
+                },
+                Csr = GenerateCsrPem(apex, new[] { apex, wildcard }),
+                Certificate = new V2CertificateParams
+                {
+                    Domain = apex,
+                    AdditionalDomains = additionalDomainsMode == "wildcard" ? new List<string> { wildcard } : null
+                },
+                Subscription = new V2SubscriptionParams { ValidityYears = 1 },
+                Agreement = new V2AgreementParams { SignerName = config.RequestorName, SignerPlace = config.SignerPlace },
+                Remarks = "Keyfactor plugin wildcard-SAN raw probe."
+            };
+
+            _output.WriteLine($"SHAPE {shape}: CN={apex}, CSR SANs=[{apex}, {wildcard}], domain={apex}, " +
+                              $"additionalDomains={(request.Certificate.AdditionalDomains == null ? "(omitted)" : wildcard)}, " +
+                              "X-Product-Code=(none)");
+
+            using var client = new CERTInextClient(config);
+            string orderId = null;
+            try
+            {
+                V2CreateOrderResponse created;
+                try
+                {
+                    created = await client.PlaceOrderV2Async(Constants.ApiV2.FamilySsl, null, request);
+                }
+                catch (Exception ex)
+                {
+                    _output.WriteLine($"RESULT {shape}: REJECTED {ex.GetType().Name}: {ex.Message}");
+                    return;
+                }
+
+                orderId = string.IsNullOrWhiteSpace(created.OrderId) ? null : created.OrderId;
+                _output.WriteLine($"RESULT {shape}: OrderId={orderId ?? "(none)"}, Status={created.Status}, " +
+                                  $"ResolvedProductCode={created.ResolvedProductCode ?? "(not reported)"}");
+
+                if (orderId != null)
+                {
+                    var (status, _, body) = await client.ProbeV2GetAsync($"{Constants.ApiV2.SslCertificatesPath}/{orderId}");
+                    string masked = System.Text.RegularExpressions.Regex.Replace(
+                        body ?? string.Empty, @"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "<email>");
+                    _output.WriteLine($"TRACK {shape}: HTTP {status} {masked}");
+                }
+            }
+            finally
+            {
+                if (orderId != null)
+                {
+                    await V2OrderCleanup.RevokeOrCancelAsync(
+                        client, orderId, "V2 wildcard-SAN raw probe cleanup.", _output.WriteLine);
                 }
             }
         }
