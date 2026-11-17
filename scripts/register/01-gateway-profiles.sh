@@ -5,12 +5,21 @@
 # driven by .about.carest.product_ids in integration-manifest.json. Idempotent:
 # existing profiles are PUT-updated, new ones are POSTed.
 #
+# When V2_TEMPLATES=1 (default) a second profile named "<ProductID> V2" is also
+# upserted per product. Command imports AnyCA templates as
+# AnyCA_<CertificateProfile>, so the "V2 template" set (stage 02: same ProductID,
+# CertificateProfile "<ProductID> V2", no ProductCode) needs these profiles to
+# exist alongside the pinned set (CertificateProfile = ProductID).
+#
 # Env: see scripts/lib/command-auth.sh for the OAuth/host contract.
 # Optional:
 #   KEY_ALGS_JSON   override the key_algs object (default: lab set below)
 #   MANIFEST        path to integration-manifest.json (default: repo root)
+#   V2_TEMPLATES    1 (default) = also register "<ProductID> V2" profiles for the
+#                       unpinned V2 template set; 0 = pinned profiles only
 #   CHECK           1 = after applying, diff result vs the captured reference
-#                       (docs/reference/gateway/certificate-profiles.json)
+#                       (docs/reference/gateway/certificate-profiles.json) and
+#                       confirm every profile this run registered is present
 #   DRY_RUN         1 = print intended actions, make no write calls
 set -euo pipefail
 
@@ -26,6 +35,11 @@ export REPO_ROOT
 MANIFEST="${MANIFEST:-$REPO_ROOT/integration-manifest.json}"
 DRY_RUN="${DRY_RUN:-0}"
 CHECK="${CHECK:-0}"
+V2_TEMPLATES="${V2_TEMPLATES:-1}"
+case "$V2_TEMPLATES" in
+    0|1) ;;
+    *) echo "ERROR: V2_TEMPLATES must be 0 or 1 (got '$V2_TEMPLATES')" >&2; exit 1 ;;
+esac
 
 # Lab default key algorithms — matches docs/reference/gateway/certificate-profiles.json.
 DEFAULT_KEY_ALGS_JSON='{
@@ -53,11 +67,20 @@ done < <(manifest_product_ids "$MANIFEST")
 [ "${#PRODUCTS[@]}" -gt 0 ] || { echo "ERROR: no product_ids in manifest" >&2; exit 1; }
 echo "   products: ${#PRODUCTS[@]}"
 
+# Profile names to register: the pinned set (one per product, name = ProductID)
+# plus, when V2_TEMPLATES=1, the unpinned "<ProductID> V2" set.
+PROFILES=()
+for _p in "${PRODUCTS[@]}"; do PROFILES+=("$_p"); done
+if [ "$V2_TEMPLATES" = "1" ]; then
+    for _p in "${PRODUCTS[@]}"; do PROFILES+=("$_p V2"); done
+fi
+echo "   V2_TEMPLATES: $V2_TEMPLATES  (profiles: ${#PROFILES[@]})"
+
 if [ "$DRY_RUN" = "1" ]; then
     # Fully offline preview: no token, no listing.
-    echo "   (dry run) would upsert ${#PRODUCTS[@]} profiles with key_algs:"
+    echo "   (dry run) would upsert ${#PROFILES[@]} profiles with key_algs:"
     echo "$KEY_ALGS_JSON" | jq -c .
-    for name in "${PRODUCTS[@]}"; do
+    for name in "${PROFILES[@]}"; do
         printf '   [DRY ] %s\n' "$name"
     done
     echo "== done (dry run): no calls made =="
@@ -75,7 +98,7 @@ if ! echo "$EXISTING" | jq -e 'type == "array"' >/dev/null 2>&1; then
 fi
 
 created=0 updated=0
-for name in "${PRODUCTS[@]}"; do
+for name in "${PROFILES[@]}"; do
     existing_id="$(echo "$EXISTING" | jq -r --arg n "$name" \
         '.[] | select(.name == $n) | .id' | head -n1)"
 
@@ -116,6 +139,16 @@ if [ "$CHECK" = "1" ] && [ "$DRY_RUN" != "1" ]; then
         echo "   OK: all reference profiles present on the gateway"
     else
         echo "   MISSING reference profiles: $missing" >&2
+        exit 1
+    fi
+    # Every profile registered by this run (pinned + optional V2 set) must exist.
+    applied_names="$(printf '%s\n' "${PROFILES[@]}" | jq -R . | jq -s .)"
+    missing="$(jq -n --argjson live "$live_names" --argjson app "$applied_names" \
+        '$app - $live')"
+    if [ "$(echo "$missing" | jq 'length')" -eq 0 ]; then
+        echo "   OK: all ${#PROFILES[@]} profiles registered by this run are present"
+    else
+        echo "   MISSING registered profiles: $missing" >&2
         exit 1
     fi
 fi
