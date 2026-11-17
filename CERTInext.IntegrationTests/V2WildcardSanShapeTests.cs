@@ -6,9 +6,10 @@
 // and limitations under the License.
 //
 // Wildcard-in-the-SAN-only enrollments (issue 0099): the CSR's CN is the apex and the wildcard is
-// only in the SAN set. CERTInext's wrapper decides "wildcard" from certificate.domain alone, so the
-// plugin must send the wildcard as the domain. These probes place real sandbox orders and record
-// what CERTInext accepts and which product it resolves; gated by CERTINEXT_V2_WILDCARD_SAN_PROBE=1.
+// only in the SAN set. The plugin keeps the CN as certificate.domain and sends the wildcard in
+// additionalDomains, with no X-Product-Code unless the template sets ProductCode. These probes
+// place real sandbox orders and record what CERTInext accepts and which product it resolves; gated
+// by CERTINEXT_V2_WILDCARD_SAN_PROBE=1.
 
 using System;
 using System.Collections.Generic;
@@ -107,7 +108,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Read-only: lists the account's live catalog entries with their productTypeID, so a run
-        /// shows which Wildcard UCC products (typeID 21 DV / 22 OV) the plugin can resolve to.
+        /// shows the catalog codes and productTypeIDs an explicit template ProductCode can be checked against.
         /// </summary>
         [SkippableFact]
         public async Task Catalog_ListsProductTypeIds()

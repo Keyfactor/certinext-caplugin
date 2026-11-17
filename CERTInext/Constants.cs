@@ -643,17 +643,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public static readonly System.Collections.Generic.HashSet<string> WildcardProductTypeIds =
                 new System.Collections.Generic.HashSet<string> { "14", "17" };
 
-            // Wildcard UCC productTypeID per SSL productVariant (live catalog: 21=DV SSL Wildcard
-            // UCC, 22=OV SSL Wildcard UCC; EV has no wildcard product). Used when the wildcard is
-            // only in the SANs: the wrapper keys "wildcard" on certificate.domain alone, and the
-            // domain must equal the CSR CN (EMS-1056), so the plugin has to name the product itself.
-            public static readonly System.Collections.Generic.Dictionary<string, string> WildcardUccProductTypeIdByVariant =
-                new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
-                {
-                    [ProductVariantDv] = "21",
-                    [ProductVariantOv] = "22",
-                };
-
             // Orders report (Synchronize, V2 mode) — GET /api/certinext/v2/reports/orders.
             // Spring-style page envelope: content/page/size/totalPages/totalElements.
             // Paging is 1-based; size is clamped to 100 server-side; page=0 is treated as

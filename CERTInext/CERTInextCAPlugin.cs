@@ -1804,50 +1804,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
-        /// The account's Wildcard UCC product code for an SSL <paramref name="productVariant"/>
-        /// that has one (DV/OV; the caller rejects EV first), read from the live V2 catalog: the single
-        /// active product whose productTypeID is <see cref="Constants.ApiV2.WildcardUccProductTypeIdByVariant"/>'s
-        /// entry for the variant. Returns <c>(code, null)</c> on success, else <c>(null, reason)</c>
-        /// when the catalog could not be read or lists zero or several matches. The caller then sends
-        /// no X-Product-Code and leaves the product to CERTInext: catalogs on other CA backends
-        /// (SSL.com) need not carry these productTypeIDs, and there CERTInext accepts this shape
-        /// unpinned (reported by a customer; not reproducible on our emSign sandbox).
-        /// </summary>
-        private async Task<(string ProductCode, string Unresolved)> ResolveWildcardUccProductCodeAsync(string productVariant)
-        {
-            string typeId = Constants.ApiV2.WildcardUccProductTypeIdByVariant[productVariant];
-
-            List<ProductDetail> catalog;
-            try
-            {
-                catalog = await _client.GetProductDetailsV2Async();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "EnrollV2Async: could not read the V2 product catalog to resolve a Wildcard UCC product.");
-                return (null, "The product catalog could not be read to find the Wildcard UCC product.");
-            }
-
-            var matches = (catalog ?? new List<ProductDetail>())
-                .Where(p => p.Active && string.Equals(p.ProductTypeId, typeId, StringComparison.Ordinal)
-                            && !string.IsNullOrWhiteSpace(p.ProductCode))
-                .Select(p => p.ProductCode)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            if (matches.Count == 1)
-            {
-                _logger.LogInformation(
-                    "EnrollV2Async: resolved Wildcard UCC product {ProductCode} (productTypeID {TypeId}) for a wildcard SAN " +
-                    "on a non-wildcard domain.", matches[0], typeId);
-                return (matches[0], null);
-            }
-
-            return (null, matches.Count == 0
-                ? $"The account's catalog has no active Wildcard UCC product (productTypeID {typeId})."
-                : $"The account's catalog has several active Wildcard UCC products ({string.Join(", ", matches)}).");
-        }
-
-        /// <summary>
         /// Validates the template parameters a V2 <c>private-pki</c> order needs
         /// beyond the SSL ones, before any CA call. Shared by <see cref="EnrollV2Async"/> (fail
         /// fast with a FAILED result) and <see cref="ValidateProductInfo"/> (reject at template
@@ -2323,7 +2279,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // matching catalog products. The connector's DefaultProductCode no longer pins a V2
             // order (it remains a V1 renewal fallback), and the V1-era Constants.Products.
             // DefaultProductCodes table is never consulted (its numbering does not match the live
-            // V2 catalog). A null productCode means "send no header".
+            // V2 catalog). A null productCode means "send no header". CERTInext has also told us
+            // directly to send only the variant and leave X-Product-Code out, so the plugin never
+            // adds it on its own, for any request shape.
             //
             // UCC / wildcard detection decides whether extra DNS SANs are carried in
             // additionalDomains (UCC) or rejected by the single-domain guard below:
@@ -2338,12 +2296,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             //    type (ProductId -> productTypeID, as before) OR the request carrying DNS SANs
             //    beyond the primary domain (its www. variant and a wildcard's bare apex are not
             //    "extra"), which is what makes the wrapper pick a UCC product — so those extras go
-            //    out in additionalDomains instead of failing the single-domain guard.
-            //    One exception reads the catalog: a wildcard SAN on a non-wildcard domain (CN =
-            //    apex, SAN = *.apex) needs a Wildcard UCC product the wrapper cannot infer on our
-            //    emSign sandbox, so the account's one is resolved and sent
-            //    (ResolveWildcardUccProductCodeAsync). If the catalog doesn't name exactly one, no
-            //    code is sent and CERTInext decides.
+            //    out in additionalDomains instead of failing the single-domain guard. That includes a
+            //    wildcard SAN on a non-wildcard domain (CN = apex, SAN = *.apex).
             //
             // Private PKI: ProductCode is likewise optional (the wrapper resolves it from
             // `variant`); the catalog is never fetched because its only use on this path — SSL UCC
@@ -2351,9 +2305,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string productCode = ep.HasExplicitProductCode ? ep.ProductCode : null;
             bool isUccProduct = false;
             bool isWildcardProduct = false;
-            // Set when a wildcard SAN on a non-wildcard domain goes out with no X-Product-Code, so an
-            // EMS-1173 from the create can say how to pin the product.
-            bool wildcardSanUnpinned = false;
             if (!isPrivatePki && ep.HasExplicitProductCode)
             {
                 List<ProductDetail> catalog = null;
@@ -2397,58 +2348,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 var extraDnsSans = FindExtraDnsSans(csr, san, domain, isWildcardProduct);
                 isUccProduct = templateIsUccType || extraDnsSans.Count > 0;
 
-                // Wildcard only in the SANs (CN = the apex, SAN = *.apex): the wrapper keys
-                // "wildcard" on certificate.domain alone, so it resolves a plain UCC product and
-                // rejects the wildcard additional domain (EMS-1173). Sending the wildcard as the
-                // domain instead is rejected too, because the domain must match the CSR CN
-                // (EMS-1056). Both confirmed live on our emSign sandbox (V2WildcardSanShapeTests). The
-                // order there needs a Wildcard UCC product, which only an explicit X-Product-Code
-                // selects, so resolve the account's one from the catalog. When the catalog doesn't
-                // name exactly one (seen on a customer's account, likely SSL.com-backed, whose direct
-                // unpinned orders of this shape issue), send no code and let CERTInext decide. EV has
-                // no wildcard product at all, so that still fails before placing an order.
-                if (!isWildcardProduct && extraDnsSans.Any(s => s.StartsWith("*.", StringComparison.Ordinal)))
+                // Wildcard only in the SANs (CN = the apex, SAN = *.apex): the wildcard goes out in
+                // additionalDomains like any other extra name, and CERTInext picks the product. EV has
+                // no wildcard product at all, so that fails before placing an order.
+                if (!isWildcardProduct
+                    && string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase)
+                    && extraDnsSans.Any(s => s.StartsWith("*.", StringComparison.Ordinal)))
                 {
-                    if (!Constants.ApiV2.WildcardUccProductTypeIdByVariant.ContainsKey(sslProductVariant ?? string.Empty))
+                    _logger.LogError(
+                        "EnrollV2Async rejected an EV order with a wildcard SAN on domain '{Domain}': EV has no " +
+                        "wildcard product.", LogSanitizer.Strip(domain));
+                    _logger.MethodExit(LogLevel.Debug);
+                    return new EnrollmentResult
                     {
-                        _logger.LogError(
-                            "EnrollV2Async rejected an order with a wildcard SAN on a non-wildcard domain '{Domain}': " +
-                            "product variant '{Variant}' has no wildcard product.",
-                            LogSanitizer.Strip(domain), sslProductVariant);
-                        _logger.MethodExit(LogLevel.Debug);
-                        return new EnrollmentResult
-                        {
-                            CARequestID   = string.Empty,
-                            Certificate   = null,
-                            Status        = (int)EndEntityStatus.FAILED,
-                            StatusMessage = $"V2 enrollment rejected: the request carries a wildcard SAN but its " +
-                                            $"primary domain ('{domain}', the CSR CN) is not a wildcard, which needs " +
-                                            $"a Wildcard UCC product. Product variant '{sslProductVariant}' has no " +
-                                            "wildcard product. No order was placed."
-                        };
-                    }
-
-                    string unresolved;
-                    (productCode, unresolved) = await ResolveWildcardUccProductCodeAsync(sslProductVariant);
-                    if (productCode == null)
-                    {
-                        wildcardSanUnpinned = true;
-                        _logger.LogWarning(
-                            "EnrollV2Async: wildcard SAN on non-wildcard domain '{Domain}' with no Wildcard UCC product " +
-                            "code to send: {Reason} Sending no X-Product-Code; CERTInext resolves the product. If it " +
-                            "rejects the wildcard (EMS-1173), set ProductCode on the template.",
-                            LogSanitizer.Strip(domain), unresolved);
-                    }
+                        CARequestID   = string.Empty,
+                        Certificate   = null,
+                        Status        = (int)EndEntityStatus.FAILED,
+                        StatusMessage = $"V2 enrollment rejected: the request carries a wildcard SAN, but EV has " +
+                                        $"no wildcard product (primary domain '{domain}'). No order was placed."
+                    };
                 }
 
                 _logger.LogInformation(
-                    "EnrollV2Async: no explicit ProductCode on the template. CERTInext resolves the product from " +
-                    "the variant, wildcard shape and additional domains unless a wildcard SAN on a non-wildcard " +
-                    "domain needed a Wildcard UCC code. ProductId={ProductId}, Wildcard={Wildcard}, Ucc={Ucc} " +
-                    "(TemplateUccType={TemplateUccType}, ExtraDnsSanCount={ExtraCount}), " +
-                    "XProductCode={ProductCode}",
-                    ep.ProductId, isWildcardProduct, isUccProduct, templateIsUccType, extraDnsSans.Count,
-                    productCode ?? "(none)");
+                    "EnrollV2Async: no explicit ProductCode on the template — no X-Product-Code header will be sent; " +
+                    "CERTInext resolves the product from the variant, wildcard shape and additional domains. " +
+                    "ProductId={ProductId}, Wildcard={Wildcard}, Ucc={Ucc} (TemplateUccType={TemplateUccType}, " +
+                    "ExtraDnsSanCount={ExtraCount})",
+                    ep.ProductId, isWildcardProduct, isUccProduct, templateIsUccType, extraDnsSans.Count);
             }
 
             // Non-UCC V2 products support only a single domain plus autoSecureWww's www.<domain>
@@ -2753,19 +2679,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     Remarks                 = remarks,
                     GroupNumber             = groupNumber
                 };
-                try
-                {
-                    createResp = await _client.PlaceOrderV2Async(ep.ProductFamilySlug, productCode, orderReq);
-                }
-                catch (Exception createEx) when (wildcardSanUnpinned
-                    && createEx.Message?.IndexOf("EMS-1173", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    // CERTInext picked a product that can't carry the wildcard additional domain.
-                    throw new Exception(
-                        $"{createEx.Message} The request carries a wildcard SAN on a non-wildcard primary domain " +
-                        "and the catalog named no single Wildcard UCC product to send. Set ProductCode on the " +
-                        "template to the account's Wildcard UCC product code.", createEx);
-                }
+                createResp = await _client.PlaceOrderV2Async(ep.ProductFamilySlug, productCode, orderReq);
             }
             string orderId = createResp.OrderId;
 
