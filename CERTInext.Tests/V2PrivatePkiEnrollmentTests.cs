@@ -535,7 +535,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // product" would be thrown and no private-pki template could ever be saved.
             using var server = WireMockServer.Start();
             StubToken(server);
-            StubCatalog(server, "149", Constants.ApiV2.PrivatePkiProductTypeId);
+            StubCatalog(server, "149", "39");
 
             Func<Task> act = () => BuildV2Plugin(NewMock().Object)
                 .ValidateProductInfo(MakePrivatePkiProductInfo(), V2ConnectionInfo(server.Urls[0]));
@@ -543,30 +543,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             await act.Should().NotThrowAsync();
         }
 
-        [Fact]
-        public async Task ValidateProductInfo_V2_PrivatePki_Throws_WhenExplicitCodeIsNotAPrivatePkiProduct()
+        // No product-code pre-check: a Private PKI ProductCode is sent as given, and CERTInext rejects one
+        // that isn't a Private PKI product or isn't on the account. Template save doesn't read the catalog.
+        [Theory]
+        [InlineData("842", "842", "13")]                                       // an SSL product
+        [InlineData("149", "100", "39")]    // not in the catalog
+        public async Task ValidateProductInfo_V2_PrivatePki_ExplicitCode_PassesWithoutCatalogCall(
+            string productCode, string catalogCode, string catalogTypeId)
         {
             using var server = WireMockServer.Start();
             StubToken(server);
-            StubCatalog(server, "842", "13"); // DV SSL
+            StubCatalog(server, catalogCode, catalogTypeId);
 
             Func<Task> act = () => BuildV2Plugin(NewMock().Object)
-                .ValidateProductInfo(MakePrivatePkiProductInfo(productCode: "842"), V2ConnectionInfo(server.Urls[0]));
+                .ValidateProductInfo(MakePrivatePkiProductInfo(productCode: productCode), V2ConnectionInfo(server.Urls[0]));
 
-            await act.Should().ThrowAsync<AnyCAValidationException>().WithMessage("*not a Private PKI product*");
-        }
-
-        [Fact]
-        public async Task ValidateProductInfo_V2_PrivatePki_Throws_WhenCodeNotInCatalog()
-        {
-            using var server = WireMockServer.Start();
-            StubToken(server);
-            StubCatalog(server, "100", Constants.ApiV2.PrivatePkiProductTypeId);
-
-            Func<Task> act = () => BuildV2Plugin(NewMock().Object)
-                .ValidateProductInfo(MakePrivatePkiProductInfo(productCode: "149"), V2ConnectionInfo(server.Urls[0]));
-
-            await act.Should().ThrowAsync<AnyCAValidationException>().WithMessage("*not found*");
+            await act.Should().NotThrowAsync();
+            server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/api/certinext/v2/catalog/products");
         }
 
         [Theory]
@@ -577,7 +570,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             using var server = WireMockServer.Start();
             StubToken(server);
-            StubCatalog(server, "149", Constants.ApiV2.PrivatePkiProductTypeId);
+            StubCatalog(server, "149", "39");
 
             Func<Task> act = () => BuildV2Plugin(NewMock().Object)
                 .ValidateProductInfo(MakePrivatePkiProductInfo(variant: variant, productCode: productCode),
@@ -592,7 +585,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             using var server = WireMockServer.Start();
             StubToken(server);
-            StubCatalog(server, "149", Constants.ApiV2.PrivatePkiProductTypeId);
+            StubCatalog(server, "149", "39");
 
             Func<Task> act = () => BuildV2Plugin(NewMock().Object)
                 .ValidateProductInfo(MakePrivatePkiProductInfo(productCode: null), V2ConnectionInfo(server.Urls[0]));

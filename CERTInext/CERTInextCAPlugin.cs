@@ -887,119 +887,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                         "ProductID={ProductID}", params_.ProductId);
                 }
 
-                // V2 catalog validation mirrors ValidateCAConnectionInfo's UseV2Api branch:
-                // GetProfilesAsync/GetProductDetailsAsync are V1-only and 404 against a
-                // V2-shaped ApiUrl. There is no soft-accept difference between modes
-                // — an empty/unusable catalog is treated as "not found", same as V1.
+                // V2: the plugin doesn't check a ProductCode against the catalog. Without one, no
+                // X-Product-Code is sent and CERTInext's wrapper picks the product from the variant,
+                // wildcard shape and additional domains; with one, it's sent as given at enroll time
+                // and CERTInext rejects a code it can't use. The ProductVariant, private-pki and
+                // organization representative checks above already ran. V1 still checks the code
+                // against GetProfilesAsync (V1-only: it 404s against a V2-shaped ApiUrl).
                 List<string> availableIds;
                 bool found;
 
-                if (v2WithoutProductCode)
+                if (useV2)
                 {
-                    // No explicit ProductCode: no X-Product-Code header is sent at enroll time and
-                    // CERTInext's wrapper picks the product from the variant, wildcard shape and
-                    // additional domains, so there is no code to look up in the catalog (and an
-                    // ambiguous catalog match is no longer a template error). The ProductVariant
-                    // and private-pki checks above already ran.
                     _logger.LogInformation(
-                        "Product/profile validation: no explicit ProductCode on the V2 template, so no catalog " +
-                        "check is needed; CERTInext resolves the product at order time. ProductID={ProductID}",
-                        params_.ProductId);
+                        "Product/profile validation: V2 template ProductCode isn't checked against the catalog; " +
+                        "CERTInext resolves or validates the product at order time. ProductCode={ProductCode}, " +
+                        "ProductID={ProductID}",
+                        v2WithoutProductCode ? "(none)" : profileId, params_.ProductId);
                     availableIds = new List<string>();
                     found = true;
-                }
-                else if (useV2)
-                {
-                    var products = await tempClient.GetProductDetailsV2Async();
-                    availableIds = products.Select(p => p.ProductCode).ToList();
-
-                    if (isPrivatePki)
-                    {
-                        // The SSL ProductId -> productTypeID cross-check below would
-                        // always reject a Private PKI code (GetProductIds only advertises SSL/TLS
-                        // product names). Check the code against the spec's Private PKI
-                        // productTypeID instead ("39" | Private PKI | Private PKI (8)).
-                        var matchedProduct = products.FirstOrDefault(p =>
-                            string.Equals(p.ProductCode, profileId, StringComparison.OrdinalIgnoreCase));
-
-                        if (matchedProduct == null)
-                        {
-                            var available = string.Join(", ", availableIds);
-                            _logger.LogWarning(
-                                "Product/profile validation failed — configured private-pki ProductCode '{ProfileId}' " +
-                                "was not found in the CERTInext V2 catalog. AvailableCount={AvailableCount}",
-                                profileId, availableIds.Count);
-                            throw new AnyCAValidationException(
-                                $"ProductCode '{profileId}' was not found in the CERTInext V2 catalog. " +
-                                $"Available codes: {available}");
-                        }
-
-                        if (!string.Equals(matchedProduct.ProductTypeId, Constants.ApiV2.PrivatePkiProductTypeId, StringComparison.OrdinalIgnoreCase))
-                        {
-                            _logger.LogWarning(
-                                "Product/profile validation failed — configured ProductCode '{ProfileId}' exists in the " +
-                                "CERTInext V2 catalog, but its productTypeID ('{ActualTypeId}') is not the Private PKI " +
-                                "productTypeID ('{ExpectedTypeId}') while ProductFamily is 'private-pki'.",
-                                profileId, matchedProduct.ProductTypeId, Constants.ApiV2.PrivatePkiProductTypeId);
-                            throw new AnyCAValidationException(
-                                $"ProductCode '{profileId}' exists in the CERTInext catalog, but it is not a Private PKI " +
-                                "product, and the template's ProductFamily is 'private-pki'. Set ProductCode to a Private " +
-                                "PKI product code from your account's catalog, or correct ProductFamily.");
-                        }
-
-                        found = true;
-                    }
-                    else
-                    {
-                        // Explicit override (the no-ProductCode case was handled above): the code must exist in the catalog AND the matched
-                        // catalog entry's productTypeID must actually correspond to the selected
-                        // ProductId — not just "does this code exist as *some* product". A code
-                        // can exist and still mean a different, wrong-assurance-level product than
-                        // the one the administrator selected.
-                        var matchedProduct = products.FirstOrDefault(p =>
-                            string.Equals(p.ProductCode, profileId, StringComparison.OrdinalIgnoreCase));
-
-                        if (matchedProduct == null)
-                        {
-                            var available = string.Join(", ", availableIds);
-                            _logger.LogWarning(
-                                "Product/profile validation failed — configured ProductCode '{ProfileId}' was not " +
-                                "found in the CERTInext V2 catalog. ProductID={ProductID}, AvailableCount={AvailableCount}",
-                                profileId, params_.ProductId, availableIds.Count);
-                            throw new AnyCAValidationException(
-                                $"ProductCode '{profileId}' was not found in the CERTInext V2 catalog. " +
-                                $"Available codes: {available}");
-                        }
-
-                        // Compared only when the catalog entry carries one of the documented SSL productTypeIDs:
-                        // catalogs on other CA backends (SSL.com) need not, and the code is then taken as given.
-                        string matchedTypeId = matchedProduct.ProductTypeId?.Trim();
-                        if (string.IsNullOrEmpty(matchedTypeId) || !Constants.Products.ProductTypeIdsV2.ContainsValue(matchedTypeId))
-                        {
-                            _logger.LogInformation(
-                                "Product/profile validation: ProductCode '{ProfileId}' is in the CERTInext V2 catalog " +
-                                "with productTypeID '{TypeId}', which isn't a documented SSL product type; not checking " +
-                                "it against the selected ProductID '{ProductID}'.",
-                                profileId, matchedTypeId ?? "(none)", params_.ProductId);
-                        }
-                        else if (Constants.Products.ProductTypeIdsV2.TryGetValue(params_.ProductId ?? string.Empty, out string expectedTypeId)
-                            && !string.Equals(matchedTypeId, expectedTypeId, StringComparison.OrdinalIgnoreCase))
-                        {
-                            _logger.LogWarning(
-                                "Product/profile validation failed — configured ProductCode '{ProfileId}' exists in " +
-                                "the CERTInext V2 catalog, but its catalog productTypeID ('{ActualTypeId}') does not " +
-                                "match the selected ProductID '{ProductID}' (expected productTypeID '{ExpectedTypeId}'). " +
-                                "This template would order a different product than the one selected.",
-                                profileId, matchedProduct.ProductTypeId, params_.ProductId, expectedTypeId);
-                            throw new AnyCAValidationException(
-                                $"ProductCode '{profileId}' exists in the CERTInext catalog, but it does not " +
-                                $"correspond to the selected product '{params_.ProductId}'. Verify the ProductCode " +
-                                "override is correct for this product, or remove the override and let CERTInext " +
-                                "resolve the product from the order shape.");
-                        }
-
-                        found = true;
-                    }
                 }
                 else
                 {
@@ -2283,74 +2188,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // directly to send only the variant and leave X-Product-Code out, so the plugin never
             // adds it on its own, for any request shape.
             //
-            // UCC / wildcard detection decides whether extra DNS SANs are carried in
-            // additionalDomains (UCC) or rejected by the single-domain guard below:
-            //  - Explicit override: the live catalog entry for the code is looked up and, when its
-            //    productTypeID is one of the documented SSL types (13-22), that type decides (UCC /
-            //    non-UCC wildcard). When it doesn't (catalog unreadable, code not listed, no or an
-            //    unfamiliar productTypeID, as on catalogs of other CA backends such as SSL.com), the
-            //    request shape decides, as with no override: extra DNS SANs make it UCC. The template
-            //    author chose the code, and CERTInext rejects a code that can't carry those names.
-            //  - No override: no catalog call at all. The wildcard shape is the domain itself
-            //    (starts "*."), exactly what the wrapper keys on. UCC is the template's product
-            //    type (ProductId -> productTypeID, as before) OR the request carrying DNS SANs
-            //    beyond the primary domain (its www. variant and a wildcard's bare apex are not
-            //    "extra"), which is what makes the wrapper pick a UCC product — so those extras go
-            //    out in additionalDomains instead of failing the single-domain guard. That includes a
-            //    wildcard SAN on a non-wildcard domain (CN = apex, SAN = *.apex).
+            // The plugin doesn't check a ProductCode against the catalog: an explicit code is sent
+            // as given, and CERTInext rejects one that can't carry the request. Wildcard and UCC
+            // are decided from the request itself, the same way the wrapper does:
+            //  - Wildcard: the domain starts "*.".
+            //  - UCC: the template's product type (ProductId -> productTypeID) is UCC, OR the
+            //    request carries DNS SANs beyond the primary domain (its www. variant and a
+            //    wildcard's bare apex are not "extra"). Those extras go out in additionalDomains,
+            //    including a wildcard SAN on a non-wildcard domain (CN = apex, SAN = *.apex).
+            //
+            // FindExtraDnsSans takes the UNION of the CSR's own SANs and the SAN dictionary: the
+            // create call sends the CSR to CERTInext verbatim, so a CSR-embedded extra domain
+            // reaches the CA even when Command also supplied a (single-domain) SAN dictionary.
             //
             // Private PKI: ProductCode is likewise optional (the wrapper resolves it from
-            // `variant`); the catalog is never fetched because its only use on this path — SSL UCC
-            // detection — does not apply.
+            // `variant`), and its SANs go in additionalHosts, so none of this applies.
             string productCode = ep.HasExplicitProductCode ? ep.ProductCode : null;
             bool isUccProduct = false;
-            bool isWildcardProduct = false;
-            if (!isPrivatePki && ep.HasExplicitProductCode)
+            if (!isPrivatePki)
             {
-                List<ProductDetail> catalog = null;
-                try
-                {
-                    catalog = await _client.GetProductDetailsV2Async();
-                }
-                catch (Exception catalogEx)
-                {
-                    _logger.LogWarning(catalogEx,
-                        "EnrollV2Async: could not fetch the live V2 product catalog to detect UCC/wildcard for the " +
-                        "explicit ProductCode; deciding from the request's SANs. ProductId={ProductId}", ep.ProductId);
-                }
-
-                var matchedProduct = catalog?.FirstOrDefault(p =>
-                    string.Equals(p.ProductCode, ep.ProductCode, StringComparison.OrdinalIgnoreCase));
-                string matchedTypeId = matchedProduct?.ProductTypeId?.Trim();
-                if (!string.IsNullOrEmpty(matchedTypeId)
-                    && Constants.Products.ProductTypeIdsV2.ContainsValue(matchedTypeId))
-                {
-                    isUccProduct = Constants.ApiV2.UccProductTypeIds.Contains(matchedTypeId);
-                    isWildcardProduct = Constants.ApiV2.WildcardProductTypeIds.Contains(matchedTypeId);
-                }
-                else
-                {
-                    isWildcardProduct = domain.StartsWith("*.", StringComparison.Ordinal);
-                    isUccProduct = FindExtraDnsSans(csr, san, domain, isWildcardProduct).Count > 0;
-                    _logger.LogInformation(
-                        "EnrollV2Async: the catalog doesn't identify explicit ProductCode {ProductCode} as a known SSL " +
-                        "product type (productTypeID={TypeId}); deciding from the request instead. Wildcard={Wildcard}, " +
-                        "Ucc={Ucc}", ep.ProductCode, matchedProduct == null ? "(not listed)" : matchedTypeId ?? "(none)",
-                        isWildcardProduct, isUccProduct);
-                }
-            }
-            else if (!isPrivatePki)
-            {
-                isWildcardProduct = domain.StartsWith("*.", StringComparison.Ordinal);
+                bool isWildcardProduct = domain.StartsWith("*.", StringComparison.Ordinal);
                 bool templateIsUccType = Constants.Products.ProductTypeIdsV2.TryGetValue(
                         ep.ProductId ?? string.Empty, out string templateTypeId)
                     && Constants.ApiV2.UccProductTypeIds.Contains(templateTypeId);
                 var extraDnsSans = FindExtraDnsSans(csr, san, domain, isWildcardProduct);
                 isUccProduct = templateIsUccType || extraDnsSans.Count > 0;
 
-                // Wildcard only in the SANs (CN = the apex, SAN = *.apex): the wildcard goes out in
-                // additionalDomains like any other extra name, and CERTInext picks the product. EV has
-                // no wildcard product at all, so that fails before placing an order.
+                // EV has no wildcard product at all, so a wildcard SAN on an EV request fails before
+                // placing an order.
                 if (!isWildcardProduct
                     && string.Equals(sslProductVariant, Constants.ApiV2.ProductVariantEv, StringComparison.OrdinalIgnoreCase)
                     && extraDnsSans.Any(s => s.StartsWith("*.", StringComparison.Ordinal)))
@@ -2370,98 +2235,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 }
 
                 _logger.LogInformation(
-                    "EnrollV2Async: no explicit ProductCode on the template — no X-Product-Code header will be sent; " +
-                    "CERTInext resolves the product from the variant, wildcard shape and additional domains. " +
-                    "ProductId={ProductId}, Wildcard={Wildcard}, Ucc={Ucc} (TemplateUccType={TemplateUccType}, " +
-                    "ExtraDnsSanCount={ExtraCount})",
-                    ep.ProductId, isWildcardProduct, isUccProduct, templateIsUccType, extraDnsSans.Count);
-            }
-
-            // Non-UCC V2 products support only a single domain plus autoSecureWww's www.<domain>
-            // variant; any other DNS SAN — from the CSR OR Command's SAN dictionary — would be
-            // silently dropped or cause a CA-side rejection, so fail fast with a
-            // clear message rather than letting the CA return an opaque error, or the extra
-            // names vanish with no order-side signal at all. UCC (multi-domain) products are
-            // exempt — their extra SANs are the expected input and are carried into
-            // additionalDomains below instead. This check necessarily runs after UCC detection
-            // above, not before it, but it still runs before PlaceOrderV2Async, so a rejected
-            // non-UCC request never places a CA order. It can only trigger for an explicit
-            // ProductCode whose catalog entry is not UCC: with no explicit code the wrapper picks
-            // the product from the request shape, so any extra DNS SAN makes the order UCC above
-            // (and goes out in additionalDomains) instead of being rejected here.
-            //
-            // Looking at the CSR alone misses the case where Command's SAN
-            // dictionary carries the extras and the CSR itself carries only the primary domain —
-            // a non-UCC order never sends additionalDomains at all, so those dictionary-only
-            // extras would have nowhere to go and would be dropped with no warning.
-            //
-            // This guard deliberately takes the UNION of the CSR's own SANs and the SAN
-            // dictionary — NOT CollectRequestedSanEntries'/BuildSanList's "fallback, not union"
-            // rule (dictionary wins when non-null; CSR consulted only when the dictionary is
-            // null). That rule exists to decide what additionalDomains/additionalHosts actually
-            // send to the CA, where the CSR's own subjectAltName extension is otherwise ignored.
-            // Here it is wrong: the create call sends the CSR to CERTInext verbatim regardless
-            // of what the SAN dictionary contains, so a CSR-embedded extra domain still reaches
-            // the CA even when Command also supplied a (single-domain) SAN dictionary. Deferring
-            // to the dictionary alone whenever it is non-null would let that CSR-embedded extra
-            // slip past this guard unrejected for any enrollment that also happens to pass a SAN
-            // dictionary.
-            //
-            // SSL-only: a private-pki order carries its SANs in additionalHosts,
-            // which the spec defines as a multi-entry "SAN list (DNS names or IPv4 / IPv6)" for
-            // every Private PKI variant, so the single-domain restriction does not apply.
-            //
-            // Wildcard apex exemption: a non-UCC wildcard product's `domain` is the literal
-            // wildcard value (e.g. "*.example.com"), and a wildcard CSR/SAN dictionary
-            // routinely also carries the bare apex ("example.com") alongside it — rejecting
-            // that apex as an "extra SAN" would make every ordinary wildcard CSR unenrollable
-            // via this guard. Exempt exactly the apex (the wildcard domain with its leading
-            // "*." stripped) for wildcard products (productTypeID 14/17,
-            // Constants.ApiV2.WildcardProductTypeIds) — any other extra SAN is still rejected.
-            // NOTE: this only widens what the guard *accepts*; it does not change
-            // what is sent to the CA for the apex — additionalDomains is still not populated
-            // for non-UCC products below. Whether CERTInext's V2 order create needs the apex
-            // added to additionalDomains (or handles it automatically for a wildcard product)
-            // is unverified and should be confirmed against a live order before relying on it.
-            if (!isPrivatePki && !isUccProduct)
-            {
-                var extraSans = FindExtraDnsSans(csr, san, domain, isWildcardProduct);
-
-                if (extraSans.Count > 0)
-                {
-                    _logger.LogWarning(
-                        "EnrollV2Async rejected multi-SAN order on domain '{Domain}'. " +
-                        "This product does not support additional domains via the V2 API " +
-                        "(autoSecureWww covers www.); only UCC (multi-domain) products may carry " +
-                        "extra SANs, whether requested via the CSR or Command's SAN dictionary. " +
-                        "ExtraSans=[{ExtraSans}]",
-                        LogSanitizer.Strip(domain),
-                        LogSanitizer.Strip(string.Join(", ", extraSans)));
-                    _logger.MethodExit(LogLevel.Debug);
-                    // Wildcard products get their own wording: unlike a plain single-domain
-                    // product, a wildcard product cannot be made to accept extra SANs by
-                    // switching to a UCC product on this same domain, so the rejection must not
-                    // suggest that.
-                    string statusMessage = isWildcardProduct
-                        ? $"V2 enrollment rejected: {extraSans.Count} SAN(s) beyond the primary wildcard " +
-                          $"domain ('{domain}') and its www. variant were requested (via the CSR and/or " +
-                          "Command's SAN dictionary). Only the primary wildcard domain and its bare apex " +
-                          "are supported via the V2 API for this product. Resubmit with a CSR/SAN set " +
-                          "carrying only those, and no other SANs."
-                        : $"V2 enrollment rejected: {extraSans.Count} SAN(s) beyond the primary domain " +
-                          $"('{domain}') and its www. variant were requested (via the CSR and/or Command's " +
-                          "SAN dictionary). This product only supports a single domain via the V2 API " +
-                          "(UCC/multi-domain products are the exception). Resubmit with a single-domain " +
-                          "CSR and no additional SANs, or enroll against a UCC product if additional " +
-                          "domains are required.";
-                    return new EnrollmentResult
-                    {
-                        CARequestID   = string.Empty,
-                        Certificate   = null,
-                        Status        = (int)EndEntityStatus.FAILED,
-                        StatusMessage = statusMessage
-                    };
-                }
+                    "EnrollV2Async: product decided by CERTInext from the variant, wildcard shape and additional " +
+                    "domains. XProductCode={ProductCode}, ProductId={ProductId}, Wildcard={Wildcard}, Ucc={Ucc} " +
+                    "(TemplateUccType={TemplateUccType}, ExtraDnsSanCount={ExtraCount})",
+                    productCode ?? "(none)", ep.ProductId, isWildcardProduct, isUccProduct, templateIsUccType,
+                    extraDnsSans.Count);
             }
 
             // For UCC products, additionalDomains is populated from the same SAN source the V1
