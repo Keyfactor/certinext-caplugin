@@ -13,8 +13,8 @@ vendor API. Shared auth/host logic lives in [`../lib/command-auth.sh`](../lib/co
 
 | Stage | Script | `make` target | Side | Notes |
 |------:|--------|---------------|------|-------|
-| 01 | `01-gateway-profiles.sh` | `register-profiles` | Gateway | one cert profile per product. **Verified.** |
-| 02 | `02-gateway-ca-config.sh` | `register-ca-config` | Gateway | CAConnection + Templates[]. ⚠️ touches CA config — opt-in. |
+| 01 | `01-gateway-profiles.sh` | `register-profiles` | Gateway | one cert profile per product, plus a `<ProductID> V2` profile per product when `V2_TEMPLATES=1` (default). **Verified.** |
+| 02 | `02-gateway-ca-config.sh` | `register-ca-config` | Gateway | CAConnection + Templates[] (pinned set, plus the V2 template set when `V2_TEMPLATES=1`). ⚠️ touches CA config — opt-in. |
 | 03 | `03-gateway-claims.sh` | `register-claims` | Gateway | OAuth claim→role mappings. Unverified. |
 | 04 | `04-command-register-ca.sh` | `register-command-ca` | Command | registers the CA. ⚠️ **CA config — leave alone unless asked.** |
 | 05 | `05-command-import-templates.sh` | `register-import` | Command | `POST /Templates/Import`. |
@@ -27,6 +27,36 @@ and reads `~/.env_certinext` + the env contract below.
 > ⚠️ **Do not modify the CA configuration** (stage 04, and stage 02's CA-connection
 > PUT) unless explicitly asked — it is fragile and easily broken. Profiles,
 > template import, enrollment patterns, and key-retention are safe to re-run.
+
+## Template sets: pinned and V2 (`V2_TEMPLATES`)
+
+Command imports AnyCA templates under the name `AnyCA_<CertificateProfile>`, so two
+gateway templates can share a `ProductID` as long as their `CertificateProfile`
+differs. Stages 01 and 02 register two sets per product in
+`.about.carest.product_ids` (10 products → 20 templates):
+
+| Set | `ProductID` | `CertificateProfile` | `Parameters` | Command template | Behavior |
+|-----|-------------|----------------------|--------------|------------------|----------|
+| Pinned | `DV SSL` | `DV SSL` | `ProductCode` (from `PRODUCT_CODE_MAP_JSON`) + `TEMPLATE_PARAMS_JSON` | `AnyCA_DV SSL` | plugin sends `X-Product-Code` |
+| V2 template | `DV SSL` | `DV SSL V2` | `TEMPLATE_PARAMS_JSON` only — **never** `ProductCode`/`ProfileId` | `AnyCA_DV SSL V2` | plugin sends no `X-Product-Code`; CERTInext resolves the product |
+
+- `V2_TEMPLATES=1` (default) registers both sets; `V2_TEMPLATES=0` is the previous
+  pinned-only behavior. Use the same value for stages 01 and 02.
+- Stage 01 must run first: it creates the `<ProductID> V2` gateway profiles that the
+  V2 templates reference. Stage 02 strips `ProductCode`/`ProfileId` from V2 entries
+  even if `PRODUCT_CODE_MAP_JSON` has an entry for the product.
+- Stage 05 imports both sets (it imports whatever the gateway exposes). Stage 06
+  iterates every template in the tenant, so the V2 templates get enrollment patterns
+  (named after each template's `DisplayName`) and key retention with no change.
+- Unpinned DV on the CERTInext sandbox currently resolves to a product that rejects
+  the CSR at submit; that is a CERTInext account finding, not a registration issue.
+  The V2 integration tests run both ways for the same reason (see
+  `CERTInext.IntegrationTests/TESTING.md`).
+- `CHECK=1` on stage 01 still diffs against the captured reference
+  (`docs/reference/gateway/certificate-profiles.json`, which only lists the pinned
+  DV/OV names — a subset check, so the V2 profiles do not break it) and additionally
+  verifies that every profile the run registered, including the V2 set, exists.
+  The reference JSON files are historical captures and are intentionally not edited.
 
 ## Authentication
 
@@ -126,7 +156,7 @@ product to a certificate profile so enrollment can resolve a CA. Two things bite
 export GATEWAY_LOGICAL_NAME=CertiNext           # the live CA's LogicalName
 export CERTINEXT_SIGNER_PLACE=Gateway
 export PRODUCT_CODE_MAP_JSON='{"DV SSL":"842","OV SSL":"846", ...}'
-make register-ca-config
+make register-ca-config           # V2_TEMPLATES=0 for the pinned set only
 ```
 
 ## Stage 06 — Command EnrollmentPatterns schema (verified 2026-06-09)
