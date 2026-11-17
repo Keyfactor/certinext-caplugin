@@ -628,11 +628,14 @@ When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
 
 When `UseV2Api` is `true`, the plugin does not choose a numeric product code. The V2 spec treats the `X-Product-Code` header on order create as an optional override: CERTInext's wrapper picks the right catalog product from the variant (`productVariant` for SSL/TLS, `variant` for Private PKI), whether `certificate.domain` is a wildcard (it starts with `*.`), and whether `additionalDomains` is non-empty (multi-domain, UCC). The create response reports the product it chose as `resolvedProductCode`, which the plugin logs at Information level.
 
-1. **No `ProductCode` on the template (the default)** — no `X-Product-Code` header is sent, with one exception, described below. The connector's `DefaultProductCode` is not used. Save-time validation does no catalog check. The plugin decides whether the order is wildcard or multi-domain from the request itself:
+CERTInext advises sending only the variant and leaving `X-Product-Code` out, so the plugin never adds the header on its own.
+
+1. **No `ProductCode` on the template (the default and recommended)** — no `X-Product-Code` header is sent. The connector's `DefaultProductCode` is not used. Neither save-time validation nor enrollment reads the catalog. The plugin decides whether the order is wildcard or multi-domain from the request itself:
    - **Wildcard:** the primary domain starts with `*.`.
-   - **Multi-domain:** the selected product is a UCC product, or the CSR or gateway SAN list carries DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count). Those names are sent as `additionalDomains`, which makes CERTInext choose a UCC product.
-   - **Wildcard in the SANs only (the exception):** the CN is a plain name, such as `example.com`, and a SAN is a wildcard, such as `*.example.com`. CERTInext can't resolve this request itself. It treats an order as wildcard only when `certificate.domain` starts with `*.`, so it picks a plain UCC product and rejects the wildcard with `EMS-1173 Invalid Additional Domain Names`. Sending the wildcard as the domain doesn't work either: CERTInext requires the domain to match the CSR CN (`EMS-1056`). For this case, the plugin reads the account's catalog once. If the catalog has exactly one active Wildcard UCC product for the variant (`productTypeID` `21` for DV, `22` for OV), the plugin sends that product's code as `X-Product-Code`. It keeps the CN as the domain and sends the wildcard in `additionalDomains`. If no single product matches, or the catalog can't be read, enrollment fails before any order is placed, and the message asks you to set `ProductCode` on the template. Setting it also skips the lookup. EV has no wildcard product, so EV requests in this shape are rejected.
-2. **Explicit `ProductCode` (or the deprecated `ProfileId` alias)** — the override. It is sent as-is in the `X-Product-Code` header, after template save-time validation confirms it exists in the live V2 catalog and matches the selected product. Use it when your account holds several matching products (for example different CA profiles for the same variant) and you want to force one. With an override, the plugin reads the catalog once per enrollment to recognize UCC and wildcard products, and rejects extra SANs on a single-domain product.
+   - **Multi-domain:** the selected product is a UCC product, or the gateway's SAN list carries DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count). Those names are sent as `additionalDomains`, which makes CERTInext choose a UCC product.
+   - **SAN source:** Command's SAN list (passed by the gateway) is authoritative. A DNS name that is only in the CSR doesn't make the order multi-domain and isn't sent in `additionalDomains`; the CSR itself is still sent to CERTInext unchanged. The CSR's SANs are used only when the gateway passes no SAN list at all. This matches the other Keyfactor CA plugins that build a SAN list for their CA.
+   - **Wildcard in the SANs only:** the CN is a plain name, such as `example.com`, and a SAN is a wildcard, such as `*.example.com`. The CN stays the domain (CERTInext requires the domain to match the CSR CN, `EMS-1056`), and the wildcard is sent in `additionalDomains`. On some accounts CERTInext rejects this shape with `EMS-1173 Invalid Additional Domain Names`; if it does, set `ProductCode` on the template to the account's Wildcard UCC product code.
+2. **Explicit `ProductCode` (or the deprecated `ProfileId` alias)** — the override. It is sent as-is in the `X-Product-Code` header. CERTInext advises against sending it, so use it only when your account holds several matching products (for example different CA profiles for the same variant) and you want to force one. The plugin doesn't check the code against the catalog, either when the template is saved or at enrollment. It decides wildcard and multi-domain from the request the same way as without an override, and CERTInext rejects a code that doesn't exist or can't carry the request.
 
 This differs from V1, where `DefaultProductCode` only affects renewals (see [DefaultProductCode](#defaultproductcode)).
 
@@ -640,7 +643,7 @@ This differs from V1, where `DefaultProductCode` only affects renewals (see [Def
 
 With `ProductFamily=private-pki`, the plugin places the order against CERTInext's Private PKI endpoint using the Private PKI request body, which differs from the SSL/TLS one:
 
-- **Product code is optional.** CERTInext resolves the Private PKI product from `ProductVariant`. Set `ProductCode` to your account's Private PKI catalog code only to pick between several matching products; template validation then checks that it is a Private PKI product (`productTypeID` `39`).
+- **Product code is optional.** CERTInext resolves the Private PKI product from `ProductVariant`. Set `ProductCode` to your account's Private PKI catalog code only to pick between several matching products. It isn't checked against the catalog; CERTInext rejects a code that isn't a Private PKI product on your account.
 - **Which `ProductID` to pick.** The plugin advertises SSL/TLS product names only, so the template still needs one from that list. It does not affect a `private-pki` order, which is built from `ProductVariant` (and `ProductCode`, if set), so any ProductID (for example `DV SSL`) works.
 - **Variant is required.** Set `ProductVariant` to `intranet-ssl` or `igtf-host`.
 - **Hostname.** The order's primary `hostname` comes from `DomainName`, or from the CSR's CN when `DomainName` isn't set.
@@ -754,9 +757,9 @@ and Synchronize — to V2. The two APIs cannot be mixed on a single connector.
 
 ### Before You Begin: Confirm V2 Will Work for Your Templates
 
-- **Multi-domain (UCC) certificates are supported.** That covers DV UCC, DV Wildcard UCC, OV UCC, OV Wildcard UCC, and EV UCC. The plugin detects a UCC product from the live catalog's `productTypeID` and sends the extra SAN domains in the order's `additionalDomains` field. Per the V2 spec, a UCC order's SANs come from the order, not the CSR.
+- **Multi-domain (UCC) certificates are supported.** That covers DV UCC, DV Wildcard UCC, OV UCC, OV Wildcard UCC, and EV UCC. The plugin treats a request as multi-domain when the selected product is a UCC product or the request carries extra DNS names, and sends those names in the order's `additionalDomains` field. Per the V2 spec, a UCC order's SANs come from the order, not the CSR.
 - **Only DNS SANs are sent.** `additionalDomains` takes DNS names only, so IP, email, and URI SANs are left off a UCC order and a warning is written to the gateway log.
-- **Non-UCC SSL products are checked up front.** A CSR or SAN list with DNS names beyond the primary domain and its `www.` variant is rejected before any order is placed. UCC products are exempt.
+- **Extra SAN names make an order multi-domain.** DNS names in Command's SAN list beyond the primary domain and its `www.` variant go out in `additionalDomains`, whatever product the template selects; CERTInext rejects a product that can't carry them. A name that is only in the CSR is ignored.
 - **DCV is not validated end to end in three cases.** These are per-SAN DCV on UCC orders, a domain that has never been validated, and wildcard DCV. The plugin runs the DNS-01 flow for each domain CERTInext reports as not yet validated, but test each UCC or wildcard template on the sandbox before relying on it in production. Keep it on a V1 connector if you need a validated path today.
 - **DCV needs a DNS provider plugin.** `DcvEnabled` defaults to `true`. Without a DNS provider plugin for the order's domains, V2 DV orders stay pending after the order is placed. Deploy one, or set `DcvEnabled` to `false` and validate domains another way. See [DCV under V2](#dcv-under-v2).
 
@@ -1370,13 +1373,8 @@ flowchart TD
     C -- No --> X1(["Enrollment rejected, no order placed"])
     C -- Yes --> D{Private PKI?}
     D -- Yes --> G0
-    D -- No --> E{"Explicit template ProductCode?"}
-    E -- Yes --> E1["Fetch the product catalog<br/>to recognize UCC and wildcard products"]
-    E -- No --> E2["Detect UCC and wildcard from the request:<br/>wildcard domain, UCC template product or extra DNS SANs"]
-    E1 --> F2{"Explicit non-UCC product with extra DNS SANs<br/>in the CSR or SAN list?"}
-    E2 --> G0
-    F2 -- Yes --> X3(["Failed result, no order placed"])
-    F2 -- No --> G0{"SSL/TLS with V2InlineCsr on?<br/>(Private PKI never)"}
+    D -- No --> E2["Detect UCC and wildcard from the request:<br/>wildcard domain, UCC template product or extra DNS SANs"]
+    E2 --> G0{"SSL/TLS with V2InlineCsr on?<br/>(Private PKI never)"}
     G0 -- "No: two-call (V2InlineCsr false, or Private PKI)" --> G["Create the order without a CSR<br/>(Idempotency-Key header, X-Product-Code only if the template sets ProductCode)"]
     G0 -- "Yes: single call, the default" --> GI["Create the order with the CSR inline, unchanged<br/>(Idempotency-Key header, X-Product-Code only if the template sets ProductCode)"]
     GI --> GI2{"Create call answered?"}
@@ -1413,11 +1411,8 @@ flowchart TD
 
 Notes on the V2 flow:
 
-- **Product code.** The spec makes `X-Product-Code` an optional override: CERTInext picks the catalog product itself from the variant, whether the domain is a wildcard (starts with `*.`), and whether `additionalDomains` is non-empty. So the plugin sends the header only when the template sets `ProductCode` (or the deprecated `ProfileId`), to choose between several matching catalog products. The connector's `DefaultProductCode` doesn't affect V2 orders. The create response's `resolvedProductCode` is logged at Information level.
-  - **With an explicit `ProductCode`,** the plugin fetches the live catalog once per enrollment, only to recognize multi-domain and wildcard products; if it can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted.
-  - **Without one,** there is no catalog call. The order is a wildcard when the domain starts with `*.`. It is multi-domain when the selected product is a UCC product, or when the CSR or SAN list has DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count); those names go out as `additionalDomains`, which is what makes CERTInext choose a UCC product.
-
-  Private PKI never fetches the catalog. Its `ProductCode`, when set, was validated when the template was saved.
+- **Product code.** The spec makes `X-Product-Code` an optional override: CERTInext picks the catalog product itself from the variant, whether the domain is a wildcard (starts with `*.`), and whether `additionalDomains` is non-empty. CERTInext advises sending only the variant, so the plugin sends the header only when the template sets `ProductCode` (or the deprecated `ProfileId`), and sends it as given. The connector's `DefaultProductCode` doesn't affect V2 orders. The create response's `resolvedProductCode` is logged at Information level.
+  - **No product-code pre-check.** Enrollment never reads the catalog, with or without `ProductCode`; CERTInext rejects a code it can't use. The order is a wildcard when the domain starts with `*.`. It is multi-domain when the selected product is a UCC product, or when the gateway's SAN list has DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count); those names go out as `additionalDomains`, which is what makes CERTInext choose a UCC product. Command's SAN list is authoritative: a name only in the CSR is ignored (the CSR is still sent unchanged), and the CSR's SANs are used only when the gateway passes no SAN list. This matches the other Keyfactor CA plugins that build a SAN list for their CA.
 - **SSL.com organization validation (OV/EV).** Just before the create call, an OV or EV SSL/TLS order reads the organization's SSL.com validation status, refreshes it once if the order's level isn't validated, and, only when `SslComSubmitOrganization` is on and the organization is ready, submits it (accepting SSL.com's subscriber agreement on its behalf, audit-logged). This step is advisory: any failure or not-validated result logs a warning and the order is placed anyway. See [SSL.com organization validation](configuration.md#sslcom-organization-validation).
 - **Multi-domain products.** DNS SANs other than the primary domain are sent as `additionalDomains`, and non-DNS SANs are left off the order with a warning. Private PKI sends DNS and IP SANs as `additionalHosts`.
 - **CSR delivery (`V2InlineCsr`).** By default (`V2InlineCsr = true`, SSL/TLS) the CSR is sent inline in the create body exactly as Command supplied it, and there is no Submit CSR step (a `PUT .../csr` after an inline CSR is rejected with HTTP 422). The create call then often holds about 20 seconds until the certificate is issued, and the order ID is known only once it returns. If that call fails with a 5xx or times out, the order may still exist and issue: the failure message says so, the plugin doesn't cancel the order, and the next sync imports it. Private PKI ignores the setting and always uses two calls, because CERTInext rejects an inline CSR on the Private PKI create (HTTP 422). With `V2InlineCsr = false` the plugin creates the order without a CSR and then submits it with `PUT .../csr`, cancelling the orphaned order once if that submit is rejected. That two-call flow fails for a domain the account has already validated: CERTInext reports the order `issued` at create, before any CSR, and then rejects the submit with HTTP 422 "Something went Wrong". A blank CSR is rejected before any CA call.
@@ -1528,9 +1523,9 @@ The same https-or-loopback check runs again at gateway startup, so a connector s
 
 When an administrator saves a certificate template, the gateway asks the plugin to validate its product settings. On V1 the product code must be set (explicitly, or derived from the selected product) and appear in the CERTInext product list for the account. On V2:
 
-- an explicit `ProductCode` is optional; if set, it must exist in the live catalog and match the selected product's type, and no catalog check runs without one;
+- an explicit `ProductCode` is optional and isn't checked against the catalog (CERTInext rejects a code it can't use when the order is placed);
 - an SSL template's `ProductVariant` must agree with the selected product;
-- a Private PKI template needs a Private PKI `ProductVariant`, and its `ProductCode`, if set, must be a Private PKI catalog product.
+- a Private PKI template needs a Private PKI `ProductVariant`.
 
 Any failure is shown to the administrator with the candidate codes or the field to fix.
 

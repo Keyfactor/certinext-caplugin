@@ -52,13 +52,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     ///   from ~/.env_certinext_v2 by <see cref="V2EnvHelper"/>, same as <see cref="V2LifecycleTests"/>.
     /// </summary>
     [Collection(PrivatePkiV2LiveCollection.Name)]
-    public class PrivatePkiV2LiveTests : IClassFixture<IntegrationTestFixture>
+    public class PrivatePkiV2LiveTests : IClassFixture<IntegrationTestFixture>, IDisposable
     {
         private const string OptInFlag = "CERTINEXT_PRIVATE_PKI_LIVE";
         private const string IpSan     = "10.0.0.50";
 
         private readonly IntegrationTestFixture _fixture;
         private readonly ITestOutputHelper _output;
+        private readonly Action _restoreLogging;
 
         private readonly bool _optedIn;
         private readonly string _v2ApiUrl;
@@ -66,12 +67,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         private readonly string _v2ClientSecret;
         private readonly string _productCode;
         private readonly string _cnOverride;
+        private readonly string _variant;
+        private readonly bool _leavePending;
         private readonly bool _v2CredsPresent;
 
         public PrivatePkiV2LiveTests(IntegrationTestFixture fixture, ITestOutputHelper output)
         {
             _fixture = fixture;
             _output  = output;
+            _restoreLogging = TestOutputLogging.RouteTo(output);
 
             // Read the opt-in flag from the real process environment BEFORE promoting the V2 env
             // file, so leaving the flag in ~/.env_certinext_v2 cannot arm this order-placing test.
@@ -83,11 +87,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             _v2ClientSecret = V2EnvHelper.GetEnv(env, "CERTINEXT_CLIENT_SECRET");
             _productCode    = V2EnvHelper.GetEnv(env, "CERTINEXT_PRIVATE_PKI_PRODUCT_CODE", "149");
             _cnOverride     = V2EnvHelper.GetEnv(env, "CERTINEXT_PRIVATE_PKI_CN");
+            _variant        = V2EnvHelper.GetEnv(env, "CERTINEXT_PRIVATE_PKI_VARIANT", Constants.ApiV2.PrivatePkiVariantIntranetSsl);
+            // Read from the process environment, like the opt-in flag: leaves a pending order for manual portal approval.
+            _leavePending   = Environment.GetEnvironmentVariable("CERTINEXT_PRIVATE_PKI_LEAVE_PENDING")?.Trim() == "1";
 
             _v2CredsPresent = !string.IsNullOrWhiteSpace(_v2ApiUrl)
                            && !string.IsNullOrWhiteSpace(_v2ClientId)
                            && !string.IsNullOrWhiteSpace(_v2ClientSecret);
         }
+
+        public void Dispose() => _restoreLogging();
 
         /// <summary>
         /// V2 config for the private-pki order: mirrors <c>V2LifecycleTests.BuildV2Config</c> (V2
@@ -202,7 +211,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 ProductParameters = new Dictionary<string, string>
                 {
                     [Constants.EnrollmentParam.ProductFamily]  = "private-pki",
-                    [Constants.EnrollmentParam.ProductVariant] = Constants.ApiV2.PrivatePkiVariantIntranetSsl,
+                    [Constants.EnrollmentParam.ProductVariant] = _variant,
                     [Constants.EnrollmentParam.ProductCode]    = _productCode,
                 }
             };
@@ -214,7 +223,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             };
 
             _output.WriteLine("=== private-pki live enrollment (ONE order, no retries) ===");
-            _output.WriteLine($"Family=private-pki, Variant={Constants.ApiV2.PrivatePkiVariantIntranetSsl}, ProductCode={_productCode}");
+            _output.WriteLine($"Family=private-pki, Variant={_variant}, ProductCode={_productCode}");
             _output.WriteLine($"CN={cn}, SANs: dnsname=[{cn}], ipaddress=[{IpSan}]");
 
             string orderId = null;
@@ -320,6 +329,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 _output.WriteLine("No order id captured — nothing to revoke or cancel. If Enroll threw after sending the " +
                                   $"create request, check the CERTInext portal for a private-pki order with hostname '{cn}'.");
+                return;
+            }
+
+            if (!issued && _leavePending)
+            {
+                _output.WriteLine($"CERTINEXT_PRIVATE_PKI_LEAVE_PENDING=1: leaving order {orderId} pending for manual approval. " +
+                                  "Revoke it once issued (scripts/v2/revoke-private-pki.sh), or cancel it with " +
+                                  "POST /private-pki-certificates/{id}/cancel and a non-empty \"reason\".");
                 return;
             }
 

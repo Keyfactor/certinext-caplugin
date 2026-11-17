@@ -429,7 +429,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             // ValidatePrivatePkiEnrollmentParams instead, unaffected here.
             using var server = WireMockServer.Start();
             StubToken(server);
-            StubCatalogServer(server, "149", Constants.ApiV2.PrivatePkiProductTypeId);
+            StubCatalogServer(server, "149", "39");
 
             var productInfo = new EnrollmentProductInfo
             {

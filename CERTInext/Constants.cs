@@ -208,9 +208,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // NOTE: 15/18/20/21/22 match the real V2 sandbox catalog; the other five
             // (13/14/16/17/19) are spec-documented but have not been checked against it.
             //
-            // Used by EnrollV2Async/ValidateProductInfo to resolve/validate the real V2 product
-            // code from the live catalog when no explicit ProductCode override is configured.
-            // Never used for V1.
+            // Used by EnrollV2Async to tell whether the template's product is UCC (with UccProductTypeIds),
+            // and by Synchronize to name a synced order's product. It is never used to choose or check a
+            // product code. Never used for V1.
             public static readonly System.Collections.Generic.Dictionary<string, string> ProductTypeIdsV2 =
                 new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
                 {
@@ -599,11 +599,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // The connector's EmailNotifications=0 maps to it and =1 maps to "all".
             public const string EmailNotificationsConsentOnly = "consent-only";
 
-            // Catalog productTypeID for Private PKI products. Spec, Catalog -> List Products
-            // "productTypeID values": `"39"` | Private PKI | Private PKI (`8`). Also observed live
-            // on the sandbox catalog (product 149, "Sandbox emSign Intranet SSL 1 Year").
-            public const string PrivatePkiProductTypeId = "39";
-
             // Document Signer create-body `subjectType` enum. Spec, "Document
             // Signer Certificates" field table: "`subjectType` | **Mandatory**
             // (`natural-person` / `legal-person` / `legal-entity`)". Not yet sourced by
@@ -625,34 +620,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             // found to reuse for this one, so this remains a fixed default.
             public const string DefaultTechnicalContactDesignation = "Technical Contact";
 
-            // UCC (multi-SAN) product family detection — from the live Catalog response's
-            // productTypeID field: 15=DV SSL UCC, 18=OV SSL UCC, 20=EV SSL UCC,
-            // 21=DV SSL Wildcard UCC, 22=OV SSL Wildcard UCC.
+            // UCC (multi-SAN) productTypeIDs (15=DV SSL UCC, 18=OV SSL UCC, 20=EV SSL UCC,
+            // 21=DV SSL Wildcard UCC, 22=OV SSL Wildcard UCC). Used only to tell whether the
+            // template's product name (via Products.ProductTypeIdsV2) is a UCC product; the catalog
+            // isn't read at enrollment.
             // Deliberately NOT derived from Constants.Products.DefaultProductCodes — that table's
             // numbering disagrees with the live/spec numbering.
             public static readonly System.Collections.Generic.HashSet<string> UccProductTypeIds =
                 new System.Collections.Generic.HashSet<string> { "15", "18", "20", "21", "22" };
-
-            // Non-UCC wildcard product family detection — from the live Catalog response's
-            // productTypeID field: 14=DV SSL Wildcard, 17=OV SSL Wildcard
-            // (Constants.Products.ProductTypeIdsV2). Deliberately excludes the UCC wildcard
-            // type IDs (21/22, in UccProductTypeIds above) — those are already exempt from
-            // the single-domain SAN guard by virtue of being UCC, and their additionalDomains
-            // handling is unrelated to the apex-SAN exemption this set is used for (the V2
-            // single-domain enrollment guard in EnrollV2Async).
-            public static readonly System.Collections.Generic.HashSet<string> WildcardProductTypeIds =
-                new System.Collections.Generic.HashSet<string> { "14", "17" };
-
-            // Wildcard UCC productTypeID per SSL productVariant (live catalog: 21=DV SSL Wildcard
-            // UCC, 22=OV SSL Wildcard UCC; EV has no wildcard product). Used when the wildcard is
-            // only in the SANs: the wrapper keys "wildcard" on certificate.domain alone, and the
-            // domain must equal the CSR CN (EMS-1056), so the plugin has to name the product itself.
-            public static readonly System.Collections.Generic.Dictionary<string, string> WildcardUccProductTypeIdByVariant =
-                new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
-                {
-                    [ProductVariantDv] = "21",
-                    [ProductVariantOv] = "22",
-                };
 
             // Orders report (Synchronize, V2 mode) — GET /api/certinext/v2/reports/orders.
             // Spring-style page envelope: content/page/size/totalPages/totalElements.

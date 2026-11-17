@@ -59,12 +59,12 @@ Tests that place real orders, publish DNS records, or cancel orders run only whe
 |---|---|
 | `CERTINEXT_COMPLETE_PENDING` | Complete every pending DV order (needs Cloudflare) |
 | `CERTINEXT_RUN_BULK_TEST`, `CERTINEXT_V2_RUN_BULK_TEST` | V1 and V2 bulk enrollment and pagination tests |
-| `CERTINEXT_PRIVATE_PKI_LIVE` | One live Private PKI order and revoke |
+| `CERTINEXT_PRIVATE_PKI_LIVE` | One live Private PKI order and revoke. `CERTINEXT_PRIVATE_PKI_VARIANT` picks the variant (default `intranet-ssl`); `CERTINEXT_PRIVATE_PKI_LEAVE_PENDING=1` leaves an unissued order for manual approval instead of cancelling it |
 | `CERTINEXT_V2_OPS_TESTS` | V2 order-window sweep (maintenance tool) |
 | `CERTINEXT_V2_LIFECYCLE_DV_UCC`, `_OV`, `_OV_UCC`, `_EV`, `_WILDCARD_DV`, `_RENEW_REISSUE`, `_FRESH_DCV` | The matching V2 full-lifecycle test |
 | `CERTINEXT_V2_LIFECYCLE_REISSUE_ENDPOINT` (plus `CERTINEXT_V2_REISSUE_SOURCE_ORDER_ID`) | One reissue of an issued order through `/reissue`; creates a derived order and cleans it up |
 | `CERTINEXT_V2_SSLCOM_DCV_PROBE`, `CERTINEXT_V2_UNRESOLVED_STATUS_PROBE` | Read-only probes: SSL.com domain lookup and DCV shape; report status pairs the sync can't map |
-| `CERTINEXT_V2_WILDCARD_SAN_PROBE` | Places DV orders with the CN as the apex and the wildcard only in the SANs, and logs what CERTInext accepts and which product it resolves (`V2WildcardSanShapeTests`) |
+| `CERTINEXT_V2_WILDCARD_SAN_PROBE` | Places DV orders with the CN as the apex and the wildcard only in the SANs, and logs what CERTInext accepts and which product it resolves (`V2WildcardSanShapeTests`; `Probe_Raw_ApexCn_WildcardSan` posts the create body directly with no `X-Product-Code`) |
 | `CERTINEXT_V2_REVOKE_PRIVILEGE_WITHDRAWN` | Places its own DV order and revokes it with `privilege-withdrawn` |
 
 Set each to `1`. [INTEGRATION_TESTING.md](../CERTInext.IntegrationTests/INTEGRATION_TESTING.md) lists the remaining flags, such as the algorithm matrices, and the extra variables each test needs. To load `~/.env_certinext` into a shell that also exports a flag, use `set -a; . ~/.env_certinext; set +a`.

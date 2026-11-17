@@ -28,17 +28,10 @@ using Xunit;
 namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 {
     /// <summary>
-    /// Tests for the non-UCC V2 single-domain SAN guard's wildcard-apex exemption:
-    /// a wildcard product's CSR/SAN dictionary routinely also carries the bare apex alongside
-    /// the wildcard domain itself (e.g. "example.com" alongside "*.example.com"), and the guard
-    /// must not reject that apex as an "extra SAN" the way it would for any other non-UCC
-    /// product. Only the apex is exempt — any other extra SAN is still rejected, and non-wildcard
-    /// products are unaffected.
-    ///
-    /// NOTE: these tests only confirm the guard's accept/reject decision. What is actually sent
-    /// to the CA for the apex (whether additionalDomains needs it, or CERTInext handles it
-    /// automatically for a wildcard product) has not been confirmed against the live API — see
-    /// the comment in EnrollV2Async above the guard.
+    /// V2 wildcard enrollments: a wildcard CSR/SAN dictionary routinely also carries the bare apex
+    /// alongside the wildcard domain itself (e.g. "example.com" alongside "*.example.com"). The apex
+    /// isn't an "extra" name; any other DNS SAN goes out in additionalDomains. There is no
+    /// product-code pre-check: an explicit ProductCode is sent as given, without reading the catalog.
     /// </summary>
     public class V2WildcardEnrollmentTests
     {
@@ -153,64 +146,44 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Once);
         }
 
-        [Fact]
-        public async Task Enroll_V2_DvWildcard_NonApexExtraSan_StillRejected_WithoutSuggestingUcc()
+        // No product-code pre-check: an explicit ProductCode is sent as given and CERTInext rejects a
+        // product that can't carry the request. Extra SANs go out in additionalDomains (for a wildcard
+        // domain, its bare apex too), and the catalog isn't read.
+        [Theory]
+        [InlineData(Constants.Products.DvSslWildcard, "839", "*.example.com", new[] { "*.example.com", "example.com", "other.example.com" }, new[] { "example.com", "other.example.com" })]
+        [InlineData(Constants.Products.DvSsl, "842", "example.com", new[] { "example.com", "other.example.com" }, new[] { "other.example.com" })]
+        public async Task Enroll_V2_ExplicitProductCode_ExtraSan_IsPlaced_InAdditionalDomains_WithoutReadingTheCatalog(
+            string productId, string productCode, string domain, string[] sans, string[] expectedAdditional)
         {
             var mock = NewMock();
-            StubCatalog(mock, "839", "14"); // DV SSL Wildcard
+            StubHappyOrderPlacement(mock);
+            V2CreateSslOrderRequest sent = null;
+            string sentCode = null;
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, code, req, __) =>
+                {
+                    sentCode = code;
+                    sent = req;
+                })
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_wc_001", Status = "pending-dcv" });
 
             var plugin = BuildV2Plugin(mock.Object);
 
             var result = await plugin.Enroll(
                 csr: MockCertificateData.FakeCsrPem,
-                subject: "CN=*.example.com",
-                san: new Dictionary<string, string[]>
-                {
-                    // The apex is exempt, but an unrelated extra domain is not.
-                    ["dns"] = new[] { "*.example.com", "example.com", "other.example.com" }
-                },
-                productInfo: MakeWildcardProductInfo(Constants.Products.DvSslWildcard, "839", "*.example.com"),
+                subject: $"CN={domain}",
+                san: new Dictionary<string, string[]> { ["dns"] = sans },
+                productInfo: MakeWildcardProductInfo(productId, productCode, domain),
                 requestFormat: RequestFormat.PKCS10,
                 enrollmentType: EnrollmentType.New);
 
-            result.Status.Should().Be((int)EndEntityStatus.FAILED);
-            result.StatusMessage.Should().Contain("1 SAN(s) beyond");
-            result.StatusMessage.Should().NotContain("UCC",
-                "a wildcard enrollment rejection must not suggest buying a UCC product");
-
-            mock.Verify(c => c.PlaceOrderV2Async(
-                It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never);
-        }
-
-        [Fact]
-        public async Task Enroll_V2_NonWildcardProduct_ApexNotExempt_StillRejected_AndSuggestsUcc()
-        {
-            // Sanity check that the exemption is wildcard-specific: a non-wildcard, non-UCC
-            // product's "extra" SAN set is unaffected by this fix, and its rejection message
-            // still offers the UCC suggestion (only wildcard products' wording changes).
-            var mock = NewMock();
-            StubCatalog(mock, "842", "13"); // DV SSL (non-wildcard, non-UCC)
-
-            var plugin = BuildV2Plugin(mock.Object);
-
-            var result = await plugin.Enroll(
-                csr: MockCertificateData.FakeCsrPem,
-                subject: "CN=example.com",
-                san: new Dictionary<string, string[]>
-                {
-                    ["dns"] = new[] { "example.com", "other.example.com" }
-                },
-                productInfo: MakeWildcardProductInfo(Constants.Products.DvSsl, "842", "example.com"),
-                requestFormat: RequestFormat.PKCS10,
-                enrollmentType: EnrollmentType.New);
-
-            result.Status.Should().Be((int)EndEntityStatus.FAILED);
-            result.StatusMessage.Should().Contain("UCC");
-
-            mock.Verify(c => c.PlaceOrderV2Async(
-                It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+            result.CARequestID.Should().Be("ord_wc_001");
+            sentCode.Should().Be(productCode);
+            sent!.Certificate.Domain.Should().Be(domain);
+            sent.Certificate.AdditionalDomains.Should().BeEquivalentTo(expectedAdditional);
+            mock.Verify(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>()), Times.Never);
         }
     }
 }

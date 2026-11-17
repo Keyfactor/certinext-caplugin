@@ -1594,135 +1594,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             ProductParameters = new Dictionary<string, string> { ["ProductCode"] = productCode }
         };
 
-        [Fact]
-        public async Task ValidateProductInfo_V2_Succeeds_WhenProductCodeInCatalog()
-        {
-            using var server = WireMockServer.Start();
-            StubV2TokenAndAuthMe(server);
-            server
-                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
-                .RespondWith(Response.Create()
-                    .WithStatusCode(200)
-                    .WithHeader("Content-Type", "application/json")
-                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
-
-            var plugin = BuildV2Plugin(NewMock().Object);
-            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
-            var productInfo = BuildProductInfo(MockCertificateData.ProfileIdTls);
-
-            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
-
-            await act.Should().NotThrowAsync();
-
-            // In V2 mode this must go through the V2 catalog,
-            // never the V1-only GetProductDetails endpoint.
-            server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/GetProductDetails");
-            server.LogEntries.Should().Contain(e => e.RequestMessage.Path == "/api/certinext/v2/catalog/products");
-        }
-
-        [Fact]
-        public async Task ValidateProductInfo_V2_Throws_WhenProductCodeNotInCatalog()
-        {
-            using var server = WireMockServer.Start();
-            StubV2TokenAndAuthMe(server);
-            server
-                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
-                .RespondWith(Response.Create()
-                    .WithStatusCode(200)
-                    .WithHeader("Content-Type", "application/json")
-                    .WithBody(MockCertificateData.GetCatalogProductsV2NestedJson()));
-
-            var plugin = BuildV2Plugin(NewMock().Object);
-            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
-            var productInfo = BuildProductInfo("999999");
-
-            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
-
-            await act.Should().ThrowAsync<AnyCAValidationException>()
-                .WithMessage("*not found*");
-        }
-
-        [Fact]
-        public async Task ValidateProductInfo_V2_Throws_WhenCatalogEmpty()
-        {
-            using var server = WireMockServer.Start();
-            StubV2TokenAndAuthMe(server);
-            server
-                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
-                .RespondWith(Response.Create()
-                    .WithStatusCode(200)
-                    .WithHeader("Content-Type", "application/json")
-                    .WithBody(MockCertificateData.GetCatalogProductsV2EmptyJson()));
-
-            var plugin = BuildV2Plugin(NewMock().Object);
-            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
-            var productInfo = BuildProductInfo(MockCertificateData.ProfileIdTls);
-
-            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
-
-            // No soft-accept on an empty/unusable catalog — must match V1's strict behaviour.
-            await act.Should().ThrowAsync<AnyCAValidationException>()
-                .WithMessage("*not found*");
-        }
-
-        [Fact]
-        public async Task ValidateProductInfo_V2_Throws_WhenCatalogReturnsError()
-        {
-            using var server = WireMockServer.Start();
-            StubV2TokenAndAuthMe(server);
-            server
-                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
-                .RespondWith(Response.Create()
-                    .WithStatusCode(500)
-                    .WithHeader("Content-Type", "application/json")
-                    .WithBody("{\"secretApiKeyLeak\":\"should-not-appear-in-message\"}"));
-
-            var plugin = BuildV2Plugin(NewMock().Object);
-            var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
-            var productInfo = BuildProductInfo(MockCertificateData.ProfileIdTls);
-
-            Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
-
-            var ex = await act.Should().ThrowAsync<AnyCAValidationException>()
-                .WithMessage("*Unable to validate*");
-            ex.Which.Message.Should().NotContain("secretApiKeyLeak");
-        }
-
         // ---------------------------------------------------------------------------
-        // productTypeID correctness check — catches a code that exists in the
-        // catalog but means a different product than the one selected, for both the
-        // explicit-override case and the no-override/fallback case. ValidateProductInfo
-        // must reject these, not just check catalog-existence.
+        // Explicit ProductCode on a V2 template: no product-code pre-check. The code is sent as given at
+        // enroll time and CERTInext rejects one it can't use, so template save never reads the catalog,
+        // whatever the catalog would have said.
         // ---------------------------------------------------------------------------
 
-        [Fact]
-        public async Task ValidateProductInfo_V2_Throws_WhenProductCodeExistsButProductTypeIdMismatchesSelectedProduct()
+        public static IEnumerable<object[]> CatalogResponsesForExplicitCode() => new[]
         {
-            // Template selects "OV SSL" (expects productTypeID "16") but overrides ProductCode to
-            // "842", which the live catalog (stubbed here) resolves to productTypeID "13" = DV
-            // SSL. The code exists — a pure existence check would pass this — but it means a
-            // different product than the one selected.
+            // label, product ID, code, catalog status, catalog body
+            new object[] { "code in catalog", "DV SSL", MockCertificateData.ProfileIdTls, 200, MockCertificateData.GetCatalogProductsV2NestedJson() },
+            new object[] { "code not in catalog", "DV SSL", "999999", 200, MockCertificateData.GetCatalogProductsV2NestedJson() },
+            new object[] { "empty catalog", "DV SSL", MockCertificateData.ProfileIdTls, 200, MockCertificateData.GetCatalogProductsV2EmptyJson() },
+            new object[] { "catalog error", "DV SSL", MockCertificateData.ProfileIdTls, 500, "{\"error\":\"boom\"}" },
+            new object[] { "type mismatch", "OV SSL", "842", 200, @"[{""productCode"":""842"",""productTypeID"":""13""}]" },
+            new object[] { "undocumented type", "DV SSL Wildcard Multi-Domain (UCC)", "1015", 200, @"[{""productCode"":""1015""}]" },
+        };
+
+        [Theory]
+        [MemberData(nameof(CatalogResponsesForExplicitCode))]
+        public async Task ValidateProductInfo_V2_ExplicitProductCode_Passes_WithoutAnyCatalogCall(
+            string label, string productId, string productCode, int catalogStatus, string catalogBody)
+        {
             using var server = WireMockServer.Start();
             StubV2TokenAndAuthMe(server);
             server
                 .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
                 .RespondWith(Response.Create()
-                    .WithStatusCode(200)
+                    .WithStatusCode(catalogStatus)
                     .WithHeader("Content-Type", "application/json")
-                    .WithBody(@"[{""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13""}]"));
+                    .WithBody(catalogBody));
 
             var plugin = BuildV2Plugin(NewMock().Object);
             var connInfo = BuildV2ConnectionInfo(server.Urls[0]);
             var productInfo = new EnrollmentProductInfo
             {
-                ProductID = Constants.Products.OvSsl,
-                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = "842" }
+                ProductID = productId,
+                ProductParameters = new Dictionary<string, string> { ["ProductCode"] = productCode }
             };
 
             Func<Task> act = () => plugin.ValidateProductInfo(productInfo, connInfo);
 
-            await act.Should().ThrowAsync<AnyCAValidationException>()
-                .WithMessage("*does not correspond to the selected product*");
+            await act.Should().NotThrowAsync(label);
+            server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/api/certinext/v2/catalog/products", label);
+            server.LogEntries.Should().NotContain(e => e.RequestMessage.Path == "/GetProductDetails", label);
         }
 
         // ---------------------------------------------------------------------------

@@ -1613,7 +1613,36 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             List<ProductDetail> products = await client.GetProductDetailsV2Async();
 
             products.Should().ContainSingle(p => p.ProductCode == "851" && p.ProductTypeId == "20",
-                "UCC product's productTypeID must survive the flat productCode row shape (direct DTO deserialize)");
+                "UCC product's productTypeID must survive the flat productCode row shape");
+        }
+
+        [Fact]
+        public async Task GetProductDetailsV2Async_FlatProductCodeRow_NoActiveField_NumericTypeId_IsActiveWithStringTypeId()
+        {
+            StubV2Token();
+            _server
+                .Given(Request.Create().WithPath("/api/certinext/v2/catalog/products").UsingGet())
+                .RespondWith(Response.Create()
+                    .WithStatusCode(200)
+                    .WithHeader("Content-Type", "application/json")
+                    .WithBody(@"[
+    {""productCode"":""845"",""productName"":""DV SSL Certificate Wildcard UCC"",""productTypeID"":21},
+    {""productCode"":""842"",""productName"":""DV SSL Certificate"",""productTypeID"":""13"",""active"":false},
+    {""productCode"":""843"",""productTypeID"":""14"",""active"":""false""},
+    {""productCode"":""844"",""productTypeID"":""15"",""active"":0},
+    {""productCode"":""846"",""productTypeID"":""16"",""active"":null}
+]"));
+
+            using var client = BuildV2Client();
+            List<ProductDetail> products = await client.GetProductDetailsV2Async();
+
+            products.Should().ContainSingle(p => p.ProductCode == "845" && p.ProductTypeId == "21" && p.Active,
+                "a row without an \"active\" field is available, and a numeric productTypeID reads as its string form");
+            products.Should().ContainSingle(p => p.ProductCode == "842" && !p.Active,
+                "an explicit \"active\": false is kept");
+            products.Should().ContainSingle(p => p.ProductCode == "843" && !p.Active, "a non-boolean \"false\" isn't trusted as active");
+            products.Should().ContainSingle(p => p.ProductCode == "844" && !p.Active, "a numeric 0 isn't trusted as active");
+            products.Should().ContainSingle(p => p.ProductCode == "846" && p.Active, "a null \"active\" counts as absent");
         }
 
         [Fact]

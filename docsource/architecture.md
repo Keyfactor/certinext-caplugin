@@ -397,13 +397,8 @@ flowchart TD
     C -- No --> X1(["Enrollment rejected, no order placed"])
     C -- Yes --> D{Private PKI?}
     D -- Yes --> G0
-    D -- No --> E{"Explicit template ProductCode?"}
-    E -- Yes --> E1["Fetch the product catalog<br/>to recognize UCC and wildcard products"]
-    E -- No --> E2["Detect UCC and wildcard from the request:<br/>wildcard domain, UCC template product or extra DNS SANs"]
-    E1 --> F2{"Explicit non-UCC product with extra DNS SANs<br/>in the CSR or SAN list?"}
-    E2 --> G0
-    F2 -- Yes --> X3(["Failed result, no order placed"])
-    F2 -- No --> G0{"SSL/TLS with V2InlineCsr on?<br/>(Private PKI never)"}
+    D -- No --> E2["Detect UCC and wildcard from the request:<br/>wildcard domain, UCC template product or extra DNS SANs"]
+    E2 --> G0{"SSL/TLS with V2InlineCsr on?<br/>(Private PKI never)"}
     G0 -- "No: two-call (V2InlineCsr false, or Private PKI)" --> G["Create the order without a CSR<br/>(Idempotency-Key header, X-Product-Code only if the template sets ProductCode)"]
     G0 -- "Yes: single call, the default" --> GI["Create the order with the CSR inline, unchanged<br/>(Idempotency-Key header, X-Product-Code only if the template sets ProductCode)"]
     GI --> GI2{"Create call answered?"}
@@ -440,11 +435,8 @@ flowchart TD
 
 Notes on the V2 flow:
 
-- **Product code.** The spec makes `X-Product-Code` an optional override: CERTInext picks the catalog product itself from the variant, whether the domain is a wildcard (starts with `*.`), and whether `additionalDomains` is non-empty. So the plugin sends the header only when the template sets `ProductCode` (or the deprecated `ProfileId`), to choose between several matching catalog products. The connector's `DefaultProductCode` doesn't affect V2 orders. The create response's `resolvedProductCode` is logged at Information level.
-  - **With an explicit `ProductCode`,** the plugin fetches the live catalog once per enrollment, only to recognize multi-domain and wildcard products; if it can't be fetched, the order proceeds as single-domain, so a request with extra SANs is rejected rather than silently accepted.
-  - **Without one,** there is no catalog call. The order is a wildcard when the domain starts with `*.`. It is multi-domain when the selected product is a UCC product, or when the CSR or SAN list has DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count); those names go out as `additionalDomains`, which is what makes CERTInext choose a UCC product.
-
-  Private PKI never fetches the catalog. Its `ProductCode`, when set, was validated when the template was saved.
+- **Product code.** The spec makes `X-Product-Code` an optional override: CERTInext picks the catalog product itself from the variant, whether the domain is a wildcard (starts with `*.`), and whether `additionalDomains` is non-empty. CERTInext advises sending only the variant, so the plugin sends the header only when the template sets `ProductCode` (or the deprecated `ProfileId`), and sends it as given. The connector's `DefaultProductCode` doesn't affect V2 orders. The create response's `resolvedProductCode` is logged at Information level.
+  - **No product-code pre-check.** Enrollment never reads the catalog, with or without `ProductCode`; CERTInext rejects a code it can't use. The order is a wildcard when the domain starts with `*.`. It is multi-domain when the selected product is a UCC product, or when the gateway's SAN list has DNS names beyond the primary domain (its `www.` variant, and a wildcard's bare apex, don't count); those names go out as `additionalDomains`, which is what makes CERTInext choose a UCC product. Command's SAN list is authoritative: a name only in the CSR is ignored (the CSR is still sent unchanged), and the CSR's SANs are used only when the gateway passes no SAN list. This matches the other Keyfactor CA plugins that build a SAN list for their CA.
 - **SSL.com organization validation (OV/EV).** Just before the create call, an OV or EV SSL/TLS order reads the organization's SSL.com validation status, refreshes it once if the order's level isn't validated, and, only when `SslComSubmitOrganization` is on and the organization is ready, submits it (accepting SSL.com's subscriber agreement on its behalf, audit-logged). This step is advisory: any failure or not-validated result logs a warning and the order is placed anyway. See [SSL.com organization validation](configuration.md#sslcom-organization-validation).
 - **Multi-domain products.** DNS SANs other than the primary domain are sent as `additionalDomains`, and non-DNS SANs are left off the order with a warning. Private PKI sends DNS and IP SANs as `additionalHosts`.
 - **CSR delivery (`V2InlineCsr`).** By default (`V2InlineCsr = true`, SSL/TLS) the CSR is sent inline in the create body exactly as Command supplied it, and there is no Submit CSR step (a `PUT .../csr` after an inline CSR is rejected with HTTP 422). The create call then often holds about 20 seconds until the certificate is issued, and the order ID is known only once it returns. If that call fails with a 5xx or times out, the order may still exist and issue: the failure message says so, the plugin doesn't cancel the order, and the next sync imports it. Private PKI ignores the setting and always uses two calls, because CERTInext rejects an inline CSR on the Private PKI create (HTTP 422). With `V2InlineCsr = false` the plugin creates the order without a CSR and then submits it with `PUT .../csr`, cancelling the orphaned order once if that submit is rejected. That two-call flow fails for a domain the account has already validated: CERTInext reports the order `issued` at create, before any CSR, and then rejects the submit with HTTP 422 "Something went Wrong". A blank CSR is rejected before any CA call.
@@ -555,9 +547,9 @@ The same https-or-loopback check runs again at gateway startup, so a connector s
 
 When an administrator saves a certificate template, the gateway asks the plugin to validate its product settings. On V1 the product code must be set (explicitly, or derived from the selected product) and appear in the CERTInext product list for the account. On V2:
 
-- an explicit `ProductCode` is optional; if set, it must exist in the live catalog and match the selected product's type, and no catalog check runs without one;
+- an explicit `ProductCode` is optional and isn't checked against the catalog (CERTInext rejects a code it can't use when the order is placed);
 - an SSL template's `ProductVariant` must agree with the selected product;
-- a Private PKI template needs a Private PKI `ProductVariant`, and its `ProductCode`, if set, must be a Private PKI catalog product.
+- a Private PKI template needs a Private PKI `ProductVariant`.
 
 Any failure is shown to the administrator with the candidate codes or the field to fix.
 
