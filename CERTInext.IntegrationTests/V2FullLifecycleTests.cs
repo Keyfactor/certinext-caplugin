@@ -665,21 +665,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
         /// <summary>
         /// Wildcard+apex CSR shape: CN is the wildcard, SAN dictionary carries BOTH the wildcard
-        /// and its bare apex domain. The non-UCC V2 SAN guard (CERTInextCAPlugin.cs, EnrollV2Async)
-        /// explicitly exempts exactly this shape for a wildcard product — the guard computes
-        /// <c>domain</c> as the literal CN ("*.dcv-test.scrup.org" here), and without the
-        /// exemption the apex ("dcv-test.scrup.org") would match neither that nor its "www."
-        /// variant and be treated as a disallowed "extra SAN", even though a wildcard+apex
-        /// pairing is an extremely common, legitimate certificate shape. The order is therefore
-        /// expected to be accepted and issued. This test records the actual resulting behavior
-        /// rather than hard-asserting on it everywhere: if the order is rejected anyway,
-        /// it asserts the rejection is specifically this guard's (by message content) rather than
-        /// some unrelated failure; if accepted and issued, it parses the issued leaf (BouncyCastle)
-        /// and logs — as an observation only, not an assertion — whether the apex is covered by
-        /// the certificate's own SAN list (CERTInext may or may not add the apex to
-        /// additionalDomains automatically for a non-UCC wildcard product).
-        /// Expected sandbox order count: 0 or 1 (0 if CERTInext itself rejects a FAILED result
-        /// before any order is ever placed — see the FAILED branch below).
+        /// and its bare apex domain. The plugin doesn't count a wildcard's bare apex as an extra
+        /// name (EnrollV2Async / FindExtraDnsSans), so this goes out as a single-domain wildcard
+        /// order with no additionalDomains, and CERTInext decides. This test records the actual
+        /// resulting behavior rather than hard-asserting on it: if the order ends FAILED it logs
+        /// the reason; if accepted and issued, it parses the issued leaf (BouncyCastle) and logs —
+        /// as an observation only, not an assertion — whether the apex is covered by the
+        /// certificate's own SAN list (CERTInext may or may not add the apex automatically for a
+        /// wildcard product). Expected sandbox order count: 0 or 1.
         /// </summary>
         [SkippableTheory]
         [V2PinModes]
@@ -713,20 +706,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 if (enrollResult.Status == (int)EndEntityStatus.FAILED)
                 {
                     _output.WriteLine(
-                        "RESULT: wildcard+apex was REJECTED before any CA call — the non-UCC SAN guard's " +
-                        $"wildcard-apex exemption did not cover this case: domain==CN=='{wildcard}', and the " +
-                        $"apex '{apex}' matched neither that nor its 'www.' variant.");
-                    enrollResult.StatusMessage.Should().Contain("SAN",
-                        "a FAILED result here must specifically be the non-UCC multi-SAN guard's rejection " +
-                        "(StatusMessage mentions SAN/domain count), not some unrelated failure masquerading as it");
-                    enrollResult.CARequestID.Should().BeNullOrWhiteSpace(
-                        "the guard rejects before PlaceOrderV2Async — no CARequestID should be minted");
+                        $"RESULT: wildcard+apex order ended FAILED: {enrollResult.StatusMessage}");
+                    orderId = string.IsNullOrWhiteSpace(enrollResult.CARequestID) ? null : enrollResult.CARequestID;
                 }
                 else
                 {
                     _output.WriteLine(
-                        "RESULT: wildcard+apex was ACCEPTED — the non-UCC single-domain SAN guard's " +
-                        "wildcard-apex exemption allows the bare apex alongside the wildcard CN.");
+                        "RESULT: wildcard+apex was ACCEPTED — the bare apex isn't an extra name for a wildcard " +
+                        "domain, so it went out as a single-domain wildcard order.");
                     enrollResult.CARequestID.Should().NotBeNullOrWhiteSpace();
                     orderId = enrollResult.CARequestID;
 
