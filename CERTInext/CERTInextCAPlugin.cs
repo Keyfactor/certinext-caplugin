@@ -1729,6 +1729,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// The primary domain of a V2 SSL request whose subject has no CN: the first DNS SAN that isn't a
+        /// wildcard, else the first wildcard one, else null. Same SAN source as <see cref="FindExtraDnsSans"/>.
+        /// A plain name comes first so SANs <c>*.example.com</c> + <c>example.com</c> order like CN
+        /// <c>example.com</c> (a UCC order, both names issued); with a wildcard domain CERTInext issues only
+        /// the wildcard.
+        /// </summary>
+        internal static string PrimaryDomainFromSans(Dictionary<string, string[]> san, string csr)
+        {
+            var dnsNames = CollectRequestedSanEntries(san, csr, out _, out _)
+                .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                .Select(s => s.Value)
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .ToList();
+            return dnsNames.FirstOrDefault(v => !v.StartsWith("*.", StringComparison.Ordinal)) ?? dnsNames.FirstOrDefault();
+        }
+
+        /// <summary>
         /// Validates the template parameters a V2 <c>private-pki</c> order needs
         /// beyond the SSL ones, before any CA call. Shared by <see cref="EnrollV2Async"/> (fail
         /// fast with a FAILED result) and <see cref="ValidateProductInfo"/> (reject at template
@@ -2047,10 +2064,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string domain = ep.DomainName;
             if (string.IsNullOrWhiteSpace(domain))
                 domain = ExtractCnFromSubject(subject);
+            // SSL with no CN (the names only in the SANs): the V2 spec requires certificate.domain, not a CSR
+            // CN, so take the domain from the SANs. CERTInext issues with CN = that domain.
+            if (string.IsNullOrWhiteSpace(domain) && !isPrivatePki)
+            {
+                domain = PrimaryDomainFromSans(san, csr);
+                if (!string.IsNullOrWhiteSpace(domain))
+                    _logger.LogInformation(
+                        "EnrollV2Async: the subject has no CN; the primary domain is taken from the SANs. Domain={Domain}",
+                        LogSanitizer.Strip(domain));
+            }
             if (string.IsNullOrWhiteSpace(domain))
                 throw new Exception(isPrivatePki
                     ? "Cannot determine the primary hostname for V2 private-pki order — set the DomainName enrollment parameter or ensure the CSR subject has a CN."
-                    : "Cannot determine primary domain for V2 order — set the DomainName enrollment parameter or ensure the CSR subject has a CN.");
+                    : "Cannot determine primary domain for V2 order — set the DomainName enrollment parameter, or give the CSR subject a CN or the request a DNS SAN.");
 
             // organization is "Conditional — Mandatory for OV / EV" per the V2 spec's SSL field
             // table; every OV/EV create example in the spec sends it, and it is omitted entirely
