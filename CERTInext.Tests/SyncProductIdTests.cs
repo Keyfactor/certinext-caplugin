@@ -26,7 +26,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// Issue 0097: the gateway gives a synced record a template only when its <c>ProductID</c> exactly equals a
     /// template's ProductID, a product name from <c>GetProductIds()</c>. Both syncs must name the CERTInext product
     /// code through the account catalog (code -> productTypeID -> name), and keep the code when they can't.
-    /// Catalog values are the sandbox's (V1 and V2 identical, 2026-11-16).
+    /// Catalog values are the sandbox's (V1 and V2 identical, 2026-11-16), plus an SSL.com-category catalog.
     /// </summary>
     [Collection(LoggingStateCollection.Name)]
     public class SyncProductIdTests
@@ -40,12 +40,34 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             new ProductDetail { ProductCode = "149", ProductTypeId = "39", Active = true },  // Intranet SSL (no plugin product)
         };
 
+        // An account issuing through SSL.com: the "SSL.com" catalog category (2026-11-17).
+        private static List<ProductDetail> SslComCatalog() => new List<ProductDetail>
+        {
+            new ProductDetail { ProductCode = "1011", ProductTypeId = "47", Active = true },  // SSL.com DV SSL
+            new ProductDetail { ProductCode = "1012", ProductTypeId = "48", Active = true },  // SSL.com DV SSL Wildcard
+            new ProductDetail { ProductCode = "1013", ProductTypeId = "49", Active = true },  // SSL.com DV SSL UCC
+            new ProductDetail { ProductCode = "1014", ProductTypeId = "50", Active = true },  // SSL.com DV SSL Wildcard UCC
+            new ProductDetail { ProductCode = "1015", ProductTypeId = "51", Active = true },  // SSL.com OV SSL
+            new ProductDetail { ProductCode = "1020", ProductTypeId = "56", Active = true },  // SSL.com EV SSL UCC
+            new ProductDetail { ProductCode = "149", ProductTypeId = "39", Active = true },   // Intranet SSL (no plugin product)
+        };
+
         [Theory]
         [InlineData("13", Constants.Products.DvSsl)]
         [InlineData("17", Constants.Products.OvSslWildcard)]
         [InlineData("21", Constants.Products.DvSslWildcardUcc)]
         [InlineData("20", Constants.Products.EvSslUcc)]
         [InlineData(" 16 ", Constants.Products.OvSsl)]
+        [InlineData("47", Constants.Products.DvSsl)]
+        [InlineData("48", Constants.Products.DvSslWildcard)]
+        [InlineData("49", Constants.Products.DvSslUcc)]
+        [InlineData("50", Constants.Products.DvSslWildcardUcc)]
+        [InlineData("51", Constants.Products.OvSsl)]
+        [InlineData("52", Constants.Products.OvSslWildcard)]
+        [InlineData("53", Constants.Products.OvSslUcc)]
+        [InlineData("54", Constants.Products.OvSslWildcardUcc)]
+        [InlineData("55", Constants.Products.EvSsl)]
+        [InlineData("56", Constants.Products.EvSslUcc)]
         [InlineData("39", null)]
         [InlineData("", null)]
         [InlineData(null, null)]
@@ -62,6 +84,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             {
                 Constants.Products.ProductTypeIdsV2.Should().ContainKey(name);
                 CERTInextCAPlugin.ProductNameForTypeId(Constants.Products.ProductTypeIdsV2[name]).Should().Be(name);
+                Constants.Products.SslComProductTypeIdsV2.Should().ContainKey(name);
+                CERTInextCAPlugin.ProductNameForTypeId(Constants.Products.SslComProductTypeIdsV2[name]).Should().Be(name);
             }
         }
 
@@ -119,6 +143,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             capture.Lines(LogLevel.Information, "synchronization complete").Should().ContainSingle()
                 .Which.Should().Contain("ProductNames: Resolved=3, Unresolved=2");
             capture.Entries.Where(e => e.Level >= LogLevel.Warning).Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task V2Sync_SslComCatalog_NamesSslComProductCodes()
+        {
+            using var capture = new PluginLogCapture();
+            var (mock, plugin) = V2(IssuedRow("a", "1011"), IssuedRow("b", "1012"), IssuedRow("c", "1013"),
+                IssuedRow("d", "1020"), IssuedRow("e", "149"));
+            mock.Setup(c => c.GetProductDetailsV2Async(It.IsAny<CancellationToken>())).ReturnsAsync(SslComCatalog());
+            var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
+
+            await plugin.Synchronize(buffer, null, true, CancellationToken.None);
+
+            buffer.ToArray().ToDictionary(r => r.CARequestID, r => r.ProductID).Should().Equal(new Dictionary<string, string>
+            {
+                ["a"] = Constants.Products.DvSsl,
+                ["b"] = Constants.Products.DvSslWildcard,
+                ["c"] = Constants.Products.DvSslUcc,
+                ["d"] = Constants.Products.EvSslUcc,
+                ["e"] = "149",                             // Private PKI: no plugin product of that type
+            });
+            capture.Lines(LogLevel.Information, "synchronization complete").Should().ContainSingle()
+                .Which.Should().Contain("ProductNames: Resolved=4, Unresolved=1");
         }
 
         [Fact]

@@ -9,6 +9,8 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -34,6 +36,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
     public class CERTInextCAPlugin : IAnyCAPlugin, IDisposable
     {
         private readonly ILogger _logger = LogHandler.GetClassLogger<CERTInextCAPlugin>();
+
+        // The version CI stamps on the build (<version>+<commit>), logged at Initialize so a log names the build.
+        internal static readonly string PluginVersion =
+            typeof(CERTInextCAPlugin).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(CERTInextCAPlugin).Assembly.GetName().Version?.ToString()
+            ?? "unknown";
+
+        internal static readonly string PluginTargetFramework =
+            typeof(CERTInextCAPlugin).Assembly.GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName ?? "unknown";
+
+#if SUPPORTS_DCV
+        internal const bool PluginDcvSupport = true;
+#else
+        internal const bool PluginDcvSupport = false;
+#endif
 
         // 1 once the "Private PKI ignores V2InlineCsr" notice has been logged (once per plugin instance).
         private int _loggedPrivatePkiIgnoresInlineCsr;
@@ -253,6 +270,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             _logger.MethodEntry(LogLevel.Debug);
 
+            // Before config validation, so the build is named even when Initialize throws.
+            _logger.LogInformation(
+                "CERTInext CA plugin version {Version}. DcvSupport={DcvSupport}, TargetFramework={TargetFramework}",
+                PluginVersion, PluginDcvSupport, PluginTargetFramework);
+
             _certificateDataReader = certificateDataReader;
 
             string rawConfig = JsonSerializer.Serialize(configProvider.CAConnectionData);
@@ -421,10 +443,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             };
         }
 
-        // Inverse of Constants.Products.ProductTypeIdsV2: catalog productTypeID -> the product name GetProductIds()
-        // advertises (one name per type).
+        // Inverse of Constants.Products.ProductTypeIdsV2 (emSign types) and SslComProductTypeIdsV2 (SSL.com types):
+        // catalog productTypeID -> the product name GetProductIds() advertises (one name per type).
         private static readonly Dictionary<string, string> ProductNamesByTypeId =
-            Constants.Products.ProductTypeIdsV2.ToDictionary(kv => kv.Value, kv => kv.Key, StringComparer.OrdinalIgnoreCase);
+            Constants.Products.ProductTypeIdsV2.Concat(Constants.Products.SslComProductTypeIdsV2)
+                .ToDictionary(kv => kv.Value, kv => kv.Key, StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// The product name (one of <see cref="GetProductIds"/>) for a catalog <c>productTypeID</c>, or null when the
@@ -1706,6 +1729,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// The primary domain of a V2 SSL request whose subject has no CN: the first DNS SAN that isn't a
+        /// wildcard, else the first wildcard one, else null. Same SAN source as <see cref="FindExtraDnsSans"/>.
+        /// A plain name comes first so SANs <c>*.example.com</c> + <c>example.com</c> order like CN
+        /// <c>example.com</c> (a UCC order, both names issued); with a wildcard domain CERTInext issues only
+        /// the wildcard.
+        /// </summary>
+        internal static string PrimaryDomainFromSans(Dictionary<string, string[]> san, string csr)
+        {
+            var dnsNames = CollectRequestedSanEntries(san, csr, out _, out _)
+                .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                .Select(s => s.Value)
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .ToList();
+            return dnsNames.FirstOrDefault(v => !v.StartsWith("*.", StringComparison.Ordinal)) ?? dnsNames.FirstOrDefault();
+        }
+
+        /// <summary>
         /// Validates the template parameters a V2 <c>private-pki</c> order needs
         /// beyond the SSL ones, before any CA call. Shared by <see cref="EnrollV2Async"/> (fail
         /// fast with a FAILED result) and <see cref="ValidateProductInfo"/> (reject at template
@@ -2024,10 +2064,20 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             string domain = ep.DomainName;
             if (string.IsNullOrWhiteSpace(domain))
                 domain = ExtractCnFromSubject(subject);
+            // SSL with no CN (the names only in the SANs): the V2 spec requires certificate.domain, not a CSR
+            // CN, so take the domain from the SANs. CERTInext issues with CN = that domain.
+            if (string.IsNullOrWhiteSpace(domain) && !isPrivatePki)
+            {
+                domain = PrimaryDomainFromSans(san, csr);
+                if (!string.IsNullOrWhiteSpace(domain))
+                    _logger.LogInformation(
+                        "EnrollV2Async: the subject has no CN; the primary domain is taken from the SANs. Domain={Domain}",
+                        LogSanitizer.Strip(domain));
+            }
             if (string.IsNullOrWhiteSpace(domain))
                 throw new Exception(isPrivatePki
                     ? "Cannot determine the primary hostname for V2 private-pki order — set the DomainName enrollment parameter or ensure the CSR subject has a CN."
-                    : "Cannot determine primary domain for V2 order — set the DomainName enrollment parameter or ensure the CSR subject has a CN.");
+                    : "Cannot determine primary domain for V2 order — set the DomainName enrollment parameter, or give the CSR subject a CN or the request a DNS SAN.");
 
             // organization is "Conditional — Mandatory for OV / EV" per the V2 spec's SSL field
             // table; every OV/EV create example in the spec sends it, and it is omitted entirely
