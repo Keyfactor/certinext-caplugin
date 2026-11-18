@@ -20,7 +20,7 @@
 - feat(config): V2 orders honor `GroupNumber`, `OrganizationNumber`, `TechnicalContact*`, `EmailNotifications`, and the subscription renewal settings.
 
 ## Bug Fixes
-- fix(sync): Certificates synced from an account that issues through SSL.com (catalog codes `1011`-`1020`) get their product name, for example `DV SSL` or `DV SSL Multi-Domain (UCC)`, so the gateway assigns them the matching template. They used to keep the raw product code and get no template.
+- fix(sync): Certificates synced from an account that issues through SSL.com (product codes `1011`-`1020`) now get a product name such as `DV SSL`, so the gateway assigns the matching template. Before, they kept the raw code and got no template.
 - fix(v2): A request whose CN is a plain name and whose SANs carry a wildcard (CN `example.com`, SAN `*.example.com`) is no longer rejected before ordering when the catalog has no single Wildcard UCC product. It keeps the CN as the domain and sends the wildcard in `additionalDomains`, with no `X-Product-Code` unless the template sets `ProductCode`.
 - fix(v2): Extra SANs on an order with an explicit `ProductCode` are sent as `additionalDomains` instead of being rejected because the catalog lists the code as a single-domain product.
 - fix(v2): Command's SAN list is the only source of an SSL order's extra names. A DNS name that is only in the CSR no longer makes the order multi-domain; the CSR is still sent unchanged, and its SANs are used only when the gateway passes no SAN list.

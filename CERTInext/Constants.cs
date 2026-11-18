@@ -228,8 +228,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
             // V2-ONLY. The same product names mapped to the productTypeIDs of the "SSL.com" catalog
             // category (codes 1011-1020), which accounts issuing through SSL.com list instead of the
-            // emSign types above. 47-50 match both the sandbox and a production-host catalog; 51-56
-            // match the sandbox catalog.
+            // emSign types above. NOTE: 47-50 match two live catalogs; 51-56 (OV and EV) have been
+            // checked against one.
             //
             // Used only by Synchronize to name a synced order's product. Enrollment doesn't need it:
             // UCC detection goes through ProductTypeIdsV2 by product name, never through the catalog.
