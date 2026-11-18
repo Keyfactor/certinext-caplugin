@@ -55,6 +55,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 "CERTINEXT_V2_LIFECYCLE_WILDCARD_DV",
                 "CERTINEXT_V2_LIFECYCLE_RENEW_REISSUE",
                 "CERTINEXT_V2_LIFECYCLE_FRESH_DCV",
+                // V2AltEnvEnrollTests: places real orders on the account in CERTINEXT_ALT_ENV_FILE.
+                "CERTINEXT_ALT_ENV_ENROLL",
                 // Selects the V2InlineCsr connector setting for the V2 enrollment tests (see V2EnvHelper).
                 "CERTINEXT_V2_INLINE_CSR",
                 // Issue 0090 V2 place-order latency experiment (places real sandbox orders).
