@@ -18,6 +18,7 @@
 - feat(enroll): V2 orders also return a quickly issued certificate in the same `Enroll` call, using the `PickupRetries` and `PickupDelay` settings V1 gained in 1.0.1.
 - feat(config): New settings `RequestorDesignation` and `V2SyncLookbackHours`.
 - feat(config): V2 orders honor `GroupNumber`, `OrganizationNumber`, `TechnicalContact*`, `EmailNotifications`, and the subscription renewal settings.
+- feat(logging): Each time the gateway initializes the plugin, it logs the plugin's version, whether the build includes DCV support, and its target framework, for example `CERTInext CA plugin version 2.0.0+e8dafef5…. DcvSupport=True, TargetFramework=.NETCoreApp,Version=v8.0`. The line is written before the configuration is checked, so it appears even when initialization fails.
 
 ## Bug Fixes
 - fix(sync): Certificates synced from an account that issues through SSL.com (product codes `1011`-`1020`) now get a product name such as `DV SSL`, so the gateway assigns the matching template. Before, they kept the raw code and got no template.

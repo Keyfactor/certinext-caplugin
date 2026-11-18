@@ -9,6 +9,8 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -34,6 +36,21 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
     public class CERTInextCAPlugin : IAnyCAPlugin, IDisposable
     {
         private readonly ILogger _logger = LogHandler.GetClassLogger<CERTInextCAPlugin>();
+
+        // The version CI stamps on the build (<version>+<commit>), logged at Initialize so a log names the build.
+        internal static readonly string PluginVersion =
+            typeof(CERTInextCAPlugin).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(CERTInextCAPlugin).Assembly.GetName().Version?.ToString()
+            ?? "unknown";
+
+        internal static readonly string PluginTargetFramework =
+            typeof(CERTInextCAPlugin).Assembly.GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName ?? "unknown";
+
+#if SUPPORTS_DCV
+        internal const bool PluginDcvSupport = true;
+#else
+        internal const bool PluginDcvSupport = false;
+#endif
 
         // 1 once the "Private PKI ignores V2InlineCsr" notice has been logged (once per plugin instance).
         private int _loggedPrivatePkiIgnoresInlineCsr;
@@ -252,6 +269,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         public void Initialize(IAnyCAPluginConfigProvider configProvider, ICertificateDataReader certificateDataReader)
         {
             _logger.MethodEntry(LogLevel.Debug);
+
+            // Before config validation, so the build is named even when Initialize throws.
+            _logger.LogInformation(
+                "CERTInext CA plugin version {Version}. DcvSupport={DcvSupport}, TargetFramework={TargetFramework}",
+                PluginVersion, PluginDcvSupport, PluginTargetFramework);
 
             _certificateDataReader = certificateDataReader;
 
