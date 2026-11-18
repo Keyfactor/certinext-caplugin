@@ -226,6 +226,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     [EvSslUcc]          = "20",
                 };
 
+            // V2-ONLY. The same product names mapped to the productTypeIDs of the "SSL.com" catalog
+            // category (codes 1011-1020), which accounts issuing through SSL.com list instead of the
+            // emSign types above. 47-50 match both the sandbox and a production-host catalog; 51-56
+            // match the sandbox catalog.
+            //
+            // Used only by Synchronize to name a synced order's product. Enrollment doesn't need it:
+            // UCC detection goes through ProductTypeIdsV2 by product name, never through the catalog.
+            public static readonly System.Collections.Generic.Dictionary<string, string> SslComProductTypeIdsV2 =
+                new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    [DvSsl]             = "47",
+                    [DvSslWildcard]     = "48",
+                    [DvSslUcc]          = "49",
+                    [DvSslWildcardUcc]  = "50",
+                    [OvSsl]             = "51",
+                    [OvSslWildcard]     = "52",
+                    [OvSslUcc]          = "53",
+                    [OvSslWildcardUcc]  = "54",
+                    [EvSsl]             = "55",
+                    [EvSslUcc]          = "56",
+                };
+
             // V2-ONLY. Maps each SSL product name (ProductId) to the V2 create body's
             // productVariant value ("dv"/"ov"/"ev"). Grouped by the same
             // productTypeID assurance level ProductTypeIdsV2 above already documents (13-15 and

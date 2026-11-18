@@ -421,10 +421,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             };
         }
 
-        // Inverse of Constants.Products.ProductTypeIdsV2: catalog productTypeID -> the product name GetProductIds()
-        // advertises (one name per type).
+        // Inverse of Constants.Products.ProductTypeIdsV2 (emSign types) and SslComProductTypeIdsV2 (SSL.com types):
+        // catalog productTypeID -> the product name GetProductIds() advertises (one name per type).
         private static readonly Dictionary<string, string> ProductNamesByTypeId =
-            Constants.Products.ProductTypeIdsV2.ToDictionary(kv => kv.Value, kv => kv.Key, StringComparer.OrdinalIgnoreCase);
+            Constants.Products.ProductTypeIdsV2.Concat(Constants.Products.SslComProductTypeIdsV2)
+                .ToDictionary(kv => kv.Value, kv => kv.Key, StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// The product name (one of <see cref="GetProductIds"/>) for a catalog <c>productTypeID</c>, or null when the
