@@ -133,8 +133,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             ids.Should().Contain(Constants.Products.DvSsl);
             ids.Should().Contain(Constants.Products.OvSsl);
             ids.Should().Contain(Constants.Products.EvSsl);
-            // Ten products total (DV/OV/EV × single/wildcard/UCC variants)
-            ids.Should().HaveCount(10);
+            ids.Should().Contain(Constants.Products.PrivatePkiIntranetSsl);
+            ids.Should().Contain(Constants.Products.PrivatePkiIgtfHost);
+            // Ten SSL products (DV/OV/EV × single/wildcard/UCC variants) plus the two V2 Private PKI products
+            ids.Should().HaveCount(12);
             mock.VerifyNoOtherCalls();
         }
 
@@ -792,6 +794,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             await act.Should().ThrowAsync<Exception>()
                 .WithMessage("*ProfileId*required*");
+        }
+
+        [Theory]
+        [InlineData(Constants.Products.PrivatePkiIntranetSsl)]
+        [InlineData(Constants.Products.PrivatePkiIgtfHost)]
+        public async Task Enroll_V1_PrivatePkiProduct_WithoutProductCode_Throws(string productId)
+        {
+            // The Private PKI products have no V1 default code, so a V1 template must set ProductCode.
+            var mock = NewMock();
+            var plugin = BuildPlugin(mock.Object);
+
+            Func<Task> act = () => plugin.Enroll(
+                csr: MockCertificateData.FakeCsrPem,
+                subject: "CN=test.example.com",
+                san: null,
+                productInfo: new EnrollmentProductInfo { ProductID = productId, ProductParameters = new Dictionary<string, string>() },
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            await act.Should().ThrowAsync<Exception>().WithMessage("*ProfileId*required*");
+            mock.Invocations.Should().BeEmpty();
         }
 
         [Fact]

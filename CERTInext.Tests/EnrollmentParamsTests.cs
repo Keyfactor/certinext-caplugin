@@ -98,5 +98,50 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             ep.HasExplicitProductVariant.Should().Be(expectedExplicit);
             ep.ProductVariant.Should().Be(expectedVariant, "the ProductVariant getter's own default is unchanged");
         }
+
+        // A Private PKI product sets the family and variant defaults; SSL products keep ssl/dv.
+        [Theory]
+        [InlineData(Constants.Products.PrivatePkiIntranetSsl, Constants.ApiV2.FamilyPrivatePki, "intranet-ssl", true)]
+        [InlineData(Constants.Products.PrivatePkiIgtfHost, Constants.ApiV2.FamilyPrivatePki, "igtf-host", true)]
+        [InlineData("private pki intranet ssl", Constants.ApiV2.FamilyPrivatePki, "intranet-ssl", true)]
+        [InlineData(Constants.Products.OvSsl, Constants.ApiV2.FamilySsl, "dv", false)]
+        [InlineData("", Constants.ApiV2.FamilySsl, "dv", false)]
+        public void ProductFamilyAndVariantDefaults_FollowTheProduct(
+            string productId, string expectedFamilySlug, string expectedVariant, bool expectedPrivatePki)
+        {
+            var ep = new EnrollmentParams(MakeProductInfo(productId));
+
+            ep.IsPrivatePkiProduct.Should().Be(expectedPrivatePki);
+            ep.ProductFamilySlug.Should().Be(expectedFamilySlug);
+            ep.ProductVariant.Should().Be(expectedVariant);
+            ep.HasExplicitProductVariant.Should().BeFalse();
+        }
+
+        [Fact]
+        public void ExplicitFamilyAndVariant_OverrideThePrivatePkiProductDefaults()
+        {
+            var ep = new EnrollmentParams(MakeProductInfo(Constants.Products.PrivatePkiIntranetSsl, new Dictionary<string, string>
+            {
+                [Constants.EnrollmentParam.ProductFamily]  = "ssl",
+                [Constants.EnrollmentParam.ProductVariant] = "igtf-host"
+            }));
+
+            ep.ProductFamilySlug.Should().Be(Constants.ApiV2.FamilySsl);
+            ep.ProductVariant.Should().Be("igtf-host");
+        }
+
+        [Fact]
+        public void ResolveSslProductVariant_RejectsAPrivatePkiProduct()
+        {
+            var ep = new EnrollmentParams(MakeProductInfo(Constants.Products.PrivatePkiIgtfHost, new Dictionary<string, string>
+            {
+                [Constants.EnrollmentParam.ProductFamily] = "ssl"
+            }));
+
+            string error = CERTInextCAPlugin.ResolveSslProductVariant(ep, out string resolved);
+
+            error.Should().Contain("Private PKI product").And.Contain("'ssl'");
+            resolved.Should().BeNull();
+        }
     }
 }
