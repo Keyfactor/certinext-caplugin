@@ -523,7 +523,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 [Constants.EnrollmentParam.ProductCode] = new PropertyConfigInfo
                 {
                     Comments = "OPTIONAL: Override the numeric CERTInext product code for this template. When omitted: " +
-                               "on V1, the default production code for the selected product is used (e.g. DV SSL → 838); " +
+                               "on V1, the default production code for the selected product is used (e.g. DV SSL → 838; " +
+                               "the Private PKI products have none, so on V1 they need this set); " +
                                "on V2, no X-Product-Code header is sent and CERTInext resolves the product from the " +
                                "variant, the wildcard shape of the domain and any additional domains. On V2 an explicit " +
                                "value is an override, sent as X-Product-Code to choose between several matching " +
@@ -654,22 +655,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 [Constants.EnrollmentParam.ProductFamily] = new PropertyConfigInfo
                 {
-                    Comments = "V2 ONLY: Product family for this template. Accepted values: 'ssl' (default) or " +
-                               "'private-pki'. 'private-pki' requires a Private PKI ProductVariant. 'signature' " +
-                               "(Document Signer) is accepted by the parameter, but Document " +
-                               "Signer enrollment is not supported.",
+                    Comments = "V2 ONLY: Product family for this template. Accepted values: 'ssl' or 'private-pki'. " +
+                               "If omitted, 'private-pki' for the Private PKI products and 'ssl' for the others; a " +
+                               "Private PKI product with any other value fails enrollment. 'private-pki' with an SSL " +
+                               "product requires a Private PKI ProductVariant. 'signature' (Document Signer) is " +
+                               "accepted by the parameter, but Document Signer enrollment is not supported.",
                     Hidden = false,
-                    DefaultValue = "ssl",
+                    DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.ProductVariant] = new PropertyConfigInfo
                 {
-                    Comments = "V2 ONLY: Product variant sent in the V2 order body. ProductFamily 'ssl': 'dv', 'ov', or " +
-                               "'ev' — if omitted, derived from the selected product; an explicit value that contradicts " +
-                               "the product fails enrollment. ProductFamily 'private-pki': 'intranet-ssl' or 'igtf-host' " +
-                               "(required; no default).",
+                    Comments = "V2 ONLY: Product variant sent in the V2 order body. If omitted, derived from the " +
+                               "selected product ('dv', 'ov' or 'ev' for SSL; 'intranet-ssl' or 'igtf-host' for the " +
+                               "Private PKI products); an explicit value that contradicts the product fails enrollment. " +
+                               "With ProductFamily 'private-pki' and an SSL product it is required: 'intranet-ssl' or " +
+                               "'igtf-host'.",
                     Hidden = false,
-                    DefaultValue = "dv",
+                    DefaultValue = string.Empty,
                     Type = "String"
                 },
                 [Constants.EnrollmentParam.OrgRepresentativeName] = new PropertyConfigInfo
