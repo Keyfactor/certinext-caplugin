@@ -69,7 +69,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private static async Task<List<AnyCAPluginCertificate>> RunSync(
             ICERTInextClient client, ICertificateDataReader reader, bool fullSync = false)
         {
-            var plugin = new CERTInextCAPlugin(client, reader, new CERTInextConfig());
+            var plugin = new CERTInextCAPlugin(client, reader, new CERTInextConfig { UseV2Api = false });
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
             await plugin.Synchronize(buffer, lastSync: fullSync ? (DateTime?)null : LastSync,
                 fullSync: fullSync, cancelToken: CancellationToken.None);

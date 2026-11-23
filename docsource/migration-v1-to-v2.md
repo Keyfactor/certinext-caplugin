@@ -1,9 +1,11 @@
 ## Migrating from V1 to V2
 
-The CERTInext V2 REST API is an opt-in, order-centric API with OAuth2 authentication. It is
-controlled entirely by the `UseV2Api` connector flag: `false` (default) keeps the connector on the
-V1 API documented above; `true` switches **all** operations — Ping, Enroll, GetSingleRecord, Revoke,
-and Synchronize — to V2. The two APIs cannot be mixed on a single connector.
+The CERTInext V1 API no longer works because of CERTInext API changes, so every connector must move
+to the order-centric V2 API, which uses OAuth2 authentication. The API is controlled entirely by
+the `UseV2Api` connector flag: `true` (the default from 2.0.0, also used when the field is unset)
+sends **all** operations — Ping, Enroll, GetSingleRecord, Revoke,
+and Synchronize — to V2; `false` keeps the connector on the legacy V1 API documented above. The two
+APIs cannot be mixed on a single connector.
 
 > Read [Known Gaps](#known-gaps) before migrating a production connector. The most important:
 >

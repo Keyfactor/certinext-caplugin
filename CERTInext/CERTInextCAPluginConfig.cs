@@ -27,9 +27,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             {
                 [Constants.Config.ApiUrl] = new PropertyConfigInfo
                 {
-                    Comments = "REQUIRED: CERTInext API base URL. V1 (default): host plus /emSignHub-API/, e.g. " +
-                               "https://us-api.certinext.io/emSignHub-API/. V2 (UseV2Api=true): bare host, e.g. " +
-                               "https://us-api.certinext.io. Must use https.",
+                    Comments = "REQUIRED: CERTInext API base URL. V2 (default, UseV2Api=true): bare host, e.g. " +
+                               "https://us-api.certinext.io. Legacy V1 (UseV2Api=false): host plus /emSignHub-API/, e.g. " +
+                               "https://us-api.certinext.io/emSignHub-API/. Must use https.",
                     Hidden = false,
                     DefaultValue = string.Empty,
                     Type = "String"
@@ -427,14 +427,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
 
                 [Constants.ConfigV2.UseV2Api] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: When true, the plugin routes Ping / Enroll / GetSingleRecord / Revoke / " +
-                               "Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 " +
+                    Comments = "OPTIONAL: When true (the default), the plugin routes Ping / Enroll / GetSingleRecord / " +
+                               "Revoke / Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 " +
                                "/reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode), " +
                                "OAuthClientId, OAuthClientSecret, and SignerPlace. V1 credentials " +
-                               "(ApiKey/AccountNumber/AuthMode) are not required when this is true. Default: false (V1 " +
-                               "API).",
+                               "(ApiKey/AccountNumber/AuthMode) are not required when this is true. Set to false only " +
+                               "for the legacy V1 API, which no longer works because of CERTInext API changes. " +
+                               "Default: true (V2 API).",
                     Hidden = false,
-                    DefaultValue = false,
+                    DefaultValue = true,
                     Type = "Boolean"
                 },
                 [Constants.Config.V2SyncLookbackHours] = new PropertyConfigInfo
@@ -732,9 +733,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         // -----------------------------------------------------------------------
 
         /// <summary>
-        /// CERTInext API base URL. V1 (default): host plus the /emSignHub-API/ path, e.g.
-        /// "https://us-api.certinext.io/emSignHub-API/". V2 (UseV2Api=true): the bare host, e.g.
-        /// "https://us-api.certinext.io". A trailing slash is optional; the client trims and re-adds it.
+        /// CERTInext API base URL. V2 (default, UseV2Api=true): the bare host, e.g.
+        /// "https://us-api.certinext.io". Legacy V1 (UseV2Api=false): host plus the /emSignHub-API/
+        /// path, e.g. "https://us-api.certinext.io/emSignHub-API/". A trailing slash is optional; the client trims and re-adds it.
         /// </summary>
         [JsonPropertyName("ApiUrl")]
         public string ApiUrl { get; set; } = string.Empty;
@@ -1070,10 +1071,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// https://sandbox-us-api.certinext.io, no trailing path suffix) and V2 OAuth2 auth reuses
         /// <see cref="OAuthClientId"/> / <see cref="OAuthClientSecret"/>. V1-only credentials
         /// (<see cref="ApiKey"/>, <see cref="AccountNumber"/>, <see cref="AuthMode"/>) are not
-        /// required when this is true. Default: false.
+        /// required when this is true. Default: true (from 2.0.0; the V1 API no longer works).
         /// </summary>
         [JsonPropertyName("UseV2Api")]
-        public bool UseV2Api { get; set; } = false;
+        public bool UseV2Api { get; set; } = true;
 
         /// <summary>
         /// V2 mode only: during an incremental Synchronize, query V2 /reports/orders with a

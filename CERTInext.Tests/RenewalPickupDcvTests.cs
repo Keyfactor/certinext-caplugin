@@ -61,6 +61,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // fixed 5s), so the "pickup still runs" cases cost ~6s each.
         private static CERTInextConfig Config(bool dcvEnabled = false) => new CERTInextConfig
         {
+            UseV2Api = false,
             PickupRetries = 1,
             PickupDelayInSeconds = 1,
             DcvEnabled = dcvEnabled,

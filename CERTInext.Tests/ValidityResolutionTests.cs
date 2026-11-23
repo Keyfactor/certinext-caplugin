@@ -55,6 +55,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         private CERTInextClient BuildClient(string connectorValidityYears) => new CERTInextClient(new CERTInextConfig
         {
+            UseV2Api = false,
             ApiUrl = _server.Urls[0],
             AuthMode = "AccessKey",
             ApiKey = "test-key",
@@ -106,7 +107,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         public async Task Enroll_New_FromTemplateParameters_SendsResolvedSubscriptionTerm(
             string years, string days, string connector, string expected)
         {
-            var plugin = new CERTInextCAPlugin(BuildClient(connector), new CERTInextConfig { PickupRetries = 0 });
+            var plugin = new CERTInextCAPlugin(BuildClient(connector), new CERTInextConfig { UseV2Api = false, PickupRetries = 0 });
 
             await plugin.Enroll(
                 MockCertificateData.FakeCsrPem, "CN=test.example.com",

@@ -70,7 +70,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private static async Task<List<AnyCAPluginCertificate>> RunSync(
             ICERTInextClient client, ICertificateDataReader reader)
         {
-            var plugin = new CERTInextCAPlugin(client, reader, new CERTInextConfig());
+            var plugin = new CERTInextCAPlugin(client, reader, new CERTInextConfig { UseV2Api = false });
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
             await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: CancellationToken.None);
             return buffer.ToList();
@@ -184,7 +184,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             var mock = new Mock<ICERTInextClient>(MockBehavior.Loose);
             mock.Setup(c => c.GetCertificateAsync(Id, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(BodylessRevoked());
-            var plugin = new CERTInextCAPlugin(mock.Object, reader, new CERTInextConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, reader, new CERTInextConfig { UseV2Api = false });
             return plugin.GetSingleRecord(Id);
         }
 

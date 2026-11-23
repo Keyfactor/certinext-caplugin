@@ -40,7 +40,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         // synchronous pickup don't pay its real Task.Delay-based poll. Tests that DO exercise
         // pickup opt in via BuildPluginWithPickup.
         private static CERTInextCAPlugin BuildPlugin(ICERTInextClient client) =>
-            new CERTInextCAPlugin(client, new CERTInextConfig { PickupRetries = 0 });
+            new CERTInextCAPlugin(client, new CERTInextConfig { UseV2Api = false, PickupRetries = 0 });
 
         // Pickup-enabled fixture for the synchronous-pickup tests. PickupDelay is clamped to a
         // 1s floor and the loop adds a fixed 5s initial delay, so these tests are intentionally
@@ -48,7 +48,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         private static CERTInextCAPlugin BuildPluginWithPickup(
             ICERTInextClient client, int retries, int delaySeconds = 1) =>
             new CERTInextCAPlugin(client,
-                new CERTInextConfig { PickupRetries = retries, PickupDelayInSeconds = delaySeconds });
+                new CERTInextConfig { UseV2Api = false, PickupRetries = retries, PickupDelayInSeconds = delaySeconds });
 
         private static Mock<ICERTInextClient> NewMock() => new Mock<ICERTInextClient>(MockBehavior.Strict);
 
@@ -169,6 +169,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = "not-a-url",
                 ["AuthMode"] = "ApiKey",
                 ["ApiKey"] = "some-key"
@@ -188,6 +189,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = "http://ca.example.com",
                 ["AuthMode"] = "ApiKey",
                 ["ApiKey"] = "some-key"
@@ -213,6 +215,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = apiUrl,
                 ["AuthMode"] = "ApiKey",
                 ["ApiKey"] = "some-key"
@@ -235,6 +238,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = "https://ca.example.com",
                 ["AuthMode"] = "ApiKey"
                 // No ApiKey
@@ -254,6 +258,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = "https://ca.example.com",
                 ["AccountNumber"] = "12345",
                 ["AuthMode"] = "Basic"
@@ -274,6 +279,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = "https://ca.example.com",
                 ["AccountNumber"] = "12345",
                 ["AuthMode"] = "OAuth"
@@ -297,6 +303,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = "https://ca.example.com",
                 ["AccountNumber"] = "12345",
                 ["AuthMode"] = "OAuth",
@@ -320,6 +327,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = "https://ca.example.com",
                 ["AccountNumber"] = "12345",
                 ["AuthMode"] = "OAuth",
@@ -359,6 +367,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = server.Urls[0] + "/",
                 ["AccountNumber"] = "12345",
                 ["AuthMode"] = "OAuth",
@@ -380,6 +389,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var info = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = "https://ca.example.com",
                 ["AuthMode"] = "CertificateBased"
             };
@@ -427,6 +437,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
             var connInfo = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = "https://ca.example.com",
                 ["AuthMode"] = "ApiKey",
                 ["ApiKey"] = "key"
@@ -461,6 +472,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             };
             var connInfo = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = server.Urls[0],
                 ["AuthMode"] = "AccessKey",
                 ["ApiKey"] = "key",
@@ -491,6 +503,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             };
             var connInfo = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = server.Urls[0],
                 ["AuthMode"] = "AccessKey",
                 ["ApiKey"] = "key",
@@ -1397,7 +1410,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var mock = NewMock();
             // MockBehavior.Strict: PingAsync must NOT be called when disabled
-            var plugin = new CERTInextCAPlugin(mock.Object, new CERTInextConfig { Enabled = false });
+            var plugin = new CERTInextCAPlugin(mock.Object, new CERTInextConfig { UseV2Api = false, Enabled = false });
 
             // Should not throw, should not call PingAsync
             await plugin.Ping();

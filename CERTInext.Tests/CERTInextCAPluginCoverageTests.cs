@@ -539,7 +539,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                     It.IsAny<CancellationToken>()))
                 .Returns(AsyncEnum(new List<LegacyGetCertificateResponse> { expiredCert, validCert }));
 
-            var config = new CERTInextConfig { IgnoreExpired = true };
+            var config = new CERTInextConfig { UseV2Api = false, IgnoreExpired = true };
             var plugin = new CERTInextCAPlugin(clientMock.Object, config);
 
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
@@ -774,6 +774,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             configProviderMock.Setup(p => p.CAConnectionData)
                 .Returns(new Dictionary<string, object>
                 {
+                    ["UseV2Api"] = false,
                     ["ApiUrl"] = "https://ca.example.com",
                     ["AuthMode"] = "ApiKey",
                     ["ApiKey"] = "test-api-key-value",
@@ -805,6 +806,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             configProviderMock.Setup(p => p.CAConnectionData)
                 .Returns(new Dictionary<string, object>
                 {
+                    ["UseV2Api"] = false,
                     ["ApiUrl"] = "http://ca.example.com",
                     ["AuthMode"] = "ApiKey",
                     ["ApiKey"] = "test-api-key-value",
@@ -832,6 +834,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             configProviderMock.Setup(p => p.CAConnectionData)
                 .Returns(new Dictionary<string, object>
                 {
+                    ["UseV2Api"] = false,
                     ["ApiUrl"] = "http://ca.example.com",
                     ["AuthMode"] = "ApiKey",
                     ["ApiKey"] = "test-api-key-value",
@@ -858,6 +861,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             configProviderMock.Setup(p => p.CAConnectionData)
                 .Returns(new Dictionary<string, object>
                 {
+                    ["UseV2Api"] = false,
                     ["ApiUrl"] = apiUrl,
                     ["AuthMode"] = "ApiKey",
                     ["ApiKey"] = "test-api-key-value",
@@ -880,6 +884,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             configProviderMock.Setup(p => p.CAConnectionData)
                 .Returns(new Dictionary<string, object>
                 {
+                    ["UseV2Api"] = false,
                     ["ApiUrl"] = "https://ca.example.com",
                     ["AuthMode"] = "ApiKey",
                     ["ApiKey"] = "test-api-key-value",
@@ -902,6 +907,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             configProviderMock.Setup(p => p.CAConnectionData)
                 .Returns(new Dictionary<string, object>
                 {
+                    ["UseV2Api"] = false,
                     ["ApiUrl"] = "https://ca.example.com",
                     ["AccountNumber"] = "12345",
                     ["AuthMode"] = "OAuth",
@@ -928,6 +934,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             configProviderMock.Setup(p => p.CAConnectionData)
                 .Returns(new Dictionary<string, object>
                 {
+                    ["UseV2Api"] = false,
                     ["ApiUrl"] = "https://ca.example.com",
                     ["AccountNumber"] = "12345",
                     ["AuthMode"] = "OAuth",
@@ -957,6 +964,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             configProviderMock.Setup(p => p.CAConnectionData)
                 .Returns(new Dictionary<string, object>
                 {
+                    ["UseV2Api"] = false,
                     ["ApiUrl"] = "https://ca.example.com",
                     ["AuthMode"] = "ApiKey",
                     ["ApiKey"] = "test-api-key-value",

@@ -230,7 +230,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             };
 
             var messages = await CaptureAsync(marker,
-                () => new CERTInextCAPlugin(mock.Object, new CERTInextConfig { PickupRetries = 0 }),
+                () => new CERTInextCAPlugin(mock.Object, new CERTInextConfig { UseV2Api = false, PickupRetries = 0 }),
                 p => p.Enroll(GenerateCsrPem(primary), $"CN={primary}", MixedSans(primary), productInfo,
                     RequestFormat.PKCS10, EnrollmentType.New));
 

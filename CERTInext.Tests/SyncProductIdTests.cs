@@ -224,7 +224,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.ListCertificatesAsync(null, It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .Returns(Certs(V1Issued("ORD-1", "842"), V1Issued("ORD-2", "845"), V1Issued("ORD-3", "810")));
             mock.Setup(c => c.GetProductDetailsAsync(It.IsAny<CancellationToken>())).ReturnsAsync(SandboxCatalog());
-            var plugin = new CERTInextCAPlugin(mock.Object, new CERTInextConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, new CERTInextConfig { UseV2Api = false });
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
 
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);

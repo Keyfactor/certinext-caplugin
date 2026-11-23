@@ -80,8 +80,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         /// Drives
         /// <see cref="Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin.ValidateProductInfo"/>
         /// (not just the client method) through the plugin, the same path AnyGatewayREST's
-        /// <c>ConfigurationValidator</c> exercises when a template is saved. V1 mode (the
-        /// default, <c>UseV2Api</c> unset) must be unaffected by V2-specific validation paths.
+        /// <c>ConfigurationValidator</c> exercises when a template is saved. V1 mode
+        /// (<c>UseV2Api</c> = false) must be unaffected by V2-specific validation paths.
         /// </summary>
         [SkippableFact]
         public async Task ValidateProductInfo_V1_AcceptsConfiguredProductCode()
@@ -93,6 +93,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var plugin = new Keyfactor.Extensions.CAPlugin.CERTInext.CERTInextCAPlugin();
             var connectionInfo = new Dictionary<string, object>
             {
+                ["UseV2Api"] = false,
                 ["ApiUrl"] = _fixture.ApiUrl,
                 ["AuthMode"] = "AccessKey",
                 ["ApiKey"] = _fixture.AccessKey,

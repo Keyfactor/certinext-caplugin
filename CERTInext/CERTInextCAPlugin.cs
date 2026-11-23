@@ -144,7 +144,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             _client = client;
             _clientWasInjected = true;
-            _config = new CERTInextConfig();
+            _config = new CERTInextConfig { UseV2Api = false }; // injected V1 client: default the fallback config to V1
         }
 
         /// <summary>
@@ -157,7 +157,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _client = client;
             _clientWasInjected = true;
             _certificateDataReader = certDataReader;
-            _config = new CERTInextConfig();
+            _config = new CERTInextConfig { UseV2Api = false }; // injected V1 client: default the fallback config to V1
         }
 
         /// <summary>
@@ -170,7 +170,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _client = client;
             _clientWasInjected = true;
             _certificateDataReader = certDataReader;
-            _config = config ?? new CERTInextConfig();
+            _config = config ?? new CERTInextConfig { UseV2Api = false }; // injected V1 client: default the fallback config to V1
         }
 
         /// <summary>
@@ -184,7 +184,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         {
             _client = client;
             _clientWasInjected = true;
-            _config = config ?? new CERTInextConfig();
+            _config = config ?? new CERTInextConfig { UseV2Api = false }; // injected V1 client: default the fallback config to V1
             _certificateDataReader = certDataReader;
         }
 
@@ -205,7 +205,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             _client = client;
             _clientWasInjected = true;
             _domainValidatorFactory = domainValidatorFactory;
-            _config = config ?? new CERTInextConfig();
+            _config = config ?? new CERTInextConfig { UseV2Api = false }; // injected V1 client: default the fallback config to V1
         }
 #endif
 
@@ -585,6 +585,22 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             return false;
         }
 
+        /// <summary>
+        /// Reads <c>UseV2Api</c> from connector settings. A missing or null value means V2 (the
+        /// default from 2.0.0, matching <see cref="CERTInextCAPluginConfig.UseV2Api"/>); only an
+        /// explicit false selects V1.
+        /// </summary>
+        internal static bool ResolveUseV2Api(Dictionary<string, object> connectionInfo)
+        {
+            if (connectionInfo == null
+                || !connectionInfo.TryGetValue(Constants.ConfigV2.UseV2Api, out object v2Obj))
+                return true;
+            if (v2Obj is bool b) return b;
+            if (v2Obj is System.Text.Json.JsonElement je)
+                return je.ValueKind != System.Text.Json.JsonValueKind.False;
+            return true;
+        }
+
         /// <inheritdoc/>
         public async Task ValidateCAConnectionInfo(Dictionary<string, object> connectionInfo)
         {
@@ -629,8 +645,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     errors.Add(apiUrlError);
             }
 
-            bool useV2 = connectionInfo.TryGetValue(Constants.ConfigV2.UseV2Api, out object v2Obj)
-                         && v2Obj is bool v2Bool && v2Bool;
+            bool useV2 = ResolveUseV2Api(connectionInfo);
 
             if (useV2)
             {
@@ -1729,11 +1744,29 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         }
 
         /// <summary>
+        /// For a request with no CN: when <paramref name="domain"/> is a plain name and the SANs (same source as
+        /// <see cref="FindExtraDnsSans"/>) include its own wildcard (<c>*.</c> + domain), returns that
+        /// wildcard so it can be the order's primary domain; otherwise returns <paramref name="domain"/>
+        /// unchanged. The plain name stays on the order as an additional domain.
+        /// </summary>
+        internal static string PromoteWildcardSanToDomain(string domain, Dictionary<string, string[]> san, string csr)
+        {
+            if (string.IsNullOrWhiteSpace(domain) || domain.StartsWith("*.", StringComparison.Ordinal))
+                return domain;
+
+            string wildcard = "*." + domain;
+            bool hasWildcardSan = CollectRequestedSanEntries(san, csr, out _, out _)
+                .Where(s => string.Equals(s.Type, "dns", StringComparison.OrdinalIgnoreCase))
+                .Any(s => string.Equals(s.Value?.Trim(), wildcard, StringComparison.OrdinalIgnoreCase));
+            return hasWildcardSan ? wildcard : domain;
+        }
+
+        /// <summary>
         /// The primary domain of a V2 SSL request whose subject has no CN: the first DNS SAN that isn't a
         /// wildcard, else the first wildcard one, else null. Same SAN source as <see cref="FindExtraDnsSans"/>.
-        /// A plain name comes first so SANs <c>*.example.com</c> + <c>example.com</c> order like CN
-        /// <c>example.com</c> (a UCC order, both names issued); with a wildcard domain CERTInext issues only
-        /// the wildcard.
+        /// A plain name comes first, and <see cref="PromoteWildcardSanToDomain"/> then makes its own wildcard
+        /// the domain, so SANs <c>*.example.com</c> + <c>example.com</c> order a wildcard UCC (both names
+        /// issued); a wildcard domain with no extra name gets only the wildcard.
         /// </summary>
         internal static string PrimaryDomainFromSans(Dictionary<string, string[]> san, string csr)
         {
@@ -2066,10 +2099,12 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 domain = ExtractCnFromSubject(subject);
             // SSL with no CN (the names only in the SANs): the V2 spec requires certificate.domain, not a CSR
             // CN, so take the domain from the SANs. CERTInext issues with CN = that domain.
+            bool domainFromSans = false;
             if (string.IsNullOrWhiteSpace(domain) && !isPrivatePki)
             {
                 domain = PrimaryDomainFromSans(san, csr);
-                if (!string.IsNullOrWhiteSpace(domain))
+                domainFromSans = !string.IsNullOrWhiteSpace(domain);
+                if (domainFromSans)
                     _logger.LogInformation(
                         "EnrollV2Async: the subject has no CN; the primary domain is taken from the SANs. Domain={Domain}",
                         LogSanitizer.Strip(domain));
@@ -2078,6 +2113,28 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 throw new Exception(isPrivatePki
                     ? "Cannot determine the primary hostname for V2 private-pki order — set the DomainName enrollment parameter or ensure the CSR subject has a CN."
                     : "Cannot determine primary domain for V2 order — set the DomainName enrollment parameter, or give the CSR subject a CN or the request a DNS SAN.");
+
+            // A request with no CN whose SANs are a plain name and its own wildcard (example.com +
+            // *.example.com): CERTInext reads a plain domain with a wildcard in additionalDomains as a
+            // multi-domain order without a wildcard and rejects it (EMS-1173) when it picks the product itself.
+            // It wants the wildcard as certificate.domain and the plain name in additionalDomains (a Wildcard
+            // UCC order covering both). Only without a CN: with a CN, a wildcard domain that differs from
+            // the CSR's CN is rejected (EMS-1056), so a CN = apex request keeps the apex as the domain.
+            // An explicit DomainName is the operator's choice and is left alone.
+            bool wildcardPromoted = false;
+            if (domainFromSans)
+            {
+                string promoted = PromoteWildcardSanToDomain(domain, san, csr);
+                if (!string.Equals(promoted, domain, StringComparison.Ordinal))
+                {
+                    _logger.LogInformation(
+                        "EnrollV2Async: the SANs carry the wildcard of the primary domain; the wildcard becomes " +
+                        "certificate.domain and the plain name goes in additionalDomains. Domain={Domain}",
+                        LogSanitizer.Strip(promoted));
+                    domain = promoted;
+                    wildcardPromoted = true;
+                }
+            }
 
             // organization is "Conditional — Mandatory for OV / EV" per the V2 spec's SSL field
             // table; every OV/EV create example in the spec sends it, and it is omitted entirely
@@ -2241,8 +2298,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             //  - Wildcard: the domain starts "*.".
             //  - UCC: the template's product type (ProductId -> productTypeID) is UCC, OR the
             //    request carries DNS SANs beyond the primary domain (its www. variant and a
-            //    wildcard's bare apex are not "extra"). Those extras go out in additionalDomains,
-            //    including a wildcard SAN on a non-wildcard domain (CN = apex, SAN = *.apex).
+            //    wildcard's bare apex are not "extra"). Those extras go out in additionalDomains.
+            //    A wildcard SAN on a CN = apex request stays in additionalDomains. Without a CN the
+            //    wildcard is promoted above: it becomes the domain and the apex is the extra.
             //
             // FindExtraDnsSans and additionalDomains share one SAN source: Command's SAN dictionary
             // (the CSR only when the dictionary is null). A name that is only in the CSR is ignored,
@@ -2258,7 +2316,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 bool templateIsUccType = Constants.Products.ProductTypeIdsV2.TryGetValue(
                         ep.ProductId ?? string.Empty, out string templateTypeId)
                     && Constants.ApiV2.UccProductTypeIds.Contains(templateTypeId);
-                var extraDnsSans = FindExtraDnsSans(csr, san, domain, isWildcardProduct);
+                // After a promotion the plain name is an extra, not the wildcard's bare apex to drop.
+                var extraDnsSans = FindExtraDnsSans(csr, san, domain, isWildcardProduct && !wildcardPromoted);
                 isUccProduct = templateIsUccType || extraDnsSans.Count > 0;
 
                 _logger.LogInformation(

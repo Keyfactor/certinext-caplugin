@@ -83,6 +83,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         private CERTInextClient BuildRealClient() => new CERTInextClient(new CERTInextConfig
         {
+            UseV2Api = false,
             ApiUrl                = _server.Urls[0],
             AuthMode              = "AccessKey",
             ApiKey                = "test-key",
@@ -103,7 +104,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         /// polling loop.
         /// </summary>
         private CERTInextCAPlugin BuildPlugin() =>
-            new CERTInextCAPlugin(BuildRealClient(), new CERTInextConfig { PickupRetries = 0 });
+            new CERTInextCAPlugin(BuildRealClient(), new CERTInextConfig { UseV2Api = false, PickupRetries = 0 });
 
         private static EnrollmentProductInfo MakeProductInfo(string profileId = "842") =>
             new EnrollmentProductInfo
@@ -389,7 +390,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var plugin = new CERTInextCAPlugin(
                 BuildRealClient(),
-                new CERTInextConfig { PickupRetries = 0, SubmitNonDnsSans = false });
+                new CERTInextConfig { UseV2Api = false, PickupRetries = 0, SubmitNonDnsSans = false });
 
             await plugin.Enroll(
                 csr: GenerateCsrPem("host.example.com"),
@@ -568,7 +569,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var plugin = new CERTInextCAPlugin(
                 BuildRealClient(),
-                new CERTInextConfig { PickupRetries = 0, SubmitNonDnsSans = false });
+                new CERTInextConfig { UseV2Api = false, PickupRetries = 0, SubmitNonDnsSans = false });
 
             await plugin.Enroll(
                 csr: GenerateCsrPem("host.example.com"),
@@ -611,7 +612,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             var plugin = new CERTInextCAPlugin(
                 BuildRealClient(),
-                new CERTInextConfig { PickupRetries = 0, SubmitNonDnsSans = false });
+                new CERTInextConfig { UseV2Api = false, PickupRetries = 0, SubmitNonDnsSans = false });
 
             await plugin.Enroll(
                 csr: GenerateCsrPemWithGeneralNames(

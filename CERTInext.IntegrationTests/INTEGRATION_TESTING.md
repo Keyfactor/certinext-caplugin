@@ -189,7 +189,7 @@ xUnit buffers test output until the test ends, so read the per-pass report at th
 Run only one full-history synchronization at a time against a shared account; full syncs are
 slow.
 
-`CompleteAllPendingDvOrders` builds a **V1** plugin (`UseV2Api` defaults to `false`), so it syncs and
+`CompleteAllPendingDvOrders` builds a **V1** plugin (it sets `UseV2Api = false`), so it syncs and
 runs DCV through V1, and it sweeps every pending DV order in the account. For one **V2** order, use
 `V2DcvLifecycleTests.GetSingleRecord_V2_DrivesDcvForPendingOrder` with
 `CERTINEXT_V2_PENDING_ORDER_ID=<orderId>`. That test writes the plugin's log to the test output.

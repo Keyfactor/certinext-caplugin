@@ -135,7 +135,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 })));
             mock.Setup(c => c.GetProductDetailsAsync(It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new List<ProductDetail> { new ProductDetail { ProductCode = "842", ProductTypeId = "13", Active = true } });
-            var plugin = new CERTInextCAPlugin(mock.Object, GatewayReader().Object, new CERTInextConfig());
+            var plugin = new CERTInextCAPlugin(mock.Object, GatewayReader().Object, new CERTInextConfig { UseV2Api = false });
             var buffer = new BlockingCollection<AnyCAPluginCertificate>(10);
 
             await plugin.Synchronize(buffer, null, true, CancellationToken.None);

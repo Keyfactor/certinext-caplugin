@@ -43,6 +43,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             int pickupRetries                  = 0) =>
             new CERTInextConfig
             {
+                UseV2Api = false,
                 DcvEnabled                 = enabled,
                 DcvPropagationDelaySeconds = propagationDelaySeconds,
                 DcvTimeoutMinutes          = timeoutMinutes,

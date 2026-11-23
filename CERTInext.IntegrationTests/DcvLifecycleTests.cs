@@ -118,6 +118,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             var config = new CERTInextConfig
             {
+                UseV2Api = false,
                 ApiUrl                    = _fixture.Config.ApiUrl,
                 AuthMode                  = _fixture.Config.AuthMode,
                 ApiKey                    = _fixture.Config.ApiKey,

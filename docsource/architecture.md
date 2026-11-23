@@ -51,7 +51,7 @@ This document describes how the CERTInext AnyCA Gateway REST plugin integrates w
 
 `UseV2Api` selects one API generation for the whole connector; the two cannot be mixed.
 
-| Aspect | V1 (default) | V2 (`UseV2Api` = `true`) |
+| Aspect | V1 (`UseV2Api` = `false`, legacy) | V2 (`UseV2Api` = `true`, default) |
 |---|---|---|
 | Authentication | Access key, sent as `meta.authKey` | OAuth2 `client_credentials` bearer token |
 | `ApiUrl` | Includes the `/emSignHub-API/` path | Bare host, no path |

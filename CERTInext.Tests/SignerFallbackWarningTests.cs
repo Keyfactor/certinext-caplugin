@@ -68,6 +68,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         private CERTInextClient BuildClient(string requestorName, string signerPlace) => new CERTInextClient(new CERTInextConfig
         {
+            UseV2Api = false,
             ApiUrl                = _server.Urls[0],
             AuthMode              = "AccessKey",
             ApiKey                = "test-key",
@@ -88,7 +89,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             if (templateParams != null)
                 foreach (var kv in templateParams) parameters[kv.Key] = kv.Value;
 
-            var plugin = new CERTInextCAPlugin(client, new CERTInextConfig { PickupRetries = 0 });
+            var plugin = new CERTInextCAPlugin(client, new CERTInextConfig { UseV2Api = false, PickupRetries = 0 });
             var logger = new CapturingLogger();
             using (CERTInextClient.OverrideLoggerForTests(logger))
             {

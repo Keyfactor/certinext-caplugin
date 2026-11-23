@@ -95,7 +95,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(75, 75)]
         public void EffectiveBudget_ZeroDisables_NegativeDefaults_ClampedBelowHttpTimeout(int configured, int expected)
         {
-            new CERTInextConfig { EnrollmentCallBudgetSeconds = configured }
+            new CERTInextConfig { UseV2Api = false, EnrollmentCallBudgetSeconds = configured }
                 .GetEffectiveEnrollmentCallBudgetSeconds().Should().Be(expected);
         }
 
@@ -283,7 +283,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             mock.Setup(c => c.GetCertificateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .Callback(() => h.Clock.Advance(PollLatency))
                 .ReturnsAsync(MockCertificateData.PendingCertRecord());
-            var plugin = h.Wire(new CERTInextCAPlugin(mock.Object, new CERTInextConfig { PickupRetries = 5, PickupDelayInSeconds = 10 }));
+            var plugin = h.Wire(new CERTInextCAPlugin(mock.Object, new CERTInextConfig { UseV2Api = false, PickupRetries = 5, PickupDelayInSeconds = 10 }));
 
             var result = await plugin.Enroll(MockCertificateData.FakeCsrPem, "CN=test.example.com", null,
                 V1ProductInfo(), RequestFormat.PKCS10, EnrollmentType.New);
@@ -309,7 +309,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 .Callback(() => h.Clock.Advance(TimeSpan.FromSeconds(48)))
                 .ReturnsAsync(MockCertificateData.PendingEnrollResponse("ORD-RENEW-002"));
             var plugin = h.Wire(new CERTInextCAPlugin(mock.Object, reader.Object,
-                new CERTInextConfig { PickupRetries = 5, PickupDelayInSeconds = 10, DcvEnabled = false }));
+                new CERTInextConfig { UseV2Api = false, PickupRetries = 5, PickupDelayInSeconds = 10, DcvEnabled = false }));
 
             var result = await plugin.Enroll(MockCertificateData.FakeCsrPem, "CN=renew.example.com",
                 new Dictionary<string, string[]> { ["dns"] = new[] { "renew.example.com" } },

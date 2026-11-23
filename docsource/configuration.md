@@ -14,9 +14,9 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
 * Certificate Revocation:
     * Request revocation of a previously issued certificate using RFC 5280 reason codes, mapped to the reasons CERTInext accepts (see [Revocation Reason Codes](#revocation-reason-codes)).
 * Supported authentication modes for calls to the CERTInext API:
-    * V1 API (default): AccessKey — SHA-256 signed requests.
-    * V2 API: OAuth2 `client_credentials` bearer token.
-* Two CERTInext API generations, selected per connector with `UseV2Api`: the V1 API (default) and the order-centric V2 REST API, which adds Private PKI products. See [V2 API](#v2-api) and [Migrating from V1 to V2](#migrating-from-v1-to-v2).
+    * V2 API (default): OAuth2 `client_credentials` bearer token.
+    * Legacy V1 API: AccessKey — SHA-256 signed requests.
+* Two CERTInext API generations, selected per connector with `UseV2Api`: the order-centric V2 REST API (default), which adds Private PKI products, and the legacy V1 API. The V1 API no longer works because of CERTInext API changes; use V2. See [V2 API](#v2-api) and [Migrating from V1 to V2](#migrating-from-v1-to-v2).
 
 ## Requirements
 
@@ -31,7 +31,7 @@ The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabi
 
 The connector runs in one of two modes, chosen with `UseV2Api`. The mode decides the `ApiUrl` shape, how the plugin authenticates, and which credential fields are used.
 
-| | V1 (default) | V2 (`UseV2Api` = `true`) |
+| | V1 (`UseV2Api` = `false`, legacy) | V2 (`UseV2Api` = `true`, default) |
 |---|---|---|
 | AnyCA Gateway REST / `IAnyCAPlugin` | 26.2.0 or later / 3.3.0 | 26.2.0 or later / 3.3.0 |
 | Authentication | AccessKey (SHA-256 signed request body) | OAuth2 `client_credentials` bearer token |
@@ -152,7 +152,7 @@ When the connector is saved (and `Enabled` is `true`), the plugin checks only th
 | Field | Applies to | Required | Description |
 |---|---|---|---|
 | `ApiUrl` | Both | Required | CERTInext API base URL. The shape depends on `UseV2Api`; see [ApiUrl by mode](#apiurl-by-mode). |
-| `UseV2Api` | Both | Optional | Route all operations through the V2 REST API. Requires `OAuthClientId`, `OAuthClientSecret`, and `SignerPlace`. Default: `false`. |
+| `UseV2Api` | Both | Optional | Route all operations through the V2 REST API. Requires `OAuthClientId`, `OAuthClientSecret`, and `SignerPlace`. Set to `false` only for the legacy V1 API, which no longer works because of CERTInext API changes. Default: `true`. |
 | `AccountNumber` | V1 | Required | CERTInext account number (numeric string), sent in the `meta` block of every request. Example: `1234567890`. |
 | `ApiKey` | V1 | Required | Access Key from **Integrations → APIs**. Masked in the UI. |
 | `AuthMode` | V1 | Optional | Legacy. Default: `AccessKey`. Leave as is; V1 does not honor OAuth. Ignored on V2. |
@@ -165,8 +165,8 @@ When the connector is saved (and `Enabled` is `true`), the plugin checks only th
 
 | Mode | Value | Examples |
 |---|---|---|
-| V1 (default) | Host plus the `/emSignHub-API/` path | Sandbox: `https://sandbox-us-api.certinext.io/emSignHub-API/`<br>Production US: `https://us-api.certinext.io/emSignHub-API/`<br>Production India: `https://api.certinext.io/emSignHub-API/` |
-| V2 (`UseV2Api` = `true`) | Bare host, no path suffix | `https://sandbox-us-api.certinext.io` |
+| V1 (`UseV2Api` = `false`, legacy) | Host plus the `/emSignHub-API/` path | Sandbox: `https://sandbox-us-api.certinext.io/emSignHub-API/`<br>Production US: `https://us-api.certinext.io/emSignHub-API/`<br>Production India: `https://api.certinext.io/emSignHub-API/` |
+| V2 (`UseV2Api` = `true`, default) | Bare host, no path suffix | `https://sandbox-us-api.certinext.io` |
 
 - The two APIs are hosted differently, so change `ApiUrl` whenever you toggle `UseV2Api`.
 - A trailing slash is accepted in either mode.
@@ -327,7 +327,7 @@ In the Keyfactor Command Management Portal, navigate to **Certificate Templates*
 | `RequesterEmail` | Optional | String | Overrides the connector `RequestorEmail` for this template when non-blank. Never derived from the certificate subject. | `pki-admin@example.com` |
 | `RenewalWindowDays` | Optional | Number | Number of days before certificate expiration within which a renewal is attempted instead of a reissue. On V2 it decides only whether `RenewOrReissue` uses the SSL/TLS reissue endpoint (outside the window) or places a new order (inside it). Default: `90`. | `90` |
 | `KeyType` | Optional | String | Informational. The CSR decides the key algorithm. CERTInext accepts only RSA 2048/3072/4096 and ECC P-256/P-384. | `RSA2048`, `RSA3072`, `RSA4096`, `EC256`, `EC384` |
-| `DomainName` | Optional | String | V2 only: primary domain name for SSL/TLS orders (for Private PKI, the primary hostname). If omitted, the plugin uses the CSR subject `CN`. For an SSL/TLS request with no `CN`, it uses the first DNS SAN that isn't a wildcard, else the first wildcard one, and CERTInext sets the issued certificate's `CN` to that domain. V1 always uses the CSR subject `CN`. | `example.com` |
+| `DomainName` | Optional | String | V2 only: primary domain name for SSL/TLS orders (for Private PKI, the primary hostname). If omitted, the plugin uses the CSR subject `CN`. For an SSL/TLS request with no `CN`, it uses the first DNS SAN that isn't a wildcard, else the first wildcard one (when the SANs are a name and its own wildcard, the wildcard is the domain and the plain name an additional domain), and CERTInext sets the issued certificate's `CN` to that domain. V1 always uses the CSR subject `CN`. | `example.com` |
 | `SignerName` | Optional | String | Per-template override for the subscriber agreement signer name. When omitted, defaults to the connector-level `RequestorName` (V2: the requestor name). If no name resolves, V1 sends `Keyfactor Gateway` and logs a warning. | `Jane Smith` |
 | `SignerPlace` | Optional | String | Per-template override for the subscriber agreement signer location. When omitted, defaults to the connector-level `SignerPlace`. If neither is set, V1 sends `Gateway` and logs a warning. | `Austin` |
 | `SignerIp` | Optional (V1 only) | String | Per-template override for the subscriber agreement signer IP address. Ignored on V2. When omitted, defaults to the connector-level `SignerIp`. If neither is set, V1 sends `127.0.0.1` and logs a warning; a V1 value that is not an IP address is sent unchanged, with a warning. | `203.0.113.10` |
@@ -527,7 +527,7 @@ If none of these yield a code, enrollment fails with a validation error.
 
 ## V2 API
 
-The plugin includes an opt-in CERTInext V2 REST API code path that uses OAuth2 `client_credentials` authentication and an order-centric resource model. V2 is disabled by default; V1 remains the active path unless `UseV2Api` is explicitly set to `true`. When enabled, V2 is fully self-contained: Ping, Enroll, GetSingleRecord, Revoke, and Synchronize all route through the V2 API, and V1 credentials (`ApiKey`, `AccountNumber`, `AuthMode`) are not required. Known limitations are listed under [Known Gaps](#known-gaps).
+The plugin uses the CERTInext V2 REST API by default, with OAuth2 `client_credentials` authentication and an order-centric resource model. The V1 API no longer works because of CERTInext API changes, so leave `UseV2Api` unset or `true`; setting it to `false` selects V1. In V2 mode, V2 is fully self-contained: Ping, Enroll, GetSingleRecord, Revoke, and Synchronize all route through the V2 API, and V1 credentials (`ApiKey`, `AccountNumber`, `AuthMode`) are not required. Known limitations are listed under [Known Gaps](#known-gaps).
 
 ### V2 CA Connector Fields
 
@@ -535,7 +535,7 @@ V2 mode reuses the connector's `ApiUrl`, `OAuthClientId`, and `OAuthClientSecret
 
 | Field | Required | Description |
 |---|---|---|
-| `UseV2Api` | Optional | Enables the V2 code path for connection tests, enrollment, revocation, status checks, and synchronization. Default: `false`. |
+| `UseV2Api` | Optional | Enables the V2 code path for connection tests, enrollment, revocation, status checks, and synchronization. Default: `true`. |
 | `V2SyncLookbackHours` | Optional | Hours subtracted from the last-sync time on incremental sync. Default: `72`. |
 | `SslComSubmitOrganization` | Optional | OV/EV on V2. `true` lets the plugin submit an unvalidated organization to SSL.com, which **accepts SSL.com's subscriber agreement on the organization's behalf**; see [SSL.com organization validation](#sslcom-organization-validation). Default: `false`. |
 | `SslComAdminEmail` | Optional | Administrator email sent as `adminEmail` on that submission. Blank omits it. Example: `pki-admin@example.com`. |

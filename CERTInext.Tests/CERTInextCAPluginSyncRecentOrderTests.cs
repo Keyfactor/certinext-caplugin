@@ -112,7 +112,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             try
             {
                 LogHandler.Factory = factory;
-                var config = new CERTInextConfig { PickupRetries = 0 };
+                var config = new CERTInextConfig { UseV2Api = false, PickupRetries = 0 };
                 if (graceSeconds.HasValue)
                     config.SyncRecentOrderGraceSeconds = graceSeconds.Value;
                 // Constructed after the swap so the plugin's per-instance logger resolves through it.
@@ -449,7 +449,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [InlineData(-9999, 120)]
         public void EffectiveGrace_DefaultZeroNegative(int? configured, int expected)
         {
-            var config = new CERTInextConfig();
+            var config = new CERTInextConfig { UseV2Api = false };
             if (configured.HasValue) config.SyncRecentOrderGraceSeconds = configured.Value;
 
             CERTInextCAPlugin.GetSyncRecentOrderGraceSeconds(config).Should().Be(expected);

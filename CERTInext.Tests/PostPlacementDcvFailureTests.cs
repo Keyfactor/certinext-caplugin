@@ -56,6 +56,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         private static CERTInextConfig DcvConfig() => new CERTInextConfig
         {
+            UseV2Api = false,
             DcvEnabled = true,
             DcvPropagationDelaySeconds = 1,
             DcvTimeoutMinutes = 1,

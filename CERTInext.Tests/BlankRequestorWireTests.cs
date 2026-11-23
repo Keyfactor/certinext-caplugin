@@ -72,6 +72,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         private CERTInextClient BuildBlankRequestorClient(bool logSensitiveRequestData = false) => new CERTInextClient(new CERTInextConfig
         {
+            UseV2Api = false,
             LogSensitiveRequestData = logSensitiveRequestData,
             ApiUrl                = _server.Urls[0],
             AuthMode              = "AccessKey",
@@ -131,7 +132,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         [Fact]
         public async Task Enroll_New_BlankRequestorAndTechContact_WireBodyMatchesExpectedShape()
         {
-            var plugin = new CERTInextCAPlugin(BuildBlankRequestorClient(), new CERTInextConfig { PickupRetries = 0 });
+            var plugin = new CERTInextCAPlugin(BuildBlankRequestorClient(), new CERTInextConfig { UseV2Api = false, PickupRetries = 0 });
 
             await plugin.Enroll(
                 MockCertificateData.FakeCsrPem, "CN=test.example.com",
@@ -178,7 +179,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         {
             string marker = $"wire-{Guid.NewGuid():N}.example.com";
             var plugin = new CERTInextCAPlugin(BuildBlankRequestorClient(logSensitiveRequestData: true),
-                new CERTInextConfig { PickupRetries = 0 });
+                new CERTInextConfig { UseV2Api = false, PickupRetries = 0 });
 
             var logger = new CapturingLogger();
             using (CERTInextClient.OverrideLoggerForTests(logger))

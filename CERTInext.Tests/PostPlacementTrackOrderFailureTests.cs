@@ -67,6 +67,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
 
         private CERTInextConfig Config() => new CERTInextConfig
         {
+            UseV2Api = false,
             ApiUrl = _server.Urls[0],
             AuthMode = "AccessKey",
             ApiKey = "test-key",

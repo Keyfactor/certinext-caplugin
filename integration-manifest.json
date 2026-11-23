@@ -27,7 +27,7 @@
             "ca_plugin_config": [
                 {
                     "name": "ApiUrl",
-                    "description": "REQUIRED: CERTInext API base URL. V1 (default): host plus /emSignHub-API/, e.g. https://us-api.certinext.io/emSignHub-API/. V2 (UseV2Api=true): bare host, e.g. https://us-api.certinext.io. Must use https.",
+                    "description": "REQUIRED: CERTInext API base URL. V2 (default, UseV2Api=true): bare host, e.g. https://us-api.certinext.io. Legacy V1 (UseV2Api=false): host plus /emSignHub-API/, e.g. https://us-api.certinext.io/emSignHub-API/. Must use https.",
                     "required": "Required",
                     "example": "https://sandbox-us-api.certinext.io/emSignHub-API/",
                     "default": ""
@@ -328,10 +328,10 @@
                 },
                 {
                     "name": "UseV2Api",
-                    "description": "OPTIONAL: When true, the plugin routes Ping / Enroll / GetSingleRecord / Revoke / Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 /reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode), OAuthClientId, OAuthClientSecret, and SignerPlace. V1 credentials (ApiKey/AccountNumber/AuthMode) are not required when this is true. Default: false (V1 API).",
+                    "description": "OPTIONAL: When true (the default), the plugin routes Ping / Enroll / GetSingleRecord / Revoke / Synchronize through the CERTInext V2 REST API (/api/certinext/v2/), including V2 /reports/orders for Synchronize. Requires ApiUrl (the V2 base URL in this mode), OAuthClientId, OAuthClientSecret, and SignerPlace. V1 credentials (ApiKey/AccountNumber/AuthMode) are not required when this is true. Set to false only for the legacy V1 API, which no longer works because of CERTInext API changes. Default: true (V2 API).",
                     "required": "Optional",
-                    "example": "false",
-                    "default": "false"
+                    "example": "true",
+                    "default": "true"
                 },
                 {
                     "name": "V2SyncLookbackHours",

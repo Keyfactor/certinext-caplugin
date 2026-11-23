@@ -260,6 +260,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
                 // Constructed AFTER the swap so _logger resolves through the capturing factory.
                 var plugin = new CERTInextCAPlugin(mock.Object, new CERTInextConfig
                 {
+                    UseV2Api = false,
                     PickupRetries = 0,
                     LogSensitiveRequestData = logSensitiveRequestData
                 });

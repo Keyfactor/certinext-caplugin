@@ -218,6 +218,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             {
                 Config = new CERTInextConfig
                 {
+                    UseV2Api = false,
                     ApiUrl             = ApiUrl.TrimEnd('/') + "/",
                     AuthMode           = "AccessKey",
                     ApiKey             = AccessKey,

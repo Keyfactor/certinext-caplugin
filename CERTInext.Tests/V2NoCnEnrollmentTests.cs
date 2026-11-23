@@ -28,7 +28,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
     /// <summary>
     /// V2 SSL requests whose subject has no CN, with the names only in the SANs. The V2 spec requires
     /// <c>certificate.domain</c> but not a CSR CN, so the plugin takes the domain from the SANs: the first
-    /// non-wildcard DNS name, else the first wildcard.
+    /// non-wildcard DNS name, else the first wildcard. A plain name whose own wildcard is also in the SANs
+    /// becomes the additional domain of a wildcard order, because CERTInext rejects a wildcard in
+    /// <c>additionalDomains</c> on a plain domain (EMS-1173).
     /// </summary>
     public class V2NoCnEnrollmentTests
     {
@@ -85,13 +87,95 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public async Task Enroll_V2_NoCn_WildcardFirstThenApex_OrdersTheApexWithTheWildcardAsExtra()
+        public async Task Enroll_V2_NoCn_WildcardFirstThenApex_OrdersTheWildcardWithTheApexAsExtra()
         {
             var sent = await EnrollWithoutCnAsync(new[] { "*.example.com", "example.com" }, Constants.Products.DvSsl);
 
+            sent.Certificate.Domain.Should().Be("*.example.com",
+                "CERTInext reads a plain domain with a wildcard in additionalDomains as a multi-domain order " +
+                "without a wildcard and rejects it (EMS-1173); the wildcard must be the domain");
+            sent.Certificate.AdditionalDomains.Should().Equal("example.com");
+        }
+
+        /// <summary>Runs Enroll with a CN subject and returns the create request sent to CERTInext.</summary>
+        private static async Task<V2CreateSslOrderRequest> EnrollWithCnAsync(
+            string subject, string[] dnsSans, string domainName = null)
+        {
+            var mock = new Mock<ICERTInextClient>(MockBehavior.Loose);
+            V2CreateSslOrderRequest sent = null;
+            mock.Setup(c => c.PlaceOrderV2Async(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, V2CreateSslOrderRequest, CancellationToken>((_, _, r, _) => sent = r)
+                .ReturnsAsync(new V2CreateOrderResponse { OrderId = "ord_cn_001", Status = "pending-dcv" });
+
+            var productInfo = DvProductInfo(Constants.Products.DvSsl);
+            if (domainName != null) productInfo.ProductParameters["DomainName"] = domainName;
+
+            await BuildV2Plugin(mock.Object).Enroll(
+                csr: MockCertificateData.FakeCsrPem,
+                subject: subject,
+                san: new Dictionary<string, string[]> { ["dnsname"] = dnsSans },
+                productInfo: productInfo,
+                requestFormat: RequestFormat.PKCS10,
+                enrollmentType: EnrollmentType.New);
+
+            sent.Should().NotBeNull("the order must be placed");
+            return sent;
+        }
+
+        [Fact]
+        public async Task Enroll_V2_ApexCn_WithItsWildcardSan_KeepsTheApexAsTheDomain()
+        {
+            var sent = await EnrollWithCnAsync("CN=example.com", new[] { "example.com", "*.example.com" });
+
             sent.Certificate.Domain.Should().Be("example.com",
-                "a plain name is preferred, so both names are issued as with CN = example.com");
+                "a wildcard domain that differs from the CSR's CN is rejected (EMS-1056)");
             sent.Certificate.AdditionalDomains.Should().Equal("*.example.com");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_NoCn_ApexWithWildcardAndOtherName_KeepsEveryNameOnTheOrder()
+        {
+            var sent = await EnrollWithoutCnAsync(
+                new[] { "example.com", "*.example.com", "other.example.com" }, Constants.Products.DvSsl);
+
+            sent.Certificate.Domain.Should().Be("*.example.com");
+            sent.Certificate.AdditionalDomains.Should().BeEquivalentTo("example.com", "other.example.com");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_ApexCn_WithExplicitDomainName_IsNotPromoted()
+        {
+            var sent = await EnrollWithCnAsync(
+                "CN=example.com", new[] { "example.com", "*.example.com" }, domainName: "example.com");
+
+            sent.Certificate.Domain.Should().Be("example.com", "an explicit DomainName is the operator's choice");
+            sent.Certificate.AdditionalDomains.Should().Equal("*.example.com");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_ApexCn_WithAnotherNamesWildcard_IsNotPromoted()
+        {
+            var sent = await EnrollWithCnAsync("CN=example.com", new[] { "example.com", "*.other.example.org" });
+
+            sent.Certificate.Domain.Should().Be("example.com");
+            sent.Certificate.AdditionalDomains.Should().Equal("*.other.example.org");
+        }
+
+        [Theory]
+        [InlineData("example.com", new[] { "example.com", "*.example.com" }, "*.example.com")]
+        [InlineData("Example.COM", new[] { "example.com", "*.EXAMPLE.com" }, "*.Example.COM")]
+        [InlineData("example.com", new[] { "example.com" }, "example.com")]
+        [InlineData("example.com", new[] { "*.other.com" }, "example.com")]
+        [InlineData("*.example.com", new[] { "*.example.com", "example.com" }, "*.example.com")]
+        [InlineData("a.example.com", new[] { "*.example.com" }, "a.example.com")]
+        public void PromoteWildcardSanToDomain_OnlyPromotesTheDomainsOwnWildcard(
+            string domain, string[] dnsSans, string expected)
+        {
+            CERTInextCAPlugin.PromoteWildcardSanToDomain(
+                    domain, new Dictionary<string, string[]> { ["dnsname"] = dnsSans }, MockCertificateData.FakeCsrPem)
+                .Should().Be(expected);
         }
 
         [Fact]
