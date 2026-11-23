@@ -171,6 +171,24 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             public const string EvSsl                = "EV SSL";
             public const string EvSslUcc             = "EV SSL Multi-Domain (UCC)";
 
+            // V2-ONLY. Private PKI products. Selecting one sets the template's ProductFamily to
+            // private-pki and its ProductVariant to the mapped variant (see PrivatePkiVariantsV2),
+            // so the template needs neither parameter. They have no V1 default code and no catalog
+            // productTypeID, so on V1 they need an explicit ProductCode, and sync doesn't name them.
+            public const string PrivatePkiIntranetSsl = "Private PKI Intranet SSL";
+            public const string PrivatePkiIgtfHost    = "Private PKI IGTF Host";
+
+            // V2-ONLY. Private PKI product name -> the private-pki create body's variant value.
+            // Read by EnrollmentParams for the ProductFamily/ProductVariant defaults and by
+            // ValidatePrivatePkiEnrollmentParams / ResolveSslProductVariant to reject a template
+            // whose explicit ProductFamily or ProductVariant contradicts the product.
+            public static readonly System.Collections.Generic.Dictionary<string, string> PrivatePkiVariantsV2 =
+                new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    [PrivatePkiIntranetSsl] = ApiV2.PrivatePkiVariantIntranetSsl,
+                    [PrivatePkiIgtfHost]    = ApiV2.PrivatePkiVariantIgtfHost,
+                };
+
             // V1-ONLY. Default production numeric codes for the CERTInext V1 (legacy) API.
             // These are the standard codes for the CERTInext production environment under V1.
             // Sandbox codes differ — set ProductCode explicitly on the template to override

@@ -259,7 +259,7 @@ The V2-only template parameters `ProductFamily` and `ProductVariant` are describ
 
 4. In Keyfactor Command (v12.3+), for each imported Certificate Template, follow the [official documentation](https://software.keyfactor.com/Core-OnPrem/Current/Content/ReferenceGuide/Configuring%20Template%20Options.htm) to define enrollment fields for each of the following parameters:
 
-    * **ProductCode** - OPTIONAL: Override the numeric CERTInext product code for this template. When omitted: on V1, the default production code for the selected product is used (e.g. DV SSL → 838); on V2, no X-Product-Code header is sent and CERTInext resolves the product from the variant, the wildcard shape of the domain and any additional domains. On V2 an explicit value is an override, sent as X-Product-Code to choose between several matching catalog products (for example different CA profiles for the same variant).
+    * **ProductCode** - OPTIONAL: Override the numeric CERTInext product code for this template. When omitted: on V1, the default production code for the selected product is used (e.g. DV SSL → 838; the Private PKI products have none, so on V1 they need this set); on V2, no X-Product-Code header is sent and CERTInext resolves the product from the variant, the wildcard shape of the domain and any additional domains. On V2 an explicit value is an override, sent as X-Product-Code to choose between several matching catalog products (for example different CA profiles for the same variant).
     * **ProfileId** - DEPRECATED: Use ProductCode instead. Kept for backward compatibility — mapped to ProductCode if ProductCode is not set.
     * **ValidityYears** - OPTIONAL: Subscription term in years: 1, 2, or 3. On V1 the order's term is the larger of ValidityYears and ValidityDays rounded up to whole years (365 days = 1 year); a field left at its default (1 year) never overrides the other. On V2 only ValidityYears is used. A template value overrides the connector's SubscriptionValidityYears. Because the larger value wins on V1, a stale larger ValidityDays cannot be shortened with ValidityYears alone; set ValidityDays back to 365. Default: 1. Note: CERTInext validates per 390-day certificate within the subscription; the 'validity' field in the order is the subscription term, not certificate lifetime.
     * **ValidityDays** - OPTIONAL: V1 only (ignored on V2, which uses ValidityYears). Requested validity in days. CERTInext's order API takes whole subscription years, so days are converted to years, rounded up (365 days = 1 year). The order's term is the larger of this and ValidityYears; a field left at its default (365 days = 1 year) never overrides the other. Kept because certificate lifetimes are shrinking and days is the unit that will matter if CERTInext adds a lifetime field. To shorten a template with a larger value, set this back to 365. Default: 365.
@@ -272,8 +272,8 @@ The V2-only template parameters `ProductFamily` and `ProductVariant` are describ
     * **SignerName** - OPTIONAL: Per-template subscriber agreement signer name. Falls back to the connector-level RequestorName if omitted (V2: the requestor name). If no name resolves, V1 sends the placeholder "Keyfactor Gateway" and logs a Warning.
     * **SignerPlace** - OPTIONAL: Per-template signer city/location. Falls back to the connector-level SignerPlace if omitted. If neither is set, V1 sends the placeholder "Gateway" and logs a Warning.
     * **SignerIp** - V1 ONLY, OPTIONAL: Per-template signer IP address. Falls back to the connector-level SignerIp if omitted. If neither is set, V1 sends the placeholder 127.0.0.1 and logs a Warning; a V1 value that is not an IP address is sent unchanged, with a Warning. Ignored on V2 (the V2 agreement block has no signer IP field).
-    * **ProductFamily** - V2 ONLY: Product family for this template. Accepted values: 'ssl' (default) or 'private-pki'. 'private-pki' requires a Private PKI ProductVariant. 'signature' (Document Signer) is accepted by the parameter, but Document Signer enrollment is not supported.
-    * **ProductVariant** - V2 ONLY: Product variant sent in the V2 order body. ProductFamily 'ssl': 'dv', 'ov', or 'ev' — if omitted, derived from the selected product; an explicit value that contradicts the product fails enrollment. ProductFamily 'private-pki': 'intranet-ssl' or 'igtf-host' (required; no default).
+    * **ProductFamily** - V2 ONLY: Product family for this template. Accepted values: 'ssl' or 'private-pki'. If omitted, 'private-pki' for the Private PKI products and 'ssl' for the others; a Private PKI product with any other value fails enrollment. 'private-pki' with an SSL product requires a Private PKI ProductVariant. 'signature' (Document Signer) is accepted by the parameter, but Document Signer enrollment is not supported.
+    * **ProductVariant** - V2 ONLY: Product variant sent in the V2 order body. If omitted, derived from the selected product ('dv', 'ov' or 'ev' for SSL; 'intranet-ssl' or 'igtf-host' for the Private PKI products); an explicit value that contradicts the product fails enrollment. With ProductFamily 'private-pki' and an SSL product it is required: 'intranet-ssl' or 'igtf-host'.
     * **OrgRepresentativeName** - V2 ONLY, OV only: Name of a new Organization Representative to register on the order. Set together with OrgRepresentativeEmail; both turn on useNewOrgRepresentative. Leave all OrgRepresentative* parameters blank to keep the organization's existing representative. Requires the connector's OrganizationNumber. Personal data: never logged.
     * **OrgRepresentativeEmail** - V2 ONLY, OV only: Email address of the new Organization Representative. Required with OrgRepresentativeName. An email that is already a representative of the organization is rejected by CERTInext (EMS-1317); leave these parameters blank to use the existing one. Personal data: never logged.
     * **OrgRepresentativePhone** - V2 ONLY, OV only, optional: Phone number of the new Organization Representative, 6-15 digits with an optional leading '+' and spaces, dashes, dots or parentheses. Needs OrgRepresentativeName and OrgRepresentativeEmail. Personal data: never logged.
@@ -561,7 +561,7 @@ The product codes in this table are for:
 
 ### S/MIME and Document Signing
 
-**Not supported by this plugin.** `GetProductIds` advertises SSL/TLS products only, and V2 `ProductFamily=signature` enrollment fails before any order is placed. The codes below are listed for reference only, because they can appear in your account's `GetProductDetails` response.
+**Not supported by this plugin.** `GetProductIds` advertises SSL/TLS and Private PKI products only, and V2 `ProductFamily=signature` enrollment fails before any order is placed. The codes below are listed for reference only, because they can appear in your account's `GetProductDetails` response.
 
 CERTInext uses the same numeric codes for these products on the US sandbox and Production India in the snapshots we have. **Treat that as an example, not a contract** — eMudhra assigns codes per account.
 
@@ -616,10 +616,11 @@ When `UseV2Api` is `true`, two additional enrollment parameters become relevant:
 
 | Parameter | Required / Optional | Type | Description | Example / Default |
 |---|---|---|---|---|
-| `ProductFamily` | Optional | String | CERTInext V2 product family: `ssl` or `private-pki` (see [V2 Private PKI Orders](#v2-private-pki-orders)). Default: `ssl`. | `ssl` |
-| `ProductVariant` | Optional | String | Variant within the family. `ssl`: `dv`, `ov`, or `ev`. `private-pki`: `intranet-ssl` or `igtf-host` (required). | Derived from `ProductId` (for example `dv`) |
+| `ProductFamily` | Optional | String | CERTInext V2 product family: `ssl` or `private-pki` (see [V2 Private PKI Orders](#v2-private-pki-orders)). Default: `private-pki` for the Private PKI products, `ssl` for the others. | Derived from `ProductId` (for example `ssl`) |
+| `ProductVariant` | Optional | String | Variant within the family. `ssl`: `dv`, `ov`, or `ev`. `private-pki`: `intranet-ssl` or `igtf-host`. | Derived from `ProductId` (for example `dv`) |
 
-- **`ProductVariant` default:** when omitted for `ssl`, the plugin derives it from the selected product (an OV product sends `ov`, an EV product sends `ev`). An explicit value that contradicts the product fails enrollment.
+- **`ProductVariant` default:** when omitted, the plugin derives it from the selected product: an OV product sends `ov`, an EV product sends `ev`, `Private PKI Intranet SSL` sends `intranet-ssl`, and `Private PKI IGTF Host` sends `igtf-host`. An explicit value that contradicts the product fails enrollment.
+- **`ProductFamily` default:** when omitted, `private-pki` for the two Private PKI products and `ssl` for the others. A Private PKI product with any other family fails enrollment.
 - **`signature` (Document Signer):** the parameter accepts it, but enrollment is not supported and fails before any order is placed.
 - **Unrecognized family:** treated as `ssl`.
 - **`ProductCode`:** optional on V2. When set, it is sent in the `X-Product-Code` header as an override; when blank, no header is sent and CERTInext resolves the product.
@@ -641,11 +642,13 @@ This differs from V1, where `DefaultProductCode` only affects renewals (see [Def
 
 ### V2 Private PKI Orders
 
-With `ProductFamily=private-pki`, the plugin places the order against CERTInext's Private PKI endpoint using the Private PKI request body, which differs from the SSL/TLS one:
+For a template whose product is `Private PKI Intranet SSL` or `Private PKI IGTF Host`, or that sets `ProductFamily=private-pki`, the plugin places the order against CERTInext's Private PKI endpoint using the Private PKI request body, which differs from the SSL/TLS one:
 
-- **Product code is optional.** CERTInext resolves the Private PKI product from `ProductVariant`. Set `ProductCode` to your account's Private PKI catalog code only to pick between several matching products. It isn't checked against the catalog; CERTInext rejects a code that isn't a Private PKI product on your account.
-- **Which `ProductID` to pick.** The plugin advertises SSL/TLS product names only, so the template still needs one from that list. It does not affect a `private-pki` order, which is built from `ProductVariant` (and `ProductCode`, if set), so any ProductID (for example `DV SSL`) works.
-- **Variant is required.** Set `ProductVariant` to `intranet-ssl` or `igtf-host`.
+- **Which `ProductID` to pick.** Select `Private PKI Intranet SSL` or `Private PKI IGTF Host`. The product sets `ProductFamily` to `private-pki` and `ProductVariant` to `intranet-ssl` or `igtf-host`, so the template needs neither parameter. A `ProductFamily` or `ProductVariant` that contradicts the product fails enrollment.
+- **Existing templates.** A template that pairs an SSL/TLS product (for example `DV SSL`) with `ProductFamily=private-pki` keeps working. It must set `ProductVariant` to `intranet-ssl` or `igtf-host`, and its SSL/TLS product name doesn't affect the order.
+- **Product code is optional.** CERTInext resolves the Private PKI product from the variant. Set `ProductCode` to your account's Private PKI catalog code only to pick between several matching products. It isn't checked against the catalog; CERTInext rejects a code that isn't a Private PKI product on your account.
+- **V2 only.** The Private PKI products have no V1 default code, so a V1 template that selects one must set `ProductCode`.
+- **Sync.** Synced Private PKI orders aren't named after these products, so they don't get a template.
 - **Hostname.** The order's primary `hostname` comes from `DomainName`, or from the CSR's CN when `DomainName` isn't set.
 - **SANs.** Sent in `additionalHosts`, which accepts DNS names and IPv4/IPv6 addresses. They come from the gateway's SAN list, or from the CSR when the gateway supplies none.
 - **Unsupported SANs.** Email and URI SANs can't be expressed, so they are left off the order and a warning is logged. `SubmitNonDnsSans` isn't consulted.

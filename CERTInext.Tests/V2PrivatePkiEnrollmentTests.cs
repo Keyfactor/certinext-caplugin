@@ -620,5 +620,109 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             error.Should().Contain("not set");
             normalized.Should().BeNull();
         }
+
+        // ---------------------------------------------------------------------------
+        // Private PKI product names: the product sets ProductFamily and ProductVariant
+        // ---------------------------------------------------------------------------
+
+        private static EnrollmentProductInfo MakePrivatePkiNamedProductInfo(
+            string productId, string family = null, string variant = null)
+        {
+            var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["DomainName"] = Hostname
+            };
+            if (family != null) parameters["ProductFamily"] = family;
+            if (variant != null) parameters["ProductVariant"] = variant;
+            return new EnrollmentProductInfo { ProductID = productId, ProductParameters = parameters };
+        }
+
+        [Theory]
+        [InlineData(Constants.Products.PrivatePkiIntranetSsl, "intranet-ssl")]
+        [InlineData(Constants.Products.PrivatePkiIgtfHost, "igtf-host")]
+        public async Task Enroll_V2_PrivatePkiProduct_PlacesPrivatePkiOrder_WithNoFamilyOrVariantParams(
+            string productId, string expectedVariant)
+        {
+            var mock = NewMock();
+            var captured = StubPrivatePkiOrder(mock);
+
+            var result = await EnrollAsync(BuildV2Plugin(mock.Object), MakePrivatePkiNamedProductInfo(productId),
+                new Dictionary<string, string[]> { ["dnsname"] = new[] { Hostname } });
+
+            result.CARequestID.Should().Be(OrderId);
+            captured().Should().NotBeNull("the product name alone must route the order to the Private PKI endpoint");
+            captured().Variant.Should().Be(expectedVariant);
+            mock.Verify(c => c.PlaceOrderV2Async(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<V2CreateSslOrderRequest>(), It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+
+        [Fact]
+        public async Task Enroll_V2_PrivatePkiProduct_MatchingExplicitParams_StillPlacesOrder()
+        {
+            var mock = NewMock();
+            var captured = StubPrivatePkiOrder(mock);
+
+            await EnrollAsync(BuildV2Plugin(mock.Object),
+                MakePrivatePkiNamedProductInfo(Constants.Products.PrivatePkiIgtfHost, family: "private-pki", variant: "IGTF-HOST"),
+                new Dictionary<string, string[]> { ["dnsname"] = new[] { Hostname } });
+
+            captured().Variant.Should().Be("igtf-host");
+        }
+
+        [Fact]
+        public async Task Enroll_V2_PrivatePkiProduct_ContradictingVariant_FailsFastWithoutAnyCaCall()
+        {
+            var mock = NewMock();
+
+            var result = await EnrollAsync(BuildV2Plugin(mock.Object),
+                MakePrivatePkiNamedProductInfo(Constants.Products.PrivatePkiIntranetSsl, variant: "igtf-host"),
+                new Dictionary<string, string[]> { ["dnsname"] = new[] { Hostname } });
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().Contain("ProductVariant").And.Contain("'intranet-ssl'");
+            mock.Invocations.Should().BeEmpty("validation must happen before any CA call");
+        }
+
+        [Theory]
+        [InlineData("ssl")]
+        [InlineData("unknown-family")] // unrecognized families are treated as ssl
+        public async Task Enroll_V2_PrivatePkiProduct_NonPrivatePkiFamily_FailsFastWithoutAnyCaCall(string family)
+        {
+            var mock = NewMock();
+
+            var result = await EnrollAsync(BuildV2Plugin(mock.Object),
+                MakePrivatePkiNamedProductInfo(Constants.Products.PrivatePkiIntranetSsl, family: family),
+                new Dictionary<string, string[]> { ["dnsname"] = new[] { Hostname } });
+
+            result.Status.Should().Be((int)EndEntityStatus.FAILED);
+            result.StatusMessage.Should().Contain("Private PKI product").And.Contain("ProductFamily");
+            mock.Invocations.Should().BeEmpty("an SSL order must not be placed for a Private PKI product");
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_PrivatePkiProduct_WithSslFamily_IsRejectedAtSave()
+        {
+            using var server = WireMockServer.Start();
+            StubToken(server);
+
+            Func<Task> act = () => BuildV2Plugin(NewMock().Object).ValidateProductInfo(
+                MakePrivatePkiNamedProductInfo(Constants.Products.PrivatePkiIgtfHost, family: "ssl"),
+                V2ConnectionInfo(server.Urls[0]));
+
+            await act.Should().ThrowAsync<AnyCAValidationException>().WithMessage("*Private PKI product*ProductFamily*");
+        }
+
+        [Fact]
+        public async Task ValidateProductInfo_V2_PrivatePkiProduct_WithNoParams_Succeeds()
+        {
+            using var server = WireMockServer.Start();
+            StubToken(server);
+
+            Func<Task> act = () => BuildV2Plugin(NewMock().Object).ValidateProductInfo(
+                MakePrivatePkiNamedProductInfo(Constants.Products.PrivatePkiIntranetSsl), V2ConnectionInfo(server.Urls[0]));
+
+            await act.Should().NotThrowAsync();
+        }
     }
 }

@@ -425,9 +425,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
             //    on GetProductDetailsAsync would risk deadlock in certain synchronization contexts.
             // 2. The Keyfactor integration-manifest doc tool requires a known list at reflection
             //    time (a live API call at that point returned empty results).
-            // 3. CERTInext product names are stable; operators select the correct product and
-            //    then provide the numeric ProductCode template parameter to map it to the actual
-            //    CERTInext API code for their account (sandbox vs. production).
+            // 3. The names are the plugin's own, not CERTInext's. On V2 the name sets the variant
+            //    (and, for the Private PKI names, the family), and CERTInext picks the product unless
+            //    the template sets a ProductCode. On V1 the name maps to a default production code
+            //    (DefaultProductCodes), which a template's ProductCode overrides.
             return new List<string>
             {
                 Constants.Products.DvSsl,
@@ -440,6 +441,8 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 Constants.Products.OvSslWildcardUcc,
                 Constants.Products.EvSsl,
                 Constants.Products.EvSslUcc,
+                Constants.Products.PrivatePkiIntranetSsl,
+                Constants.Products.PrivatePkiIgtfHost,
             };
         }
 
@@ -1040,7 +1043,9 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                     LogSanitizer.MaskEmail(LogSanitizer.Strip(ep.RequesterEmail)));
             }
 
-            if (string.IsNullOrWhiteSpace(ep.ProfileId))
+            // V1 only: a V2 order needs no product code (CERTInext resolves it when the template sets none),
+            // and the Private PKI products have no V1 default code to fall back on.
+            if (!_config.UseV2Api && string.IsNullOrWhiteSpace(ep.ProfileId))
             {
                 _logger.LogError(
                     "Enrollment rejected — ProfileId parameter is missing. Subject={Subject}, EnrollmentType={EnrollmentType}",
@@ -1771,6 +1776,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                        $"{Constants.ApiV2.PrivatePkiVariantIgtfHost}. Current value: {configured}.";
             }
 
+            // A Private PKI product name fixes the variant; an explicit ProductVariant must agree with it.
+            if (Constants.Products.PrivatePkiVariantsV2.TryGetValue(ep.ProductId ?? string.Empty, out string productVariant)
+                && !string.Equals(variant, productVariant, StringComparison.OrdinalIgnoreCase))
+            {
+                return $"Template parameter '{Constants.EnrollmentParam.ProductVariant}' is set to '{variant}', but " +
+                       $"the selected product '{ep.ProductId}' is '{productVariant}'. Remove the override, or " +
+                       $"select the product for '{variant}'.";
+            }
+
             normalizedVariant = variant.ToLowerInvariant();
             return null;
         }
@@ -1800,6 +1814,16 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
         /// </summary>
         internal static string ResolveSslProductVariant(EnrollmentParams ep, out string resolvedVariant)
         {
+            // A Private PKI product only reaches the SSL path when the template sets ProductFamily
+            // to something other than private-pki; ordering it as SSL would buy the wrong product.
+            if (ep.IsPrivatePkiProduct)
+            {
+                resolvedVariant = null;
+                return $"The selected product '{ep.ProductId}' is a Private PKI product, but template parameter " +
+                       $"'{Constants.EnrollmentParam.ProductFamily}' is set to '{ep.ProductFamily}'. Set it to " +
+                       $"'private-pki' or remove it.";
+            }
+
             bool hasMapping = Constants.Products.ProductVariantsV2.TryGetValue(
                 ep.ProductId ?? string.Empty, out string derivedVariant);
 

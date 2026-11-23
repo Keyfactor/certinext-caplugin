@@ -77,11 +77,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
         }
 
         [Fact]
-        public void EveryAdvertisedProductHasATypeId_AndMapsBackToItself()
+        public void EveryAdvertisedSslProductHasATypeId_AndMapsBackToItself()
         {
+            // The Private PKI products have no known catalog productTypeID, so sync can't name them.
             var plugin = new CERTInextCAPlugin();
             foreach (string name in plugin.GetProductIds())
             {
+                if (Constants.Products.PrivatePkiVariantsV2.ContainsKey(name))
+                    continue;
                 Constants.Products.ProductTypeIdsV2.Should().ContainKey(name);
                 CERTInextCAPlugin.ProductNameForTypeId(Constants.Products.ProductTypeIdsV2[name]).Should().Be(name);
                 Constants.Products.SslComProductTypeIdsV2.Should().ContainKey(name);

@@ -128,10 +128,15 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         // ------------------------------------------------------------------
 
         /// <summary>
-        /// V2 product family. Accepted values: "ssl" (default), "private-pki", "signature".
-        /// Used to select the correct V2 resource path.
+        /// V2 product family. Accepted values: "ssl", "private-pki", "signature".
+        /// Used to select the correct V2 resource path. Default: "private-pki" for a Private PKI
+        /// product (<see cref="Constants.Products.PrivatePkiVariantsV2"/>), else "ssl".
         /// </summary>
-        public string ProductFamily => GetString(Constants.EnrollmentParam.ProductFamily, "ssl");
+        public string ProductFamily => GetString(Constants.EnrollmentParam.ProductFamily,
+            IsPrivatePkiProduct ? "private-pki" : "ssl");
+
+        /// <summary>True when <see cref="ProductId"/> is one of the Private PKI product names.</summary>
+        public bool IsPrivatePkiProduct => Constants.Products.PrivatePkiVariantsV2.ContainsKey(ProductId ?? string.Empty);
 
         /// <summary>
         /// V2 product family as the REST path slug used in V2 URL construction.
@@ -150,10 +155,13 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Models
         /// V2 product variant within the family, sent in the order body. For the SSL family this
         /// is the <c>productVariant</c> field ("dv", "ov", "ev"); for the private-pki family it
         /// is the <c>variant</c> field ("intranet-ssl", "igtf-host").
-        /// Default: "dv" (SSL-only; private-pki enrollment rejects it — see
-        /// <see cref="HasExplicitProductVariant"/>).
+        /// Default: the mapped variant for a Private PKI product, else "dv" (SSL-only;
+        /// private-pki enrollment rejects it — see <see cref="HasExplicitProductVariant"/>).
         /// </summary>
-        public string ProductVariant => GetString(Constants.EnrollmentParam.ProductVariant, "dv");
+        public string ProductVariant => GetString(Constants.EnrollmentParam.ProductVariant,
+            Constants.Products.PrivatePkiVariantsV2.TryGetValue(ProductId ?? string.Empty, out string pkiVariant)
+                ? pkiVariant
+                : "dv");
 
         /// <summary>
         /// True when the ProductVariant template parameter is actually set (non-blank), as
