@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
-# V2 private-pki-certificates/{orderId}/certificate — download issued Private PKI certificate.
+# V2 private-pki-certificates/{orderId}/certificate — download issued Private PKI
+# certificate. Read-only.
 # Required env var: ORDER_ID
 #
 # Returns JSON with certificatePem, serialNumber, subject, issuer, notBefore, notAfter.
 # Returns 422 if the order is not yet in issued state.
+# Credentials: see scripts/v2/README.md.
 set -euo pipefail
-. ~/.env_certinext
+# shellcheck source=scripts/lib/certinext-v2-auth.sh
 . "$(dirname "$0")/../lib/certinext-v2-auth.sh"
+v2_usage() { echo "Usage: ORDER_ID=<orderId> scripts/v2/download-certificate-private-pki.sh" >&2; }
+v2_parse_args "$@"
 
 ORDER_ID="${ORDER_ID:-}"
+v2_require_id ORDER_ID
 
-if [ -z "$ORDER_ID" ]; then
-    echo "Usage: ORDER_ID=<orderId> scripts/v2/download-certificate-private-pki.sh" >&2
-    exit 1
-fi
-
-echo "V2 GET /api/certinext/v2/private-pki-certificates/$ORDER_ID/certificate"
-curl -s -X GET "$CERTINEXT_V2_API_URL/api/certinext/v2/private-pki-certificates/$ORDER_ID/certificate" \
-     -H "Authorization: Bearer $CERTINEXT_V2_TOKEN" \
-     -H "Accept: application/json" \
-| jq .
+echo "V2 GET /api/certinext/v2/private-pki-certificates/$ORDER_ID/certificate" >&2
+v2_request GET "/api/certinext/v2/private-pki-certificates/$ORDER_ID/certificate"
