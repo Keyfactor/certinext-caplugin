@@ -286,7 +286,7 @@ The credentials you create in the CERTInext portal depend on the API generation 
 
 | Mode | API | Where credentials go | Fields required |
 |---|---|---|---|
-| AccessKey | V1 (default) | `authKey` in the `meta` block of every request body. There is no `Authorization` header. | `AccountNumber`, `ApiKey` |
+| AccessKey | V1 (default `AuthMode` on V1) | `authKey` in the `meta` block of every request body. There is no `Authorization` header. | `AccountNumber`, `ApiKey` |
 | OAuth2 client credentials | V2 (`UseV2Api` = `true`) | `Authorization: Bearer` header. The token comes from `{ApiUrl}/oauth/token`. | `OAuthClientId`, `OAuthClientSecret`, `SignerPlace` |
 
 > Note: V1 OAuth is not supported. The live V1 API ignores a bearer token and answers HTTP 401 (`clientAccessKey is not active`) whether or not one is sent. The `AuthMode` and `OAuthTokenUrl` fields remain only so connectors saved with them keep loading. Leave `AuthMode` as `AccessKey`.
