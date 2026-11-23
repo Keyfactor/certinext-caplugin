@@ -3,10 +3,12 @@ COVERAGE_DIR := /tmp/certinext-coverage
 REPORT_DIR   := /tmp/certinext-coverage-report
 
 # ---------------------------------------------------------------------------
-# V2 API credentials — set CERTINEXT_V2_API_URL in ~/.env_certinext.
-# For the sandbox environment this is the same host as V1 but without the
+# V2 API credentials — CERTINEXT_API_URL / CERTINEXT_CLIENT_ID /
+# CERTINEXT_CLIENT_SECRET in ~/.env_certinext_v2 (override the path with
+# CERTINEXT_V2_ENV_FILE). CERTINEXT_API_URL is the V2 base URL, without the
 # /emSignHub-API/ suffix, e.g.:
-#   CERTINEXT_V2_API_URL=https://sandbox-us.certinext.io
+#   CERTINEXT_API_URL=https://sandbox-us.certinext.io
+# See scripts/v2/README.md.
 # ---------------------------------------------------------------------------
 
 .PHONY: build test integration-test coverage coverage-report open-coverage clean \
@@ -138,11 +140,11 @@ generate-test-csr:
 
 # ---------------------------------------------------------------------------
 # probe-products — places saveAndHold=1 draft orders for every SSL/TLS
-# product code known to be provisioned on this sandbox account and reports
-# which codes are accepted by GenerateOrderSSL.
+# product code in the list below and reports which codes are accepted by
+# GenerateOrderSSL for the configured account.
 #
-# Product codes exercised (all SSL/TLS from GetProductDetails for this
-# sandbox account with groupNumber=2171775848):
+# Product codes exercised (sandbox SSL/TLS codes; production codes differ —
+# see docsource/configuration.md):
 #   842 DV SSL Certificate
 #   843 DV SSL Certificate Wildcard
 #   844 DV SSL Certificate UCC
@@ -167,7 +169,7 @@ probe-products: generate-test-csr
 # Aliases: orders
 # Optional overrides: PAGE (default 1), PAGE_SIZE (default 10)
 #
-# Response shape (live API, verified 2026-04):
+# Response shape:
 #   { "orderDetails": { "ordersArray": [...], "noOfPages": N,
 #                       "totalNoOfResults": N, "pageSize": N, "currentPage": "1" },
 #     "meta": { "status": "1", ... } }
@@ -285,17 +287,11 @@ submit-csr:
 # ---------------------------------------------------------------------------
 # list-cas — Sub-CA listing via API
 #
-# The CERTInext REST API does NOT expose a Sub-CA listing endpoint.
-# All 18 candidate endpoint names return HTTP 404.
+# The CERTInext REST API does not expose a Sub-CA listing endpoint.
+# Sub-CA information is available in the CERTInext portal UI
+# (https://sandbox-us.certinext.io for the sandbox environment).
 #
-# Sub-CA information must be obtained via the sandbox portal UI at
-# https://sandbox-us.certinext.io.  Active Sub-CAs for this account:
-#   Name : emSign Issuing Sand box CA IGTF - C6
-#   Type : Subordinate CA
-#   Status : Active
-#   (Backed by emSign Trusted Sandbox Root CA - C6)
-#
-# See analysis/certinext-caplugin/postman-api-findings.md for full details.
+# See analysis/certinext-caplugin/postman-api-findings.md for details.
 # ---------------------------------------------------------------------------
 
 list-cas:
@@ -319,8 +315,8 @@ list-cas:
 #     make register-import        # 05 import templates into Command  [CHECK=1]
 #     make register-enrollment    # 06 enrollment patterns + template KeyRetention
 #
-# Stages 01 and 06 are VERIFIED live; 02-05 are built from docs/reference
-# captures — validate against a live gateway/Command before relying on them.
+# Stages 02-05 are modeled on the captured JSON in docs/reference — validate
+# them against your gateway/Command before relying on them.
 # Auth (cookie/token/OAuth), env vars, and gotchas: scripts/register/README.md.
 # NOTE: stage 04 (and stage 02's CA-connection PUT) touch the CA config, which
 # is fragile — leave it alone unless explicitly required.
@@ -349,14 +345,11 @@ register-enrollment:
 # ---------------------------------------------------------------------------
 # create-product — Create a custom product via API
 #
-# The CERTInext REST API does NOT expose a product creation or configuration
-# endpoint.  All 8 candidate endpoint names return HTTP 404.
-#
-# Products must be created via the sandbox portal UI at
-# https://sandbox-us.certinext.io under:
+# The CERTInext REST API does not expose a product creation or configuration
+# endpoint.  Products are created in the CERTInext portal UI under:
 #   Account → Products → Configure Product
 #
-# See analysis/certinext-caplugin/postman-api-findings.md for full details.
+# See analysis/certinext-caplugin/postman-api-findings.md for details.
 # ---------------------------------------------------------------------------
 
 create-product:
@@ -365,9 +358,10 @@ create-product:
 # ---------------------------------------------------------------------------
 # generate-order-igtf — Place a Private PKI order using product 149
 #
-# Product 149 (Sandbox emSign Intranet SSL 1 Year) is the only Private PKI
-# product provisioned on this sandbox account.  Product 108 (IGTF Host
-# Certificate) is NOT provisioned here — GetFieldDetails returns EMS-1269.
+# Product 149 (Sandbox emSign Intranet SSL 1 Year) is a Private PKI product
+# available on sandbox accounts with the Private PKI entitlement.  Product 108
+# (IGTF Host Certificate) requires separate provisioning — GetFieldDetails
+# returns EMS-1269 when it is not provisioned.
 #
 # Uses GenerateOrderPrivatePKI.
 # Required: CSR at /tmp/certinext-igtf-test.csr (run generate-test-csr first)
@@ -413,7 +407,7 @@ generate-order-private-pki: generate-test-csr
 # reports whether they exist (non-404) or not (404).  Wraps
 # scripts/probe_endpoints.py.
 #
-# Result (confirmed 2026-04): ALL 18 candidates return HTTP 404.
+# None of the candidate endpoints exist (all return HTTP 404).
 # ---------------------------------------------------------------------------
 
 probe-endpoints:
@@ -453,7 +447,7 @@ get-field-details:
 FILTER ?=
 
 show-postman-bodies:
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/extract_postman_bodies.py \
+	@python3 scripts/extract_postman_bodies.py \
 	  --filter "$(FILTER)"
 
 # ---------------------------------------------------------------------------
@@ -465,7 +459,7 @@ show-postman-bodies:
 # ---------------------------------------------------------------------------
 
 show-postman-variables:
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/extract_postman_variables.py
+	@python3 scripts/extract_postman_variables.py
 
 # ---------------------------------------------------------------------------
 # probe-private-pki-payloads — Try three payload variants for
@@ -479,23 +473,27 @@ show-postman-variables:
 # ---------------------------------------------------------------------------
 
 probe-private-pki-payloads: generate-test-csr
-	@python3 /Users/sbailey/RiderProjects/certinext-caplugin/scripts/order_private_pki_minimal.py \
+	@python3 scripts/order_private_pki_minimal.py \
 	  --csr /tmp/certinext-test.csr \
 	  --domain "$(IGTF_DOMAIN)" \
 	  --product "$(PRIVATE_PKI_CODE)" \
 	  --save-and-hold "$(SAVE_AND_HOLD)"
 
 # ---------------------------------------------------------------------------
-# V2 API targets  (credentials + CERTINEXT_V2_API_URL from ~/.env_certinext)
+# V2 API targets  (credentials from ~/.env_certinext_v2)
 #
-# Auth: scripts/lib/certinext-v2-auth.sh exchanges SHA256(accessKey+ts+txn)
-# for a short-lived Bearer JWT at POST {v2BaseURL}/oauth/token.  All V2
-# scripts source that lib automatically — no manual token step needed.
+# Auth: scripts/lib/certinext-v2-auth.sh fetches an OAuth2 client_credentials
+# token at POST {CERTINEXT_API_URL}/oauth/token (same as the plugin's V2 mode).
+# The env file is parsed, not sourced; the secret/token never hit argv, disk,
+# or output.
 #
-# Scripts live in scripts/v2/.  Each script sources ~/.env_certinext and
-# scripts/lib/certinext-v2-auth.sh; jq is used for JSON construction and
-# pretty-printing.
+# Mutating targets (create/verify-dcv/submit-csr/accept/cancel/revoke) only
+# PREVIEW the request unless you pass V2_ARGS=--yes-mutate, e.g.:
+#   make v2-revoke-ssl ORDER_ID=123 V2_ARGS=--yes-mutate
+# Full details: scripts/v2/README.md.
 # ---------------------------------------------------------------------------
+
+V2_ARGS ?=
 
 # ---------------------------------------------------------------------------
 # v2-ping — GET /api/certinext/v2/auth/me
@@ -575,7 +573,7 @@ V2_VARIANT ?= dv
 
 v2-create-ssl-order:
 	@echo "V2 create SSL order — POST /api/certinext/v2/ssl-certificates"
-	@PRODUCT_CODE=$(V2_PRODUCT_CODE) DOMAIN=$(V2_DOMAIN) VARIANT=$(V2_VARIANT) scripts/v2/create-ssl-order.sh
+	@PRODUCT_CODE=$(V2_PRODUCT_CODE) DOMAIN=$(V2_DOMAIN) VARIANT=$(V2_VARIANT) scripts/v2/create-ssl-order.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-track-order — GET /api/certinext/v2/ssl-certificates/{orderId}
@@ -613,7 +611,7 @@ V2_DCV_METHOD ?= http-url
 
 v2-verify-dcv:
 	@echo "V2 verify DCV — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/dcv/verify"
-	@ORDER_ID=$(ORDER_ID) DOMAIN=$(V2_DOMAIN) METHOD=$(V2_DCV_METHOD) scripts/v2/verify-dcv.sh
+	@ORDER_ID=$(ORDER_ID) DOMAIN=$(V2_DOMAIN) METHOD=$(V2_DCV_METHOD) scripts/v2/verify-dcv.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-submit-csr — PUT /api/certinext/v2/ssl-certificates/{orderId}/csr
@@ -625,7 +623,7 @@ V2_CSR_FILE ?=
 
 v2-submit-csr:
 	@echo "V2 submit CSR (SSL) — PUT /api/certinext/v2/ssl-certificates/$(ORDER_ID)/csr"
-	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr.sh
+	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-accept-agreement — POST /api/certinext/v2/ssl-certificates/{orderId}/agreement
@@ -635,7 +633,7 @@ v2-submit-csr:
 
 v2-accept-agreement:
 	@echo "V2 accept agreement — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/agreement"
-	@ORDER_ID=$(ORDER_ID) scripts/v2/accept-agreement.sh
+	@ORDER_ID=$(ORDER_ID) scripts/v2/accept-agreement.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-download-certificate — GET /api/certinext/v2/ssl-certificates/{orderId}/certificate
@@ -661,7 +659,7 @@ V2_REASON ?= superseded
 
 v2-revoke-ssl:
 	@echo "V2 revoke SSL — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/revoke"
-	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-ssl.sh
+	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-ssl.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-cancel-ssl-order — POST /api/certinext/v2/ssl-certificates/{orderId}/cancel
@@ -671,12 +669,14 @@ v2-revoke-ssl:
 
 v2-cancel-ssl-order:
 	@echo "V2 cancel SSL order — POST /api/certinext/v2/ssl-certificates/$(ORDER_ID)/cancel"
-	@ORDER_ID=$(ORDER_ID) scripts/v2/cancel-ssl-order.sh
+	@ORDER_ID=$(ORDER_ID) scripts/v2/cancel-ssl-order.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-create-private-pki-order — POST /api/certinext/v2/private-pki-certificates
 # Creates a Private PKI certificate order against a customer-owned CA.
-# Required: PRODUCT_CODE=<code>  HOSTNAME=<host>  CA_PROFILE_ID=<id>  MASTER_PRODUCT_ID=<id>
+# Required: V2_HOSTNAME=<host>  V2_CA_PROFILE_ID=<id>  V2_MASTER_PRODUCT_ID=<id>
+# Optional: V2_PRODUCT_CODE=<code>
+# (the script input is CERT_HOSTNAME; bash always sets HOSTNAME to the local machine name)
 #
 # Prints orderId on success.  Use orderId with v2-track-private-pki,
 # v2-submit-csr-private-pki, v2-download-certificate-private-pki, and
@@ -689,7 +689,7 @@ V2_MASTER_PRODUCT_ID ?=
 
 v2-create-private-pki-order:
 	@echo "V2 create Private PKI order — POST /api/certinext/v2/private-pki-certificates"
-	@PRODUCT_CODE=$(V2_PRODUCT_CODE) HOSTNAME=$(V2_HOSTNAME) CA_PROFILE_ID=$(V2_CA_PROFILE_ID) MASTER_PRODUCT_ID=$(V2_MASTER_PRODUCT_ID) scripts/v2/create-private-pki-order.sh
+	@PRODUCT_CODE=$(V2_PRODUCT_CODE) CERT_HOSTNAME=$(V2_HOSTNAME) CA_PROFILE_ID=$(V2_CA_PROFILE_ID) MASTER_PRODUCT_ID=$(V2_MASTER_PRODUCT_ID) scripts/v2/create-private-pki-order.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-track-private-pki — GET /api/certinext/v2/private-pki-certificates/{orderId}
@@ -711,7 +711,7 @@ v2-track-private-pki:
 
 v2-submit-csr-private-pki:
 	@echo "V2 submit CSR (Private PKI) — PUT /api/certinext/v2/private-pki-certificates/$(ORDER_ID)/csr"
-	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr-private-pki.sh
+	@ORDER_ID=$(ORDER_ID) CSR_FILE=$(V2_CSR_FILE) scripts/v2/submit-csr-private-pki.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
 # v2-download-certificate-private-pki — GET /api/certinext/v2/private-pki-certificates/{orderId}/certificate
@@ -735,18 +735,20 @@ v2-download-certificate-private-pki:
 
 v2-revoke-private-pki:
 	@echo "V2 revoke Private PKI — POST /api/certinext/v2/private-pki-certificates/$(ORDER_ID)/revoke"
-	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-private-pki.sh
+	@ORDER_ID=$(ORDER_ID) REASON=$(V2_REASON) scripts/v2/revoke-private-pki.sh $(V2_ARGS)
 
 # ---------------------------------------------------------------------------
-# v2-orders-report — GET /api/certinext/v2/reports/orders?page=0&size=50
-# Paginated order history across all product types.
-# NOTE: currently returns 501 Not Implemented.
-# Use v1 make get-order-report (POST /emSignHub-API/GetOrderReport) meanwhile.
+# v2-orders-report — GET /api/certinext/v2/reports/orders?page=1&size=100
+# One page of order history (the endpoint V2 Synchronize pages through).
+# Optional: V2_PAGE=1 (1-based)  V2_SIZE=100 (server clamps to 100)
 # ---------------------------------------------------------------------------
+
+V2_PAGE ?= 1
+V2_SIZE ?= 100
 
 v2-orders-report:
-	@echo "V2 orders report — GET /api/certinext/v2/reports/orders (NOTE: currently 501)"
-	@scripts/v2/orders-report.sh
+	@echo "V2 orders report — GET /api/certinext/v2/reports/orders?page=$(V2_PAGE)&size=$(V2_SIZE)"
+	@PAGE=$(V2_PAGE) SIZE=$(V2_SIZE) scripts/v2/orders-report.sh
 
 # ---------------------------------------------------------------------------
 # Help
@@ -775,7 +777,7 @@ api-help:
 	@echo ""
 	@echo "  make probe-products   [PROBE_DOMAIN=test-integration.example.com]"
 	@echo "      Place saveAndHold=1 draft orders for all SSL/TLS product codes"
-	@echo "      provisioned on the sandbox account (842–851, 149) and report which"
+	@echo "      in the sandbox product list (842–851, 149) and report which"
 	@echo "      codes are accepted.  A code returning a requestNumber is valid."
 	@echo "      Depends on generate-test-csr (called automatically)."
 	@echo ""
@@ -813,9 +815,8 @@ api-help:
 	@echo ""
 	@echo "  make generate-order-igtf   [IGTF_CSR_FILE=/tmp/certinext-igtf-test.csr]"
 	@echo "      GenerateOrderPrivatePKI — place a Private PKI order using product 149"
-	@echo "      (Sandbox emSign Intranet SSL, the only active Private PKI product on this"
-	@echo "      sandbox account).  Uses saveAndHold=1 by default."
-	@echo "      NOTE: product 108 (IGTF Host) is not provisioned on this account."
+	@echo "      (Sandbox emSign Intranet SSL).  Uses saveAndHold=1 by default."
+	@echo "      NOTE: product 108 (IGTF Host) requires separate provisioning."
 	@echo ""
 	@echo "  make generate-order-private-pki   [PRIVATE_PKI_CSR=...] [PRIVATE_PKI_DOMAIN=...] [PRIVATE_PKI_CODE=149]"
 	@echo "      GenerateOrderPrivatePKI — place a Private PKI order for any product code."
