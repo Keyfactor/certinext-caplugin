@@ -40,15 +40,23 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
     /// CERTINEXT_DCV_DOMAIN=&lt;subdomain to use, e.g. dcv-test.example.com&gt;
     /// </code>
     /// </summary>
-    public class DcvLifecycleTests : IClassFixture<IntegrationTestFixture>
+    public class DcvLifecycleTests : IClassFixture<IntegrationTestFixture>, IDisposable
     {
         private readonly IntegrationTestFixture _fixture;
         private readonly ITestOutputHelper _output;
+        private readonly List<IDisposable> _toDispose = new List<IDisposable>();
 
         public DcvLifecycleTests(IntegrationTestFixture fixture, ITestOutputHelper output)
         {
             _fixture = fixture;
             _output = output;
+        }
+
+        public void Dispose()
+        {
+            foreach (var d in _toDispose)
+                d.Dispose();
+            _toDispose.Clear();
         }
 
         // ---------------------------------------------------------------------------
@@ -69,11 +77,17 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 + "\n-----END CERTIFICATE REQUEST-----";
         }
 
-        private IDomainValidatorFactory BuildDnsFactory() =>
-            _fixture.IsCloudflareConfigured
-                ? (IDomainValidatorFactory)new CloudflareDomainValidatorFactory(
-                    _fixture.CloudflareApiToken, _fixture.CloudflareZoneId)
-                : new StubDomainValidatorFactory();
+        private IDomainValidatorFactory BuildDnsFactory()
+        {
+            if (_fixture.IsCloudflareConfigured)
+            {
+                var factory = new CloudflareDomainValidatorFactory(
+                    _fixture.CloudflareApiToken, _fixture.CloudflareZoneId);
+                _toDispose.Add(factory);
+                return factory;
+            }
+            return new StubDomainValidatorFactory();
+        }
 
         /// <summary>
         /// Runs <c>plugin.Synchronize</c> and returns every record that came out of the
@@ -88,6 +102,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             var syncTask = Task.Run(async () =>
             {
                 await plugin.Synchronize(buffer, lastSync: null, fullSync: true, cancelToken: System.Threading.CancellationToken.None);
+                // Synchronize calls CompleteAdding() in its finally block; guard against double-call.
                 if (!buffer.IsAddingCompleted)
                     buffer.CompleteAdding();
             });
@@ -103,6 +118,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             var config = new CERTInextConfig
             {
+                UseV2Api = false,
                 ApiUrl                    = _fixture.Config.ApiUrl,
                 AuthMode                  = _fixture.Config.AuthMode,
                 ApiKey                    = _fixture.Config.ApiKey,
@@ -184,20 +200,33 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
         {
             IntegrationSkip.IfNotConfigured(_fixture);
 
-            // Use a plugin backed by the real client but DcvEnabled=false
-            var plugin = BuildPlugin(dcvEnabled: false);
+            // Route plugin/client logs to the test output (before the plugin is constructed), so the CA's
+            // answer to the V1 order is visible.
+            var restoreLogging = TestOutputLogging.RouteTo(_output);
+            EnrollmentResult result;
+            try
+            {
+                // Use a plugin backed by the real client but DcvEnabled=false
+                var plugin = BuildPlugin(dcvEnabled: false);
 
-            var result = await plugin.Enroll(
-                csr:            GenerateCsrPem(IntegrationTestData.DcvTestDomain),
-                subject:        $"CN={IntegrationTestData.DcvTestDomain}",
-                san:            new Dictionary<string, string[]>
-                {
-                    ["dns"] = new[] { IntegrationTestData.DcvTestDomain }
-                },
-                productInfo:    IntegrationTestData.DvSslProductInfo(_fixture.Config.DefaultProductCode),
-                requestFormat:  RequestFormat.PKCS10,
-                enrollmentType: EnrollmentType.New);
+                result = await plugin.Enroll(
+                    csr:            GenerateCsrPem(IntegrationTestData.DcvTestDomain),
+                    subject:        $"CN={IntegrationTestData.DcvTestDomain}",
+                    san:            new Dictionary<string, string[]>
+                    {
+                        ["dns"] = new[] { IntegrationTestData.DcvTestDomain }
+                    },
+                    productInfo:    IntegrationTestData.DvSslProductInfo(_fixture.Config.DefaultProductCode),
+                    requestFormat:  RequestFormat.PKCS10,
+                    enrollmentType: EnrollmentType.New);
+            }
+            finally
+            {
+                restoreLogging();
+            }
 
+            _output.WriteLine($"RESULT: CARequestID={result?.CARequestID ?? "(none)"}, Status={result?.Status}, " +
+                              $"Message={result?.StatusMessage}");
             result.Should().NotBeNull();
         }
 
@@ -655,7 +684,6 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
             List<AnyCAPluginCertificate> synced = null;
             System.Diagnostics.Stopwatch syncPhaseSw = System.Diagnostics.Stopwatch.StartNew();
             int passesUsed = 0;
-            int finalNotIssued = -1;
 
             for (int pass = 1; pass <= maxSyncPasses; pass++)
             {
@@ -664,13 +692,27 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 synced = await RunSyncAsync(plugin);
                 passSw.Stop();
 
+                // Classify enrolled orders by their current status so that FAILED orders
+                // are not silently counted as still-pending, which would burn the full
+                // pass budget before producing a misleading "expected 0" assertion.
                 int generated = synced.Count(r => enrolledIds.Contains(r.CARequestID) && r.Status == (int)EndEntityStatus.GENERATED);
-                int pending   = enrolledIds.Count - generated;
-                finalNotIssued = pending;
+                int failed    = synced.Count(r => enrolledIds.Contains(r.CARequestID) && r.Status == (int)EndEntityStatus.FAILED);
+                int pending   = enrolledIds.Count - generated - failed;
 
                 _output.WriteLine(
                     $"--- Sync pass #{pass}: returned {synced.Count} records, {generated}/{enrolledIds.Count} GENERATED, " +
-                    $"{pending} still pending, elapsed={passSw.Elapsed:mm\\:ss} ---");
+                    $"{failed} FAILED, {pending} still pending, elapsed={passSw.Elapsed:mm\\:ss} ---");
+
+                if (failed > 0)
+                {
+                    var failedIds = synced
+                        .Where(r => enrolledIds.Contains(r.CARequestID) && r.Status == (int)EndEntityStatus.FAILED)
+                        .Select(r => r.CARequestID)
+                        .Take(5);
+                    Assert.Fail(
+                        $"Pass #{pass}: {failed} order(s) reached FAILED status and will never issue: " +
+                        string.Join(", ", failedIds));
+                }
 
                 if (pending == 0)
                     break;
@@ -696,10 +738,14 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
                 $"{string.Join(", ", missing.Take(5))}{(missing.Count > 5 ? ", ..." : "")}");
 
             // Final assertion — every enrolled order must be GENERATED after the polling window.
-            var lookup = synced.ToDictionary(r => r.CARequestID, r => r);
+            // Filter null CARequestIDs before building the lookup (guards against any CA response
+            // that omits the ID, which would otherwise throw ArgumentNullException in ToDictionary).
+            var lookup = synced
+                .Where(r => r.CARequestID != null)
+                .ToDictionary(r => r.CARequestID, r => r);
             var notIssued = enrolledIds
+                .Where(id => lookup.TryGetValue(id, out var rec) && rec.Status != (int)EndEntityStatus.GENERATED)
                 .Select(id => lookup[id])
-                .Where(r => r.Status != (int)EndEntityStatus.GENERATED)
                 .ToList();
 
             if (notIssued.Count > 0)
@@ -711,7 +757,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.IntegrationTests
 
             notIssued.Should().BeEmpty(
                 $"every enrolled DV order should auto-issue on the new sandbox after {maxSyncPasses} sync passes; " +
-                $"{notIssued.Count} did not (last pass: {finalNotIssued} pending).");
+                $"{notIssued.Count} did not.");
 
             _output.WriteLine($"--- SUCCESS: {count}/{count} DV orders enrolled, synced, and issued in {passesUsed} sync pass(es). " +
                               $"Enroll={sw.Elapsed:mm\\:ss}  SyncPhase={syncPhaseSw.Elapsed:mm\\:ss}  Total={(sw.Elapsed + syncPhaseSw.Elapsed):mm\\:ss} ---");
