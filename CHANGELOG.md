@@ -48,12 +48,6 @@
 - V2 `expired` orders are reported as issued, and revoking one is sent to the CA.
 - On V2 accounts whose domains SSL.com validates, DCV publishes SSL.com's record name and value, not `DcvTxtRecordTemplate`. The DNS provider plugin must be able to write those names (for example `_pki-validation.<domain>`).
 
-### Upgrading from 1.0.0
-- Upgrading from 1.0.0 also brings the changes in 1.0.1 and 1.0.2 above. For example, V1 now submits non-DNS SANs; set `SubmitNonDnsSans` to `false` to drop them.
-
-### Upgrading from a 2.0.0 release candidate
-- `V2InlineCsr` now defaults to `true`. A connector that already has `V2InlineCsr = false` saved keeps the two-call flow, which fails for already-validated domains. Set it to `true` on those connectors.
-
 ## Known Limitations
 - OV and OV UCC order placement under V2 can exceed the fixed 120s request timeout, and the order may still be created.
 - V1 `AuthMode=OAuth` isn't supported: the V1 API ignores the bearer token, so V1 needs an access key.
