@@ -1,20 +1,41 @@
-## What
+<!--
+Delete any section you have nothing to put in.
+Keep it short and plain: say what changed and why, not how you debugged it.
+Live-run logs, order IDs and open questions go in the issue, not here.
+-->
 
-<!-- One or two sentences: what does this PR do? -->
+## Summary
 
-## Why
+<!-- One or two sentences: what does this PR do, and why? -->
 
-<!-- What problem does it solve, or what improvement does it make? -->
+## Breaking Changes
+
+<!-- Anything users must change when they upgrade: settings, defaults, behavior. -->
+
+## Features
+
+<!-- New things the plugin can do. One bullet each. -->
+
+## Fixes
+
+<!-- Bugs fixed. One bullet each: what was wrong, what happens now. -->
+
+## Chores
+
+<!-- Refactors, docs, build, CI, test-only changes. -->
 
 ## Testing
 
-<!-- How was this validated? Check all that apply. -->
+<!-- How was this checked? Check what applies and name any new tests. -->
 
 - [ ] `make test` passes (unit tests)
 - [ ] `make integration-test` passes (requires `~/.env_certinext`)
 - [ ] `make coverage` shows no coverage regression
-- [ ] Terraform changes validated with `terraform plan`
 - [ ] Tested only docs/config — no runtime changes
+
+## Other
+
+<!-- Anything else a reviewer should know. -->
 
 ## Checklist
 
