@@ -38,7 +38,7 @@
 ## Upgrade Notes
 
 ### Moving a connector from V1 to V2
-- Orders placed under 1.x still sync after the switch to V2. Certificates issued from eMudhra's emSign chains may already be revoked; replace them by enrolling again through V2.
+- Orders placed under 1.x still sync after the switch to V2. Certificates that chain to eMudhra's emSign G1 root are losing browser trust (Chrome and Firefox for certificates logged after November 16, 2026; Apple for all of them from November 30, 2026); replace them by enrolling again through V2.
 - V2 connectors require `SignerPlace`, and V2 OV/EV orders require `OrganizationNumber`.
 - `DefaultProductCode` doesn't apply to V2 orders, and V2 sends `X-Product-Code` only when the template sets `ProductCode`. A template that needs a specific one of several matching catalog products must set `ProductCode`.
 - V2 `ProductVariant` is derived from the selected product when unset.

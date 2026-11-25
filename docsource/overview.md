@@ -1,10 +1,18 @@
 ## Overview
 
-The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabilities of the CERTInext platform (by eMudhra) to Keyfactor Command via the Keyfactor AnyCA Gateway REST. Related documents:
+The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabilities of the CERTInext platform (by eMudhra) to Keyfactor Command via the Keyfactor AnyCA Gateway REST, using the CERTInext V2 API.
+
+> [!CAUTION]
+> **The CERTInext V1 API is deprecated and no longer works.** Plugin 1.x and any connector with
+> `UseV2Api` set to `false` can no longer be relied on. Upgrade to 2.0.0 and move every connector to
+> V2: see [migration-v1-to-v2.md](migration-v1-to-v2.md).
+
+Related documents:
 
 - [configuration.md](configuration.md): installation and configuration details.
 - [architecture.md](architecture.md): design notes.
 - [migration-v1-to-v2.md](migration-v1-to-v2.md): moving a connector to the V2 API.
+- [v1-legacy.md](v1-legacy.md): the deprecated V1 API, kept for reference while migrating.
 - [development.md](development.md): local development.
 
 ## CERTInext CA Certificates
@@ -33,44 +41,12 @@ See [configuration.md](configuration.md#gateway-registration) for the full Gatew
 
 | Symptom | Section |
 |---|---|
-| V1 enrollments fail with `Inactive Account User.` | [`"Inactive Account User."` from `GenerateOrderSSL`](#inactive-account-user-returned-from-generateorderssl-v1) |
+| V1 enrollments fail with `Inactive Account User.` | [`"Inactive Account User."` from `GenerateOrderSSL`](v1-legacy.md#inactive-account-user-returned-from-generateorderssl-v1) (V1, deprecated) |
 | Enrollment returns pending (`Status=90`, `EXTERNALVALIDATION`) | [Enrollment returns immediately with `Status=90`](#enrollment-returns-immediately-with-status90-externalvalidation) |
-| `EMS-956 "Invalid Request for this API"` from `GetDcv` | [`EMS-956` from `GetDcv`](#ems-956-invalid-request-for-this-api-from-getdcv-v1) |
+| `EMS-956 "Invalid Request for this API"` from `GetDcv` | [`EMS-956` from `GetDcv`](v1-legacy.md#ems-956-invalid-request-for-this-api-from-getdcv-v1) (V1, deprecated) |
 | HTTP 500 and a `TypeLoadException` in the gateway log | [Plugin fails to load](#plugin-fails-to-load-with-could-not-load-type-keyfactoranygatewayextensionsidomainvalidatorfactory) |
 | Connector fails to start with an `https` error | [`ApiUrl` must use https](#connector-fails-to-start-apiurl--must-use-https) |
 | Enrollment fails with `invalid custom extension or certificate policy OIDs` | [Enrollment fails with `invalid custom extension or certificate policy OIDs`](#enrollment-fails-with-invalid-custom-extension-or-certificate-policy-oids) |
-
-### `"Inactive Account User."` returned from `GenerateOrderSSL` (V1)
-
-**Symptom**
-
-V1 enrollments fail with the gateway exception:
-
-```
-CERTInext order failed: Inactive Account User.. See gateway logs for details.
-```
-
-The same access key / account works before and after the failing window — a `Ping` (`ValidateCredentials`) call seconds earlier returns success, and the next individual enrollment after a brief pause also succeeds.
-
-**Root cause**
-
-- **Cause:** the CERTInext sandbox at `https://sandbox-us-api.certinext.io/emSignHub-API` applies a **burst rate limit** on order placement.
-- **Generic error:** the rejection uses the string `"Inactive Account User."`, the same string the API uses for genuinely inactive accounts.
-- **No distinguishing field:** the response has no `errorCode`, `Retry-After` header, or structured field that tells the two conditions apart.
-- **Trigger:** roughly **16 or more enrollments submitted within 10 seconds** on the US sandbox.
-- **Below the threshold:** lower submission velocity runs cleanly.
-
-**Confirmation steps**
-
-1. Run a single `Ping` against the same `ApiUrl` / `ApiKey`. If it succeeds, the account is active; the failure was almost certainly a rate-limit hit.
-2. Check the gateway warning log for the API-failure line the plugin writes just before it throws. It includes the full raw response body, so any distinguishing code or message CERTInext returns appears there.
-3. Wait 30–60 seconds, then retry the failed enrollment. A successful retry confirms it was a rate limit.
-
-**Mitigation**
-
-- **Automatic retry**: when order placement returns this error, the plugin retries it with exponential backoff and jitter (up to 5 attempts) before surfacing the failure, so brief bursts resolve without operator action.
-- **Reduce submission velocity**: throttle order placements to roughly one per 1–2 seconds. The plugin has no built-in client-side throttle; pacing must come from the caller (for example Keyfactor Command's enrollment scheduling, or a workflow that places certificates in batches).
-- **High-volume migrations**: split the workload into batches of about 10 orders separated by a short pause, rather than submitting everything at once.
 
 ### Enrollment returns immediately with `Status=90 (EXTERNALVALIDATION)`
 
@@ -86,28 +62,13 @@ This is the expected result in any of these cases:
 - **DCV enabled but unable to run:** no DNS provider plugin is deployed on the gateway, or none resolves the order's domain. The plugin logs why. The order completes only after the domain is validated some other way.
 - **`Enroll()` budget elapsed:** the plugin's bounded wait ended before CERTInext finished issuing. The budget is:
     - `PickupRetries` × `PickupDelay` for the certificate pickup poll, capped at 75 s in total and ended at `EnrollmentCallBudgetSeconds` (default 50 s from the start of the enrollment, inside Command's 60 s default workflow step timeout);
-    - on V1, `DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds` (default 60 s each) around DCV. When DCV engages for an order, these waits replace the pickup wait; they do not stack.
-- **Issued but certificate not generated yet (V2):** CERTInext reports the order `issued` while Download Certificate still answers 422 `EMS-1165`. Normal generation takes about 20 s; the pickup poll waits for it, logging at Debug level and writing one Information summary. If the budget runs out the next sync imports the certificate.
-- **DCV could not validate every domain:** for example an IP or email SAN with no DNS provider. V1 still validates the other domains but returns pending without waiting for issuance.
-- **V1 renewal still pending DNS-01 validation:** with DCV enabled, a renewal waiting on DNS-01 validation returns pending at once instead of holding a worker for the pickup wait; the next sync completes the validation.
+    - when DCV runs inside the call, `DcvTimeoutMinutes` bounds the DCV flow, and the pickup wait is skipped.
+- **Issued but certificate not generated yet:** CERTInext reports the order `issued` while Download Certificate still answers 422 `EMS-1165`. Normal generation takes about 20 s; the pickup poll waits for it, logging at Debug level and writing one Information summary. If the budget runs out the next sync imports the certificate.
+- **DCV could not validate every domain:** for example a domain no DNS provider resolves. The other domains are still validated, and the order stays pending until the skipped domain is resolved.
 
 **Mitigation**
 
 The next gateway sync cycle picks the certificate up and moves it to issued. Sync-driven DCV is bounded per pass by `DcvSyncMaxOrderAgeHours` and `DcvSyncMaxPerPass`, so a large backlog of old pending orders doesn't slow each pass. See [configuration.md](configuration.md) for the knobs that tune the `Enroll()` wait.
-
-### `EMS-956 "Invalid Request for this API"` from `GetDcv` (V1)
-
-**Symptom**
-
-The plugin's DCV machinery starts but the first `GetDcv` call returns this error. The plugin defers DCV to the next sync cycle (a single log line, no exception).
-
-**Root cause**
-
-CERTInext exposes the `domainVerification` slot in `TrackOrder` **before** the `GetDcv` endpoint accepts calls for that order. The plugin recognizes this condition and treats it as "DCV not ready yet, retry on the next sync".
-
-**Mitigation**
-
-No action needed. The order is picked up on a subsequent sync cycle once CERTInext's gate clears; the wait can range from seconds to several hours.
 
 ### Plugin fails to load with `Could not load type 'Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory'`
 
@@ -131,7 +92,7 @@ After upgrading, a connector fails initialization with an error naming `ApiUrl` 
 
 **Root cause**
 
-The API key (V1) or OAuth client secret (V2) is sent to `ApiUrl` on every request, so the plugin rejects `http` URLs on save and at startup. A loopback host (`localhost`, `127.0.0.1`, `::1`) is the only exception, for local test servers.
+The OAuth client secret is sent to `ApiUrl` on every request, so the plugin rejects `http` URLs on save and at startup. A loopback host (`localhost`, `127.0.0.1`, `::1`) is the only exception, for local test servers.
 
 **Mitigation**
 

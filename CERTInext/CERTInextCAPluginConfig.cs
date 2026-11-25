@@ -595,10 +595,10 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext
                 },
                 [Constants.EnrollmentParam.RenewalWindowDays] = new PropertyConfigInfo
                 {
-                    Comments = "OPTIONAL: V1 only. Number of days before certificate expiration within which a renewal " +
-                               "is triggered. Certificates expiring further than this window are reissued instead. " +
-                               "Certificates that have already expired also fall back to reissue. V2 places a new order " +
-                               "for every renewal and reissue. Default: 90.",
+                    Comments = "OPTIONAL: Number of days before certificate expiration within which a RenewOrReissue " +
+                               "is treated as a renewal (a new order). A certificate that expires further out than this " +
+                               "window is reissued instead (SSL/TLS reissue endpoint); an expired certificate gets a new " +
+                               "order. Default: 90.",
                     Hidden = false,
                     DefaultValue = 90,
                     Type = "Number"

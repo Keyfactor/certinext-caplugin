@@ -2,6 +2,8 @@
 
 This document covers local development, testing, and live API smoke-testing for the CERTInext AnyCA Gateway REST plugin. For production deployment and CA connector configuration, see [configuration.md](configuration.md).
 
+> **The V1 API is deprecated and no longer works** (see [v1-legacy.md](v1-legacy.md)). The V1 targets, tests, and runner below (including `make ping`, `make products`, `make probe-products`, the `IntegrationRunner`, and the V1 opt-in flags) are kept for reference only and aren't expected to work against the live CA. Use the `v2-*` targets and the V2 tests.
+
 ## Prerequisites
 
 | Tool | Used for |
@@ -120,10 +122,12 @@ All V1 targets source `~/.env_certinext`, compute `authKey` as the SHA-256 diges
 **Start here when setting up a new environment:**
 
 ```bash
-make ping       # should return {"meta": {"status": "1", ...}}
-make products   # lists product codes for your account
-make orders     # lists recent orders; useful to find an ORDER_NUMBER to test with
+make v2-ping            # GET /api/certinext/v2/auth/me
+make v2-list-products   # GET /api/certinext/v2/catalog/products
+make v2-orders-report   # recent orders; useful to find an order ID to test with
 ```
+
+The V1 targets below are deprecated and aren't expected to work against the live CA.
 
 | Target | Command | Description |
 |---|---|---|
@@ -186,10 +190,6 @@ Drive live-API verification through the integration tests and the runner rather 
 
 Draft-order and track-order semantics are covered by `LifecycleTests`, which creates its own order and asserts on it without relying on account-specific identifiers.
 
-Product codes are provisioned per account by eMudhra and are not portable across accounts (see [Product Codes](configuration.md#product-codes) in configuration.md). To discover which codes and required fields apply to *your* account:
+Product codes are provisioned per account by eMudhra and are not portable across accounts (see [Product Codes](configuration.md#product-codes) in configuration.md). To discover which codes apply to *your* account, read its catalog with `make v2-list-products` (`GET /api/certinext/v2/catalog/products`).
 
-```bash
-make probe-products
-```
-
-This places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which return a `requestNumber` (valid and provisioned) versus an error (invalid or not provisioned). See `CERTInext.IntegrationTests/TESTING.md` for the expected test results.
+The deprecated V1 equivalent, `make probe-products`, places `saveAndHold=1` draft orders for all known SSL/TLS product codes and reports which return a `requestNumber` (valid and provisioned) versus an error (invalid or not provisioned). See `CERTInext.IntegrationTests/TESTING.md` for the expected test results.
