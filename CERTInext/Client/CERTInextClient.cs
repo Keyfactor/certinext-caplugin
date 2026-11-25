@@ -3429,9 +3429,11 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // JSON: "client_secret":"..."  → same
             // JSON: "ApiKey":"..."  → same (defensive — not currently sent on the wire,
             //  but the field name is a common one and the cost of redacting it is zero).
+            // JSON: "access_token"/"refresh_token":"..."  → same (defensive — the OAuth token
+            //  response is never logged today, but a bearer token must never reach a log line).
             body = System.Text.RegularExpressions.Regex.Replace(
                 body,
-                @"(?i)""(authKey|client_secret|apiKey|accessKey|password)""\s*:\s*""[^""\\]*(?:\\.[^""\\]*)*""",
+                @"(?i)""(authKey|client_secret|apiKey|accessKey|password|access_token|refresh_token)""\s*:\s*""[^""\\]*(?:\\.[^""\\]*)*""",
                 @"""$1"":""***REDACTED***""");
 
             // The JSON value pattern above is escape-aware: a value such as "ab\"cd" is matched whole.
@@ -3440,7 +3442,7 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Client
             // embedded in a JSON-escaped string cannot leak the text after the escape.
             body = System.Text.RegularExpressions.Regex.Replace(
                 body,
-                @"(?i)\b(authKey|client_secret|apiKey|accessKey|password)=(?:\\.|[^&\s""])+",
+                @"(?i)\b(authKey|client_secret|apiKey|accessKey|password|access_token|refresh_token)=(?:\\.|[^&\s""])+",
                 "$1=***REDACTED***");
 
             // Authorization header lines if a header dump ever ends up in body shape.

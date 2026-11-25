@@ -54,6 +54,26 @@ namespace Keyfactor.Extensions.CAPlugin.CERTInext.Tests
             CERTInextClient.RedactCredentials(input).Should().Be(expected);
         }
 
+        // OAuth token responses are never logged today; these pin that a bearer or refresh token
+        // is still scrubbed if a future code path ever logs one. Values are synthetic.
+        [Theory]
+        [InlineData(
+            "{\"access_token\":\"eyJhbGciOi.synthetic.token\",\"token_type\":\"Bearer\",\"expires_in\":3600}",
+            "{\"access_token\":\"***REDACTED***\",\"token_type\":\"Bearer\",\"expires_in\":3600}")]
+        [InlineData(
+            "{\"refresh_token\":\"r-synthetic\",\"scope\":\"keep\"}",
+            "{\"refresh_token\":\"***REDACTED***\",\"scope\":\"keep\"}")]
+        [InlineData(
+            "access_token=abc.def.ghi&token_type=Bearer",
+            "access_token=***REDACTED***&token_type=Bearer")]
+        [InlineData(
+            "refresh_token=r-synthetic",
+            "refresh_token=***REDACTED***")]
+        public void RedactCredentials_ScrubsOAuthTokens(string input, string expected)
+        {
+            CERTInextClient.RedactCredentials(input).Should().Be(expected);
+        }
+
         // JSON string values can contain escaped quotes and backslashes. A scrubber that stops at the
         // first '"' it sees leaks everything after the escape into the log. Values below are synthetic.
         [Theory]
