@@ -1,6 +1,19 @@
 ## Overview
 
-The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabilities of the CERTInext platform (by eMudhra) to Keyfactor Command via the Keyfactor AnyCA Gateway REST. See [configuration.md](configuration.md) for full installation and configuration details, [architecture.md](architecture.md) for design notes, and [development.md](development.md) for local development.
+The CERTInext AnyCA Gateway REST plugin extends the certificate lifecycle capabilities of the CERTInext platform (by eMudhra) to Keyfactor Command via the Keyfactor AnyCA Gateway REST, using the CERTInext V2 API.
+
+> [!CAUTION]
+> **The CERTInext V1 API is deprecated and no longer works.** Plugin 1.x and any connector with
+> `UseV2Api` set to `false` can no longer be relied on. Upgrade to 2.0.0 and move every connector to
+> V2: see [migration-v1-to-v2.md](migration-v1-to-v2.md).
+
+Related documents:
+
+- [configuration.md](configuration.md): installation and configuration details.
+- [architecture.md](architecture.md): design notes.
+- [migration-v1-to-v2.md](migration-v1-to-v2.md): moving a connector to the V2 API.
+- [v1-legacy.md](v1-legacy.md): the deprecated V1 API, kept for reference while migrating.
+- [development.md](development.md): local development.
 
 ## CERTInext CA Certificates
 
@@ -12,81 +25,105 @@ Before the gateway can register a CA backed by this plugin, the Keyfactor Comman
 | Production — India (Global) | https://in.certinext.io/ |
 | Production — US | https://us.certinext.io/ |
 
-After signing in, navigate to the certificate-authority / chain download page in the portal, export each CA in the chain as PEM or DER, and import them into the appropriate Windows certificate stores on the gateway host (Trusted Root for the root CA, Intermediate Certification Authorities for any subordinates). See [configuration.md](configuration.md#gateway-registration) and the [README](../README.md#configuration) for the full Gateway Registration walkthrough.
+To import the chain:
+
+1. Sign in to the CERTInext portal for your environment.
+2. Open the certificate-authority / chain download page.
+3. Export each CA in the chain as PEM or DER.
+4. On the gateway host, import the root CA into the **Trusted Root Certification Authorities** store.
+5. Import any subordinate CAs into the **Intermediate Certification Authorities** store.
+
+See [configuration.md](configuration.md#gateway-registration) for the full Gateway Registration walkthrough.
+
+> Note: eMudhra is withdrawing from public TLS, and the emSign roots are being phased out by browser root programs (Chrome and Firefox after November 16, 2026; Apple on November 30, 2026). CERTInext public TLS certificates will be issued under a different CA, so the steps above need repeating with the new chain. See [Change of issuing CA](configuration.md#change-of-issuing-ca-emudhra-exit-from-public-tls).
 
 ## Troubleshooting
 
-### `"Inactive Account User."` returned from `GenerateOrderSSL`
-
-**Symptom**
-
-Enrollments fail with the gateway exception:
-
-```
-CERTInext order failed: Inactive Account User.. See gateway logs for details.
-```
-
-The same access key / account works perfectly fine before and after the failing window — a `Ping` (`ValidateCredentials`) call seconds earlier returns success, and the next individual enrollment after a brief pause also succeeds.
-
-**Root cause**
-
-The CERTInext sandbox at `https://sandbox-us-api.certinext.io/emSignHub-API` applies a **burst rate limit** on order placement and surfaces rate‑limit rejection through the **generic** error string `"Inactive Account User."` — the same string the API uses for genuinely inactive accounts. There is currently no distinguishing `errorCode`, `Retry-After` header, or structured field to tell the two conditions apart from the meta block alone.
-
-Empirically the limit kicks in at roughly **16+ enrollments submitted within 10 seconds** on the US sandbox. Sustained submission velocity well below that runs cleanly.
-
-**Confirmation steps**
-
-1. Run a single `Ping` against the same `ApiUrl` / `AccessKey`. If it succeeds, the account is active; the prior failure was almost certainly a rate-limit hit.
-2. Check the gateway warning log for the `LogApiFailure` line emitted just before the throw (see issue [#8](https://github.com/Keyfactor/certinext-caplugin/issues/8) and the `LogApiFailure` helper in `CERTInextClient.cs`). The full raw response body is included there — if CERTInext ever surfaces a distinguishing code or message for rate-limit (as opposed to account-state), it will appear in that line.
-3. Wait 30–60 seconds, then retry the failed enrollment(s). A successful retry confirms it was rate-limit.
-
-**Mitigation**
-
-- **Reduce submission velocity**: throttle order placements to roughly one per 1–2 seconds. The plugin does not yet have a built-in client-side throttle; pacing must come from the caller (e.g. Keyfactor Command's enrollment scheduling, or a workflow that places certs in batches).
-- **For high-volume migration scenarios**: split the workload into batches of ~10 orders separated by a short pause, rather than firing everything at once.
-- **No client-side automatic retry on this error**: a defensive retry inside `PlaceOrderAsync` would paper over the misleading error string and burn the operator's order quota on retries. We document the gotcha instead.
+| Symptom | Section |
+|---|---|
+| V1 enrollments fail with `Inactive Account User.` | [`"Inactive Account User."` from `GenerateOrderSSL`](v1-legacy.md#inactive-account-user-returned-from-generateorderssl-v1) (V1, deprecated) |
+| Enrollment returns pending (`Status=90`, `EXTERNALVALIDATION`) | [Enrollment returns immediately with `Status=90`](#enrollment-returns-immediately-with-status90-externalvalidation) |
+| `EMS-956 "Invalid Request for this API"` from `GetDcv` | [`EMS-956` from `GetDcv`](v1-legacy.md#ems-956-invalid-request-for-this-api-from-getdcv-v1) (V1, deprecated) |
+| HTTP 500 and a `TypeLoadException` in the gateway log | [Plugin fails to load](#plugin-fails-to-load-with-could-not-load-type-keyfactoranygatewayextensionsidomainvalidatorfactory) |
+| Connector fails to start with an `https` error | [`ApiUrl` must use https](#connector-fails-to-start-apiurl--must-use-https) |
+| Enrollment fails with `invalid custom extension or certificate policy OIDs` | [Enrollment fails with `invalid custom extension or certificate policy OIDs`](#enrollment-fails-with-invalid-custom-extension-or-certificate-policy-oids) |
 
 ### Enrollment returns immediately with `Status=90 (EXTERNALVALIDATION)`
 
 **Symptom**
 
-Enrollment completes successfully but the cert is not yet issued — Command shows the request in pending status. A subsequent `Synchronize` picks it up.
+Enrollment completes but the certificate is not yet issued — Command shows the request as pending. A later `Synchronize` picks it up.
 
 **Root cause**
 
-This is the expected return shape on two paths:
+This is the expected result in any of these cases:
 
-1. The plugin was loaded on an older gateway host (pre-IAnyCAPlugin v3.3) that does not inject `IDomainValidatorFactory`. DCV cannot run, so any product that requires DNS validation completes only after CERTInext-side validation finishes.
-2. The plugin's bounded `Enroll()` budget (`DcvWaitForChallengeSeconds` + `DcvWaitForIssuanceSeconds`, defaults 60s each) elapsed before CERTInext finished asynchronous issuance.
-
-**Mitigation**
-
-The next gateway sync cycle will pick the cert up and transition it to `GENERATED`. The plugin's sync-driven DCV retry is single-shot per record, so even with hundreds of pending orders the sync completes in seconds, not minutes — see [configuration.md](configuration.md) for the `DcvWaitForChallengeSeconds`/`DcvWaitForIssuanceSeconds` knobs if you want to tune the Enroll-time budget.
-
-### `EMS-956 "Invalid Request for this API"` from `GetDcv`
-
-**Symptom**
-
-The plugin's DCV machinery starts but the first `GetDcv` call returns this error. Plugin gracefully defers DCV to the next sync cycle (single warning log line, no exception thrown).
-
-**Root cause**
-
-CERTInext exposes the `domainVerification` slot in `TrackOrder` **before** the `GetDcv` endpoint will accept calls for that order — there's an internal gating window. The plugin's `IsDcvNotYetReady` predicate explicitly recognizes this and treats it as "DCV not ready yet, retry on the next sync".
+- **OV or EV order:** CERTInext issues these after organization verification (minutes to hours), longer than the enrollment call waits.
+- **DCV enabled but unable to run:** no DNS provider plugin is deployed on the gateway, or none resolves the order's domain. The plugin logs why. The order completes only after the domain is validated some other way.
+- **`Enroll()` budget elapsed:** the plugin's bounded wait ended before CERTInext finished issuing. The budget is:
+    - `PickupRetries` × `PickupDelay` for the certificate pickup poll, capped at 75 s in total and ended at `EnrollmentCallBudgetSeconds` (default 50 s from the start of the enrollment, inside Command's 60 s default workflow step timeout);
+    - when DCV runs inside the call, `DcvTimeoutMinutes` bounds the DCV flow, and the pickup wait is skipped.
+- **Issued but certificate not generated yet:** CERTInext reports the order `issued` while Download Certificate still answers 422 `EMS-1165`. Normal generation takes about 20 s; the pickup poll waits for it, logging at Debug level and writing one Information summary. If the budget runs out the next sync imports the certificate.
+- **DCV could not validate every domain:** for example a domain no DNS provider resolves. The other domains are still validated, and the order stays pending until the skipped domain is resolved.
 
 **Mitigation**
 
-No action needed. Plugin's sync-driven DCV retry handles this transparently — the order will be picked up on a subsequent sync cycle once the CA-side gate clears (observed window: seconds to a few hours, environment-dependent).
+The next gateway sync cycle picks the certificate up and moves it to issued. Sync-driven DCV is bounded per pass by `DcvSyncMaxOrderAgeHours` and `DcvSyncMaxPerPass`, so a large backlog of old pending orders doesn't slow each pass. See [configuration.md](configuration.md) for the knobs that tune the `Enroll()` wait.
 
 ### Plugin fails to load with `Could not load type 'Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory'`
 
 **Symptom**
 
-Gateway returns HTTP 500 on CA registration or first enrollment with the body `{"ErrorCode":"0x80131509"}`. Pod logs show `TypeLoadException` for `Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory`.
+The gateway returns HTTP 500 on CA registration or first enrollment (the response body is only a generic `ErrorCode`), and the gateway log shows a `TypeLoadException` for `Keyfactor.AnyGateway.Extensions.IDomainValidatorFactory`.
 
 **Root cause**
 
-Older gateway image whose bundled `Keyfactor.AnyGateway.IAnyCAPlugin` assembly is v3.2 or earlier (the `IDomainValidatorFactory` interface is v3.3+). This was fully addressed by the issue [#7](https://github.com/Keyfactor/certinext-caplugin/issues/7) fix in v1.0 — both the constructor-signature surface AND the field-type surface are now safe to load on v3.2 hosts.
+The gateway's bundled `Keyfactor.AnyGateway.IAnyCAPlugin` assembly is older than 3.3, which does not define `IDomainValidatorFactory`. This plugin requires AnyCA Gateway REST 26.2.0 or later.
 
 **Mitigation**
 
-Deploy the default (no-DCV) build for AnyCA Gateway 25.5.x; do not deploy the DCV build on a 25.5.x host. The **default build (no-DCV, IAnyCAPlugin 3.2.0)** is the one that loads *and* persists records on AnyCA Gateway 25.5.x, and it is what the released artifact ships. The DCV-capable build (IAnyCAPlugin 3.3.0-PRERELEASE, `dotnet build -p:DcvSupport=true`) is for AnyCA Gateway 26.x; loading it on a 25.5.x host triggers the type-load error above and, even when it loads, its records do not persist on a 3.2 host. See the `DcvSupport` build variants in the developer guide.
+Upgrade the AnyCA Gateway REST to 26.2.0 or later.
+
+### Connector fails to start: `'ApiUrl' ... must use https`
+
+**Symptom**
+
+After upgrading, a connector fails initialization with an error naming `ApiUrl` and `https`.
+
+**Root cause**
+
+The OAuth client secret is sent to `ApiUrl` on every request, so the plugin rejects `http` URLs on save and at startup. A loopback host (`localhost`, `127.0.0.1`, `::1`) is the only exception, for local test servers.
+
+**Mitigation**
+
+Change the connector's `ApiUrl` to an `https` URL.
+
+### Enrollment fails with `invalid custom extension or certificate policy OIDs`
+
+**Symptom**
+
+Command reports this error for an enrollment:
+
+```
+An error occurred while performing the operation. This may be due to invalid custom extension or certificate policy OIDs. Please see CA logs for more information.
+```
+
+The certificate request may be valid, and CERTInext may already have issued the certificate.
+
+**Root cause**
+
+This is a known timing issue. If the scheduled gateway sync runs while an enrollment is still finishing, the sync can create the record for that request first. The enrollment's own save then fails, because a record for the same request already exists. That record may or may not include the certificate yet. The error message does not describe this, so it looks like a problem with the request. The problem is more likely when the sync runs more often.
+
+The plugin reduces the race: a sync skips pending and issued orders created in the last `SyncRecentOrderGraceSeconds` (default 120, plus a 5-second margin) and imports them on the next pass. That makes the error less likely, not impossible. An enrollment that takes longer than about two minutes to finish saving, or a connector with `SyncRecentOrderGraceSeconds` set to `0`, can still hit it.
+
+**What to do before you retry**
+
+1. Check whether CERTInext has already issued a certificate for the request.
+2. In Command, search for the certificate by subject name. It may already be there, or it may appear after a later sync.
+3. Check the gateway log for a "duplicate key" error. If you find one, this issue is the likely cause.
+
+Retrying can place a second order with CERTInext, which may be billed again. Check first.
+
+**Versions**
+
+Seen with the CERTInext plugin on AnyCA REST Gateway 25.5, before the hold-back existed. Other versions have not been tested.
