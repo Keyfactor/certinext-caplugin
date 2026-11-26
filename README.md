@@ -423,7 +423,7 @@ Where several catalog products match a variant, CERTInext picks one, and it may 
 - **Private PKI** products need a separate entitlement. On an account without it, an order returns EMS-1162.
 - **S/MIME and Document Signing are not supported.** `GetProductIds` advertises SSL/TLS products only, and `ProductFamily=signature` enrollment fails before any order is placed. Their codes can still appear in your account's catalog.
 
-## Plugin Behavior
+## Extension Mechanics
 
 ### Authentication
 
